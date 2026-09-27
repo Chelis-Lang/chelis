@@ -19,8 +19,9 @@ chelis-reef.workspace = true
 # WS-C orchestration: reuse chelisup's toolchain-store path math (paths::Store)
 # and pin resolution (resolve) so `reef setup`/`doctor`/the unknown-subcommand
 # hint share one source of truth with the installer. chelisup has no `chelis-*`
-# deps, so this edge is cycle-free. Only `paths` + `resolve` are used; never
-# `install` (see the shim-corruption guard in cmd_reef_setup).
+# deps, so this edge is cycle-free. Only `paths` + `resolve` are used, plus the
+# pure asset-naming helpers in `install` from tests; never `install::install`
+# (see the shim-corruption guard in cmd_reef_setup).
 chelisup = { path = "../chelisup" }
 chelis-macros.workspace = true
 chelis-surf.workspace = true
@@ -62,7 +63,7 @@ assert_cmd = "2"
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
-# (`chelis-vX.Y.Z-<slug>.tar.gz`, gzip) so the auto-install-via-chelisup path
+# (`chelis-vX.Y.Z-<build>.tar.gz`, gzip) so the auto-install-via-chelisup path
 # runs fully offline through the real chelisup binary.
 flate2 = "1"
 # `observation_roundtrip_harness.rs` (chelis#732 Phase 0) verifies f16/bf16

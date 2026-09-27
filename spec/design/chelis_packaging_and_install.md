@@ -227,6 +227,10 @@ built in the glibc-2.31 container job so the first binary a bare machine runs
 loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
 canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
+For the same reason `chelisup install` takes that job's
+`chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz` on Linux, for every release from
+0.7.24 on; the `linux-x86_64` tarball needs the glibc of the runner that built it,
+and a glibc older than 2.31 runs neither build (chelis#2686).
 **Private-repo caveat:** until chelis releases are public the public release URL
 does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
 an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of

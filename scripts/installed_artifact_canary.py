@@ -52,16 +52,22 @@ def verify_sidecar(path: Path) -> str:
     return expected
 
 
-def archive_name(version: str, label: str, source: str, slug: str) -> str:
+# The installer slug and the release build `chelisup install` downloads on each
+# canary host. On Linux that is the glibc-2.31 build (chelis#2686).
+PLATFORMS = {("Linux", "x86_64"): ("linux-x86_64", "linux-x86_64-glibc2.31"),
+             ("Darwin", "arm64"): ("darwin-arm64", "darwin-arm64")}
+
+
+def archive_name(version: str, label: str, source: str, build: str) -> str:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("expected concrete X.Y.Z version")
     if not re.fullmatch(r"[0-9a-f]{40}", source):
         raise ValueError("expected full source commit")
-    if slug not in ("linux-x86_64", "darwin-arm64"):
-        raise ValueError("unsupported installed-canary platform")
+    if build not in {known for _, known in PLATFORMS.values()}:
+        raise ValueError("unsupported installed-canary build")
     if label not in (f"v{version}", f"dev-{source[:8]}"):
         raise ValueError("build label does not match version/source")
-    return f"chelis-{label}-{slug}.tar.gz"
+    return f"chelis-{label}-{build}.tar.gz"
 
 
 def archive_inventory(path: Path) -> dict[str, str]:
@@ -133,7 +139,7 @@ def require_staged_runtime(output: Path, inventory: dict[str, str]) -> None:
 
 
 def installer_archive(source: Path, destination: Path, *, candidate: bool,
-                      version: str, slug: str) -> None:
+                      version: str, build: str) -> None:
     """chelisup requires a chelis-v* archive root, even for local candidates.
 
     Only a dev archive gets a new container. Published release bytes are copied
@@ -145,7 +151,7 @@ def installer_archive(source: Path, destination: Path, *, candidate: bool,
             for original in incoming:
                 member = copy.copy(original)
                 suffix = PurePosixPath(*PurePosixPath(member.name).parts[1:])
-                member.name = str(PurePosixPath(f"chelis-v{version}-{slug}") / suffix)
+                member.name = str(PurePosixPath(f"chelis-v{version}-{build}") / suffix)
                 member.pax_headers = {key: value for key, value in member.pax_headers.items()
                                       if key != "path"}
                 stream = incoming.extractfile(original) if member.isfile() else None
@@ -233,10 +239,9 @@ def corrupt_driver(driver: str, target: str) -> str:
 
 def execute(args: argparse.Namespace, report: dict) -> None:
     root = args.evidence
-    slug = {("Linux", "x86_64"): "linux-x86_64",
-            ("Darwin", "arm64"): "darwin-arm64"}.get(
-                (platform.system(), platform.machine()), "unsupported")
-    name = archive_name(args.version, args.build_label, args.source_sha, slug)
+    slug, build = PLATFORMS.get((platform.system(), platform.machine()),
+                                ("unsupported", "unsupported"))
+    name = archive_name(args.version, args.build_label, args.source_sha, build)
     archive = args.artifacts / name
     installer = args.installer_assets / f"chelisup-{slug}"
     archive_hash, installer_hash = verify_sidecar(archive), verify_sidecar(installer)
@@ -249,9 +254,9 @@ def execute(args: argparse.Namespace, report: dict) -> None:
     # Copy verified assets into this run's new directory, never a shared store.
     local_assets = root / "assets"
     local_assets.mkdir()
-    mapped = local_assets / f"chelis-v{args.version}-{slug}.tar.gz"
+    mapped = local_assets / f"chelis-v{args.version}-{build}.tar.gz"
     candidate = args.build_label.startswith("dev-")
-    installer_archive(archive, mapped, candidate=candidate, version=args.version, slug=slug)
+    installer_archive(archive, mapped, candidate=candidate, version=args.version, build=build)
     report["installer_mapping"] = {"from": archive.name, "to": mapped.name,
                                    "kind": "root-rename-only" if candidate else "byte-identical",
                                    "original_sha256": archive_hash,

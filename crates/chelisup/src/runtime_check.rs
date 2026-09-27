@@ -32,7 +32,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::UPGRADE_ADVICE;
-use crate::version::is_safe_path_component;
+use crate::version::{is_safe_path_component, release_triple};
 
 /// The last release whose `chelis` has no `chelis runtime export`.
 pub const LAST_RELEASE_WITHOUT_EXPORT: &str = "0.18.11";
@@ -62,7 +62,7 @@ pub(crate) fn check(
     unpacked: &Path,
     scratch: &Path,
 ) -> Result<RuntimeCheck, String> {
-    if triple(version)? <= triple(LAST_RELEASE_WITHOUT_EXPORT)? {
+    if release_triple(version)? <= release_triple(LAST_RELEASE_WITHOUT_EXPORT)? {
         return Ok(RuntimeCheck::Unchecked);
     }
     let exported = tempfile::Builder::new()
@@ -99,7 +99,7 @@ fn cannot_start(version: &str, error: &io::Error) -> String {
 /// Append how to get the latest chelisup to `refusal` when release `version`
 /// is newer than `chelisup`, the running chelisup's version.
 fn advise_upgrade(refusal: String, version: &str, chelisup: &str) -> String {
-    match (triple(version), triple(chelisup)) {
+    match (release_triple(version), release_triple(chelisup)) {
         (Ok(release), Ok(running)) if release > running => format!(
             "{refusal}. This chelisup ({chelisup}) is older than the {version} release, which \
              may use a format it does not know; to get the latest chelisup, {UPGRADE_ADVICE}, \
@@ -179,15 +179,6 @@ fn verify(
         require_shipped(unpacked, &Path::new("include").join(name), digest, version)?;
     }
     Ok(archive_sha256.to_owned())
-}
-
-/// Parse a validated `X.Y.Z` for ordering.
-fn triple(version: &str) -> Result<(u64, u64, u64), String> {
-    let mut parts = version.split('.').map(str::parse::<u64>);
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => Ok((major, minor, patch)),
-        _ => Err(format!("malformed version {version:?}; expected X.Y.Z")),
-    }
 }
 
 fn sha256_field<'a>(receipt: &'a Value, field: &str, version: &str) -> Result<&'a str, String> {
@@ -287,6 +278,6 @@ mod tests {
     #[test]
     fn the_running_chelisup_version_is_ordered() {
         // An unordered version would silently drop every upgrade advice.
-        assert!(triple(CHELISUP_VERSION).is_ok());
+        assert!(release_triple(CHELISUP_VERSION).is_ok());
     }
 }

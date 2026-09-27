@@ -2269,7 +2269,7 @@ disposition = "owner"
 workflow = "ci.yml"
 job = "script-unit"
 cadence = "pull_request and push"
-reason = "script-unit runs the canary's transport, process and staged-runtime receipt controls"
+reason = "script-unit runs the canary's transport, process and staged-runtime receipt controls and ties each canary leg to the build chelisup installs (chelis#2686)"
 tracking_issue = "chelis#1354"
 
 [[path_rule]]

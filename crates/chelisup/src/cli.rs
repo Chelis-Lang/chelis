@@ -94,11 +94,11 @@ fn cmd_install(store: &Store, version: &str) -> i32 {
     match install::install(store, version) {
         Ok(install::InstallOutcome::Installed {
             version,
-            slug,
+            build,
             runtime,
         }) => {
             println!(
-                "installed chelis {version} ({slug}) into {}",
+                "installed chelis {version} ({build}) into {}",
                 store.toolchain_dir(&version).display()
             );
             match runtime {

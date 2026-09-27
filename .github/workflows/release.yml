@@ -457,17 +457,20 @@ jobs:
 
   installed-artifact-canary:
     name: Installed C callable (${{ matrix.slug }})
-    needs: [preflight, build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [preflight, build-linux-x86_64-glibc231, build-darwin-arm64]
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Each artifact holds the toolchain build chelisup installs and the
+          # chelisup built beside it. On Linux that is the glibc-2.31 build
+          # (chelis#2686).
           - runner: ubuntu-latest
             slug: linux-x86_64
-            installer_artifact: chelis-linux-x86_64-glibc2.31
+            artifact: chelis-linux-x86_64-glibc2.31
           - runner: macos-latest
             slug: darwin-arm64
-            installer_artifact: chelis-darwin-arm64
+            artifact: chelis-darwin-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     permissions:
@@ -484,12 +487,12 @@ jobs:
       - name: Download staged toolchain
         uses: actions/download-artifact@v7
         with:
-          name: chelis-${{ matrix.slug }}
+          name: ${{ matrix.artifact }}
           path: installed-canary-assets/toolchain
       - name: Download staged installer
         uses: actions/download-artifact@v7
         with:
-          name: ${{ matrix.installer_artifact }}
+          name: ${{ matrix.artifact }}
           path: installed-canary-assets/installer
       - name: Install verified archive and run shipped callable
         run: .venv/bin/python scripts/installed_artifact_canary.py --artifacts installed-canary-assets/toolchain --installer-assets installed-canary-assets/installer --source-sha "${{ github.sha }}" --evidence installed-canary-evidence

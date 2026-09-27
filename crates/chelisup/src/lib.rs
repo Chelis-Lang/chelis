@@ -41,7 +41,8 @@
 //! executable named `chelisup-<slug>` (slug in `darwin-arm64`,
 //! `darwin-x86_64`, `linux-x86_64`): no version in the name and no
 //! tarball, distinct from the toolchain tarball
-//! `chelis-v<ver>-<slug>.tar.gz` that `install` downloads.
+//! `chelis-v<ver>-<build>.tar.gz` that `install` downloads (on Linux the
+//! glibc-2.31 build, see [`install::release_build`]).
 
 pub mod cli;
 pub mod install;

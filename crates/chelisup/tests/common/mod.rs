@@ -54,12 +54,12 @@ pub fn write_default(home: &Path, version: &str) {
     fs::write(home.join("default"), format!("{version}\n")).unwrap();
 }
 
-/// Build a release-tarball fixture `chelis-v<ver>-<slug>.tar.gz` under
-/// `release_dir`, whose top-level `chelis-v<ver>-<slug>/bin/chelis` is
+/// Build a release-tarball fixture `chelis-v<ver>-<build>.tar.gz` under
+/// `release_dir`, whose top-level `chelis-v<ver>-<build>/bin/chelis` is
 /// the fake toolchain. This is what `CHELISUP_RELEASE_BASE` serves.
-pub fn build_fixture_tarball(release_dir: &Path, version: &str, slug: &str) -> PathBuf {
+pub fn build_fixture_tarball(release_dir: &Path, version: &str, build: &str) -> PathBuf {
     let stage = tempfile::tempdir().unwrap();
-    let root = stage.path().join(format!("chelis-v{version}-{slug}"));
+    let root = stage.path().join(format!("chelis-v{version}-{build}"));
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let chelis = bin_dir.join("chelis");
@@ -142,11 +142,11 @@ pub fn sha256(bytes: &[u8]) -> String {
 pub fn build_release_tarball(
     release_dir: &Path,
     version: &str,
-    slug: &str,
+    build: &str,
     runtime: &ReleaseRuntime,
 ) -> PathBuf {
     let stage = tempfile::tempdir().unwrap();
-    let root = stage.path().join(format!("chelis-v{version}-{slug}"));
+    let root = stage.path().join(format!("chelis-v{version}-{build}"));
     for directory in ["bin", "lib", "include"] {
         fs::create_dir_all(root.join(directory)).unwrap();
     }
