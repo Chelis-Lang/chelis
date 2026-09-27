@@ -1,0 +1,1 @@
+CI can reuse eligible verification after either a base rebase or a merge from `main` when the synthetic candidate is a shallow checkout. Cache-publication census failures now show the first bounded compiler error instead of only a generic compile-outcome message. See [#2673](https://github.com/Chelis-Lang/chelis/issues/2673).

@@ -141,6 +141,27 @@ class CachePublicationSelection(unittest.TestCase):
             with self.assertRaises(CachePublicationError):
                 validate_compile_outcomes(altered)
 
+    def test_unexpected_library_compile_failure_exposes_bounded_rustc_error(self):
+        outcomes = tuple(
+            CompileOutcome(
+                case.name,
+                1 if case.name == "library" else (0 if case.success else 1),
+                "error[E0433]: failed to resolve: undeclared crate `chelis_types`\n"
+                + "detail\n" * 5000 if case.name == "library" else
+                ((case.error + " " + case.diagnostic) if case.error else ""),
+                "source",
+                ("rustc",),
+            )
+            for case in COMPILE_CASES
+        )
+        with self.assertRaises(CachePublicationError) as failure:
+            validate_compile_outcomes(outcomes)
+        message = str(failure.exception)
+        self.assertIn("wrong compile outcome: library", message)
+        self.assertIn("error[E0433]", message)
+        self.assertIn("undeclared crate `chelis_types`", message)
+        self.assertLess(len(message), 4500)
+
     def test_runtime_receipt_requires_exact_framework_selection(self):
         names = tuple(sorted(RUNTIME_CASES))
         receipt = TestExecution(("test_binary",), names, names, "0" * 64)

@@ -6,6 +6,10 @@
 //! through this code path. `CachePayload` seals publication to those two
 //! concrete owners and supplies each owner's format/key domain. Comparison
 //! and key-material bincode helpers are not durable payload publication.
+//! `scripts/capacity_census_cache_publication.py` also compiles this module as
+//! a standalone fixture. Its fixed external crate set is `chelis_compiler_api`,
+//! `chelis_ir`, `chelis_unord`, `serde`, `sha2`, and `bincode`; adding another
+//! crate reference here requires updating that census fixture and its review.
 //!
 //! `CompiledContext` instead owns `context::CacheEnvelope`, shared by its
 //! disk cache and worker encode/decode routes; it does not use this envelope.
