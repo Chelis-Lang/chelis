@@ -1413,9 +1413,6 @@ fn where_elementwise(
     if condition.prim() != Prim::Bool {
         return Err("where: condition must have bool storage".into());
     }
-    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
-        return Err("where: condition and branch shapes must match exactly".into());
-    }
     if then_value.prim() != else_value.prim() {
         return Err("where: branch dtypes must match exactly".into());
     }
@@ -1423,6 +1420,26 @@ fn where_elementwise(
         .storage()
         .to_i64_exact_vec()
         .expect("sealed bool storage has an exact integer view");
+    // [05-OP-53]: shapes agree only across what the condition selects. A
+    // branch selected nowhere is neither read nor shape-checked, so a
+    // condition selecting one branch everywhere yields that branch, and an
+    // empty condition yields an empty result of its own shape.
+    let then_selected = condition_values.iter().any(|selected| *selected != 0);
+    let else_selected = condition_values.iter().any(|selected| *selected == 0);
+    match (then_selected, else_selected) {
+        (true, false) => return Ok(then_value.clone()),
+        (false, true) => return Ok(else_value.clone()),
+        (false, false) => {
+            return Ok(TensorValue::from_storage(
+                condition.shape.clone(),
+                tensor_from_scalars(then_value.prim(), &[]),
+            ));
+        }
+        (true, true) => {}
+    }
+    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
+        return Err("where: condition and branch shapes must match exactly".into());
+    }
     let writes = condition_values
         .into_iter()
         .enumerate()
@@ -5475,6 +5492,43 @@ mod tests {
     use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
+
+    /// [05-OP-53]: a branch the condition selects nowhere is neither read
+    /// nor shape-checked. A uniform condition yields the selected branch at
+    /// its own shape, an empty one an empty result of its shape, and a mixed
+    /// one still requires every shape to agree (decisions section 25).
+    ///
+    /// Evidentiary status: REGRESSION TEST for the uniform and empty rows
+    /// (each fails the shape check at 096daea8c); DISPOSITION LOCK for the
+    /// mixed row.
+    #[test]
+    fn where_checks_only_the_branches_its_condition_selects() {
+        let condition = |flags: &[i64]| {
+            finalize_wide_int("where", Prim::Bool, vec![flags.len()], flags.to_vec()).unwrap()
+        };
+        let three = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
+        let two = TensorValue::from_vec(vec![2], vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[1, 1]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![2]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[0, 0]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![3]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+        let empty = where_elementwise(&condition(&[]), &two, &three).unwrap();
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.prim(), Prim::F64);
+        assert_eq!(
+            where_elementwise(&condition(&[1, 0, 1]), &three, &two).unwrap_err(),
+            "where: condition and branch shapes must match exactly"
+        );
+        let mixed = where_elementwise(
+            &condition(&[1, 0, 1]),
+            &three,
+            &TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0]),
+        )
+        .unwrap();
+        assert_eq!(mixed.to_f64_lossy_vec(), vec![1.0, 5.0, 3.0]);
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()

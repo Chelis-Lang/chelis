@@ -3045,6 +3045,19 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             if !valid {
                 errors.push(format!("checked unit axis at node {} requires its own tensor-axis witness with requirement one and only that axis refined", node.id.0));
             }
+            // Its witness checks the unit requirement where the refinement
+            // runs, never on a path the refinement is not on.
+            if let Some(witness) = node.inputs.get(1).and_then(|witness| dag.get(*witness))
+                && witness.owner.activation != node.owner.activation
+            {
+                errors.push(format!(
+                    "checked unit axis at node {} is checked under activation {:?}, but its witness {} under {:?}",
+                    node.id.0,
+                    node.owner.activation.map(|activation| activation.0),
+                    witness.id.0,
+                    witness.owner.activation.map(|activation| activation.0)
+                ));
+            }
         }
 
         // C3a (WS-A0): per spec/04-type-system.md §5.7.1 the result

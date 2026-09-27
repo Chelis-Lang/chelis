@@ -7055,7 +7055,9 @@ struct LowerCtx<'program> {
     /// sibling branch — the exact thing `spec/06-transformations.md`
     /// §2.10.1 forbids.
     branch_path_condition: Option<NodeId>,
-    local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
+    /// Each `(input, axis)` refined to a unit extent, by the activation the
+    /// refinement is checked under ([`Self::draw_activation`]).
+    local_unit_refinements: BTreeMap<(NodeId, usize, Option<NodeId>), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
     /// the consuming reshape. This construction map never escapes lowering.
@@ -17326,33 +17328,64 @@ impl<'program> LowerCtx<'program> {
             return input;
         }
         let rt_axis = RtAxis::Lit(i32::try_from(axis).expect("checked axis fits i32"));
-        let existing = self
+        let activation = self.draw_activation();
+        let bound = self
             .binding_witnesses_for_expr(expr)
             .and_then(|(_, witnesses)| witnesses.get(axis))
             .copied();
-        let local = existing.is_none()
+        // A unit refinement is checked under the activation that makes it
+        // (spec/10 section 3.2): it joins a parameter's witness only when that
+        // witness runs under the same activation. An arm refining a parameter
+        // checked at entry gets a witness of its own, read from the same
+        // parameter and reported the same way.
+        let existing = bound.filter(|witness| {
+            self.dag
+                .get(*witness)
+                .expect("binding witness")
+                .owner
+                .activation
+                == activation
+        });
+        let local = bound.is_none()
             && !matches!(
                 self.dag.get(input).expect("expand input").op,
                 RiscOp::Load { .. }
             );
-        if local && let Some(checked) = self.local_unit_refinements.get(&(input, axis)) {
+        let scoped = local || (bound.is_some() && existing.is_none());
+        if scoped
+            && let Some(checked) = self
+                .local_unit_refinements
+                .get(&(input, axis, activation))
+                .or_else(|| self.local_unit_refinements.get(&(input, axis, None)))
+        {
             return *checked;
         }
         let witness = match existing {
             Some(witness) => witness,
             None => {
-                let witness = self.dag.add_node(
-                    self.owner(),
-                    RiscOp::ExtentWitness {
-                        site: if local {
+                let (site, parameter) = match bound
+                    .map(|witness| &self.dag.get(witness).expect("binding witness").op)
+                {
+                    Some(RiscOp::ExtentWitness {
+                        site, parameter, ..
+                    }) => (site.clone(), parameter.clone()),
+                    _ => (
+                        if local {
                             crate::dag::ExtentWitnessSite::LocalExpand
                         } else {
                             crate::dag::ExtentWitnessSite::Caller
                         },
-                        parameter: match &self.dag.get(input).expect("expand input").op {
+                        match &self.dag.get(input).expect("expand input").op {
                             RiscOp::Load { name } => name.as_str().to_owned(),
                             _ => "expand".into(),
                         },
+                    ),
+                };
+                let witness = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::ExtentWitness {
+                        site,
+                        parameter,
                         axis: rt_axis,
                         requirements: Vec::new(),
                         claims: Vec::new(),
@@ -17385,8 +17418,9 @@ impl<'program> LowerCtx<'program> {
             ty,
             self.current_span_id.clone(),
         );
-        if local {
-            self.local_unit_refinements.insert((input, axis), checked);
+        if scoped {
+            self.local_unit_refinements
+                .insert((input, axis, activation), checked);
         }
         checked
     }

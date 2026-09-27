@@ -1261,6 +1261,7 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Eager conditional selection over raw stored values. Float branch values
 /// use integer carriers so NaN payloads and signed zero survive bit-for-bit.
+/// Each element indexes only the branch its condition selects ([05-OP-53]).
 pub fn where_stored(rank: usize, kernel_name: &str, branch_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
@@ -1278,9 +1279,9 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   chelis_device_metadata idx_cond = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, cond_s, cond_ndim), cond_size, 1);
-  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  out[i] = cond[idx_cond] != 0 ? a[idx_a] : b[idx_b];
+  out[i] = cond[idx_cond] != 0
+    ? a[CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1)]
+    : b[CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1)];
 }}
 ",
         // The generic ternary launcher names its three metadata groups a/b/g.

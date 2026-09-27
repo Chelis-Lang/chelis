@@ -3869,12 +3869,56 @@ impl CEmitter {
         self.emit_realize(id, &inputs[1..], ty);
     }
 
+    /// [05-OP-53]: shapes agree only across what the condition selects. A
+    /// branch selected nowhere is neither read nor shape-checked, so a
+    /// condition selecting one branch everywhere yields that branch; the
+    /// condition itself is checked when it mixes or is empty, the evaluator's
+    /// `where_elementwise` rule.
     fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let condition = inputs[0].0;
         let then_value = inputs[1].0;
         let else_value = inputs[2].0;
         let element_size = Self::elem_type(ty);
-        let identity = self.emit_elementwise_index_steps(id, inputs, ty);
+        let then_read = format!("__where_then_read_{id}");
+        let else_read = format!("__where_else_read_{id}");
+        let mixed = format!("__where_mixed_{id}");
+        self.line(&format!("int {then_read} = 0;"));
+        self.line(&format!("int {else_read} = 0;"));
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{condition}_size && !({then_read} && {else_read}); i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "if (((const uint8_t*)t{condition}_data)[i] != UINT8_C(0)) {then_read} = 1; else {else_read} = 1;"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("const int {mixed} = {then_read} && {else_read};"));
+        // Each distinct operand's step is taken, and its shape checked, only
+        // under the roles that read it.
+        let mut reads: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (node, read) in [
+            (condition, format!("({then_read} == {else_read})")),
+            (then_value, then_read.clone()),
+            (else_value, else_read.clone()),
+        ] {
+            reads.entry(node).or_default().push(read);
+        }
+        let shape = Self::tagged_shape_literal(ty);
+        let rank = Self::ndim(ty);
+        let mut identity = Vec::new();
+        let mut contiguity = Vec::new();
+        for (node, roles) in &reads {
+            let read = format!("({})", roles.join(" || "));
+            self.line(&format!(
+                "const int64_t t{id}_input{node}_step = {read} ? chelis_tensor_elementwise_index_step_for_shape(t{node}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0;"
+            ));
+            identity.push(format!("(!{read} || t{id}_input{node}_step == 1)"));
+            contiguity.push(format!(
+                "(!{read} || (chelis_is_contiguous(t{node}) && t{node}_size == t{id}_size))"
+            ));
+        }
+        let identity = format!("t{id}_size <= 1 || ({})", identity.join(" && "));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "uint8_t* restrict __where_out_{id} = (uint8_t*)t{id}_data;"
@@ -3891,18 +3935,14 @@ impl CEmitter {
         self.line(&format!(
             "const size_t __where_width_{id} = sizeof({element_size});"
         ));
-        let contiguity_cond = format!(
-            "chelis_is_contiguous(t{condition}) && chelis_is_contiguous(t{then_value}) && \
-             chelis_is_contiguous(t{else_value}) && t{condition}_size == t{id}_size && \
-             t{then_value}_size == t{id}_size && t{else_value}_size == t{id}_size"
-        );
+        let contiguity_cond = contiguity.join(" && ");
         self.line(&format!("if (({contiguity_cond}) && ({identity})) {{"));
         self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "const uint8_t* selected = __where_condition_{id}[i] != UINT8_C(0) \
+            "const uint8_t* selected = ({mixed} ? __where_condition_{id}[i] != UINT8_C(0) : {then_read}) \
              ? __where_then_{id} : __where_else_{id};"
         ));
         self.line(&format!(
@@ -3927,7 +3967,7 @@ impl CEmitter {
             "int64_t idx_else = i * t{id}_input{else_value}_step;"
         ));
         self.line(&format!(
-            "const uint8_t* selected = __where_condition_{id}[idx_condition] != UINT8_C(0) \
+            "const uint8_t* selected = ({mixed} ? __where_condition_{id}[idx_condition] != UINT8_C(0) : {then_read}) \
              ? __where_then_{id} + (size_t)idx_then * __where_width_{id} \
              : __where_else_{id} + (size_t)idx_else * __where_width_{id};"
         ));

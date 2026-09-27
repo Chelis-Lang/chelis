@@ -2024,13 +2024,13 @@ exact ADT identity by [05-OP-34].
 > This atom's selection rule also governs exactly the language builtin
 > `where(condition, then, else)` with signature
 > `(&tensor[D,bool], &tensor[D,p], &tensor[D,p]) -> tensor[D,p]` and its
-> exact public C counterpart `chelis_tensor_where` in that registry. All four
-> tensors have identical dimensions, both branches and the result have the
-> same active element dtype `p`, and selection copies the chosen stored bits
-> without numeric conversion. On float branches the adjoint routes each
-> cotangent to the selected branch and exact zero to the other; the condition
-> has no cotangent. Signed-integer and bool branches are forward-only. The
-> operation has no accumulator.
+> exact public C counterpart `chelis_tensor_where` in that registry. The
+> tensors' dimensions agree as [05-OP-53] requires, both branches and the
+> result have the same active element dtype `p`, and selection copies the
+> chosen stored bits without numeric conversion. On float branches the
+> adjoint routes each cotangent to the selected branch and exact zero to the
+> other; the condition has no cotangent. Signed-integer and bool branches are
+> forward-only. The operation has no accumulator.
 >
 > Every entry validates every observable input-descriptor invariant from
 > [05-OP-31] and [05-OP-44], including dtype, shape, element count, capacity,
@@ -3516,7 +3516,11 @@ path even though bare `round` under `grad` remains a structural
 > element is silently narrowed.
 >
 > Result: Where selects stored bits directly from the chosen branch without
-> converting bool to numeric. Cumsum returns inclusive axis-prefix sums;
+> converting bool to numeric. Its shape agreement binds only the branches its
+> condition selects: a branch selected in no element is neither read nor
+> shape-checked, so a condition selecting one branch in every element yields
+> that branch, and an empty condition yields an empty result of its own shape.
+> Cumsum returns inclusive axis-prefix sums;
 > sort orders each axis slice using [05-OP-33]'s NaN/tie rule; diagonal uses
 > that atom's axis ordering, and trace sums the diagonal. Clamp follows the
 > atom's exact lower/upper selection rule. Split preserves source order,
