@@ -425,9 +425,15 @@ class ReceiptTests(unittest.TestCase):
         replacements = (
             (
                 'chelis-backend-c::emit::tests::'
-                'path_sensitive_uniform_reads_uint8_bool_and_gates_counter',
+                'path_sensitive_uniform_reads_uint8_bool',
                 'chelis-backend-c::emit::tests::'
                 'path_sensitive_uniform_reads_float_backed_bool_and_gates_counter',
+            ),
+            (
+                'chelis-backend-c::emit::tests::'
+                'path_sensitive_uniform_reads_uint8_bool',
+                'chelis-backend-c::emit::tests::'
+                'path_sensitive_uniform_reads_uint8_bool_and_gates_counter',
             ),
             (
                 'chelis-cli::capacity_census_tripwire::'
