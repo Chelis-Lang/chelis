@@ -450,7 +450,10 @@ fn apply_placements(unit: &mut Unit, placements: &[Placed]) -> Result<(), Owners
             Placement::OnEdge { edge, .. } => edge_sites.entry(edge).or_default().push(placed),
         }
     }
-    for values in block_sites.values_mut().chain(edge_sites.values_mut()) {
+    for values in block_sites.values_mut() {
+        values.sort_by_key(|placed| std::cmp::Reverse(placed.definition_order));
+    }
+    for values in edge_sites.values_mut() {
         values.sort_by_key(|placed| std::cmp::Reverse(placed.definition_order));
     }
     for block in &mut unit.blocks {
