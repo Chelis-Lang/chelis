@@ -58,29 +58,182 @@ pub fn write_default(home: &Path, version: &str) {
 /// `release_dir`, whose top-level `chelis-v<ver>-<slug>/bin/chelis` is
 /// the fake toolchain. This is what `CHELISUP_RELEASE_BASE` serves.
 pub fn build_fixture_tarball(release_dir: &Path, version: &str, slug: &str) -> PathBuf {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-
-    fs::create_dir_all(release_dir).unwrap();
-    let top = format!("chelis-v{version}-{slug}");
-
-    // Stage the unpacked layout on disk so the tar entries carry real
-    // file modes (the fake `chelis` is executable).
     let stage = tempfile::tempdir().unwrap();
-    let root = stage.path().join(&top);
+    let root = stage.path().join(format!("chelis-v{version}-{slug}"));
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let chelis = bin_dir.join("chelis");
     fs::write(&chelis, FAKE_CHELIS).unwrap();
     set_exec(&chelis);
+    write_tarball(release_dir, &root)
+}
 
+/// The runtime files a fixture release ships, and what its fake
+/// `chelis runtime export` reports about the runtime it carries.
+pub struct ReleaseRuntime {
+    /// `lib/libchelis_runtime.a` in the tarball.
+    pub shipped_archive: Vec<u8>,
+    /// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding
+    /// `shipped_archive`.
+    pub archive_is_symlink: bool,
+    /// Ship `lib` as a symlink to a sibling `lib.real` directory.
+    pub lib_is_symlink: bool,
+    /// Ship the top-level `chelis-v*` entry as a link to an absolute path
+    /// outside the tarball, where the release's files are.
+    pub root_is_symlink: bool,
+    /// `include/<name>` files in the tarball.
+    pub shipped_headers: Vec<(String, Vec<u8>)>,
+    /// The staging receipt the fake export writes.
+    pub receipt: serde_json::Value,
+    /// The fake export's exit status; a failed export writes nothing.
+    pub export_status: i32,
+    /// The interpreter the fake `chelis` names. A missing one makes the
+    /// binary impossible to start, like a glibc build on a musl system.
+    pub chelis_interpreter: &'static str,
+}
+
+impl ReleaseRuntime {
+    /// A sealed release of `version` whose shipped runtime files are the
+    /// ones its export reports.
+    pub fn matching(version: &str) -> Self {
+        let archive = b"carried runtime archive".to_vec();
+        let headers = vec![
+            ("chelis_runtime.h".to_owned(), b"/* runtime */\n".to_vec()),
+            ("chelis_math.h".to_owned(), b"/* math */\n".to_vec()),
+        ];
+        let digests: serde_json::Map<String, serde_json::Value> = headers
+            .iter()
+            .map(|(name, bytes)| (name.clone(), sha256(bytes).into()))
+            .collect();
+        let receipt = serde_json::json!({
+            "schema": "chelis-runtime-staging/1",
+            "archive": "libchelis_runtime.a",
+            "archive_sha256": sha256(&archive),
+            "headers": digests,
+            "mode": "sealed",
+            "chelis_version": version,
+        });
+        Self {
+            shipped_archive: archive,
+            archive_is_symlink: false,
+            lib_is_symlink: false,
+            root_is_symlink: false,
+            shipped_headers: headers,
+            receipt,
+            export_status: 0,
+            chelis_interpreter: "/bin/sh",
+        }
+    }
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Build a release tarball that ships `runtime`'s files, with a fake
+/// `chelis` whose `runtime export <dir>` writes `runtime.receipt` into
+/// `<dir>` (and, like the real export, refuses a set `CHELIS_RUNTIME_DIR`).
+/// Other invocations echo their arguments.
+pub fn build_release_tarball(
+    release_dir: &Path,
+    version: &str,
+    slug: &str,
+    runtime: &ReleaseRuntime,
+) -> PathBuf {
+    let stage = tempfile::tempdir().unwrap();
+    let root = stage.path().join(format!("chelis-v{version}-{slug}"));
+    for directory in ["bin", "lib", "include"] {
+        fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    let chelis = root.join("bin/chelis");
+    fs::write(
+        &chelis,
+        format!(
+            "#!{interpreter}\n\
+             if [ \"$1\" = runtime ] && [ \"$2\" = export ]; then\n\
+             \x20 if [ -n \"${{CHELIS_RUNTIME_DIR+set}}\" ]; then\n\
+             \x20   echo 'error: CHELIS_RUNTIME_DIR is set' >&2; exit 1\n\
+             \x20 fi\n\
+             \x20 if [ {status} -ne 0 ]; then echo 'error: export refused' >&2; exit {status}; fi\n\
+             \x20 mkdir -p \"$3\" || exit 1\n\
+             \x20 cat > \"$3/chelis_runtime.receipt.json\" <<'RECEIPT'\n\
+             {receipt}\n\
+             RECEIPT\n\
+             \x20 exit 0\n\
+             fi\n\
+             printf 'FAKE-CHELIS %s' \"$*\"\n",
+            interpreter = runtime.chelis_interpreter,
+            status = runtime.export_status,
+            receipt = runtime.receipt,
+        ),
+    )
+    .unwrap();
+    set_exec(&chelis);
+    let archive = root.join("lib/libchelis_runtime.a");
+    if runtime.archive_is_symlink {
+        fs::write(
+            root.join("lib/libchelis_runtime.real"),
+            &runtime.shipped_archive,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("libchelis_runtime.real", &archive).unwrap();
+    } else {
+        fs::write(&archive, &runtime.shipped_archive).unwrap();
+    }
+    for (name, bytes) in &runtime.shipped_headers {
+        fs::write(root.join("include").join(name), bytes).unwrap();
+    }
+    if runtime.lib_is_symlink {
+        fs::rename(root.join("lib"), root.join("lib.real")).unwrap();
+        std::os::unix::fs::symlink("lib.real", root.join("lib")).unwrap();
+    }
+    if runtime.root_is_symlink {
+        let top = root.file_name().unwrap().to_str().unwrap().to_owned();
+        let outside = release_dir.join(format!("outside-{top}"));
+        fs::create_dir_all(release_dir).unwrap();
+        fs::rename(&root, &outside).unwrap();
+        return write_link_tarball(release_dir, &top, &outside);
+    }
+    write_tarball(release_dir, &root)
+}
+
+/// Write `root` (a staged `chelis-v*` directory) as `<release_dir>/<name>.tar.gz`,
+/// keeping real file modes and symlinks.
+fn write_tarball(release_dir: &Path, root: &Path) -> PathBuf {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    fs::create_dir_all(release_dir).unwrap();
+    let top = root.file_name().unwrap().to_str().unwrap().to_owned();
     let asset = release_dir.join(format!("{top}.tar.gz"));
     let file = fs::File::create(&asset).unwrap();
     let enc = GzEncoder::new(file, Compression::fast());
     let mut builder = tar::Builder::new(enc);
-    builder.append_dir_all(&top, &root).unwrap();
+    builder.follow_symlinks(false);
+    builder.append_dir_all(&top, root).unwrap();
     let enc = builder.into_inner().unwrap();
     enc.finish().unwrap();
+    asset
+}
+
+/// Write `<release_dir>/<top>.tar.gz` holding only the link `top -> target`.
+fn write_link_tarball(release_dir: &Path, top: &str, target: &Path) -> PathBuf {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let asset = release_dir.join(format!("{top}.tar.gz"));
+    let enc = GzEncoder::new(fs::File::create(&asset).unwrap(), Compression::fast());
+    let mut builder = tar::Builder::new(enc);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    builder.append_link(&mut header, top, target).unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
     asset
 }
 
