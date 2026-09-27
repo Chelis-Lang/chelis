@@ -27,10 +27,9 @@ pub use transcript_capture::{
 #[cfg(test)]
 mod source_arch;
 
-pub use chelis_reef::EntryImports;
 /// Re-export of reef package-root discovery so callers (e.g. the Python
 /// bindings' `compile_and_load` auto-discovery) can resolve the enclosing
-/// reef project without depending on `chelis-reef` directly. See issue #816.
+/// reef project through the compiler API. See issue #816.
 pub use chelis_reef::{find_package_root_for_dir, find_package_root_for_input};
 /// Cooperative cancellation for long-running evaluation (chelis#914).
 /// Install a token on the thread that will run the eval, hand a clone to

@@ -35,10 +35,11 @@ use chelis_compiler_api::schema::{
 };
 use chelis_compiler_api::{CancelToken, install_cancel_token};
 use chelis_compiler_api::{
-    CompiledContext, EntryImports, compile_for_execution_in_context, eval_in_context_with_bindings,
+    CompiledContext, compile_for_execution_in_context, eval_in_context_with_bindings,
     find_package_root_for_input, load_or_compile_with_local_registry_fallback,
     surf_source_has_import,
 };
+use chelis_reef::EntryImports;
 use chelis_vocab::RuntimeDType;
 use libloading::Library;
 use pyo3::create_exception;

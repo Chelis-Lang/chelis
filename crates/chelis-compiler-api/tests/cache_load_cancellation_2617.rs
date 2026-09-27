@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use chelis_compiler_api::{
-    COMPILER_VERSION, CancelToken, EVAL_CANCELLED_MSG, EntryImports, install_cancel_token,
+    COMPILER_VERSION, CancelToken, EVAL_CANCELLED_MSG, install_cancel_token,
     load_or_build_library_context, load_or_build_stdlib_context, load_or_compile_for_package,
     stdlib_cache_key,
 };
+use chelis_reef::EntryImports;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
