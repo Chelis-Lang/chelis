@@ -4763,7 +4763,9 @@ where
 /// parameter), so an untaken arm's operands can disagree. The node then
 /// yields zeros at its first operand's shape, read only by the arm's own
 /// nodes and by the join, which does not read an unselected branch
-/// ([05-OP-53]). `None` where the operands agree or some row is active.
+/// ([05-OP-53]). A `where` is one such node: an untaken arm's inner join
+/// checks its condition against no branch, and yields zeros at the
+/// condition's shape. `None` where the operands agree or some row is active.
 fn inactive_disagreeing_elementwise(
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
@@ -4782,6 +4784,7 @@ fn inactive_disagreeing_elementwise(
             | RiscOp::Compare(_)
             | RiscOp::Logical(_)
             | RiscOp::FusedElem { .. }
+            | RiscOp::Where
     ) {
         return Ok(None);
     }

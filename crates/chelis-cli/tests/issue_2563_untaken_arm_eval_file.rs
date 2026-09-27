@@ -1081,3 +1081,42 @@ fn a_condition_shaped_unlike_its_selected_branch_is_refused_in_eval_file_and_c()
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
+
+/// spec/10 §3.2 and [05-OP-53]: a `where` under a false activation checks
+/// nothing, so an untaken arm's inner join whose condition selects the
+/// claim-sized zeros of `id0` (extent 0, against a condition of extent 3)
+/// neither traps nor is read, and both lanes return the taken `else` arm's
+/// sum, 6. The twin nests the same condition, so the inner join selects
+/// the same branch as the outer.
+///
+/// Evidentiary status: REGRESSION TEST for the nested row in H (at
+/// 0b20dcad5 it fails with the evaluator's `where` shape error);
+/// DISPOSITION LOCK for its C lane and for the twin.
+#[test]
+fn an_untaken_arms_inner_where_checks_nothing_in_eval_file_and_c() {
+    let source = "def id0(v: tensor[*, f32]) -> tensor[0, f32] = add(copy(v), v)
+def selected(x: tensor[32, f32]) -> tensor[f32] = {
+  s = tensor_to_scalar(sum(copy(x), 0i32))
+  y = shrink(copy(x), [[1i64, sub(shape(&x, 0i32), 28i64)]])
+  r = if lt(s, 0.0f32) then (if {inner} then id0(copy(y)) else neg(copy(y))) else add(copy(y), y)
+  sum(r, 0i32)
+}
+def main() -> tensor[f32] = selected(to_tensor([-3.0f32, -1.0f32, 1.0f32, 3.0f32, 5.0f32, 7.0f32, 9.0f32, 11.0f32, 13.0f32, 15.0f32, 17.0f32, 19.0f32, 21.0f32, 23.0f32, 25.0f32, 27.0f32, 29.0f32, 31.0f32, 33.0f32, 35.0f32, 37.0f32, 39.0f32, 41.0f32, 43.0f32, 45.0f32, 47.0f32, 49.0f32, 51.0f32, 53.0f32, 55.0f32, 57.0f32, 59.0f32]))
+";
+    let directory = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for (index, inner) in ["lt(0.0f32, s)", "lt(s, 0.0f32)"].into_iter().enumerate() {
+        let program = source.replace("{inner}", inner);
+        let stem = format!("inner_where_{index}");
+        let h = h_file(directory.path(), &stem, &program);
+        let c = c_file(directory.path(), &stem, &program);
+        let expected = |lane: &Result<String, String>| {
+            lane.as_ref()
+                .is_ok_and(|stdout| stdout.trim() == "main = 6.0")
+        };
+        if !expected(&h) || !expected(&c) {
+            failures.push(format!("{inner}: H {h:?}, C {c:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
