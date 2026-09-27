@@ -67,8 +67,9 @@ pub fn link_package_declarations(
                     artifacts: BTreeMap::new(),
                 },
                 modules,
-                source: LoadedSourceKind::Root,
-                source_root: PathBuf::new(),
+                source: LoadedSourceKind::Root {
+                    root: PathBuf::new(),
+                },
                 archive_sha256: None,
                 shell_sha256: None,
                 shell: None,

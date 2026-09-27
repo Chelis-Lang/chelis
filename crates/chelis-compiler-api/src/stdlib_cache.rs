@@ -420,6 +420,42 @@ pub fn cache_disabled() -> bool {
         .unwrap_or(false)
 }
 
+/// What probing a typecheck cache file found (chelis#2617).
+pub(crate) enum TypecheckCacheLoad<T> {
+    /// A valid entry under the expected key.
+    Hit(T),
+    /// No file, or a valid file under a different key.
+    Miss,
+    /// Cancellation was requested and the payload decode did not complete.
+    /// Decoding revalidates the cached proof, and that revalidation polls the
+    /// cancel token, so an abandoned decode says nothing about the file. The
+    /// caller propagates the cancellation and leaves the file in place.
+    Cancelled,
+    /// The bytes are present but cannot be used; the caller warns, rebuilds
+    /// and overwrites.
+    Unusable(cache_envelope::CacheError),
+}
+
+/// Classify the result of a typecheck cache load, separating a load abandoned
+/// by cancellation from an unusable file.
+///
+/// Each cache site calls `cache_envelope::load` for its own payload type and
+/// passes the result here, so the serialization edge stays at the site that
+/// owns the payload (the capacity census attributes it there) and this
+/// classifier performs no serialization.
+pub(crate) fn classify_typecheck_cache_load<T>(
+    loaded: Result<Option<T>, cache_envelope::CacheError>,
+) -> TypecheckCacheLoad<T> {
+    match loaded {
+        Ok(Some(payload)) => TypecheckCacheLoad::Hit(payload),
+        Ok(None) => TypecheckCacheLoad::Miss,
+        Err(cache_envelope::CacheError::Decode(_)) if chelis_types::cancellation_requested() => {
+            TypecheckCacheLoad::Cancelled
+        }
+        Err(error) => TypecheckCacheLoad::Unusable(error),
+    }
+}
+
 /// Load the bundled chelis-std's [`StdLibContext`] from disk if a fresh
 /// entry exists, else build it and (best-effort) write it back.
 ///
@@ -452,10 +488,15 @@ pub fn load_or_build_stdlib_context(
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
 
-    match cache_envelope::load::<StdLibContext>(&cache_path, key) {
-        Ok(Some(ctx)) => return Ok(ctx),
-        Ok(None) => {}
-        Err(e) => {
+    match classify_typecheck_cache_load(cache_envelope::load::<StdLibContext>(&cache_path, key)) {
+        TypecheckCacheLoad::Hit(ctx) => return Ok(ctx),
+        TypecheckCacheLoad::Miss => {}
+        TypecheckCacheLoad::Cancelled => {
+            return Err(crate::compiler::cancelled_stage_error(
+                "chelis-std typecheck cache",
+            ));
+        }
+        TypecheckCacheLoad::Unusable(e) => {
             eprintln!(
                 "chelis: chelis-std typecheck cache at {} unusable ({e}); \
                  rebuilding and overwriting",
