@@ -4,8 +4,9 @@
 //! that closure is everything linking can reach.
 
 use chelis_reef::{
-    EntryImports, PreparedReefGraph, SourceDigest, compile_with_reef_graph,
-    compiler_bundled_chelis_std_version, prepare_reef_graph, rewrite_entry_decls_with_reef_graph,
+    DependencyGraphStatus, EntryImports, PreparedReefGraph, SourceDigest, compile_with_reef_graph,
+    compiler_bundled_chelis_std_version, dependency_graph_for_file, prepare_reef_graph,
+    rewrite_entry_decls_with_reef_graph,
 };
 use chelis_surf::ast::Decl;
 use std::collections::BTreeSet;
@@ -272,5 +273,44 @@ fn rewriting_an_entry_against_a_graph_without_its_imports_is_refused() {
     assert!(
         error.contains("standard-library module `Std.Io.Json` is not linked"),
         "{error}"
+    );
+}
+
+/// The dependency graph `chelis prove` reports covers the linked program:
+/// the root package and the chelis-std modules it imports, and no
+/// chelis-std module the graph did not link.
+#[test]
+fn the_dependency_graph_walks_only_linked_stdlib_modules() {
+    let (_dir, root) = package(JSON_MODULE);
+    let graph = dependency_graph_for_file(&root.join("src/main.ch"))
+        .expect("dependency graph")
+        .expect("a package module has a dependency graph");
+    assert_eq!(graph.status, DependencyGraphStatus::Complete);
+    let reached = graph
+        .declarations
+        .iter()
+        .map(|declaration| declaration.module.clone())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        reached.contains("Std.Io.Json"),
+        "the imported chelis-std function is attributed: {reached:?}"
+    );
+    assert!(
+        reached.is_subset(&modules(&["Probe.Main", "Std.Io.Json", "Std.Text"])),
+        "{reached:?}"
+    );
+
+    let (_dir, root) = package(NO_IMPORT_MODULE);
+    let graph = dependency_graph_for_file(&root.join("src/main.ch"))
+        .expect("dependency graph")
+        .expect("a package module has a dependency graph");
+    assert_eq!(graph.status, DependencyGraphStatus::Complete);
+    assert!(
+        graph
+            .declarations
+            .iter()
+            .all(|declaration| declaration.module == "Probe.Main"),
+        "{:?}",
+        graph.declarations
     );
 }

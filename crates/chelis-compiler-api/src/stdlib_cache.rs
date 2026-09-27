@@ -410,17 +410,31 @@ fn non_empty_env(name: &str) -> Option<String> {
     }
 }
 
-/// The on-disk path for the bundled chelis-std's cache entry.
+/// The on-disk path for a chelis-std typecheck cache entry.
 ///
-/// `pub(crate)` so [`crate::library_cache::evict_typecheck_cache`] can tell the
-/// RUNNING build's Layer-1 entry apart from the entries other builds left
-/// behind (chelis#1156 made Layer 1 one-per-compiler-build, not one-per-stdlib).
+/// Layer 1 holds one entry per compiler build (chelis#1156) and linked
+/// chelis-std module set (chelis#2558). The name starts with
+/// [`running_build_stdlib_cache_prefix`], so
+/// [`crate::library_cache::evict_typecheck_cache`] can tell every entry the
+/// RUNNING build can still read apart from the entries other builds left
+/// behind.
 pub(crate) fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
     cache_dir.join(format!(
-        "chelis-std-{}-{}.tc",
-        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        "{}{}.tc",
+        running_build_stdlib_cache_prefix(),
         hex_prefix(&key, 8),
     ))
+}
+
+/// The file-name prefix shared by every Layer-1 entry the running compiler
+/// build writes: the bundled chelis-std version and a tag of
+/// [`crate::build_fingerprint`], which the key itself also folds.
+pub(crate) fn running_build_stdlib_cache_prefix() -> String {
+    format!(
+        "chelis-std-{}-{}-",
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        hex_prefix(&Sha256::digest(crate::build_fingerprint().as_bytes()), 8),
+    )
 }
 
 /// Whether the disk cache is disabled for this process.
