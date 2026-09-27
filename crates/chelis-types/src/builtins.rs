@@ -703,6 +703,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    "split_keys",
     "cmplt",
     "sub",
     "div",
@@ -1165,10 +1166,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     BuiltinDecl {
         name: "split_keys",
         capability: NUMERIC_CAPABILITY,
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the signature (key, i64) -> tensor[n, key] fully determines this builtin type; \
-                     n is a fresh extent per call that the runtime count must equal",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -2996,10 +2994,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     // [05-OP-69]..[05-OP-72] (spec/05 section 2.7): the random key
     // operations. The key operand of `split_key`, `split_keys` and `fold_in`
     // is owned, never borrowed: [04-LIN-9] makes every key affine, and these
-    // are its consuming uses. `split_keys`'s extent is the runtime count `n`
-    // ([05-OP-71]), so each call's result extent is a fresh dimension that
-    // the surrounding program pins; the lowered graph checks the declared
-    // extent against the count at run time.
+    // are its consuming uses. `split_keys`'s extent is its count `n`
+    // ([05-OP-71]); its application's result extent is decided from the
+    // count by `check_split_keys_signature`, spec/04 section 4.7.2's
+    // `expand` rule, and the scheme's dimension only types the builtin named
+    // as a value.
     let key = Type::Prim(Prim::Key);
     let count = Type::Prim(Prim::Int64);
     env.bind(

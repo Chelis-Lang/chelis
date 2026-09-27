@@ -1076,7 +1076,7 @@ path.
 |---|---|---|
 | `key_from_seed` | `(i64) -> key`; `(tensor[D,i64]) -> tensor[D,key]` | The root key of a seed ([05-OP-69]) |
 | `split_key` | `(key) -> (key, key)`; `(tensor[D,key]) -> (tensor[D,key], tensor[D,key])` | Two child keys ([05-OP-70]) |
-| `split_keys` | `(key, i64) -> tensor[n, key]`; `(tensor[D,key], i64) -> tensor[D ++ [n],key]` | `n` child keys ([05-OP-71]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]`; `(tensor[D,key], i64) -> tensor[D ++ [n],key]` | `n` child keys ([05-OP-71]); `n` is the count's extent under spec/04 §4.7.2 |
 | `fold_in` | `(key, i64) -> key`; `(tensor[D,key], tensor[D,i64]) -> tensor[D,key]` | The child key of an integer ([05-OP-72]) |
 
 (The tensor forms are not fully implemented; see chelis#2656.)
@@ -1110,10 +1110,14 @@ path.
 > **[05-OP-71]** `split_keys(k, n) -> tensor[n, key]` consumes the key `k` and
 > takes a runtime `i64` count `n`. Row `j` of the result, for `0 <= j < n`,
 > is `derive(derive(k, 2), j)` of [05-RNG-2], the key that folding `j` into
-> `k` yields. `n` SHALL be non-negative: a negative count traps before
-> allocation, as a negative runtime movement bound does, and `n = 0` gives an
-> empty tensor. For a `tensor[D, key]` operand the result is
-> `tensor[D ++ [n], key]`, the new axis last. No row carries a cotangent.
+> `k` yields. `n` SHALL be non-negative: a runtime negative count traps
+> before allocation, as a negative runtime movement bound does, and `n = 0`
+> gives an empty tensor. The result extent follows spec/04 §4.7.2's rule for
+> `expand` and `insert`: a literal count gives that literal extent, a static
+> negative count is a type error, and any other count gives a fresh runtime
+> extent, checked for equality where it meets another extent. For a
+> `tensor[D, key]` operand the result is `tensor[D ++ [n], key]`, the new
+> axis last. No row carries a cotangent.
 
 > **[05-OP-72]** `fold_in(k, n) -> key` consumes the key `k` and returns
 > `derive(derive(k, 2), n)` of [05-RNG-2], reading the `i64` `n` as its

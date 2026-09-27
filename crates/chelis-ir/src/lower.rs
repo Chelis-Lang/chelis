@@ -12495,6 +12495,52 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// [05-OP-71] under spec/04 §4.7.2: a `split_keys` whose count is not a
+    /// literal has a fresh runtime extent, and `vmap` meets it with the batch
+    /// extent another mapped argument gives by a literal or a name. The
+    /// split's count axis takes that extent, and the split checks its count
+    /// against it before any key exists (the declared-extent check every lane
+    /// runs for `SplitN`), so a disagreeing count traps `Domain` instead of
+    /// batching a draw whose keys and data disagree.
+    fn claim_split_key_batch_extents(
+        &mut self,
+        batch_dim: &mut DimInfo,
+        actual_args: &[NodeId],
+        actual_types: &[TensorType],
+        axis: usize,
+        canonical_actual_types: &mut [TensorType],
+    ) {
+        let anonymous = |dim: &DimInfo| matches!(dim, DimInfo::Named(name, _) if name.is_empty() || name == "*");
+        let Some(extent) = actual_types
+            .iter()
+            .filter_map(|ty| ty.dims.get(axis))
+            .find(|dim| !anonymous(dim))
+            .cloned()
+        else {
+            return;
+        };
+        for (index, (arg, ty)) in actual_args.iter().zip(actual_types).enumerate() {
+            let counts_the_batch = ty.dims.get(axis).is_some_and(anonymous)
+                && ty.dims.len() == axis + 1
+                && self
+                    .dag
+                    .get(*arg)
+                    .is_some_and(|node| matches!(node.op, RiscOp::SplitN { .. }));
+            if !counts_the_batch {
+                continue;
+            }
+            self.dag.node_mut(*arg).expect("split").output_type.dims[axis] = extent.clone();
+            canonical_actual_types[index].dims[0] = extent.clone();
+        }
+        if let Some(first) = actual_types
+            .iter()
+            .zip(canonical_actual_types.iter())
+            .find(|(ty, _)| axis < ty.dims.len())
+        {
+            *batch_dim = first.1.dims[0].clone();
+        }
+    }
+
     fn lower_vmap_callable_with_nodes(
         &mut self,
         fn_expr: &ResolvedFunction,
@@ -12561,13 +12607,20 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
-        let Some(batch_dim) = batch_dim else {
+        let Some(mut batch_dim) = batch_dim else {
             return self.lower_unrepresentable(
                 "vmap with no tensor arguments",
                 &[],
                 expr_diagnostic_location(fn_expr),
             );
         };
+        self.claim_split_key_batch_extents(
+            &mut batch_dim,
+            actual_args,
+            &actual_types,
+            axis,
+            &mut canonical_actual_types,
+        );
 
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
