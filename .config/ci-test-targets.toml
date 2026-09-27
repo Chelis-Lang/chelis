@@ -885,6 +885,30 @@ cadence = "pull_request and exact-candidate workflow_dispatch when directly modi
 reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
 tracking_issue = "chelis#1863"
 
+# These all-ignored targets need prerequisites no Linux PR worker has. A direct
+# modification is listed with its ignored tests, rejected if an active test
+# appears, and reported as a manual gate that PR CI did not execute. Each
+# `manual_gates` value is a docs/manual_gates.md row whose command runs exactly
+# this target's ignored tests, and one of them runs all of them with no name
+# filter; an uncited row that runs it makes this row stale.
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "shoals_oracle"
+manual_gates = [
+  "phase3l_shoals_oracle",
+  "phase3l_shoals_oracle_grad_greeks_match_analytic",
+  "shoals_oracle suite",
+]
+reason = "the Shoals finance-oracle rows need a Shoals checkout that the Linux PR workers do not have"
+tracking_issue = "chelis#1824"
+
+[[manual_gate_target]]
+package = "chelis-python"
+name = "manual_reef_context"
+manual_gates = ["reef_context_manual_acceptance_oracle"]
+reason = "the reef-context acceptance oracle needs a populated local reef registry and Python environment that the Linux PR workers do not have"
+tracking_issue = "chelis#1824"
+
 # This target requires a real HIP workstation. Ubuntu change-owned and package
 # expansion workers must preserve the exact manual gate without attempting to
 # execute the ignored hardware matrix themselves.
@@ -1663,6 +1687,15 @@ job = "script-unit"
 cadence = "pull_request and push"
 reason = "the full SMT prove cadence and its configuration-closure inputs are locked by script-unit"
 tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "docs/manual_gates.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates every manual_gate_target row against this table, which the planner also reads; the docs-only detector lists it as a control artifact"
+tracking_issue = "chelis#1824"
 
 [[path_rule]]
 prefix = "docs/investigations/remediation_status_2026_08_04.md"

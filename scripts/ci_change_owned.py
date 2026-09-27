@@ -38,6 +38,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -57,8 +58,8 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 3
-PLAN_VERSION = 4
-RECEIPT_VERSION = 1
+PLAN_VERSION = 5
+RECEIPT_VERSION = 2
 STANDING_COVERAGE_VERSION = 1
 DURATION_BASELINE_VERSION = 1
 DURATION_BASELINE_PATH = ROOT / ".config/ci-change-owned-durations.json"
@@ -84,6 +85,18 @@ TEST_FUNCTION = re.compile(
     re.MULTILINE,
 )
 OWNER_FIELDS = {"workflow", "job", "cadence", "reason", "tracking_issue"}
+MANUAL_GATE_FIELDS = {"package", "name", "manual_gates", "reason", "tracking_issue"}
+# A manual_gate_target row cites rows of this one table by their first cell.
+MANUAL_GATES_PATH = "docs/manual_gates.md"
+MANUAL_GATES_SECTION = "## Ignored tests (wired manual gates)"
+MANUAL_GATES_HEADER = (
+    "Test",
+    "Crate",
+    "Manual command",
+    "Prerequisite",
+    "Owning phase",
+)
+MANUAL_GATE_STATUS = "manual gate, not executed in PR CI"
 SIDECAR_NAMES = ("commands.json", "timings.json", "test-list.json", "junit.xml")
 # The informational lane's deadline is a backstop against a hung command, not
 # a schedule. Sized at 80 minutes it cuts none of the 38 dispatches measured
@@ -221,6 +234,20 @@ class Owner:
 
 
 @dataclass(frozen=True)
+class ManualGate:
+    entries: tuple[str, ...]
+    reason: str
+    tracking_issue: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "manual_gates": list(self.entries),
+            "reason": self.reason,
+            "tracking_issue": self.tracking_issue,
+        }
+
+
+@dataclass(frozen=True)
 class PathRule:
     prefix: str
     disposition: str
@@ -251,6 +278,7 @@ class Config:
     version: int
     standing_targets: tuple[Identity, ...]
     manual_only_targets: Mapping[Identity, Owner]
+    manual_gate_targets: Mapping[Identity, ManualGate]
     target_exclusions: Mapping[Identity, Owner]
     test_exclusions: Mapping[TestIdentity, Owner]
     required_package_rules: tuple[RequiredPackageRule, ...]
@@ -331,12 +359,13 @@ def _rules_overlap(left: str, right: str) -> bool:
 
 
 def read_config(path: Path) -> Config:
-    """Read the strict version-3 six-row-kind configuration."""
+    """Read the strict version-3 seven-row-kind configuration."""
     data = tomllib.loads(path.read_text())
     allowed = {
         "version",
         "standing_target",
         "manual_only_target",
+        "manual_gate_target",
         "target_exclusion",
         "test_exclusion",
         "required_package_rule",
@@ -367,6 +396,42 @@ def read_config(path: Path) -> Config:
         if identity in manual_only_targets:
             raise ValueError(f"duplicate manual_only_target: {identity.canonical}")
         manual_only_targets[identity] = _owner(row)
+
+    manual_gate_targets: dict[Identity, ManualGate] = {}
+    for row in _rows(data, "manual_gate_target"):
+        if set(row) != MANUAL_GATE_FIELDS:
+            raise ValueError(
+                "manual_gate_target requires exactly package, name, "
+                "manual_gates, reason, and tracking_issue"
+            )
+        identity = Identity(_identifier(row, "package"), _identifier(row, "name"))
+        if identity in manual_gate_targets:
+            raise ValueError(f"duplicate manual_gate_target: {identity.canonical}")
+        entries = row["manual_gates"]
+        if (
+            not isinstance(entries, list)
+            or not entries
+            or any(
+                not isinstance(entry, str) or not entry or entry != entry.strip()
+                for entry in entries
+            )
+            or len(set(entries)) != len(entries)
+        ):
+            raise ValueError(
+                "manual_gate_target manual_gates must be unique exact "
+                f"{MANUAL_GATES_PATH} row identifiers"
+            )
+        tracking_issue = _nonempty_string(row, "tracking_issue")
+        if not ISSUE.fullmatch(tracking_issue):
+            raise ValueError(
+                "manual_gate_target tracking_issue must be chelis#N: "
+                f"{tracking_issue!r}"
+            )
+        manual_gate_targets[identity] = ManualGate(
+            tuple(entries),
+            _nonempty_string(row, "reason"),
+            tracking_issue,
+        )
 
     target_exclusions: dict[Identity, Owner] = {}
     for row in _rows(data, "target_exclusion"):
@@ -407,6 +472,16 @@ def read_config(path: Path) -> Config:
             "manual-only targets cannot be standing targets or target exclusions: "
             f"{manual_conflicts}"
         )
+    gate_conflicts = sorted(
+        item.canonical
+        for item in set(manual_gate_targets)
+        & (set(standing) | set(target_exclusions) | set(manual_only_targets))
+    )
+    if gate_conflicts:
+        raise ValueError(
+            "manual-gate targets cannot be standing, manual-only, or excluded "
+            f"targets: {gate_conflicts}"
+        )
     contradictory_tests = sorted(
         identity.canonical
         for identity in test_exclusions
@@ -425,6 +500,16 @@ def read_config(path: Path) -> Config:
         raise ValueError(
             "manual-only targets must execute their complete ignored suite; "
             f"test exclusions are forbidden: {manual_test_exclusions}"
+        )
+    gate_test_exclusions = sorted(
+        identity.canonical
+        for identity in test_exclusions
+        if identity.target_identity in manual_gate_targets
+    )
+    if gate_test_exclusions:
+        raise ValueError(
+            "manual-gate targets must list their complete ignored suite; "
+            f"test exclusions are forbidden: {gate_test_exclusions}"
         )
 
     required_package_rules: list[RequiredPackageRule] = []
@@ -527,6 +612,7 @@ def read_config(path: Path) -> Config:
         SCHEMA_VERSION,
         tuple(standing),
         manual_only_targets,
+        manual_gate_targets,
         target_exclusions,
         test_exclusions,
         tuple(required_package_rules),
@@ -752,6 +838,284 @@ def test_functions(source: str) -> set[str]:
     return set(TEST_FUNCTION.findall(source))
 
 
+def _manual_gate_cells(line: str) -> list[str]:
+    stripped = line.strip()
+    cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", stripped)[1:-1]]
+    if not stripped.endswith("|") or len(cells) != len(MANUAL_GATES_HEADER):
+        raise ValueError(f"malformed {MANUAL_GATES_PATH} table row: {line!r}")
+    return cells
+
+
+def manual_gate_entries(document: str) -> dict[str, list[str]]:
+    """Map each wired manual-gate row identifier to its command cells.
+
+    The section holds nothing but its table, one unbroken run of ``|`` lines,
+    so every row read here is a row the rendered page shows. Any other
+    nonblank line, such as a row inside an HTML comment or a fenced block, a
+    row after prose, or a second table, is rejected rather than read or
+    skipped.
+
+    The identifier is the row's first cell with its code-span backticks
+    removed. A repeated identifier keeps every command, so a citation of it is
+    rejected as ambiguous rather than resolved to one of them.
+    """
+    lines = document.splitlines()
+    if lines.count(MANUAL_GATES_SECTION) != 1:
+        raise ValueError(
+            f"{MANUAL_GATES_PATH} must contain exactly one "
+            f"{MANUAL_GATES_SECTION!r} section"
+        )
+    start = lines.index(MANUAL_GATES_SECTION) + 1
+    rows = []
+    last = None
+    for number, line in enumerate(lines[start:], start + 1):
+        if line.startswith("## "):
+            break
+        if not line.strip():
+            continue
+        if not line.startswith("|") or (last is not None and number != last + 1):
+            raise ValueError(
+                f"{MANUAL_GATES_PATH} line {number} lies outside the wired-gates "
+                f"table, the only content {MANUAL_GATES_SECTION!r} may hold: "
+                f"{line!r}"
+            )
+        rows.append(_manual_gate_cells(line))
+        last = number
+    if (
+        len(rows) < 2
+        or tuple(rows[0]) != MANUAL_GATES_HEADER
+        or not all(re.fullmatch(r":?-{3,}:?", cell) for cell in rows[1])
+    ):
+        raise ValueError(
+            f"{MANUAL_GATES_PATH} {MANUAL_GATES_SECTION!r} has no "
+            f"{' | '.join(MANUAL_GATES_HEADER)} table"
+        )
+    entries: dict[str, list[str]] = {}
+    for cells in rows[2:]:
+        entries.setdefault(cells[0].replace("`", "").strip(), []).append(cells[2])
+    return entries
+
+
+# A manual-gate command cell is one code span of shell words joined by these
+# operators. A segment is classified only when every word is plain and is an
+# argument the runner below knows; anything else is rejected, never skipped.
+COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
+PLAIN_WORD = re.compile(r"[A-Za-z0-9_.,/:=-]+")
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+NEXTEST_RUN = ("cargo", "nextest", "run")
+# The value-taking options each runner accepts before ``--``, by role, and the
+# harness options and flags after it. A bare word is a test-name filter.
+CARGO_TEST_RUNNERS: dict[tuple[str, ...], dict[str, str]] = {
+    ("cargo", "test"): {"-p": "package", "--package": "package", "--test": "test"},
+    NEXTEST_RUN: {
+        "-p": "package",
+        "--package": "package",
+        "--test": "test",
+        "--run-ignored": "run-ignored",
+    },
+}
+# Without this flag nextest applies its profile's default-filter, which can
+# exclude the target, so only a run that passes it is unfiltered.
+IGNORE_DEFAULT_FILTER = "--ignore-default-filter"
+CARGO_TEST_RUNNER_FLAGS: dict[tuple[str, ...], frozenset[str]] = {
+    ("cargo", "test"): frozenset(),
+    NEXTEST_RUN: frozenset({IGNORE_DEFAULT_FILTER}),
+}
+HARNESS_OPTIONS = {"--test-threads": "setting"}
+HARNESS_FLAGS = {"--ignored", "--exact", "--nocapture"}
+
+
+@dataclass(frozen=True)
+class CargoTestRun:
+    packages: tuple[str, ...]
+    tests: tuple[str, ...]
+    ignored: bool
+    filtered: bool
+
+
+def _arguments(
+    args: list[str],
+    valued: Mapping[str, str],
+    flags: frozenset[str] | set[str] = frozenset(),
+) -> list[tuple[str, str]]:
+    """Return ``(role, value)`` for each argument, rejecting any other spelling."""
+    parsed = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        name, equals, value = arg.partition("=")
+        if equals and name.startswith("--") and name in valued:
+            parsed.append((valued[name], value))
+            index += 1
+        elif (
+            arg in valued
+            and index + 1 < len(args)
+            and not args[index + 1].startswith("-")
+        ):
+            parsed.append((valued[arg], args[index + 1]))
+            index += 2
+        elif arg in flags:
+            parsed.append((arg, ""))
+            index += 1
+        elif not arg.startswith("-"):
+            parsed.append(("filter", arg))
+            index += 1
+        else:
+            raise ValueError(f"unrecognized argument {arg!r}")
+    return parsed
+
+
+def _cargo_test_run(segment: list[str]) -> CargoTestRun:
+    """Classify one command segment as a Cargo test run, or reject it."""
+    for word in segment:
+        if not PLAIN_WORD.fullmatch(word):
+            raise ValueError(f"unrecognized word {word!r}")
+    # An assignment can select a nextest profile whose filter excludes the
+    # target, or compile its tests out, so none is accepted before the runner.
+    if segment and ENV_ASSIGNMENT.fullmatch(segment[0]):
+        raise ValueError(f"environment assignment {segment[0]!r}")
+    runner = next(
+        (
+            runner
+            for runner in CARGO_TEST_RUNNERS
+            if tuple(segment[: len(runner)]) == runner
+        ),
+        None,
+    )
+    if runner is None:
+        raise ValueError("not `cargo test` or `cargo nextest run`")
+    args = segment[len(runner) :]
+    split = args.index("--") if "--" in args else len(args)
+    arguments = _arguments(
+        args[:split], CARGO_TEST_RUNNERS[runner], CARGO_TEST_RUNNER_FLAGS[runner]
+    ) + _arguments(args[split + 1 :], HARNESS_OPTIONS, HARNESS_FLAGS)
+    run_ignored = [value for role, value in arguments if role == "run-ignored"]
+    if not set(run_ignored) <= {"all", "only"}:
+        raise ValueError(f"unrecognized --run-ignored value in {run_ignored}")
+    return CargoTestRun(
+        packages=tuple(value for role, value in arguments if role == "package"),
+        tests=tuple(value for role, value in arguments if role == "test"),
+        ignored=bool(run_ignored) or ("--ignored", "") in arguments,
+        filtered=any(role == "filter" for role, _ in arguments)
+        or (runner == NEXTEST_RUN and (IGNORE_DEFAULT_FILTER, "") not in arguments),
+    )
+
+
+def _command_segments(command: str) -> list[list[str]]:
+    """Split one code-span command cell into its operator-separated words."""
+    span = re.fullmatch(r"`([^`]+)`", command)
+    if span is None:
+        raise ValueError(f"manual gate command is not one code span: {command!r}")
+    try:
+        words = shlex.split(span.group(1))
+    except ValueError as error:
+        raise ValueError(f"manual gate command does not parse: {command!r}") from error
+    segments: list[list[str]] = [[]]
+    for word in words:
+        if word in COMMAND_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(word)
+    return segments
+
+
+def _classify(name: str, command: str, segments: list[list[str]]) -> list[CargoTestRun]:
+    """Classify every given segment of a wired entry's command, or reject it.
+
+    Quoting is rejected so that the classified words are the words the shell
+    passes to Cargo.
+    """
+    if segments and re.search(r"[\\'\"]", command):
+        raise ValueError(
+            f"{MANUAL_GATES_PATH} entry {name!r} quotes or escapes a word: {command}"
+        )
+    runs = []
+    for segment in segments:
+        try:
+            runs.append(_cargo_test_run(segment))
+        except ValueError as error:
+            raise ValueError(
+                f"{MANUAL_GATES_PATH} entry {name!r} has a segment that is not a "
+                f"recognized Cargo test run ({error}): {command}"
+            ) from error
+    return runs
+
+
+def _names(target: str, text: str) -> bool:
+    """Whether ``text`` names ``target`` as a whole word."""
+    return re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", text) is not None
+
+
+def validate_manual_gate_entries(
+    targets: Mapping[Identity, ManualGate],
+    document: str,
+) -> None:
+    """Bind every manual-gate row to exactly the wired entries that run it.
+
+    Each cited entry must exist once, and every segment of its command must be
+    a Cargo test run of exactly the row's package and target with its ignored
+    tests; at least one cited entry must run them with no name filter, a
+    nextest profile's default-filter included. An uncited entry that runs the
+    target makes the row stale, and a segment of any entry that names the
+    target but cannot be classified is rejected.
+    """
+    entries = manual_gate_entries(document)
+    for identity, gate in sorted(targets.items()):
+        exact = ((identity.package,), (identity.target,))
+        whole_suite = False
+        for name in gate.entries:
+            commands = entries.get(name, [])
+            if len(commands) != 1:
+                raise ValueError(
+                    f"manual-gate target {identity.canonical} cites {name!r}, "
+                    f"which names {len(commands)} rows of {MANUAL_GATES_PATH} "
+                    f"{MANUAL_GATES_SECTION!r}; exactly one is required"
+                )
+            runs = _classify(name, commands[0], _command_segments(commands[0]))
+            if any(
+                (run.packages, run.tests) != exact or not run.ignored for run in runs
+            ):
+                raise ValueError(
+                    f"{MANUAL_GATES_PATH} entry {name!r} does not run exactly "
+                    f"{identity.canonical} with its ignored tests: {commands[0]}"
+                )
+            whole_suite = whole_suite or any(not run.filtered for run in runs)
+        if not whole_suite:
+            raise ValueError(
+                f"manual-gate target {identity.canonical} cites no "
+                f"{MANUAL_GATES_PATH} entry that runs its whole ignored suite "
+                "without a name filter or a nextest default-filter"
+            )
+        uncited = []
+        for name, commands in sorted(entries.items()):
+            if name in gate.entries:
+                continue
+            for command in commands:
+                # A command that does not name the target is left alone, so an
+                # unrelated row the parser cannot read fails no plan.
+                try:
+                    segments = _command_segments(command)
+                except ValueError:
+                    if _names(identity.target, command):
+                        raise
+                    continue
+                named = [
+                    segment
+                    for segment in segments
+                    if any(_names(identity.target, word) for word in segment)
+                ]
+                if any(
+                    identity.package in run.packages and identity.target in run.tests
+                    for run in _classify(name, command, named)
+                ):
+                    uncited.append(name)
+        if uncited:
+            raise ValueError(
+                f"manual-gate target {identity.canonical} does not cite "
+                f"{MANUAL_GATES_PATH} entries that run it: {sorted(set(uncited))}"
+            )
+
+
 def validate_config(
     config: Config,
     metadata: Mapping[str, Any],
@@ -777,6 +1141,19 @@ def validate_config(
             raise ValueError(f"stale manual-only package: {identity.package}")
         if identity not in all_targets:
             raise ValueError(f"stale manual-only target: {identity.canonical}")
+    for identity in config.manual_gate_targets:
+        if identity.package not in packages:
+            raise ValueError(f"stale manual-gate package: {identity.package}")
+        if identity not in all_targets:
+            raise ValueError(f"stale manual-gate target: {identity.canonical}")
+    if config.manual_gate_targets:
+        try:
+            document = source_reader(MANUAL_GATES_PATH)
+        except (OSError, KeyError, subprocess.CalledProcessError) as error:
+            raise ValueError(
+                f"cannot read {MANUAL_GATES_PATH} for manual-gate targets"
+            ) from error
+        validate_manual_gate_entries(config.manual_gate_targets, document)
     for identity in config.target_exclusions:
         if identity.package not in packages:
             raise ValueError(f"stale exclusion package: {identity.package}")
@@ -987,6 +1364,15 @@ def _owned_target_rows(
     ]
 
 
+def _manual_gate_rows(
+    targets: Mapping[Identity, ManualGate],
+) -> list[dict[str, Any]]:
+    return [
+        {"identity": identity.canonical, **gate.as_dict()}
+        for identity, gate in sorted(targets.items())
+    ]
+
+
 def _exclusion_rows(config: Config) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     target_rows = [
         {"identity": identity.canonical, "owner": _owner_dict(owner)}
@@ -1018,6 +1404,7 @@ def config_digest(config: Config) -> str:
             identity.canonical for identity in config.standing_targets
         ),
         "manual_only_targets": _owned_target_rows(config.manual_only_targets),
+        "manual_gate_targets": _manual_gate_rows(config.manual_gate_targets),
         "target_exclusions": _owned_target_rows(config.target_exclusions),
         "test_exclusions": [
             {"identity": identity.canonical, "owner": _owner_dict(owner)}
@@ -1119,6 +1506,8 @@ def make_plan(
             selected_packages.add(identity.package)
             if identity in config.manual_only_targets:
                 row["execution_mode"] = "ignored-only"
+            elif identity in config.manual_gate_targets:
+                row["execution_mode"] = "manual-gate"
         target_dispositions.append(row)
     for identity in sorted(set(base_all) - set(candidate_all)):
         target_dispositions.append(
@@ -1205,6 +1594,8 @@ def make_plan(
                     **(
                         {"execution_mode": "ignored-only"}
                         if identity in config.manual_only_targets
+                        else {"execution_mode": "manual-gate"}
+                        if identity in config.manual_gate_targets
                         else {}
                     ),
                 }
@@ -1359,6 +1750,7 @@ def make_plan(
             identity.canonical for identity in standing_coverage_reuse
         ),
         "manual_only_targets": _owned_target_rows(config.manual_only_targets),
+        "manual_gate_targets": _manual_gate_rows(config.manual_gate_targets),
         "target_exclusions": target_exclusions,
         "test_exclusions": test_exclusions,
         "shard_planning": {
@@ -1689,6 +2081,7 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
         "standing_targets",
         "standing_coverage_reuse",
         "manual_only_targets",
+        "manual_gate_targets",
         "target_exclusions",
         "test_exclusions",
         "shard_planning",
@@ -1897,6 +2290,43 @@ def _validate_plan_shape(plan: Mapping[str, Any]) -> None:
     }
     if manual_only & test_exclusion_targets:
         raise ValueError("plan manual-only targets cannot contain test exclusions")
+    rows = plan.get("manual_gate_targets")
+    if not isinstance(rows, list):
+        raise ValueError("plan manual_gate_targets must be a list")
+    manual_gates: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+            "identity",
+            "manual_gates",
+            "reason",
+            "tracking_issue",
+        }:
+            raise ValueError("plan manual_gate_targets row has the wrong shape")
+        Identity.parse(row["identity"])
+        if row["identity"] in manual_gates:
+            raise ValueError("plan manual_gate_targets contains duplicate identities")
+        manual_gates.add(row["identity"])
+        entries = row["manual_gates"]
+        if (
+            not isinstance(entries, list)
+            or not entries
+            or any(not isinstance(entry, str) or not entry for entry in entries)
+            or len(set(entries)) != len(entries)
+            or not isinstance(row["reason"], str)
+            or not row["reason"].strip()
+            or not isinstance(row["tracking_issue"], str)
+            or not ISSUE.fullmatch(row["tracking_issue"])
+        ):
+            raise ValueError("plan manual_gate_targets row has malformed fields")
+    if not manual_gates <= eligible:
+        raise ValueError("plan manual-gate targets must be eligible")
+    if manual_gates & (
+        standing | target_exclusions | manual_only | test_exclusion_targets
+    ):
+        raise ValueError(
+            "plan manual-gate targets conflict with standing, excluded, "
+            "manual-only, or test-excluded targets"
+        )
 
     expected_change_owned = change_owned - standing_reuse
     shard_planning = plan.get("shard_planning")
@@ -2042,6 +2472,7 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         "executed_targets",
         "selected_tests",
         "executed_tests",
+        "manual_gate_tests",
         "commands_file",
         "timings_file",
         "test_list_file",
@@ -2079,7 +2510,7 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
         raise ValueError("receipt plan_digest must be a SHA-256 digest")
     for key in ("selected_targets", "executed_targets"):
         _identity_list(receipt, key)
-    for key in ("selected_tests", "executed_tests"):
+    for key in ("selected_tests", "executed_tests", "manual_gate_tests"):
         rows = receipt.get(key)
         if not isinstance(rows, list) or any(not isinstance(row, str) for row in rows):
             raise ValueError(f"receipt {key} must be a list")
@@ -2087,6 +2518,24 @@ def _validate_receipt_shape(receipt: Mapping[str, Any]) -> None:
             TestIdentity.parse(row)
         if len(rows) != len(set(rows)):
             raise ValueError(f"receipt {key} contains duplicates")
+    # A manual-gate test is listed and never run, so it is neither selected
+    # nor executed, and only the required lane lists one.
+    gate_tests = receipt["manual_gate_tests"]
+    gate_targets = {
+        TestIdentity.parse(row).target_identity.canonical for row in gate_tests
+    }
+    if gate_tests and lane != "change-owned":
+        raise ValueError("receipt manual_gate_tests belong only to change-owned")
+    if (
+        not gate_targets <= set(receipt["selected_targets"])
+        or gate_targets & set(receipt["executed_targets"])
+        or set(gate_tests)
+        & (set(receipt["selected_tests"]) | set(receipt["executed_tests"]))
+    ):
+        raise ValueError(
+            "receipt manual_gate_tests must be listed, unexecuted tests of "
+            "selected targets"
+        )
     files = {
         "commands_file": "commands.json",
         "timings_file": "timings.json",
@@ -2845,7 +3294,7 @@ def _listing_tests(
             )
     if manual_only and active:
         raise ValueError(
-            f"manual-only target {expected} has active tests: {sorted(active)}"
+            f"ignored-only target {expected} has active tests: {sorted(active)}"
         )
     configured_nonmatching = {
         exclusion.test
@@ -2982,6 +3431,7 @@ def execute_shard(
     executed_tests: list[str] = []
     executed_targets: list[str] = []
     not_applicable_targets: list[str] = []
+    manual_gate_tests: list[str] = []
     failures: list[str] = []
 
     def run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -3019,6 +3469,14 @@ def execute_shard(
     manual_only_targets = {
         row["identity"] for row in plan["manual_only_targets"]
     }
+    # The required lane lists a manual-gate target with its ignored tests and
+    # stops there: the gate's prerequisites exist only where its documented
+    # command is run by hand.
+    manual_gate_targets = (
+        {row["identity"] for row in plan["manual_gate_targets"]}
+        if lane == "change-owned"
+        else set()
+    )
     cargo_target = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
     if not cargo_target.is_absolute():
         cargo_target = repo / cargo_target
@@ -3104,6 +3562,11 @@ def execute_shard(
                 len(identities) == 1
                 and identities[0].canonical in manual_only_targets
             )
+            manual_gate = (
+                len(identities) == 1
+                and identities[0].canonical in manual_gate_targets
+            )
+            ignored_only = manual_only or manual_gate
             required_features = sorted(
                 {
                     feature
@@ -3115,7 +3578,7 @@ def execute_shard(
                 identities,
                 exclusions,
                 list_only=True,
-                manual_only=manual_only,
+                manual_only=ignored_only,
                 required_features=required_features,
             )
             list_started_at = _utc_timestamp()
@@ -3134,9 +3597,9 @@ def execute_shard(
                     json.loads(listed.stdout),
                     identities,
                     exclusions,
-                    manual_only=manual_only,
+                    manual_only=ignored_only,
                     allow_empty=(
-                        lane == "package-expansion" and not manual_only
+                        lane == "package-expansion" and not ignored_only
                     ),
                 )
                 group_not_applicable = [
@@ -3149,7 +3612,9 @@ def execute_shard(
                 ]
                 not_applicable_targets.extend(group_not_applicable)
                 executed_targets.extend(group_not_applicable)
-                selected_tests.extend(listed_tests)
+                (manual_gate_tests if manual_gate else selected_tests).extend(
+                    listed_tests
+                )
                 commands.append(
                     {
                         "identity": (
@@ -3201,7 +3666,7 @@ def execute_shard(
                 continue
             list_seconds = round(time.monotonic() - started, 3)
             list_finished_at = commands[-1]["finished_at"]
-            if not listed_tests:
+            if manual_gate or not listed_tests:
                 for canonical in canonicals:
                     target_timings[canonical] = {
                         "command_group": canonicals,
@@ -3352,6 +3817,7 @@ def execute_shard(
                 "executed_targets": sorted(executed_targets),
                 "executed_tests": sorted(executed_tests),
                 "not_applicable_targets": sorted(not_applicable_targets),
+                "manual_gate_tests": sorted(manual_gate_tests),
             }
         )
     )
@@ -3368,6 +3834,7 @@ def execute_shard(
         "executed_targets": sorted(executed_targets),
         "selected_tests": sorted(selected_tests),
         "executed_tests": sorted(executed_tests),
+        "manual_gate_tests": sorted(manual_gate_tests),
         "commands_file": command_output.name,
         "timings_file": timing_output.name,
         "test_list_file": listing_output.name,
@@ -3823,6 +4290,7 @@ def _report_findings(
     all_executed_targets: list[str] = []
     all_selected_tests: list[str] = []
     all_executed_tests: list[str] = []
+    all_manual_gate_tests: list[str] = []
     for shard, receipt in sorted(by_shard.items()):
         expected = execution_shards(plan, lane)[str(shard)]
         selected = receipt.get("selected_targets")
@@ -3846,6 +4314,7 @@ def _report_findings(
         all_executed_targets.extend(executed)
         all_selected_tests.extend(selected_tests)
         all_executed_tests.extend(executed_tests)
+        all_manual_gate_tests.extend(receipt["manual_gate_tests"])
         # The informational lane reports an unsuccessful shard through the
         # introduced/inherited/unrun counts, which are derived from the shard's
         # own JUnit and target lists rather than from its prose.
@@ -3861,16 +4330,36 @@ def _report_findings(
         for rows in execution_shards(plan, lane).values()
         for identity in rows
     )
+    # A manual-gate target is listed, never executed: it leaves the executed
+    # set, and its listed ignored tests must account for exactly those rows.
+    manual_gates = (
+        {row["identity"] for row in plan["manual_gate_targets"]}
+        & set(expected_targets)
+        if lane == "change-owned"
+        else set()
+    )
+    expected_executed = sorted(set(expected_targets) - manual_gates)
     if sorted(all_selected_targets) != expected_targets:
         findings.append(
             "selected target coverage mismatch: "
             f"expected={expected_targets}, got={sorted(all_selected_targets)}"
         )
-    if not classifies_coverage and sorted(all_executed_targets) != expected_targets:
+    if not classifies_coverage and sorted(all_executed_targets) != expected_executed:
         findings.append(
             "executed target coverage mismatch: "
-            f"expected={expected_targets}, got={sorted(all_executed_targets)}"
+            f"expected={expected_executed}, got={sorted(all_executed_targets)}"
         )
+    listed_gates = {
+        TestIdentity.parse(test).target_identity.canonical
+        for test in all_manual_gate_tests
+    }
+    if listed_gates != manual_gates:
+        findings.append(
+            "manual-gate listing mismatch: "
+            f"expected={sorted(manual_gates)}, listed={sorted(listed_gates)}"
+        )
+    if len(all_manual_gate_tests) != len(set(all_manual_gate_tests)):
+        findings.append("duplicate manual-gate test listing")
     if len(all_executed_targets) != len(set(all_executed_targets)):
         findings.append("duplicate target execution")
     if len(all_executed_tests) != len(set(all_executed_tests)):
@@ -3913,6 +4402,18 @@ def validate_change_owned_report(
     reused_targets = validate_standing_coverage(plan, standing_coverage)
     if findings:
         raise ValueError("; ".join(findings))
+    listed = [test for receipt in receipts for test in receipt["manual_gate_tests"]]
+    manual_gates = [
+        {
+            **row,
+            "status": MANUAL_GATE_STATUS,
+            "listed_tests": sorted(
+                test for test in listed if test.startswith(f"{row['identity']}::")
+            ),
+        }
+        for row in plan["manual_gate_targets"]
+        if row["identity"] in plan["change_owned"]
+    ]
     return {
         "version": 1,
         "lane": "change-owned",
@@ -3920,7 +4421,10 @@ def validate_change_owned_report(
         "success": True,
         "observed_success": True,
         "plan_digest": plan["plan_digest"],
-        "covered_targets": sorted(plan["change_owned"]),
+        "covered_targets": sorted(
+            set(plan["change_owned"]) - {row["identity"] for row in manual_gates}
+        ),
+        "manual_gate_targets": manual_gates,
         "standing_reused_targets": reused_targets,
         "shard_durations": shard_durations(
             plan,
@@ -4121,41 +4625,7 @@ def _verify_duration_sample_plan(plan: Mapping[str, Any]) -> None:
     if version == PLAN_VERSION and has_package_execution:
         verify_plan_digest(plan)
         return
-    if version not in {2, 3}:
-        raise ValueError(f"unsupported duration sample plan version: {version!r}")
-    candidate_sha = plan.get("candidate_sha")
-    if not isinstance(candidate_sha, str) or not SHA.fullmatch(candidate_sha):
-        raise ValueError("duration sample plan candidate_sha is malformed")
-    digest = plan.get("plan_digest")
-    if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
-        raise ValueError("duration sample plan digest is malformed")
-    if digest != _digest_without(plan, "plan_digest"):
-        raise ValueError("duration sample plan digest mismatch")
-    change_owned = set(_identity_list(plan, "change_owned"))
-    standing_reuse = set(_identity_list(plan, "standing_coverage_reuse"))
-    expected = change_owned - standing_reuse
-    shards = plan.get("shards")
-    if not isinstance(shards, dict):
-        raise ValueError("duration sample plan shards are malformed")
-    lane_shards = shards.get("change_owned")
-    if not isinstance(lane_shards, dict) or set(lane_shards) != {
-        str(shard) for shard in SHARDS
-    }:
-        raise ValueError("duration sample plan requires four change-owned shards")
-    flattened: list[str] = []
-    for shard in SHARDS:
-        rows = lane_shards[str(shard)]
-        if not isinstance(rows, list):
-            raise ValueError("duration sample shard target list is malformed")
-        for canonical in rows:
-            Identity.parse(canonical)
-        flattened.extend(rows)
-    if len(flattened) != len(set(flattened)):
-        raise ValueError("duration sample plan contains duplicate shard targets")
-    if set(flattened) != expected:
-        raise ValueError(
-            "duration sample plan shards do not exactly cover change-owned execution"
-        )
+    raise ValueError(f"unsupported duration sample plan version: {version!r}")
 
 
 def _duration_seconds(value: Any, label: str) -> float:
@@ -4314,6 +4784,16 @@ def _write_report_files(output: Path, report: Mapping[str, Any]) -> None:
         f"{len(report.get('standing_reused_targets', []))}",
         f"- Findings: {len(report['failures'])}",
     ]
+    if report["lane"] == "change-owned":
+        manual_gates = report.get("manual_gate_targets", [])
+        lines.append(f"- Manual gates, not executed in PR CI: {len(manual_gates)}")
+        for row in manual_gates:
+            entries = ", ".join(f"`{entry}`" for entry in row["manual_gates"])
+            lines.append(
+                f"  - `{row['identity']}`: {row['status']}. Ignored tests "
+                f"listed: {len(row['listed_tests'])}, run: 0. Run by hand: "
+                f"{MANUAL_GATES_PATH} {entries} ({row['tracking_issue']})"
+            )
     lines.extend(_classification_counts(report))
     for row in report.get("shard_durations", []):
         weight = row["estimated_milliseconds"] / 1000
@@ -4667,6 +5147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "observed_success": False,
                 "plan_digest": plan.get("plan_digest"),
                 "covered_targets": [],
+                "manual_gate_targets": [],
                 "standing_reused_targets": [],
                 "failures": [str(error)],
             }
