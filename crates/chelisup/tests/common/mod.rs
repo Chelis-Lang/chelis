@@ -84,6 +84,9 @@ pub struct ReleaseRuntime {
     pub receipt: serde_json::Value,
     /// The fake export's exit status; a failed export writes nothing.
     pub export_status: i32,
+    /// The interpreter the fake `chelis` names. A missing one makes the
+    /// binary impossible to start, like a glibc build on a musl system.
+    pub chelis_interpreter: &'static str,
 }
 
 impl ReleaseRuntime {
@@ -114,6 +117,7 @@ impl ReleaseRuntime {
             shipped_headers: headers,
             receipt,
             export_status: 0,
+            chelis_interpreter: "/bin/sh",
         }
     }
 }
@@ -146,7 +150,7 @@ pub fn build_release_tarball(
     fs::write(
         &chelis,
         format!(
-            "#!/bin/sh\n\
+            "#!{interpreter}\n\
              if [ \"$1\" = runtime ] && [ \"$2\" = export ]; then\n\
              \x20 if [ -n \"${{CHELIS_RUNTIME_DIR+set}}\" ]; then\n\
              \x20   echo 'error: CHELIS_RUNTIME_DIR is set' >&2; exit 1\n\
@@ -159,6 +163,7 @@ pub fn build_release_tarball(
              \x20 exit 0\n\
              fi\n\
              printf 'FAKE-CHELIS %s' \"$*\"\n",
+            interpreter = runtime.chelis_interpreter,
             status = runtime.export_status,
             receipt = runtime.receipt,
         ),

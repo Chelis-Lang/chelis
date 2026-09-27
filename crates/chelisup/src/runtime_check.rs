@@ -13,19 +13,30 @@
 //! Releases up to [`LAST_RELEASE_WITHOUT_EXPORT`] predate
 //! `chelis runtime export`, so nothing can be checked; they install as
 //! before, and the CLI warns that their runtime files are unchecked.
+//!
+//! A refused release newer than the running chelisup may use a format this
+//! chelisup does not know, and chelisup does not update itself, so that
+//! refusal says how to get the latest chelisup. A release whose `chelis` this
+//! machine cannot start is not refused for its runtime files, and a newer
+//! chelisup would unpack the same binary, so that error says why it cannot
+//! start instead.
 
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::UPGRADE_ADVICE;
 use crate::version::is_safe_path_component;
 
 /// The last release whose `chelis` has no `chelis runtime export`.
 pub const LAST_RELEASE_WITHOUT_EXPORT: &str = "0.18.11";
+
+/// The running chelisup's version.
+const CHELISUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const RECEIPT: &str = "chelis_runtime.receipt.json";
 const RECEIPT_SCHEMA: &str = "chelis-runtime-staging/1";
@@ -64,7 +75,46 @@ pub(crate) fn check(
         // release, not the caller's environment.
         .env_remove("CHELIS_RUNTIME_DIR")
         .output()
-        .map_err(|e| format!("could not run {} runtime export: {e}", chelis.display()))?;
+        .map_err(|e| cannot_start(version, &e))?;
+    verify(version, &output, exported.path(), unpacked)
+        .map(|archive_sha256| RuntimeCheck::Verified { archive_sha256 })
+        .map_err(|refusal| advise_upgrade(refusal, version, CHELISUP_VERSION))
+}
+
+/// The error for a release whose `bin/chelis` this machine cannot start.
+fn cannot_start(version: &str, error: &io::Error) -> String {
+    // Extraction found `bin/chelis`, so what is missing is a file it names.
+    let cause = if error.kind() == io::ErrorKind::NotFound {
+        ": the file exists, so the loader or interpreter it names is missing, as with a \
+         glibc build on a musl-based system such as Alpine"
+    } else {
+        ""
+    };
+    format!("this machine cannot run the chelis {version} release's bin/chelis ({error}){cause}")
+}
+
+/// Append how to get the latest chelisup to `refusal` when release `version`
+/// is newer than `chelisup`, the running chelisup's version.
+fn advise_upgrade(refusal: String, version: &str, chelisup: &str) -> String {
+    match (triple(version), triple(chelisup)) {
+        (Ok(release), Ok(running)) if release > running => format!(
+            "{refusal}. This chelisup ({chelisup}) is older than the {version} release, which \
+             may use a format it does not know; to get the latest chelisup, {UPGRADE_ADVICE}, \
+             then retry"
+        ),
+        _ => refusal,
+    }
+}
+
+/// Require the export `output` reports on, written to `exported`, to describe
+/// a sealed build of `version` whose runtime files are the ones in `unpacked`.
+/// Returns the shipped archive's SHA-256.
+fn verify(
+    version: &str,
+    output: &Output,
+    exported: &Path,
+    unpacked: &Path,
+) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!(
             "`chelis runtime export` from the chelis {version} release failed ({}): {}",
@@ -73,7 +123,7 @@ pub(crate) fn check(
         ));
     }
 
-    let receipt_path = exported.path().join(RECEIPT);
+    let receipt_path = exported.join(RECEIPT);
     let receipt: Value = fs::read(&receipt_path)
         .map_err(|e| format!("could not read {}: {e}", receipt_path.display()))
         .and_then(|bytes| {
@@ -125,9 +175,7 @@ pub(crate) fn check(
             })?;
         require_shipped(unpacked, &Path::new("include").join(name), digest, version)?;
     }
-    Ok(RuntimeCheck::Verified {
-        archive_sha256: archive_sha256.to_owned(),
-    })
+    Ok(archive_sha256.to_owned())
 }
 
 /// Parse a validated `X.Y.Z` for ordering.
@@ -210,4 +258,32 @@ fn sha256_file(path: &Path) -> io::Result<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_release_newer_than_chelisup_gets_upgrade_advice() {
+        let advised = advise_upgrade("refused".to_owned(), "0.19.10", "0.19.9");
+        assert!(
+            advised
+                .starts_with("refused. This chelisup (0.19.9) is older than the 0.19.10 release"),
+            "{advised}"
+        );
+        assert!(advised.contains(UPGRADE_ADVICE), "{advised}");
+        for release in ["0.19.9", "0.9.10"] {
+            assert_eq!(
+                advise_upgrade("refused".to_owned(), release, "0.19.9"),
+                "refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_running_chelisup_version_is_ordered() {
+        // An unordered version would silently drop every upgrade advice.
+        assert!(triple(CHELISUP_VERSION).is_ok());
+    }
 }

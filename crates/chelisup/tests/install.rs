@@ -32,6 +32,12 @@ fn install(home: &Path, release: &Path, version: &str) -> std::process::Output {
 /// A release after 0.18.11, so `install` checks its runtime files.
 const CHECKED: &str = "0.19.0";
 
+/// The next patch release after this chelisup's own version.
+fn newer_than_chelisup() -> String {
+    let (major_minor, patch) = env!("CARGO_PKG_VERSION").rsplit_once('.').unwrap();
+    format!("{major_minor}.{}", patch.parse::<u64>().unwrap() + 1)
+}
+
 /// Nothing of `version` reached the store: no toolchain, shim or default.
 fn assert_store_untouched(home: &Path, version: &str) {
     assert!(!home.join("toolchains").join(version).exists());
@@ -202,6 +208,54 @@ fn releases_before_the_export_install_unchecked_with_a_warning() {
         stderr(&first_checked)
     );
     assert!(!home.path().join("toolchains/0.18.12").exists());
+}
+
+#[test]
+fn a_refused_release_newer_than_chelisup_says_how_to_get_the_latest() {
+    let version = newer_than_chelisup();
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    let mut runtime = ReleaseRuntime::matching(&version);
+    runtime.receipt["schema"] = "chelis-runtime-staging/2".into();
+    build_release_tarball(release.path(), &version, slug(), &runtime);
+
+    let out = install(home.path(), release.path(), &version);
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    let expected = format!(
+        "records schema \"chelis-runtime-staging/2\", not \"chelis-runtime-staging/1\". \
+         This chelisup ({}) is older than the {version} release, which may use a format it \
+         does not know; to get the latest chelisup, re-run the bootstrap installer",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(stderr(&out).contains(&expected), "stderr: {}", stderr(&out));
+    assert_store_untouched(home.path(), &version);
+}
+
+#[test]
+fn install_says_why_this_machine_cannot_start_a_release() {
+    // The release is newer than this chelisup, yet a newer chelisup would
+    // unpack the same binary, so the error must not send the user to one.
+    let version = newer_than_chelisup();
+    let home = tempfile::tempdir().unwrap();
+    let release = tempfile::tempdir().unwrap();
+    let mut runtime = ReleaseRuntime::matching(&version);
+    runtime.chelis_interpreter = "/nonexistent/ld-linux-x86-64.so.2";
+    build_release_tarball(release.path(), &version, slug(), &runtime);
+
+    let out = install(home.path(), release.path(), &version);
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    let stderr = stderr(&out);
+    assert!(
+        stderr.contains(&format!(
+            "this machine cannot run the chelis {version} release's bin/chelis ("
+        )) && stderr.contains(
+            "): the file exists, so the loader or interpreter it names is missing, as with a \
+             glibc build on a musl-based system such as Alpine"
+        ),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("bootstrap"), "stderr: {stderr}");
+    assert_store_untouched(home.path(), &version);
 }
 
 #[test]

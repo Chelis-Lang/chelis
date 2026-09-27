@@ -59,7 +59,9 @@ The first install also records `0.13.0` as the default and installs the
 toolchain, chelisup checks that the runtime files it ships under `lib/` and
 `include/` are the ones its `chelis runtime export` reports, and refuses the
 release otherwise. Releases up to 0.18.11 predate that export; they install
-with a warning that their runtime files are unchecked.
+with a warning that their runtime files are unchecked. If chelisup refuses a
+release newer than itself, re-run the bootstrap to get the latest chelisup and
+try again.
 
 ### 3. Provision a project in one command
 

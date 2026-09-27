@@ -127,7 +127,10 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
   refuses the release unless its `lib/` and `include/` runtime files are the
   bytes that export reports from a sealed build of `<ver>` (chelis#1354).
   Releases up to 0.18.11 predate the export and install unchecked, with a
-  warning.
+  warning. A refused release newer than the running chelisup may use a format
+  that chelisup does not know, so the refusal says how to get the latest
+  chelisup. A release whose `chelis` the machine cannot start is reported as
+  such, without that advice.
 - `chelisup default <ver>` — set the recorded default the shim falls back to.
 - `chelisup show` / `list-installed` / `which` — status.
 - `chelisup update` — self-update the installer.

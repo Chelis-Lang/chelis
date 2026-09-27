@@ -54,6 +54,12 @@ pub mod version;
 use std::ffi::OsString;
 use std::path::Path;
 
+/// How to get the latest chelisup while it cannot update itself. `chelisup
+/// update` prints it, and so does the refusal of a release newer than the
+/// running chelisup.
+pub(crate) const UPGRADE_ADVICE: &str =
+    "re-run the bootstrap installer (the published `chelisup` one-liner)";
+
 /// Inspect `argv[0]` and route to the shim or the installer CLI.
 ///
 /// Returns the process exit code. The shim path never returns on

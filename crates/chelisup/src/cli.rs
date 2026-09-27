@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 
+use crate::UPGRADE_ADVICE;
 use crate::install;
 use crate::paths::Store;
 use crate::resolve::{Resolution, ResolveInput, resolve};
@@ -269,9 +270,8 @@ fn cmd_update() -> i32 {
     // Documented stub. Self-update is not implemented yet; re-running the
     // bootstrap is the supported upgrade path until it is.
     eprintln!(
-        "chelisup: self-update is not implemented yet. To upgrade, re-run the bootstrap \
-         installer (the published `chelisup` one-liner), which drops the latest binary at \
-         ~/.chelis/bin/chelisup."
+        "chelisup: self-update is not implemented yet. To upgrade, {UPGRADE_ADVICE}, which \
+         drops the latest binary at ~/.chelis/bin/chelisup."
     );
     0
 }
