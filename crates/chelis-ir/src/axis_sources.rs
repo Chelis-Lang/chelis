@@ -4138,16 +4138,13 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuar
         // activation, read where the operand's extent is: an activation the
         // operand runs before has no site that reads both.
         let activation = GuardActivation::reading(dag, claim.node)?;
-        if activation
-            .node()
-            .is_some_and(|activation| activation.0 > claim.operand.0)
+        if let Some(node) = activation.node()
+            && node.0 > claim.operand.0
         {
             return Err(format!(
                 "the unit-extent claim of `expand` node {} is checked under activation {}, which \
                  its operand {} runs before: no guard site reads both (unimplemented chelis#2413)",
-                claim.node.0,
-                activation.node().map_or(0, |activation| activation.0),
-                claim.operand.0
+                claim.node.0, node.0, claim.operand.0
             ));
         }
         sites.push((
