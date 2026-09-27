@@ -83,13 +83,17 @@ pub struct CEmitter {
     /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
-    /// Per node id, whether it guards a restamp under an activation
-    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]): where no row of
-    /// its activation holds it is zero-filled rather than computed. A
-    /// movement is not, since its own gate already zero-fills
+    /// Per node id, whether its declared extent rests on a claim checked
+    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]):
+    /// where no row of its activation holds it is zero-filled rather than
+    /// computed. A movement is not, since its own gate already zero-fills
     /// ([`CEmitter::emit_movement_copy`]).
     zero_filled_when_inactive: Vec<bool>,
-    /// The restamping node whose operation is being emitted inside its
+    /// Per claim-sized node, the extent each claim states for one of its axes
+    /// ([`chelis_ir::axis_sources::GuardActivation::sized_axis`]): what that
+    /// axis declares where the claim is not checked.
+    claimed_extents: BTreeMap<usize, Vec<(usize, chelis_ir::axis_sources::CanonicalExtent)>>,
+    /// The claim-sized node whose operation is being emitted inside its
     /// activation's branch ([`CEmitter::open_inactive_zeros`]).
     inactive_zeros: Option<InactiveZeros>,
     /// The literal result claims each witness checks
@@ -112,13 +116,13 @@ pub struct CEmitter {
     gate: Option<ActivationGate>,
 }
 
-/// A restamping node emitted inside its activation's branch
+/// A claim-sized node emitted inside its activation's branch
 /// ([`CEmitter::open_inactive_zeros`]).
 #[derive(Debug, Clone, Copy)]
 struct InactiveZeros {
     node: usize,
     /// Where what both arms need goes: before the branch
-    /// ([`CEmitter::before_restamp_branch`]).
+    /// ([`CEmitter::before_inactive_zeros_branch`]).
     before_branch: usize,
     indent: usize,
     /// Whether its output was allocated before the branch.
@@ -418,6 +422,10 @@ impl CEmitter {
             usize,
             Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>,
         > = chelis_unord::UnordMap::new();
+        let mut claimed_extents: BTreeMap<
+            usize,
+            Vec<(usize, chelis_ir::axis_sources::CanonicalExtent)>,
+        > = BTreeMap::new();
         for ((node, axis), claim) in dag.local_dim_guard_sites().map_err(|reason| {
             Unsupported::new(
                 UnsupportedKind::Construct("producer extent guard".into()),
@@ -429,6 +437,12 @@ impl CEmitter {
                 ),
             )
         })? {
+            if let Some(sized) = claim.activation.sized_axis() {
+                claimed_extents
+                    .entry(claim.activation.claimed().0)
+                    .or_default()
+                    .push((sized, claim.canonical.clone()));
+            }
             let claims = local_dim_guard_sites.entry(node).or_default();
             let entry = (axis, claim);
             if !claims.contains(&entry) {
@@ -469,10 +483,11 @@ impl CEmitter {
                 .iter()
                 .map(|node| {
                     node.owner.activation.is_some()
-                        && seeds.guards_a_restamp(node)
+                        && seeds.is_claim_sized(node)
                         && node.runtime_check() != chelis_ir::dag::RuntimeCheck::MovementBounds
                 })
                 .collect(),
+            claimed_extents,
             inactive_zeros: None,
             literal_result_witness_requirements: dag
                 .nodes()
@@ -854,7 +869,7 @@ impl CEmitter {
     }
 
     fn emit_owned_tensor(&mut self, id: usize, ndim: &str, shape: &str, dtype: &str) {
-        self.restamp_allocation(id, |emitter| {
+        self.inactive_zeros_allocation(id, |emitter| {
             emitter.line(&format!(
                 "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
             ));
@@ -1053,202 +1068,46 @@ impl CEmitter {
         out
     }
 
+    /// Give every anonymous extent its identity by
+    /// [`chelis_ir::anonymous_dims::anonymous_axis_names`], in node order, so
+    /// an axis that reads another node's reads it already named. The runtime
+    /// `if` join reads the same rule to decide which arms share an extent.
     pub(crate) fn rename_anonymous_dims(dag: Dag) -> Dag {
-        use chelis_ir::dag::DimInfo;
-        fn is_anon(name: &str) -> bool {
-            name.is_empty() || name == "*"
-        }
-        // chelis#616 (soundness): a movement op with any NON-IDENTITY axis (a
-        // node-valued bound, a non-sentinel shrink, a stride step other than
-        // literal 1, or a non-zero pad) produces a FRESH output extent on that
-        // axis, which is NOT the input axis extent. The "copy first-input
-        // dims" shortcut below would clobber such an axis with the input's dim
-        // (e.g. propagate a shrink's `_anon_dim` onto a stride's output,
-        // making two different extents share one C variable), so skip it and
-        // let each anon axis get a fresh `_anon_dim_{id}_{axis}` that
-        // `emit_shrink`/`emit_stride`/`emit_pad` size from its own bounds.
-        // Mirrors the identity-only pass-through rule in
-        // `chelis_ir::dag::shape_source_for_axis`.
-        fn movement_alters_extents(op: &RiscOp) -> bool {
-            match op {
-                RiscOp::Shrink { bounds } => bounds
-                    .iter()
-                    .any(|(s, e)| !(s.as_lit() == Some(0) && matches!(e, RtDim::ToEnd))),
-                RiscOp::Pad { padding, .. } => padding
-                    .iter()
-                    .any(|(b, a)| !(b.as_lit() == Some(0) && a.as_lit() == Some(0))),
-                RiscOp::Stride { strides } => strides.iter().any(|s| s.as_lit() != Some(1)),
-                // A runtime reshape target's extent comes from its scalar,
-                // never from the input's dims.
-                RiscOp::Reshape { new_shape } => new_shape.iter().any(|d| d.node_input().is_some()),
-                _ => false,
-            }
-        }
-        fn rewrite_dim(id: NodeId, axis: usize, dim: &DimInfo) -> DimInfo {
-            match dim {
-                DimInfo::Named(name, size) if is_anon(name) => {
-                    DimInfo::Named(format!("_anon_dim_{}_{}", id.0, axis), *size)
-                }
-                other => other.clone(),
-            }
-        }
+        use chelis_ir::anonymous_dims::{
+            AnonymousAxisName, anonymous_axis_names, fresh_anonymous_dim,
+        };
         let mut out = dag;
         // DAG exposes no `nodes_mut`; rewrite by round-tripping replace_node.
         let ids: Vec<_> = out.nodes().iter().map(|n| n.id).collect();
         for id in ids {
-            if let Some(node) = out.get(id) {
-                let needs = node
-                    .output_type
-                    .dims
-                    .iter()
-                    .any(|d| matches!(d, DimInfo::Named(name, _) if is_anon(name)));
-                if !needs {
-                    continue;
-                }
-                let mut new_ty = node.output_type.clone();
-                if let RiscOp::Expand {
-                    axis: expanded_axis,
-                    ..
-                } = &node.op
-                    && !matches!(
-                        new_ty.dims.get(*expanded_axis),
-                        Some(DimInfo::Named(name, _)) if !is_anon(name)
-                    )
-                {
-                    // [05-MOV-1], #1619: the replaced/inserted axis reads
-                    // the size carrier; kept axes read their own operand
-                    // positions. Rank equality does not prove pass-through.
-                    // Numeric result claims remain independent of their
-                    // sources. An explicit name ON THE EXPANDED AXIS stays on
-                    // the existing path: preserving one without its unread
-                    // signature witness can newly execute an unchecked wrong
-                    // shape, and B2b-1 owns that scoped claim-transport
-                    // repair. chelis#1822: a real name on a BYSTANDER axis is
-                    // not that case. Testing every axis sent an `expand` whose
-                    // kept axis carries a signature binder to the pass-through
-                    // arm below, which copies the operand's PRE-EXPAND extent
-                    // onto the expanded axis, so `spec/05` section 2.4's
-                    // replacement was undone: the consumer then failed
-                    // ownership verification, or with no consumer the wrong
-                    // type reached codegen and the binary trapped while eval
-                    // returned the right answer.
-                    let sources = chelis_ir::output_axis_sources(&out, id);
-                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
-                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
-                            continue;
-                        }
-                        if let DimInfo::Named(_, Some(required)) = dim {
-                            // Anonymous spelling supplies no binder, but a
-                            // required number is still a literal claim.
-                            *dim = DimInfo::Lit(*required);
-                            continue;
-                        }
-                        use chelis_ir::AxisSource;
-                        let observed = match sources.get(axis) {
-                            Some(AxisSource::Literal { value }) => {
-                                usize::try_from(*value).ok().map(DimInfo::Lit)
-                            }
-                            Some(AxisSource::InputAxis {
-                                input,
-                                axis: RtAxis::Lit(source_axis),
-                            }) => node
-                                .inputs
-                                .get(*input)
-                                .and_then(|input| out.get(*input))
-                                .and_then(|input| {
-                                    input
-                                        .output_type
-                                        .dims
-                                        .get(usize::try_from(*source_axis).ok()?)
-                                })
-                                .cloned(),
-                            // A scalar size is read at execution. Give
-                            // that output its own symbol.
-                            Some(
-                                AxisSource::ScalarInput { .. }
-                                | AxisSource::OpComputed { .. }
-                                | AxisSource::ClassSupplied { .. }
-                                | AxisSource::ExternalAxis { .. },
-                            )
-                            | None => None,
-                        };
-                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
+            let Some(names) = anonymous_axis_names(&out, id) else {
+                continue;
+            };
+            let node = out.get(id).expect("named node exists");
+            let mut new_ty = node.output_type.clone();
+            new_ty.dims = names
+                .iter()
+                .enumerate()
+                .map(|(axis, name)| match *name {
+                    AnonymousAxisName::Own => node.output_type.dims[axis].clone(),
+                    AnonymousAxisName::Literal(extent) => chelis_ir::dag::DimInfo::Lit(extent),
+                    AnonymousAxisName::Of {
+                        node: source,
+                        axis: read,
+                    } => out
+                        .get(source)
+                        .expect("named source exists")
+                        .output_type
+                        .dims[read]
+                        .clone(),
+                    AnonymousAxisName::Fresh => {
+                        fresh_anonymous_dim(id, axis, &node.output_type.dims[axis])
                     }
-                } else if matches!(node.op, RiscOp::Permute { .. }) {
-                    // A permutation preserves extents but not their positions.
-                    // The generic same-rank pass-through arm below copies the
-                    // first input's dimensions positionally, which silently
-                    // undoes every non-identity permutation as soon as one
-                    // output axis is anonymous. Resolve each anonymous output
-                    // axis through the IR's structural axis-source mapping;
-                    // explicitly named axes already carry their destination
-                    // identity and stay untouched.
-                    let sources = chelis_ir::output_axis_sources(&out, id);
-                    for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
-                        if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {
-                            continue;
-                        }
-                        if let DimInfo::Named(_, Some(required)) = dim {
-                            *dim = DimInfo::Lit(*required);
-                            continue;
-                        }
-                        let observed = match sources.get(axis) {
-                            Some(chelis_ir::AxisSource::InputAxis {
-                                input,
-                                axis: RtAxis::Lit(source_axis),
-                            }) => node
-                                .inputs
-                                .get(*input)
-                                .and_then(|input| out.get(*input))
-                                .and_then(|input| {
-                                    input
-                                        .output_type
-                                        .dims
-                                        .get(usize::try_from(*source_axis).ok()?)
-                                })
-                                .cloned(),
-                            _ => None,
-                        };
-                        *dim = observed.unwrap_or_else(|| rewrite_dim(id, axis, dim));
-                    }
-                } else if let RiscOp::Gather { axis } = &node.op
-                    && node.inputs.len() == 2
-                    && let (Some(values), Some(indices)) =
-                        (out.get(node.inputs[0]), out.get(node.inputs[1]))
-                    && *axis < values.output_type.dims.len()
-                {
-                    let mut dims = Vec::new();
-                    dims.extend_from_slice(&values.output_type.dims[..*axis]);
-                    dims.extend(indices.output_type.dims.iter().cloned());
-                    dims.extend_from_slice(&values.output_type.dims[*axis + 1..]);
-                    new_ty.dims = dims;
-                } else if !movement_alters_extents(&node.op)
-                    && let Some(first_input) = node.inputs.first().and_then(|input| out.get(*input))
-                    && first_input.output_type.dims.len() == new_ty.dims.len()
-                {
-                    new_ty.dims = first_input.output_type.dims.clone();
-                } else if node.inputs.is_empty()
-                    && let Some(shape_source) =
-                        node.shape_deps.first().and_then(|dep| out.get(*dep))
-                    && shape_source.output_type.dims.len() == new_ty.dims.len()
-                {
-                    // chelis#616: an input-less node (a `lower_if` mask Const)
-                    // shaped like a sibling records the relation as a
-                    // shape-dep; tie its wildcard dims to the sibling's
-                    // instead of fragmenting them into a sourceless anon dim.
-                    new_ty.dims = shape_source.output_type.dims.clone();
-                } else {
-                    new_ty.dims = new_ty
-                        .dims
-                        .iter()
-                        .enumerate()
-                        .map(|(axis, dim)| rewrite_dim(id, axis, dim))
-                        .collect();
-                }
-                let op = node.op.clone();
-                let inputs = node.inputs.clone();
-                out.replace_node(id, op, inputs, new_ty);
-            }
+                })
+                .collect();
+            let op = node.op.clone();
+            let inputs = node.inputs.clone();
+            out.replace_node(id, op, inputs, new_ty);
         }
         out
     }
@@ -1471,7 +1330,7 @@ impl CEmitter {
         // results return immediately inside the shared derivation.
         let operand_guard = self.lines.len();
         self.emit_elementwise_operand_guard(node, dag);
-        self.gate_restamp_operand_guard(id, operand_guard);
+        self.gate_claim_sized_operand_guard(id, operand_guard);
         // chelis#1948: operand agreement precedes the producer-owned result
         // claim, and both precede the operation's allocation or first access.
         self.emit_same_shape_result_guards(node);
@@ -1925,26 +1784,26 @@ impl CEmitter {
         self.close_inactive_zeros(node)
     }
 
-    /// The condition under which a restamping node computes
-    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]): some row of its
+    /// The condition under which a claim-sized node computes
+    /// ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]): some row of its
     /// activation holds. `None` for every other node.
-    fn restamp_activity(&self, id: usize) -> Option<String> {
+    fn claim_sized_activity(&self, id: usize) -> Option<String> {
         if !self.zero_filled_when_inactive[id] {
             return None;
         }
         let gate = self
             .gate
             .as_ref()
-            .expect("a restamping node under an activation is gated");
+            .expect("a claim-sized node under an activation is gated");
         Some(gate.any.clone())
     }
 
     /// Put the operand-agreement lines emitted from `start` under a
-    /// restamping node's activation: the agreement is what its reads need,
+    /// claim-sized node's activation: the agreement is what its reads need,
     /// and where no row is active it reads no operand (spec/10 section 3.2),
     /// as the evaluator's zero value reads none.
-    fn gate_restamp_operand_guard(&mut self, id: usize, start: usize) {
-        let Some(active) = self.restamp_activity(id) else {
+    fn gate_claim_sized_operand_guard(&mut self, id: usize, start: usize) {
+        let Some(active) = self.claim_sized_activity(id) else {
             return;
         };
         if self.lines.len() == start {
@@ -1959,18 +1818,18 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// Open a restamping node's activation branch before its operation is
+    /// Open a claim-sized node's activation branch before its operation is
     /// emitted. Where no row of the activation holds, the node checks
     /// nothing and produces zeros of its declared type instead of reading an
-    /// operand whose extent need not be its own, as the evaluator's
+    /// operand whose extent need not be the one it declares, as the evaluator's
     /// `inactive_unchecked_value` does and as a movement's
     /// [`Self::emit_movement_copy`] does for its bounds: the operation, every
     /// operand-shape check it makes and every guard it places run in the
-    /// branch, its allocation before it ([`Self::before_restamp_branch`]), and
+    /// branch, its allocation before it ([`Self::before_inactive_zeros_branch`]), and
     /// [`Self::close_inactive_zeros`] zero-fills the other arm. A movement
     /// is not wrapped: its own gate already reads no bound and zero-fills.
     fn open_inactive_zeros(&mut self, node: &DagNode) {
-        let Some(active) = self.restamp_activity(node.id.0) else {
+        let Some(active) = self.claim_sized_activity(node.id.0) else {
             return;
         };
         self.inactive_zeros = Some(InactiveZeros {
@@ -1998,7 +1857,7 @@ impl CEmitter {
             return Err(Unsupported::new(
                 UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
                 format!(
-                    "a restamping operation under an activation at C DAG node {} that {}",
+                    "a claim-sized operation under an activation at C DAG node {} that {}",
                     node.id.0,
                     if zeros.allocated {
                         "declares a runtime extent itself"
@@ -2021,16 +1880,16 @@ impl CEmitter {
         Ok(())
     }
 
-    /// Emit what both arms of `id`'s restamp branch need (`emit`): its
+    /// Emit what both arms of `id`'s inactive-zeros branch need (`emit`): its
     /// output allocation, and runtime extent names it declares from its
-    /// operands' metadata. For a restamping node emitted inside its
+    /// operands' metadata. For a claim-sized node emitted inside its
     /// activation's branch ([`Self::open_inactive_zeros`]) it is placed
     /// before that branch, so both arms define the one tensor every later
     /// reader sees; elsewhere it is emitted in place. The allocation's slot is
     /// never one of the node's operands' (only a fused kernel reuses an
     /// operand in place, and fusion keeps a gated node out), so allocating
     /// first leaves every operand read in the branch unchanged.
-    fn before_restamp_branch(&mut self, id: usize, emit: impl FnOnce(&mut Self)) {
+    fn before_inactive_zeros_branch(&mut self, id: usize, emit: impl FnOnce(&mut Self)) {
         let Some(InactiveZeros {
             before_branch,
             indent,
@@ -2042,20 +1901,23 @@ impl CEmitter {
         };
         let branch = self.lines.split_off(before_branch);
         let inside = std::mem::replace(&mut self.indent, indent);
+        let declared_before = self.declared_dim_names.len();
         emit(self);
         self.indent = inside;
         let before_branch = self.lines.len();
         self.lines.extend(branch);
-        let declared_names = self.declared_dim_names.len();
+        // Only the names declared here are declared before the branch; one
+        // the branch itself declared stays inside it, and is refused.
+        let hoisted_names = self.declared_dim_names.len() - declared_before;
         if let Some(zeros) = self.inactive_zeros.as_mut() {
             zeros.before_branch = before_branch;
-            zeros.declared_names = declared_names;
+            zeros.declared_names += hoisted_names;
         }
     }
 
-    /// Allocate `id`'s output ([`Self::before_restamp_branch`]).
-    fn restamp_allocation(&mut self, id: usize, allocate: impl FnOnce(&mut Self)) {
-        self.before_restamp_branch(id, allocate);
+    /// Allocate `id`'s output ([`Self::before_inactive_zeros_branch`]).
+    fn inactive_zeros_allocation(&mut self, id: usize, allocate: impl FnOnce(&mut Self)) {
+        self.before_inactive_zeros_branch(id, allocate);
         if let Some(zeros) = self
             .inactive_zeros
             .as_mut()
@@ -2929,7 +2791,7 @@ impl CEmitter {
     }
 
     fn emit_reused_slot_wrapper(&mut self, previous: usize, id: usize, ty: &TensorType) {
-        self.restamp_allocation(id, |emitter| {
+        self.inactive_zeros_allocation(id, |emitter| {
             if emitter.write_nodes.remove(&previous) {
                 emitter.line(&format!(
                     "chelis_tensor_end_write(t{previous}_write_guard);"
@@ -3851,12 +3713,56 @@ impl CEmitter {
         self.emit_realize(id, &inputs[1..], ty);
     }
 
+    /// [05-OP-53]: shapes agree only across what the condition selects. A
+    /// branch selected nowhere is neither read nor shape-checked, so a
+    /// condition selecting one branch everywhere yields that branch; the
+    /// condition itself is checked when it mixes or is empty, the evaluator's
+    /// `where_elementwise` rule.
     fn emit_where(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let condition = inputs[0].0;
         let then_value = inputs[1].0;
         let else_value = inputs[2].0;
         let element_size = Self::elem_type(ty);
-        let identity = self.emit_elementwise_index_steps(id, inputs, ty);
+        let then_read = format!("__where_then_read_{id}");
+        let else_read = format!("__where_else_read_{id}");
+        let mixed = format!("__where_mixed_{id}");
+        self.line(&format!("int {then_read} = 0;"));
+        self.line(&format!("int {else_read} = 0;"));
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{condition}_size && !({then_read} && {else_read}); i++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "if (((const uint8_t*)t{condition}_data)[i] != UINT8_C(0)) {then_read} = 1; else {else_read} = 1;"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("const int {mixed} = {then_read} && {else_read};"));
+        // Each distinct operand's step is taken, and its shape checked, only
+        // under the roles that read it.
+        let mut reads: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (node, read) in [
+            (condition, format!("({then_read} == {else_read})")),
+            (then_value, then_read.clone()),
+            (else_value, else_read.clone()),
+        ] {
+            reads.entry(node).or_default().push(read);
+        }
+        let shape = Self::tagged_shape_literal(ty);
+        let rank = Self::ndim(ty);
+        let mut identity = Vec::new();
+        let mut contiguity = Vec::new();
+        for (node, roles) in &reads {
+            let read = format!("({})", roles.join(" || "));
+            self.line(&format!(
+                "const int64_t t{id}_input{node}_step = {read} ? chelis_tensor_elementwise_index_step_for_shape(t{node}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}) : 0;"
+            ));
+            identity.push(format!("(!{read} || t{id}_input{node}_step == 1)"));
+            contiguity.push(format!(
+                "(!{read} || (chelis_is_contiguous(t{node}) && t{node}_size == t{id}_size))"
+            ));
+        }
+        let identity = format!("t{id}_size <= 1 || ({})", identity.join(" && "));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "uint8_t* restrict __where_out_{id} = (uint8_t*)t{id}_data;"
@@ -3873,18 +3779,14 @@ impl CEmitter {
         self.line(&format!(
             "const size_t __where_width_{id} = sizeof({element_size});"
         ));
-        let contiguity_cond = format!(
-            "chelis_is_contiguous(t{condition}) && chelis_is_contiguous(t{then_value}) && \
-             chelis_is_contiguous(t{else_value}) && t{condition}_size == t{id}_size && \
-             t{then_value}_size == t{id}_size && t{else_value}_size == t{id}_size"
-        );
+        let contiguity_cond = contiguity.join(" && ");
         self.line(&format!("if (({contiguity_cond}) && ({identity})) {{"));
         self.indent += 1;
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "const uint8_t* selected = __where_condition_{id}[i] != UINT8_C(0) \
+            "const uint8_t* selected = ({mixed} ? __where_condition_{id}[i] != UINT8_C(0) : {then_read}) \
              ? __where_then_{id} : __where_else_{id};"
         ));
         self.line(&format!(
@@ -3909,7 +3811,7 @@ impl CEmitter {
             "int64_t idx_else = i * t{id}_input{else_value}_step;"
         ));
         self.line(&format!(
-            "const uint8_t* selected = __where_condition_{id}[idx_condition] != UINT8_C(0) \
+            "const uint8_t* selected = ({mixed} ? __where_condition_{id}[idx_condition] != UINT8_C(0) : {then_read}) \
              ? __where_then_{id} + (size_t)idx_then * __where_width_{id} \
              : __where_else_{id} + (size_t)idx_else * __where_width_{id};"
         ));
@@ -7896,7 +7798,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
             .map(|(axis, dim)| (axis, Self::bound_c_expr(dim, inputs, a, axis)))
             .collect();
-        self.emit_runtime_dim_sites(id, &extents);
+        // Read from its target's scalars and its operand's metadata: a
+        // claim-sized `reshape` declares them before its branch.
+        self.before_inactive_zeros_branch(id, |emitter| {
+            emitter.emit_runtime_dim_sites(id, &extents);
+        });
         for (axis, extent) in &extents {
             self.line(&format!(
                 "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
@@ -7975,8 +7881,10 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 extents.push((axis, extent.clone()));
             }
             // Its operands' metadata and scalars, read before any plan: a
-            // restamping `expand` declares them before its branch.
-            self.before_restamp_branch(id, |emitter| emitter.emit_runtime_dim_sites(id, &extents));
+            // claim-sized `expand` declares them before its branch.
+            self.before_inactive_zeros_branch(id, |emitter| {
+                emitter.emit_runtime_dim_sites(id, &extents)
+            });
         }
         let operation = match dag.expansion_kind(NodeId(id)) {
             chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
@@ -8059,6 +7967,33 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// claims in declaration order. Supplying all axes together preserves
     /// that order even when the output permutes the signature's dimensions.
     fn emit_runtime_dim_sites(&mut self, id: usize, extents: &[(usize, String)]) {
+        // A claim-sized node declares these before its activation's branch
+        // ([`Self::open_inactive_zeros`]); where no row is active an axis
+        // takes the extent its unchecked claim states, as its zero value
+        // does in the evaluator ([`Self::inactive_extent`]).
+        let gated;
+        let extents = match self
+            .inactive_zeros
+            .filter(|zeros| zeros.node == id)
+            .and_then(|_| self.claim_sized_activity(id))
+        {
+            Some(active) => {
+                gated = extents
+                    .iter()
+                    .map(|(axis, extent)| {
+                        let inactive = self.inactive_extent(id, *axis, extent);
+                        let extent = if inactive == *extent {
+                            extent.clone()
+                        } else {
+                            format!("(({active}) ? ({extent}) : {inactive})")
+                        };
+                        (*axis, extent)
+                    })
+                    .collect::<Vec<_>>();
+                gated.as_slice()
+            }
+            None => extents,
+        };
         // Declaring and guarding are not exclusive. The legacy walk owns
         // declarations and the derivation owns guards, so an axis that
         // declares its own extent may ALSO be the axis another operation
@@ -8155,7 +8090,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             // (spec/10 section 3.2): rank 0 at an arm, one Bool per row under
             // `vmap`. The extent is every row's, so the guard runs when any
             // row is active, as the evaluator's `local_guard_is_active`.
-            let predicate = if let Some(activation) = site.activation {
+            let predicate = if let Some(activation) = site.activation.node() {
                 let act = activation.0;
                 self.finish_tensor_write_for_checked_read(act);
                 let bool_et = Self::prim_elem_type(Prim::Bool);
@@ -8181,7 +8116,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             ));
             self.indent -= 1;
             self.line("}");
-            if site.activation.is_some() {
+            if site.activation.node().is_some() {
                 self.indent -= 1;
                 self.line("}");
             }
@@ -8377,7 +8312,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         );
         // Under an activation that holds in no row the operation reads no
         // bound (spec/10 section 3.2): it builds no plan, each axis it
-        // declares takes its operand's extent, and
+        // declares takes the extent a claim states for it or else its
+        // operand's ([`Self::inactive_extent`]), and
         // [`Self::emit_movement_copy`] zero-fills its result.
         let active = self.gate.as_ref().map(|gate| gate.any.clone());
         match &active {
@@ -8391,7 +8327,8 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 let extent = format!("chelis_movement_extent(t{id}_movement, CHELIS_MOVEMENT_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))");
                 let extent = match &active {
                     Some(_) => format!(
-                        "(t{id}_movement ? {extent} : chelis_tensor_shape(t{a}, {axis}))"
+                        "(t{id}_movement ? {extent} : {})",
+                        self.inactive_extent(id, axis, &format!("chelis_tensor_shape(t{a}, {axis})"))
                     ),
                     None => extent,
                 };
@@ -8407,6 +8344,32 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             Some(_) => self.line(&format!("if (t{id}_movement) {check}")),
             None => self.line(&check),
         }
+    }
+
+    /// The extent axis `axis` of node `id` declares where its activation
+    /// holds in no row: the extent a claim states for it
+    /// ([`Self::claimed_extents`], the unchecked claim's canonical value), as
+    /// the evaluator's `inactive_unchecked_value` takes it, and otherwise
+    /// `carried`, what its carrier reads. A binder is that extent only once
+    /// declared; before that this axis is what declares it.
+    fn inactive_extent(&self, id: usize, axis: usize, carried: &str) -> String {
+        let claimed = self.claimed_extents.get(&id).and_then(|claims| {
+            claims
+                .iter()
+                .find(|(claimed_axis, _)| *claimed_axis == axis)
+                .and_then(|(_, canonical)| match canonical {
+                    chelis_ir::axis_sources::CanonicalExtent::Resolved(extent) => {
+                        Some(extent.to_string())
+                    }
+                    chelis_ir::axis_sources::CanonicalExtent::Witness(witness) => Some(
+                        Self::bound_c_expr(&RtDim::Node(0), &[*witness], witness.0, axis),
+                    ),
+                    chelis_ir::axis_sources::CanonicalExtent::Binder(name) => {
+                        self.declared_dim_names.contains(name).then(|| name.clone())
+                    }
+                })
+        });
+        claimed.unwrap_or_else(|| carried.to_string())
     }
 
     /// Emit an affine movement operation's copy (`copy`, which reads

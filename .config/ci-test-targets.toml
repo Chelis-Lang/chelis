@@ -456,6 +456,12 @@ name = "local_ascription_activation"
 package = "chelis-cli"
 name = "issue_2563_local_ascription_eval_file"
 
+# chelis#2413: at a runtime `if` join every lane returns the taken arm or its
+# claim's typed trap, over the generated claimed-join matrix.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2413_claimed_join_lanes"
+
 [[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1906_annotated_softmax"

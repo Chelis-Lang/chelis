@@ -169,6 +169,41 @@ fn selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard() 
     );
 }
 
+/// The claimed arm in the `else` position: the join's condition takes its
+/// extent from that arm, whose zeros have the claimed extent 2, so only the
+/// `where` rule that an unselected branch is not shape-checked (decisions
+/// section 25) lets the taken `then` value through at its own extent.
+///
+/// Evidentiary status: DISPOSITION LOCK at 096daea8c (the untaken `pad` was
+/// computed from `x` there); REGRESSION TEST against 987b79e2e, where the
+/// zeros met `x` at the join and failed the shape check.
+#[test]
+fn an_untaken_else_arms_claimed_result_is_not_read_at_the_join() {
+    let dag = lower(
+        "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+         if flag then x else {\n  \
+           y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+           y\n\
+         }\n",
+    );
+    let run = |flag| {
+        eval_tensor_with(&dag, |name| match name {
+            "flag" => Some(runtime_bool(flag)),
+            "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+            _ => None,
+        })
+    };
+    let values = run(true).expect("the untaken else arm's claim is not observed");
+    let root = *dag.roots().last().expect("entry root");
+    assert_eq!(values[&root].shape, vec![3]);
+    assert_eq!(values[&root].to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(
+        run(false).expect_err("the selected else arm's claim traps"),
+        "extent `2`: claimed = 2, pad axis 0 = 3\n\
+         numeric trap: domain in pad at i64"
+    );
+}
+
 #[test]
 fn lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer() {
     let dag = lower(&direct_source(
@@ -684,8 +719,13 @@ fn an_arms_local_claim_is_checked_under_its_carriers_owner_activation() {
     for (row, source) in [("direct", direct), ("grad", spliced)] {
         let (dag, carrier, site) = claim_carrier_and_site(source);
         let carrier = dag.get(carrier).unwrap();
-        assert!(site.activation.is_some(), "{row}: {dag:#?}");
-        assert_eq!(site.activation, carrier.owner.activation, "{row}: {dag:#?}");
+        assert!(site.activation.node().is_some(), "{row}: {dag:#?}");
+        assert_eq!(
+            site.activation.node(),
+            carrier.owner.activation,
+            "{row}: {dag:#?}"
+        );
+        assert_eq!(site.activation.claimed(), carrier.id, "{row}: {dag:#?}");
         assert!(
             carrier.shape_deps.iter().all(|dependency| {
                 let dependency = dag.get(*dependency).unwrap();

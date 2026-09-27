@@ -1413,9 +1413,6 @@ fn where_elementwise(
     if condition.prim() != Prim::Bool {
         return Err("where: condition must have bool storage".into());
     }
-    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
-        return Err("where: condition and branch shapes must match exactly".into());
-    }
     if then_value.prim() != else_value.prim() {
         return Err("where: branch dtypes must match exactly".into());
     }
@@ -1423,6 +1420,26 @@ fn where_elementwise(
         .storage()
         .to_i64_exact_vec()
         .expect("sealed bool storage has an exact integer view");
+    // [05-OP-53]: shapes agree only across what the condition selects. A
+    // branch selected nowhere is neither read nor shape-checked, so a
+    // condition selecting one branch everywhere yields that branch, and an
+    // empty condition yields an empty result of its own shape.
+    let then_selected = condition_values.iter().any(|selected| *selected != 0);
+    let else_selected = condition_values.contains(&0);
+    match (then_selected, else_selected) {
+        (true, false) => return Ok(then_value.clone()),
+        (false, true) => return Ok(else_value.clone()),
+        (false, false) => {
+            return Ok(TensorValue::from_storage(
+                condition.shape.clone(),
+                tensor_from_scalars(then_value.prim(), &[]),
+            ));
+        }
+        (true, true) => {}
+    }
+    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
+        return Err("where: condition and branch shapes must match exactly".into());
+    }
     let writes = condition_values
         .into_iter()
         .enumerate()
@@ -3174,7 +3191,7 @@ fn value_free_schedule(
             }
             if let Some(sites) = local_guard_sites.get(&node.id) {
                 for (_, claim) in sites {
-                    if let Some(activation) = claim.activation {
+                    if let Some(activation) = claim.activation.node() {
                         read(activation);
                     }
                     if let crate::axis_sources::CanonicalExtent::Witness(witness) = &claim.canonical
@@ -3533,6 +3550,19 @@ where
     // looks statically proved and every site disappears. Node ids survive
     // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
     // site derived here addresses the node the loop below evaluates.
+    // The extent each claim states for the node it sizes
+    // ([`crate::axis_sources::GuardActivation::sized_axis`]): the extent that
+    // node declares at that axis where, inactive, it produces zeros.
+    let mut claimed_extents: UnordMap<NodeId, Vec<(usize, crate::axis_sources::CanonicalExtent)>> =
+        UnordMap::new();
+    for (_, claim) in &declared_local_guard_sites {
+        if let Some(axis) = claim.activation.sized_axis() {
+            claimed_extents
+                .entry(claim.activation.claimed())
+                .or_default()
+                .push((axis, claim.canonical.clone()));
+        }
+    }
     let mut local_guard_sites: UnordMap<
         NodeId,
         Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
@@ -3568,7 +3598,11 @@ where
                         canonical: crate::axis_sources::CanonicalExtent::Resolved(axis.required),
                         op: site.operation(),
                         observed: site.observation().clone(),
-                        activation: None,
+                        activation: crate::axis_sources::GuardActivation::sizing(
+                            dag,
+                            site.producer(),
+                            producer_axis as usize,
+                        )?,
                         source: axis.source.clone(),
                     },
                 ));
@@ -3624,10 +3658,10 @@ where
         let gated = dag
             .get(node.id)
             .is_some_and(|source| seeds.is_activation_gated(source));
-        let restamped = gated
+        let claim_sized = gated
             && dag
                 .get(node.id)
-                .is_some_and(|source| seeds.guards_a_restamp(source));
+                .is_some_and(|source| seeds.is_claim_sized(source));
         let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
         if let Some(failure) = movement_failures.remove(&node.id)
             && !inactive
@@ -3757,10 +3791,20 @@ where
         // from operands its checks accept, and checks nothing.
         let inactive_operands = neutralize_inactive_operands(node, gated, &mut values)?;
         let mut inactive_value = if inactive {
-            inactive_unchecked_value(node, restamped, dag, &values, &runtime_dims)?
+            inactive_unchecked_value(
+                node,
+                claim_sized,
+                claimed_extents.get(&node.id).map_or(&[], Vec::as_slice),
+                dag,
+                &values,
+                &runtime_dims,
+            )?
         } else {
             None
         };
+        if inactive_value.is_none() {
+            inactive_value = inactive_disagreeing_elementwise(node, &values)?;
+        }
         let out_prim = node.output_type.precision;
         let value = match &node.op {
             // An extent or bound check under a false activation: the value
@@ -4708,24 +4752,79 @@ where
     })
 }
 
+/// spec/10 §3.2 for an elementwise node whose activation holds in no row:
+/// its operands' extent agreement is a check, so it checks nothing. An
+/// untaken arm's claim-sized node is zeros at the claimed extent (decisions
+/// section 25), while a node the arm sizes from an unclaimed origin keeps
+/// that origin's extent (a `grad` body's accumulator sized from its
+/// parameter), so an untaken arm's operands can disagree. The node then
+/// yields zeros at its first operand's shape, read only by the arm's own
+/// nodes and by the join, which does not read an unselected branch
+/// ([05-OP-53]). `None` where the operands agree or some row is active.
+fn inactive_disagreeing_elementwise(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Option<TensorValue>, String> {
+    if !matches!(
+        node.op,
+        RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::FusedElem { .. }
+    ) {
+        return Ok(None);
+    }
+    let shapes = node
+        .inputs
+        .iter()
+        .filter_map(|input| values.get(input))
+        .map(|value| &value.shape)
+        .filter(|shape| !shape.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = shapes.first() else {
+        return Ok(None);
+    };
+    if shapes.iter().all(|shape| shape == first)
+        || !matches!(node_activity(node, values)?, Activity::Inactive)
+    {
+        return Ok(None);
+    }
+    let prim = node.output_type.precision;
+    let len = admit_result("activation", first, prim)?;
+    Ok(Some(TensorValue::from_storage(
+        first.to_vec(),
+        zero_storage(prim, len)?,
+    )))
+}
+
 /// The value a node whose activation holds in no row produces without
 /// checking anything (spec/10 §3.2), for the classes that check an extent or
 /// a bound rather than an operand's values ([`RuntimeCheck`]), and for a
-/// node that guards a restamp (`restamped`,
-/// [`crate::dag::TrapSeeds::guards_a_restamp`]); `None` for a node that
-/// computes from its operands as usual.
+/// node whose declared extent rests on a claim checked under its activation
+/// (`claim_sized`, [`crate::dag::TrapSeeds::is_claim_sized`]); `None` for a
+/// node that computes from its operands as usual.
 ///
 /// A movement node reads no bound and produces zeros of its declared type,
-/// each axis it declares itself taking its operand's extent, so an empty or
-/// out-of-range bound in an untaken arm allocates and traps on nothing. A
-/// restamping node produces zeros of its declared type the same way, each
-/// axis nothing has bound yet taking the extent its carrier reads, so an
-/// operand whose extent disagrees with the claim is never read. A reduction over an
-/// empty axis reduces to zeros. An extent claim compares nothing and
-/// produces the value it would have checked.
+/// so an empty or out-of-range bound in an untaken arm allocates and traps
+/// on nothing. A claim-sized node produces zeros of its declared type the
+/// same way, so an operand whose extent disagrees with the claim is never
+/// read. In both, an axis nothing has bound yet takes the extent a claim
+/// states for it (`claimed`, the unchecked claim's canonical value), and
+/// otherwise the extent its carrier reads (for a movement, its operand's
+/// axis). A reduction over an empty axis reduces to zeros. An extent claim
+/// compares nothing and produces the value it would have checked.
 fn inactive_unchecked_value(
     node: &DagNode,
-    restamped: bool,
+    claim_sized: bool,
+    claimed: &[(usize, crate::axis_sources::CanonicalExtent)],
     source: &Dag,
     values: &UnordMap<NodeId, TensorValue>,
     runtime_dims: &UnordMap<String, usize>,
@@ -4751,9 +4850,27 @@ fn inactive_unchecked_value(
         };
         Ok(TensorValue::from_storage(shape.to_vec(), storage))
     };
+    // The extent a claim states for `axis`: its resolved size, its declaring
+    // witness's scalar, or its binder as bound.
+    let claimed_extent = |axis: usize| {
+        claimed
+            .iter()
+            .find(|(claimed_axis, _)| *claimed_axis == axis)
+            .and_then(|(_, canonical)| match canonical {
+                crate::axis_sources::CanonicalExtent::Resolved(extent) => Some(*extent),
+                crate::axis_sources::CanonicalExtent::Witness(witness) => {
+                    usize::try_from(values.get(witness)?.storage().scalar_at(0).as_i64_exact()?)
+                        .ok()
+                }
+                crate::axis_sources::CanonicalExtent::Binder(name) => {
+                    runtime_dims.get(name).copied()
+                }
+            })
+    };
     // The declared type's extents: a literal or a resolved name as stated, a
-    // runtime name as bound, and a name nothing has bound yet as the extent
-    // `unbound` gives its axis (the axis, when it gives none).
+    // runtime name as bound, and a name nothing has bound yet as the extent a
+    // claim states for its axis, or else the one `unbound` gives it (the
+    // axis, when neither gives one).
     let declared_shape = |unbound: &dyn Fn(usize) -> Option<usize>| {
         node.output_type
             .dims
@@ -4764,6 +4881,7 @@ fn inactive_unchecked_value(
                 DimInfo::Named(name, None) => runtime_dims
                     .get(name)
                     .copied()
+                    .or_else(|| claimed_extent(axis))
                     .or_else(|| unbound(axis))
                     .ok_or(axis),
             })
@@ -4784,10 +4902,10 @@ fn inactive_unchecked_value(
                 })?;
             zeros(&shape).map(Some)
         }
-        _ if restamped => {
-            // An unbound name takes what the node's own carrier for its axis
-            // reads, an operand's axis or a scalar operand, as the C lane
-            // declares it before the node's branch.
+        _ if claim_sized => {
+            // An unbound name no claim states takes what the node's own
+            // carrier for its axis reads, an operand's axis or a scalar
+            // operand, as the C lane declares it before the node's branch.
             let sources = crate::axis_sources::output_axis_sources(source, node.id);
             let operand = |input: &usize| node.inputs.get(*input).and_then(|id| values.get(id));
             let carried = |axis: usize| match sources.get(axis)? {
@@ -4861,7 +4979,7 @@ fn local_guard_is_active(
     claim: &crate::axis_sources::LocalGuardClaim,
     values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<bool, String> {
-    let Some(activation) = claim.activation else {
+    let Some(activation) = claim.activation.node() else {
         return Ok(true);
     };
     let value = values.get(&activation).ok_or_else(|| {
@@ -5430,6 +5548,43 @@ mod tests {
     use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
+
+    /// [05-OP-53]: a branch the condition selects nowhere is neither read
+    /// nor shape-checked. A uniform condition yields the selected branch at
+    /// its own shape, an empty one an empty result of its shape, and a mixed
+    /// one still requires every shape to agree (decisions section 25).
+    ///
+    /// Evidentiary status: REGRESSION TEST for the uniform and empty rows
+    /// (each fails the shape check at 096daea8c); DISPOSITION LOCK for the
+    /// mixed row.
+    #[test]
+    fn where_checks_only_the_branches_its_condition_selects() {
+        let condition = |flags: &[i64]| {
+            finalize_wide_int("where", Prim::Bool, vec![flags.len()], flags.to_vec()).unwrap()
+        };
+        let three = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
+        let two = TensorValue::from_vec(vec![2], vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[1, 1]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![2]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[0, 0]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![3]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+        let empty = where_elementwise(&condition(&[]), &two, &three).unwrap();
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.prim(), Prim::F64);
+        assert_eq!(
+            where_elementwise(&condition(&[1, 0, 1]), &three, &two).unwrap_err(),
+            "where: condition and branch shapes must match exactly"
+        );
+        let mixed = where_elementwise(
+            &condition(&[1, 0, 1]),
+            &three,
+            &TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0]),
+        )
+        .unwrap();
+        assert_eq!(mixed.to_f64_lossy_vec(), vec![1.0, 5.0, 3.0]);
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -8394,7 +8549,7 @@ mod value_reclamation {
     fn guard_claim(
         canonical: crate::axis_sources::CanonicalExtent,
         observed: crate::axis_sources::LocalGuardObservation,
-        activation: Option<NodeId>,
+        activation: crate::axis_sources::GuardActivation,
     ) -> crate::axis_sources::LocalGuardClaim {
         crate::axis_sources::LocalGuardClaim {
             claim: "n".to_string(),
@@ -8419,14 +8574,18 @@ mod value_reclamation {
 
     #[test]
     fn a_guard_activation_extends_the_lifetime_it_reads() {
-        let (dag, x, _a, late) = spectator_graph();
+        let (mut dag, x, a, late) = spectator_graph();
+        // The guard at `late` is checked under the activation of the node
+        // its claim is about, `a`'s: `x`, which `a` already reads earlier.
+        dag.node_mut(a).expect("a").owner.activation = Some(x);
+        let activation = crate::axis_sources::GuardActivation::reading(&dag, a).unwrap();
         let schedule = schedule_with_guard(
             &dag,
             late,
             guard_claim(
                 crate::axis_sources::CanonicalExtent::Resolved(3),
                 crate::axis_sources::LocalGuardObservation::RealizedExtent,
-                Some(x),
+                activation,
             ),
             &[late],
         );
@@ -8446,7 +8605,7 @@ mod value_reclamation {
             guard_claim(
                 crate::axis_sources::CanonicalExtent::Witness(x),
                 crate::axis_sources::LocalGuardObservation::RealizedExtent,
-                None,
+                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
             ),
             &[late],
         );
@@ -8504,7 +8663,7 @@ mod value_reclamation {
             guard_claim(
                 crate::axis_sources::CanonicalExtent::Resolved(3),
                 crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement),
-                None,
+                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
             ),
             &[late],
         );

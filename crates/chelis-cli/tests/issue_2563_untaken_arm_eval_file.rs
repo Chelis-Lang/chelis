@@ -20,6 +20,9 @@
 use assert_cmd::Command;
 use std::path::Path;
 
+#[path = "common/mod.rs"]
+mod common;
+
 const DISCARDED_CAST: &str = "def f(x: tensor[1, f32]) -> tensor[f32] = {
   s = tensor_to_scalar(sum(&x, 0i32))
   r = if gt(s, 5.0f32) then {
@@ -780,4 +783,237 @@ fn an_untaken_arm_contributes_nothing_to_a_gradient_in_eval_file() {
 #[test]
 fn a_taken_arm_keeps_its_gradient_in_eval_file() {
     check_gradients("gradient_taken", &TAKEN_GRADIENTS);
+}
+
+/// An arm whose extent rests on a claim, with the condition spelling that
+/// leaves it untaken and the one that takes it with the claim false, and the
+/// claim's typed trap. `{x}` is [`x32`]. The rows are the round-2b witnesses
+/// of #2586: (a) a callee's result claim, (b) a guarded broadcast's unit
+/// claim, (c) a local ascription, and a parameter's unit refinement.
+const CLAIMED_ARMS: [(&str, &str, (&str, &str), &str); 7] = [
+    (
+        "(a) callee's result claim",
+        "def drop_last(y: tensor[*, f32]) -> tensor[3, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 1i64)]])
+def selected(x: tensor[32, f32]) -> tensor[f32] = if eq(shape(&x, 0i32), 4i64) then sum(add(drop_last(x), to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32) else sum(x, 0i32)
+def main() -> tensor[f32] = selected({x})
+",
+        ("eq(shape(&x, 0i32), 4i64)", "eq(shape(&x, 0i32), 32i64)"),
+        "extent `3`: claimed = 3, shrink axis 0 = 31",
+    ),
+    (
+        "(a) callee's result claim under a data condition",
+        "def g(y: tensor[*, f32]) -> tensor[3, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 1i64)]])
+def selected(x: tensor[32, f32]) -> tensor[32, f32] = {
+  s = tensor_to_scalar(sum(copy(x), 0i32))
+  if lt(s, 0.0f32) then add(x, insert(sum(add(g(copy(x)), to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), 0i32, 32i64)) else x
+}
+def main() -> tensor[32, f32] = selected({x})
+",
+        ("lt(s, 0.0f32)", "lt(0.0f32, s)"),
+        "extent `3`: claimed = 3, shrink axis 0 = 31",
+    ),
+    (
+        "(b) guarded broadcast of a local",
+        "def selected(x: tensor[32, f32]) -> tensor[32, f32] = {
+  t = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 29i64)]])
+  if eq(shape(&t, 0i32), 1i64) then add(x, expand(t, 0i32, 32i64)) else x
+}
+def main() -> tensor[32, f32] = selected({x})
+",
+        ("eq(shape(&t, 0i32), 1i64)", "eq(shape(&t, 0i32), 3i64)"),
+        "numeric trap: domain in expand at i64",
+    ),
+    (
+        "(b) guarded broadcast of a local sized by a scalar",
+        "def selected(x: tensor[32, f32], i: tensor[1, i64]) -> tensor[32, f32] = {
+  m = tensor_to_scalar(sum(copy(i), 0i32))
+  t = shrink(copy(x), [[0i64, m]])
+  if eq(tensor_to_scalar(sum(i, 0i32)), 1i64) then add(x, expand(t, 0i32, 32i64)) else x
+}
+def main() -> tensor[32, f32] = selected({x}, to_tensor([3i64]))
+",
+        (
+            "eq(tensor_to_scalar(sum(i, 0i32)), 1i64)",
+            "eq(tensor_to_scalar(sum(i, 0i32)), 3i64)",
+        ),
+        "numeric trap: domain in expand at i64",
+    ),
+    (
+        "(c) local ascription under a data condition",
+        "def selected(x: tensor[32, f32]) -> tensor[32, f32] = {
+  s = tensor_to_scalar(sum(copy(x), 0i32))
+  if lt(s, 0.0f32) then {
+    y: tensor[3, f32] = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 27i64)]])
+    add(x, insert(sum(add(y, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32), 0i32, 32i64))
+  } else x
+}
+def main() -> tensor[32, f32] = selected({x})
+",
+        ("lt(s, 0.0f32)", "lt(0.0f32, s)"),
+        "extent `3`: claimed = 3, shrink axis 0 = 5",
+    ),
+    (
+        "(c) local ascription",
+        "def selected(x: tensor[32, f32]) -> tensor[f32] = if eq(shape(&x, 0i32), 4i64) then {
+  y: tensor[3, f32] = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 1i64)]])
+  sum(add(y, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)
+} else sum(x, 0i32)
+def main() -> tensor[f32] = selected({x})
+",
+        ("eq(shape(&x, 0i32), 4i64)", "eq(shape(&x, 0i32), 32i64)"),
+        "extent `3`: claimed = 3, shrink axis 0 = 31",
+    ),
+    (
+        "parameter's unit refinement",
+        "def selected[n](x: tensor[32, f32], t: tensor[n, f32]) -> tensor[32, f32] = if eq(shape(&t, 0i32), 1i64) then add(x, expand(t, 0i32, 32i64)) else x
+def main() -> tensor[32, f32] = selected({x}, to_tensor([1.0f32, 2.0f32, 3.0f32]))
+",
+        ("eq(shape(&t, 0i32), 1i64)", "eq(shape(&t, 0i32), 3i64)"),
+        "extent `1`: claimed = 1, t axis 0 = 3",
+    ),
+];
+
+/// `[-3, -1, ..., 59]`: 32 elements summing to 896.
+fn x32() -> String {
+    let elements = (0..32)
+        .map(|index| format!("{}.0f32", 2 * index - 3))
+        .collect::<Vec<_>>();
+    format!("to_tensor([{}])", elements.join(", "))
+}
+
+/// The whole-program C lane: `chelis build --target c`, linked and run.
+/// Its stdout on success, or its build or run output on failure.
+fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> {
+    let path = directory.join(format!("{stem}.ch"));
+    std::fs::write(&path, source).unwrap();
+    let out_dir = directory.join(format!("{stem}-out"));
+    let built = Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    if !built.status.success() {
+        return Err(format!("build: {}", text(&built)));
+    }
+    let linked = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
+    assert!(linked.success(), "{stem}: link failed: {linked}");
+    let run = std::process::Command::new(out_dir.join(stem))
+        .output()
+        .unwrap();
+    if run.status.success() {
+        Ok(String::from_utf8_lossy(&run.stdout).into_owned())
+    } else {
+        Err(text(&run))
+    }
+}
+
+/// The host interpreter's lane, style gate off: `chelis eval --file`.
+fn h_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> {
+    let path = format!("{stem}.ch");
+    std::fs::write(directory.join(&path), source).unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .current_dir(directory)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", &path])
+        .output()
+        .unwrap();
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(text(&output))
+    }
+}
+
+/// #2586 round 2b: an untaken arm whose extent rests on a claim checks
+/// nothing, so the host interpreter and the whole-program C return the other
+/// branch's value, the same in both; taken with the claim false, both trap
+/// with the claim's typed extent message. The DAG-evaluator and selected-C
+/// rows are in `chelis-backend-c`'s `exec_compile`.
+///
+/// Evidentiary status: REGRESSION TEST for every untaken row at 096daea8c
+/// (C traps (a) and the parameter row, aborts (b) untyped, and every lane
+/// fails (c)); DISPOSITION LOCK for the taken rows.
+#[test]
+fn an_untaken_claimed_arm_checks_nothing_and_a_taken_one_traps_in_eval_file_and_c() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for (index, (row, source, (untaken, taken), trap)) in CLAIMED_ARMS.into_iter().enumerate() {
+        let source = source.replace("{x}", &x32());
+        assert!(source.contains(untaken), "{row}");
+        let h = h_file(
+            directory.path(),
+            &format!("claimed_untaken_{index}"),
+            &source,
+        );
+        let c = c_file(
+            directory.path(),
+            &format!("claimed_untaken_{index}"),
+            &source,
+        );
+        match (&h, &c) {
+            (Ok(h), Ok(c)) if h == c => {}
+            _ => failures.push(format!("{row}, untaken: H {h:?}, C {c:?}")),
+        }
+        let source = source.replace(untaken, taken);
+        let h = h_file(directory.path(), &format!("claimed_taken_{index}"), &source);
+        let c = c_file(directory.path(), &format!("claimed_taken_{index}"), &source);
+        match (&h, &c) {
+            (Err(h), Err(c)) if h.contains(trap) && c.contains(trap) => {}
+            _ => failures.push(format!("{row}, taken: H {h:?}, C {c:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// [05-OP-53] in the host interpreter's `where` builtin: a branch the
+/// condition selects nowhere is not shape-checked, so a uniform condition
+/// returns its branch at that branch's extent, and a mixed condition over
+/// branches of different extents still fails with the typed shape error
+/// (decisions section 25). `b` is `a` without its last element.
+///
+/// Evidentiary status: REGRESSION TEST for the uniform rows (each fails the
+/// shape check at 096daea8c); DISPOSITION LOCK for the mixed row.
+#[test]
+fn the_where_builtin_checks_only_the_branches_its_condition_selects_in_eval_file() {
+    let source = "def pick(c: tensor[*, bool], a: tensor[*, f32], b: tensor[*, f32]) -> tensor[*, f32] = where(&c, &a, &b)
+def main() -> tensor[*, f32] = {
+  a = to_tensor([1.0f32, 2.0f32, 3.0f32])
+  b = shrink(copy(a), [[0i64, sub(shape(&a, 0i32), 1i64)]])
+  pick(to_tensor({c}), a, b)
+}
+";
+    let directory = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+    for (index, (condition, expected)) in [
+        (
+            "[true, true, true]",
+            Ok("main = tensor(shape=[3], data=[1.0, 2.0, 3.0])"),
+        ),
+        (
+            "[false, false, false]",
+            Ok("main = tensor(shape=[2], data=[1.0, 2.0])"),
+        ),
+        (
+            "[true, false, true]",
+            Err("where expects condition and both branches to have identical shape"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let outcome = h_file(
+            directory.path(),
+            &format!("where_{index}"),
+            &source.replace("{c}", condition),
+        );
+        match (&outcome, expected) {
+            (Ok(stdout), Ok(line)) if stdout.trim() == line => {}
+            (Err(stderr), Err(error)) if stderr.contains(error) => {}
+            _ => failures.push(format!("{condition}: {outcome:?}")),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

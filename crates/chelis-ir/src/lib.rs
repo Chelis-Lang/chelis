@@ -23,6 +23,7 @@ pub const EVAL_TENSOR_CAPABLE_PRIMS: &[chelis_types::types::Prim] = &[
 ];
 
 pub mod analysis;
+pub mod anonymous_dims;
 pub mod axis_sources;
 #[expect(
     dead_code,

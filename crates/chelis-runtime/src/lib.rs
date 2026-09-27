@@ -6292,8 +6292,6 @@ pub unsafe extern "C" fn chelis_tensor_where(
         (then_tensor, "where then tensor"),
         (else_tensor, "where else tensor"),
     ]);
-    require_same_tensor_shape_validated(cond, then_tensor, "where");
-    require_same_tensor_shape_validated(then_tensor, else_tensor, "where");
     require_bool_dtype(cond_dtype, "where condition");
     if dtype != else_dtype {
         runtime_fail!(
@@ -6302,9 +6300,32 @@ pub unsafe extern "C" fn chelis_tensor_where(
             diagnostic_dtype_name(else_dtype)
         );
     }
+    // [05-OP-53]: shapes agree only across what the condition selects. A
+    // branch selected nowhere is neither read nor shape-checked, so a
+    // condition selecting one branch everywhere yields that branch, and an
+    // empty condition yields an empty result of its own shape.
+    let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
+    let (mut then_selected, mut else_selected) = (false, false);
+    for i in 0..(*cond).count() {
+        if (*p.add(i)).get() {
+            then_selected = true;
+        } else {
+            else_selected = true;
+        }
+    }
+    let shape_source = match (then_selected, else_selected) {
+        (true, false) => then_tensor,
+        (false, true) => else_tensor,
+        (false, false) => cond,
+        (true, true) => {
+            require_same_tensor_shape_validated(cond, then_tensor, "where");
+            require_same_tensor_shape_validated(then_tensor, else_tensor, "where");
+            then_tensor
+        }
+    };
     let out = chelis_alloc(
-        (*then_tensor).rank(),
-        (*then_tensor).shape().as_ptr(),
+        (*shape_source).rank(),
+        (*shape_source).shape().as_ptr(),
         dtype.id() as chelis_dtype,
     );
     let size = (*out).count();
@@ -6326,8 +6347,11 @@ pub unsafe extern "C" fn chelis_tensor_where(
             copy_tensor_element(pick, i as i64, out, i as i64, "where");
         }
     }
-    let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
-    where_copy(out, then_tensor, else_tensor, size, |i| (*p.add(i)).get());
+    if then_selected && else_selected {
+        where_copy(out, then_tensor, else_tensor, size, |i| (*p.add(i)).get());
+    } else {
+        where_copy(out, then_tensor, else_tensor, size, |_| then_selected);
+    }
     out
 }
 

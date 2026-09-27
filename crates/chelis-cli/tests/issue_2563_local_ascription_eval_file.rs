@@ -7,10 +7,14 @@
 //! `vmap`ped arm fires only in the rows that take it. `eval --file` runs the
 //! whole file; the kernel holding each `if` computes both arms. The
 //! evaluator and C rows of the same shapes are in `chelis-compiler-api`'s
-//! `local_ascription_activation`. A shift's negative count in an untaken arm
+//! `local_ascription_activation`; the grad-body row's whole program also
+//! builds and runs in C here. A shift's negative count in an untaken arm
 //! checks nothing either, consumed or discarded, and traps when taken.
 use assert_cmd::Command;
 use std::path::Path;
+
+#[path = "common/mod.rs"]
+mod common;
 
 const GRAD_BODY: &str = "def h(x: tensor[*, f32]) -> tensor[f32] = {
   y: tensor[3, f32] = pad(x, [[0i64, 0i64]], 0.0f32)
@@ -207,6 +211,64 @@ fn a_taken_arms_local_ascription_traps_in_eval_file() {
         if output.status.success() || !text(&output).contains(trap) {
             failures.push(format!("{shape}: {}", text(&output).trim()));
         }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The whole-program C lane: `chelis build --target c`, linked and run.
+/// Its stdout on success, or its build or run output on failure.
+fn c_file(directory: &Path, stem: &str, source: &str) -> Result<String, String> {
+    let path = directory.join(format!("{stem}.ch"));
+    std::fs::write(&path, source).unwrap();
+    let out_dir = directory.join(format!("{stem}-out"));
+    let built = chelis(
+        directory,
+        &[
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    if !built.status.success() {
+        return Err(format!("build: {}", text(&built)));
+    }
+    let linked = common::link_generated(&out_dir, &format!("{stem}.c"), stem);
+    assert!(linked.success(), "{stem}: link failed: {linked}");
+    let run = std::process::Command::new(out_dir.join(stem))
+        .output()
+        .unwrap();
+    if run.status.success() {
+        Ok(String::from_utf8_lossy(&run.stdout).into_owned())
+    } else {
+        Err(text(&run))
+    }
+}
+
+/// The grad-body row in the whole program's C: both arms of `f`'s join are
+/// sized from `x`, which C names as one extent, so it builds, and returns
+/// `x` untaken, as `eval --file` does; taken, it traps on the claim.
+///
+/// Evidentiary status: REGRESSION TEST for both rows: at 592dc55ce
+/// `chelis build` refused each ("where at node N condition and branches
+/// must have exactly matching shape"), the join condition sized from the
+/// larger arm under a fresh identity; the untaken row built and returned `x`
+/// at 096daea8c.
+#[test]
+fn the_grad_body_row_builds_and_agrees_with_eval_file_in_c() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, source, value, trap) = SHAPES[0];
+    let mut failures = Vec::new();
+    let eval = eval_file(directory.path(), "grad_body_eval", source);
+    match c_file(directory.path(), "grad_body_c", source) {
+        Ok(c) if c.trim() == value && text(&eval).trim() == value => {}
+        c => failures.push(format!("untaken: eval {:?}, C {c:?}", text(&eval))),
+    }
+    match c_file(directory.path(), "grad_body_taken_c", &taken(source)) {
+        Err(c) if c.contains(trap) => {}
+        c => failures.push(format!("taken: C {c:?}")),
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

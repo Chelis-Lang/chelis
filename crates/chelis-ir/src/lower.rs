@@ -7055,7 +7055,9 @@ struct LowerCtx<'program> {
     /// sibling branch — the exact thing `spec/06-transformations.md`
     /// §2.10.1 forbids.
     branch_path_condition: Option<NodeId>,
-    local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
+    /// Each `(input, axis)` refined to a unit extent, by the activation the
+    /// refinement is checked under ([`Self::draw_activation`]).
+    local_unit_refinements: BTreeMap<(NodeId, usize, Option<NodeId>), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
     /// the consuming reshape. This construction map never escapes lowering.
@@ -17379,33 +17381,64 @@ impl<'program> LowerCtx<'program> {
             return input;
         }
         let rt_axis = RtAxis::Lit(i32::try_from(axis).expect("checked axis fits i32"));
-        let existing = self
+        let activation = self.draw_activation();
+        let bound = self
             .binding_witnesses_for_expr(expr)
             .and_then(|(_, witnesses)| witnesses.get(axis))
             .copied();
-        let local = existing.is_none()
+        // A unit refinement is checked under the activation that makes it
+        // (spec/10 section 3.2): it joins a parameter's witness only when that
+        // witness runs under the same activation. An arm refining a parameter
+        // checked at entry gets a witness of its own, read from the same
+        // parameter and reported the same way.
+        let existing = bound.filter(|witness| {
+            self.dag
+                .get(*witness)
+                .expect("binding witness")
+                .owner
+                .activation
+                == activation
+        });
+        let local = bound.is_none()
             && !matches!(
                 self.dag.get(input).expect("expand input").op,
                 RiscOp::Load { .. }
             );
-        if local && let Some(checked) = self.local_unit_refinements.get(&(input, axis)) {
+        let scoped = local || (bound.is_some() && existing.is_none());
+        if scoped
+            && let Some(checked) = self
+                .local_unit_refinements
+                .get(&(input, axis, activation))
+                .or_else(|| self.local_unit_refinements.get(&(input, axis, None)))
+        {
             return *checked;
         }
         let witness = match existing {
             Some(witness) => witness,
             None => {
-                let witness = self.dag.add_node(
-                    self.owner(),
-                    RiscOp::ExtentWitness {
-                        site: if local {
+                let (site, parameter) = match bound
+                    .map(|witness| &self.dag.get(witness).expect("binding witness").op)
+                {
+                    Some(RiscOp::ExtentWitness {
+                        site, parameter, ..
+                    }) => (site.clone(), parameter.clone()),
+                    _ => (
+                        if local {
                             crate::dag::ExtentWitnessSite::LocalExpand
                         } else {
                             crate::dag::ExtentWitnessSite::Caller
                         },
-                        parameter: match &self.dag.get(input).expect("expand input").op {
+                        match &self.dag.get(input).expect("expand input").op {
                             RiscOp::Load { name } => name.as_str().to_owned(),
                             _ => "expand".into(),
                         },
+                    ),
+                };
+                let witness = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::ExtentWitness {
+                        site,
+                        parameter,
                         axis: rt_axis,
                         requirements: Vec::new(),
                         claims: Vec::new(),
@@ -17438,8 +17471,9 @@ impl<'program> LowerCtx<'program> {
             ty,
             self.current_span_id.clone(),
         );
-        if local {
-            self.local_unit_refinements.insert((input, axis), checked);
+        if scoped {
+            self.local_unit_refinements
+                .insert((input, axis, activation), checked);
         }
         checked
     }
@@ -19905,7 +19939,7 @@ impl<'program> LowerCtx<'program> {
         // value, and (iii) the extent source stays alive under DCE.
         let then_node = self.conform_branch_placeholder(then_node, &out_ty, else_node);
         let else_node = self.conform_branch_placeholder(else_node, &out_ty, then_node);
-        let condition = self.lower_if_condition(cond, &out_ty, else_node);
+        let condition = self.lower_if_condition(cond, &out_ty, then_node, else_node);
         LoweredValue::Node(self.dag.add_node(
             self.owner(),
             RiscOp::Where,
@@ -20517,11 +20551,17 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// The runtime `if`'s scalar condition expanded to the join's shape. An
+    /// arm the condition does not select may be zeros at an unchecked
+    /// claim's extent (decisions section 25), so on a runtime axis the
+    /// condition's extent is not simply the `else` arm's: see
+    /// [`Self::join_condition_extents`].
     fn lower_if_condition(
         &mut self,
         cond: NodeId,
         out_ty: &TensorType,
-        shape_source: NodeId,
+        then_node: NodeId,
+        else_node: NodeId,
     ) -> NodeId {
         let cond_ty = self
             .dag
@@ -20529,25 +20569,34 @@ impl<'program> LowerCtx<'program> {
             .map(|node| node.output_type.clone())
             .unwrap_or_else(Self::default_type);
         if cond_ty.dims.is_empty() && !out_ty.dims.is_empty() {
+            let extents = self.join_condition_extents(out_ty, then_node, else_node);
             let mut expanded = cond;
             let mut dims = Vec::new();
             for (axis, dim) in out_ty.dims.iter().enumerate() {
                 dims.push(dim.clone());
-                let size = match dim {
-                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => RtDim::Lit(*value),
-                    DimInfo::Named(_, None) => RtDim::InputAxis {
-                        tensor: 1,
-                        axis: RtAxis::Lit(i32::try_from(axis).expect("tensor rank fits i32")),
-                    },
+                let (size, inputs) = match dim {
+                    DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => {
+                        (RtDim::Lit(*value), vec![expanded])
+                    }
+                    DimInfo::Named(_, None) => {
+                        let (node, read) = extents
+                            .get(&axis)
+                            .map_or((else_node, axis), |extent| (extent.node, extent.axis));
+                        (
+                            RtDim::InputAxis {
+                                tensor: 1,
+                                axis: RtAxis::Lit(
+                                    i32::try_from(read).expect("tensor rank fits i32"),
+                                ),
+                            },
+                            vec![expanded, node],
+                        )
+                    }
                 };
                 expanded = self.dag.add_node(
                     self.owner(),
                     RiscOp::Expand { axis, size },
-                    if matches!(dim, DimInfo::Named(_, None)) {
-                        vec![expanded, shape_source]
-                    } else {
-                        vec![expanded]
-                    },
+                    inputs,
                     TensorType {
                         dims: dims.clone(),
                         precision: Prim::Bool,
@@ -20559,6 +20608,131 @@ impl<'program> LowerCtx<'program> {
         }
         cond
     }
+
+    /// Where the join condition takes its extent on each runtime axis of
+    /// `out_ty`, when not from the `else` arm. An arm's extent is read only
+    /// where the arms' extents are proven one extent: where both resolve to
+    /// one origin that runs whenever the join does, the condition reads that
+    /// origin. Where the arms carry one anonymous-extent identity, the one
+    /// the C lane names them by
+    /// ([`crate::anonymous_dims::anonymous_axis_identity`]), the condition
+    /// reads the axis where that identity is decided, when it runs whenever
+    /// the join does, so it carries the arms' identity in C too. An axis
+    /// whose extents are one otherwise (the operand agreement `where`
+    /// verifies, [`crate::verify::axis_extents_semantically_equivalent`]:
+    /// one bound name, a checked named claim, one static extent; or one
+    /// identity decided where the join does not run) keeps the `else` arm's
+    /// extent. Where none of these proves the arms' extents equal, the join
+    /// is refused (chelis#2583): an untaken arm may be zeros at an unchecked
+    /// claim's extent, so no single arm, and no extent computed from both,
+    /// sizes a selection every lane agrees on.
+    fn join_condition_extents(
+        &mut self,
+        out_ty: &TensorType,
+        then_node: NodeId,
+        else_node: NodeId,
+    ) -> BTreeMap<usize, JoinExtent> {
+        let arms = [then_node, else_node];
+        // The join's activation and every path it is nested in: `lower_if`
+        // builds an arm's path as `And(parent, condition)`.
+        let mut enclosing = vec![None];
+        let mut path = self.draw_activation();
+        while let Some(node) = path {
+            enclosing.push(Some(node));
+            path = self.dag.get(node).and_then(|node| {
+                matches!(node.op, RiscOp::Logical(LogicalKind::And))
+                    .then(|| node.inputs.first().copied())
+                    .flatten()
+            });
+        }
+        let runs_with_join = |dag: &Dag, node: NodeId| {
+            dag.get(node)
+                .is_some_and(|node| enclosing.contains(&node.owner.activation))
+        };
+        let mut sources = BTreeMap::new();
+        for (axis, dim) in out_ty.dims.iter().enumerate() {
+            if !matches!(dim, DimInfo::Named(_, None)) {
+                continue;
+            }
+            match crate::verify::shared_axis_origin(&self.dag, then_node, else_node, axis, &arms) {
+                Some(
+                    crate::axis_sources::ExtentOrigin::ExternalAxis {
+                        load: node,
+                        axis: read,
+                    }
+                    | crate::axis_sources::ExtentOrigin::OpComputed {
+                        op: node,
+                        axis: read,
+                    },
+                ) if runs_with_join(&self.dag, node) => {
+                    sources.insert(axis, JoinExtent { node, axis: read });
+                }
+                _ if crate::verify::axis_extents_semantically_equivalent(
+                    &self.dag, then_node, else_node, axis, &arms,
+                ) => {}
+                _ => {
+                    let identity = |node| {
+                        crate::anonymous_dims::anonymous_axis_identity(&self.dag, node, axis)
+                    };
+                    match (identity(then_node), identity(else_node)) {
+                        (
+                            Some((then_dim, then_at, then_axis)),
+                            Some((else_dim, else_at, else_axis)),
+                        ) if then_dim == else_dim => {
+                            if let Some((node, read)) = [(else_at, else_axis), (then_at, then_axis)]
+                                .into_iter()
+                                .find(|(node, _)| runs_with_join(&self.dag, *node))
+                            {
+                                sources.insert(axis, JoinExtent { node, axis: read });
+                            }
+                        }
+                        _ => self.reject_unproven_join(axis),
+                    }
+                }
+            }
+        }
+        sources
+    }
+
+    /// The typed refusal of a runtime `if` join whose arms' extents on
+    /// `axis` are not proven equal ([`Self::join_condition_extents`]), on
+    /// the raise ladder of [`Self::reject_lowering_at`]: fatal inside an AD
+    /// transform body, recoverable elsewhere. A recoverable refusal is the
+    /// error of the evaluator's kernel for the body; C's whole-program build
+    /// emits a body its kernel lowering refuses as host code (chelis#1515).
+    fn reject_unproven_join(&self, axis: usize) -> ! {
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        let unsupported = Unsupported::new(
+            UnsupportedKind::Construct(format!(
+                "a runtime `if` whose arms' extents on axis {axis} are not proven equal"
+            )),
+            "the `if` join in IR lowering",
+            Stage::Lowering,
+            chelis_types::unimplemented_rejection!(
+                2583,
+                "an `if` whose arms' extents are not proven equal cannot be joined as a \
+                 selection yet: an untaken arm may be sized by its unchecked claim"
+            ),
+        );
+        let diagnostic =
+            LowerDiagnostic::from_unsupported(unsupported, None, self.current_span_id.clone());
+        raise_lowering_diagnostic(if self.allow_host_list_ad_rewrites {
+            diagnostic.fatal()
+        } else {
+            diagnostic
+        })
+    }
+}
+
+/// Where a runtime `if`'s join condition reads its extent on one axis
+/// (`join_condition_extents`): the axis of the node both arms' extents
+/// resolve to.
+#[derive(Clone, Copy)]
+struct JoinExtent {
+    node: NodeId,
+    axis: usize,
 }
 
 #[cfg(test)]

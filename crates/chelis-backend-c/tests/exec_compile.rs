@@ -11108,6 +11108,124 @@ fn a_callees_result_claim_checks_only_in_a_taken_arm_in_eval_and_c() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// `f` of `source` lowered as a tensor entry over `inputs` (each a rank-1
+/// `f32` tensor of ones of the given extent), with a rank-0 `f32` result,
+/// run by the DAG evaluator and by its compiled C: each lane's value, or its
+/// trap text (for C, the emitter's refusal where it refuses the graph).
+fn tensor_entry_lanes_over(
+    source: &str,
+    inputs: &[(&str, usize)],
+) -> (Result<f64, String>, Result<f64, String>) {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let mut values = UnordMap::new();
+    for (name, n) in inputs {
+        values.insert(
+            name.to_string(),
+            TensorValue::from_storage(
+                vec![*n],
+                finalize_tensor("input", Prim::F32, RawTensor::Float(vec![1.0; *n])).unwrap(),
+            ),
+        );
+    }
+    let root = *dag.roots().last().expect("a root");
+    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+    let generated = match codegen(&dag, "claim_arm") {
+        Ok(generated) => generated,
+        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+    };
+    let mut allocations = String::new();
+    for label in &generated.input_labels {
+        let (_, n) = inputs
+            .iter()
+            .find(|(name, _)| name == label)
+            .unwrap_or_else(|| panic!("entry slot {label}"));
+        allocations.push_str(&format!(
+            "    float {label}_data[{n}];\n    for (int i = 0; i < {n}; ++i) {label}_data[i] = 1.0f;\n    int64_t {label}_shape[1] = {{{n}}};\n    chelis_tensor *{label} = chelis_tensor_entry_borrow(1, {label}_shape, CHELIS_DTYPE_F32, {label}_data, sizeof({label}_data));\n"
+        ));
+    }
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+{allocations}    chelis_tensor *inputs[] = {{{slots}}}, *outputs[1] = {{NULL}};
+    claim_arm(inputs, {count}, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%.1f\n", (double)((const float *)out.data)[0]);
+    return 0;
+}}
+"#,
+        slots = generated.input_labels.join(", "),
+        count = generated.input_labels.len(),
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let c = if run.status.success() {
+        String::from_utf8_lossy(&run.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run.stderr).to_string())
+    };
+    (eval, c)
+}
+
+/// #2586 round 2b, decisions section 25: an arm whose extent rests on a
+/// claim, (a) a callee's result claim, (b) a guarded broadcast's unit claim
+/// on a local, (c) a local ascription, and a parameter's unit refinement.
+/// Untaken (`{c}` 50), the claim is not checked and the claim-sized nodes
+/// are zeros, so the DAG evaluator and the compiled C both return the
+/// `else` value, 32; taken (`{c}` -5) with the claim false, both trap with
+/// the claim's typed trap. `x` is 32 ones and `t` 3 ones.
+///
+/// Evidentiary status: REGRESSION TEST for every untaken row at 096daea8c
+/// (each lane traps or fails there); DISPOSITION LOCK for the taken rows.
+#[test]
+fn an_untaken_claimed_arm_checks_nothing_and_a_taken_one_traps_in_eval_and_c() {
+    let cases = [
+        (
+            "(a) callee's result claim",
+            "def g(y: tensor[*, f32]) -> tensor[3, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 1i64)]])\n\ndef f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(add(g(copy(x)), to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32) else sum(x, 0i32)\n}\n",
+            "extent `3`: claimed = 3, shrink axis 0 = 31",
+        ),
+        (
+            "(b) guarded broadcast of a local",
+            "def f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  t = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 29i64)]])\n  if gt(s, {c}) then sum(add(x, expand(t, 0i32, 32i64)), 0i32) else sum(x, 0i32)\n}\n",
+            "numeric trap: domain in expand at i64",
+        ),
+        (
+            "(c) local ascription",
+            "def f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then {\n    y: tensor[3, f32] = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 1i64)]])\n    sum(add(y, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n  } else sum(x, 0i32)\n}\n",
+            "extent `3`: claimed = 3, shrink axis 0 = 31",
+        ),
+        (
+            "parameter's unit refinement",
+            "def f[n](x: tensor[32, f32], t: tensor[n, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(add(x, expand(t, 0i32, 32i64)), 0i32) else sum(x, 0i32)\n}\n",
+            "extent `1`: claimed = 1, t axis 0 = 3",
+        ),
+    ];
+    let inputs = [("x", 32), ("t", 3)];
+    let mut failures = Vec::new();
+    for (kind, source, trap) in cases {
+        let untaken = tensor_entry_lanes_over(&source.replace("{c}", "50.0f32"), &inputs);
+        if !matches!(untaken, (Ok(eval), Ok(c)) if eval == 32.0 && c == 32.0) {
+            failures.push(format!("untaken {kind}: {untaken:?}"));
+        }
+        let taken = tensor_entry_lanes_over(&source.replace("{c}", "-5.0f32"), &inputs);
+        if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
+            failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
 /// One kind [`a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c`]
 /// covers: the declarations before `f`, the dead `let` (with `{v}` for the
 /// value that decides the check), the value that traps and the one that

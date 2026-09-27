@@ -133,10 +133,10 @@ pub struct HipEmitter {
     /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
     /// query over the graph.
     activation_gated: Vec<bool>,
-    /// Per node id, whether it guards a restamp
-    /// ([`chelis_ir::dag::TrapSeeds::guards_a_restamp`]), which this lane
-    /// has no zero value for.
-    guards_a_restamp: Vec<bool>,
+    /// Per node id, whether its declared extent rests on a claim checked
+    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]),
+    /// which this lane has no zero value for.
+    claim_sized: Vec<bool>,
 }
 
 /// How a checking node under an activation (spec/10 section 3.2) reads it:
@@ -266,14 +266,14 @@ impl HipEmitter {
     /// activation is false. `None` for a node that is not gated, and for a
     /// gated node whose check is not of every operand's values (an extent,
     /// a bound, an empty axis, an abort's condition beside its fallback, a
-    /// restamp's zero value), which this lane has no gate for:
+    /// claim-sized node's zero value), which this lane has no gate for:
     /// [`Self::begin_node_gate`] refuses it.
     fn activation_gate(
         &self,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Option<HipActivationGate> {
-        if !self.activation_gated[node.id.0] || self.guards_a_restamp[node.id.0] {
+        if !self.activation_gated[node.id.0] || self.claim_sized[node.id.0] {
             return None;
         }
         let activation = node.owner.activation?;
@@ -600,10 +600,10 @@ impl HipEmitter {
                 .iter()
                 .map(|node| seeds.is_activation_gated(node))
                 .collect(),
-            guards_a_restamp: dag
+            claim_sized: dag
                 .nodes()
                 .iter()
-                .map(|node| node.owner.activation.is_some() && seeds.guards_a_restamp(node))
+                .map(|node| node.owner.activation.is_some() && seeds.is_claim_sized(node))
                 .collect(),
             kernel_rank: match dag
                 .nodes()

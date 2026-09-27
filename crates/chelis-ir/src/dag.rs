@@ -2233,14 +2233,14 @@ impl DagNode {
     /// | `Nothing` | every other operation, and float arithmetic and reductions | |
     ///
     /// Three checks are not an operation kind's and are listed here for
-    /// completeness. A node restating an input axis under a claim its class
-    /// guards there ([`TrapSeeds::guards_a_restamp`]) is gated whatever its
-    /// class, and where its activation is false it produces zeros of its
+    /// completeness. A node whose declared extent rests on a claim checked
+    /// under its activation ([`TrapSeeds::is_claim_sized`]) is gated whatever
+    /// its class, and where its activation is false it produces zeros of its
     /// declared type. Every same-shape producer's operand agreement (the
     /// evaluator's "tensor shapes must match" and the C lane's
     /// `emit_elementwise_operand_guard`) is a memory-safety precondition of
     /// the kernel, not a gated check: a false activation leaves it in place,
-    /// except at a restamping node, which then reads no operand. A result's
+    /// except at a claim-sized node, which then reads no operand. A result's
     /// element count and byte size are admitted at every allocation
     /// ([05-OP-33]) whatever the activation.
     pub fn runtime_check(&self) -> RuntimeCheck {
@@ -2412,7 +2412,7 @@ pub struct TrapSeeds<'dag> {
     dag: &'dag Dag,
     literal_result_witness_requirements:
         std::cell::OnceCell<std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>>>,
-    guarded_restamping_nodes: std::cell::OnceCell<std::collections::BTreeSet<NodeId>>,
+    claim_sized_nodes: std::cell::OnceCell<Result<std::collections::BTreeSet<NodeId>, String>>,
 }
 
 impl TrapSeeds<'_> {
@@ -2512,8 +2512,9 @@ impl TrapSeeds<'_> {
     }
 
     /// Whether `node` checks nothing where its activation is false (spec/10
-    /// section 3.2): it has an activation, and either it guards a restamp
-    /// ([`Self::guards_a_restamp`]), or its check can fail
+    /// section 3.2): it has an activation, and either its declared extent
+    /// rests on a claim checked under it ([`Self::is_claim_sized`]), or its
+    /// check can fail
     /// ([`Self::check_may_fail`]; a node whose check no input fails needs
     /// no gate and computes as usual) and its class is one the lanes gate,
     /// by one of the mechanisms [`RuntimeCheck`] names: every class but
@@ -2537,26 +2538,35 @@ impl TrapSeeds<'_> {
                     | RuntimeCheck::Abort => true,
                     RuntimeCheck::Nothing | RuntimeCheck::Random | RuntimeCheck::Ungated => false,
                 })
-                || self.guards_a_restamp(node))
+                || self.is_claim_sized(node))
     }
 
-    /// Whether `node` restates an input axis under a claim that its class
-    /// guards at the node (chelis#2512, the restamp guard
-    /// [`crate::axis_sources::local_dim_guard_sites`] places), whatever its
-    /// operation's class. Where its activation holds in no row it checks
-    /// nothing and produces zeros of its declared type, as
-    /// [`RuntimeCheck::MovementBounds`] does: its operand's extent need not
-    /// be its own there, so it reads no operand, and its operands'
-    /// agreement, which only its reads need, is not checked either. Where
-    /// some row is active it computes as usual.
+    /// Whether `node`'s declared extent rests on a claim checked under its
+    /// activation ([`crate::axis_sources::claim_sized_nodes`]: a result
+    /// claim, a local ascription, an extent an operation computes or a
+    /// carrier sets, a restamp (chelis#2512), a unit claim, a
+    /// [`RiscOp::CheckedUnitAxis`]), whatever its operation's class. Where
+    /// its activation holds in no row the claim is not checked, so it checks
+    /// nothing and produces zeros of its declared type, each claimed axis
+    /// taking the claim's extent, as [`RuntimeCheck::MovementBounds`] does:
+    /// its operand's extent need not be the one it declares there, so it
+    /// reads no operand, and its operands' agreement, which only its reads
+    /// need, is not checked either. Where some row is active it computes as
+    /// usual.
     ///
     /// A whole-graph derivation, run on the first call and shared by every
     /// later one; [`Self::is_activation_gated`] asks it only of a node with
-    /// an activation.
-    pub fn guards_a_restamp(&self, node: &DagNode) -> bool {
-        self.guarded_restamping_nodes
-            .get_or_init(|| crate::axis_sources::guarded_restamping_nodes(self.dag))
-            .contains(&node.id)
+    /// an activation. A graph whose guard sites cannot be derived has every
+    /// such node gated: each lane refuses that graph when it derives the
+    /// sites itself, and until then gating keeps it out of fusion.
+    pub fn is_claim_sized(&self, node: &DagNode) -> bool {
+        match self
+            .claim_sized_nodes
+            .get_or_init(|| crate::axis_sources::claim_sized_nodes(self.dag))
+        {
+            Ok(nodes) => nodes.contains(&node.id),
+            Err(_) => true,
+        }
     }
 }
 
@@ -2855,7 +2865,7 @@ impl Dag {
         TrapSeeds {
             dag: self,
             literal_result_witness_requirements: std::cell::OnceCell::new(),
-            guarded_restamping_nodes: std::cell::OnceCell::new(),
+            claim_sized_nodes: std::cell::OnceCell::new(),
         }
     }
 
