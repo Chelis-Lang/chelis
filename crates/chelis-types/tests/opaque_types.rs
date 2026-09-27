@@ -439,13 +439,14 @@ def leak(p: Probability) -> f32 = p |> fn (q) -> q.value
 
 #[test]
 fn outside_module_let_generalized_accessor_rejected_fail_closed() {
-    // Let-polymorphism generalizes `f = fn (q) -> q.value` BEFORE the
-    // call `f(p)` runs, so the call instantiates fresh type variables
-    // and the recorded access target is never pinned -- a laundering
-    // channel for opaque values through a polymorphic accessor. The
-    // ledger mirrors the deferred-borrow precedent and rejects
-    // never-pinned targets fail-closed (scoped to check units that
-    // declare an opaque type).
+    // Let-polymorphism generalized `f = fn (q) -> q.value` BEFORE the
+    // call `f(p)` ran, so the call instantiated fresh type variables
+    // and the recorded access target was never pinned -- a laundering
+    // channel for opaque values through a polymorphic accessor, which the
+    // deferred-access ledger rejected fail-closed. Since chelis#2523 the
+    // field read is an obligation that keeps `f` monomorphic until its first
+    // application ([04-INF-1]), so `f(p)` pins the target and the access is
+    // rejected with the precise opaque-boundary diagnostic.
     let outside = "module Agent.Strategy
 def leak(p: Probability) -> f32 = {
   f = fn (q) -> q.value
@@ -462,9 +463,11 @@ def leak(p: Probability) -> f32 = {
     );
     assert_eq!(
         violations[0].message,
-        "in def `leak`: field access on an unresolved target type cannot be verified \
-         against opaque type boundaries; annotate the target so the checker can resolve it",
-        "pinned fail-closed message mismatch"
+        format!(
+            "in def `leak`: field access on opaque type `Probability` outside its \
+             defining module `stats.prob`; exported producers of `stats.prob`: {PROB_PRODUCERS}"
+        ),
+        "pinned opaque-boundary message mismatch"
     );
 }
 

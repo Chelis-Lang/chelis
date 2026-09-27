@@ -160,16 +160,7 @@ pub(crate) struct TypeResolutionEnv {
 
 /// Checker-native nominal containers whose payloads are their type arguments.
 /// Other nominal shapes come from the ADT registry, including List and Option.
-pub(crate) const NATIVE_NOMINAL_HEADERS: &[(&str, usize)] =
-    &[("Dict", 2), ("Result", 2), ("String", 0)];
-
-/// Whether `name` is one of [`NATIVE_NOMINAL_HEADERS`]: a checker-native
-/// nominal type that the ADT registry carries no constructor for.
-pub fn is_checker_native_nominal(name: &str) -> bool {
-    NATIVE_NOMINAL_HEADERS
-        .iter()
-        .any(|&(native, _)| native == name)
-}
+pub(crate) const NATIVE_NOMINAL_HEADERS: &[(&str, usize)] = &[("Dict", 2), ("String", 0)];
 
 impl TypeResolutionEnv {
     pub(crate) fn from_registry(registry: &AdtRegistry) -> Self {

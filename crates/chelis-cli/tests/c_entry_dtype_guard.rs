@@ -525,103 +525,70 @@ fn a_nested_path_too_long_to_render_ends_in_a_truncation_marker() {
     );
 }
 
-/// chelis#2521 round 1 REGRESSION TEST: the checker-native `Result` has no
-/// constructor, so no body can read a value's payload, and a parameter that
-/// carries one needs no walk. At the pre-fix tree every row failed to build,
-/// because the walk demanded a constructor layout `Result` does not have;
-/// the base before chelis#2506 built them all.
+/// chelis#2526: `Result` is not a built-in type. It was admitted as a
+/// checker-native nominal type with no constructors, so a parameter or field
+/// could carry one that no program could build or read, and the C entry walker
+/// needed a special case for its payload. It is now an unknown type at check in
+/// every position a parameter can carry it, and the build stops there.
 #[test]
-fn a_parameter_carrying_the_constructorless_result_builds() {
-    let mut failures = Vec::new();
-    for (name, definition) in [
-        ("scalar", "def f(x: Result[i64, string]) -> i64 = 1i64\n"),
+fn result_is_an_unknown_type_at_check() {
+    let mut accepted = Vec::new();
+    for (name, definition, position) in [
+        (
+            "scalar",
+            "def f(x: Result[i64, string]) -> i64 = 1i64\n",
+            "defsig",
+        ),
         (
             "tensor",
             "def f(x: Result[tensor[3, f32], string]) -> i64 = 1i64\n",
+            "defsig",
         ),
         (
             "list",
             "def f(x: List[Result[i64, string]]) -> i64 = len(x)\n",
+            "defsig",
         ),
         (
             "option",
             "def f(x: Option[Result[i64, string]]) -> i64 = 1i64\n",
+            "defsig",
         ),
         (
             "tuple",
             "def f(x: (i64, Result[i64, string])) -> i64 = x.0\n",
+            "defsig",
         ),
         (
             "field",
             "type Wrap =\n  | Wrap(Result[i64, string])\ndef f(x: Wrap) -> i64 = 1i64\n",
-        ),
-        (
-            "field_beside_tensor",
-            "type Wrap =\n  | Wrap(Result[tensor[3, f32], string], tensor[3, f32])\ndef f(x: Wrap) -> i64 = 1i64\n",
+            "deftype field",
         ),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
-        // A second definition keeps the program on the host entry path.
         let source = format!("{definition}def g(x: i64) -> i64 = x\n");
-        if let Err(stderr) = build_source(dir.path(), &source) {
-            failures.push(format!("{name}: {stderr}"));
+        match build_source(dir.path(), &source) {
+            Ok(_) => accepted.push(format!("{name}: built")),
+            Err(stderr) => assert!(
+                stderr.contains(&format!("unknown nominal type `Result` in {position}")),
+                "{name}: {stderr}"
+            ),
         }
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
+    assert!(accepted.is_empty(), "{}", accepted.join("\n"));
 
-/// A `Result` payload of the wrong dtype runs, since nothing reads it, while
-/// a tensor field beside the `Result` is still checked at the entry.
-#[test]
-fn a_result_payload_is_not_walked_and_a_sibling_tensor_is() {
-    if !gcc_available() {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let out = build_source(
-        dir.path(),
-        "type Wrap =\n  | Wrap(Result[tensor[3, f32], string], tensor[3, f32])\n\
-         def f(x: Wrap) -> i64 = 1i64\n\
-         def g(x: Result[tensor[3, f32], string]) -> i64 = 2i64\n",
-    )
-    .unwrap_or_else(|stderr| panic!("{stderr}"));
-    for (name, sibling, expected) in [
-        ("sibling_matches", "F32", None),
-        (
-            "sibling_mismatches",
-            "F64",
-            Some("input `x.1` expected dtype f32, got f64\nnumeric trap: domain in load at f32\n"),
-        ),
+    // A program may still declare its own `Result`, at any arity; its
+    // constructors give the entry walker a layout like any other data type.
+    // The zero-arity form was rejected before, because the built-in header
+    // demanded two arguments.
+    for declared in [
+        "type Result[a, b] =\n  | Ok(a)\n  | Err(b)\n\
+         def f(x: Result[tensor[3, f32], string]) -> i64 = 1i64\n",
+        "type Result =\n  | HomeWin\n  | Draw\n  | AwayWin\n\
+         def f(x: Result) -> i64 = 1i64\n",
     ] {
-        let harness = format!(
-            "#define main generated_main\n#include \"entry.c\"\n#undef main\n\
-             int main(void) {{\n\
-             chelis_string ok = chelis_string_from_cstr(\"Ok\");\n\
-             chelis_string wrap = chelis_string_from_cstr(\"Wrap\");\n\
-             chelis_value payload = chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_F64));\n\
-             chelis_adt *result = chelis_adt_construct(ok, &payload, 1);\n\
-             chelis_value_release(payload);\n\
-             printf(\"g %lld\\n\", (long long){}(result));\n\
-             chelis_value fields[2] = {{ chelis_value_take_adt(result), chelis_value_take_tensor(chelis_alloc(1, (int64_t[]){{3}}, CHELIS_DTYPE_{sibling})) }};\n\
-             chelis_adt *x = chelis_adt_construct(wrap, fields, 2);\n\
-             chelis_value_release(fields[0]); chelis_value_release(fields[1]);\n\
-             printf(\"f %lld\\n\", (long long){}(x));\n\
-             chelis_adt_release(x); chelis_string_release(ok); chelis_string_release(wrap);\n\
-             puts(\"completed\"); return 0;\n}}\n",
-            authored_c_symbol("g"),
-            authored_c_symbol("f")
-        );
-        let (succeeded, output) = link_and_run(&out, name, &harness);
-        assert!(output.contains("g 2\n"), "{name}: {output}");
-        match expected {
-            None => assert!(
-                succeeded && output.contains("f 1\ncompleted"),
-                "{name}: {output}"
-            ),
-            Some(expected) => assert!(
-                !succeeded && output.contains(expected) && !output.contains("f 1"),
-                "{name}: {output}"
-            ),
-        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_source(dir.path(), &format!("{declared}def g(x: i64) -> i64 = x\n"))
+            .unwrap_or_else(|stderr| panic!("a declared Result builds: {stderr}\n{declared}"));
     }
 }

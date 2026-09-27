@@ -3073,19 +3073,38 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop_borrow("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
     generic_triop("pad_sequences_to", &mut env, &mut vg);
-    generic_unop("read_file", &mut env, &mut vg);
-    generic_binop("write_file", &mut env, &mut vg);
-    generic_unop("read_lines", &mut env, &mut vg);
-    generic_unop("read_bytes", &mut env, &mut vg);
-    generic_unop("file_exists", &mut env, &mut vg);
-    generic_unop("list_dir", &mut env, &mut vg);
-    generic_unop("mmap_file", &mut env, &mut vg);
-    // `process_run(cmd, args)` is an eval/test-only subprocess exec builtin
-    // (Hull Phase 0a). The 2-arg `generic_binop` scheme declares the arity;
-    // the concrete return tuple `(Int64, String, String)` is pinned in
-    // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
-    // how `read_file` acquires IO. Rejected by the C/HIP build backends.
-    generic_binop("process_run", &mut env, &mut vg);
+    // chelis#2524: [05-OP-60] and [05-OP-38] make every argument and result
+    // type of the file and process builtins exact, so each carries its exact
+    // signature and ordinary unification rejects any other argument. A generic
+    // scheme here admitted an `f32` path. The IO effect is still assigned in
+    // `chelis-effects` by name. `process_run` is eval/test-only (Hull Phase 0a)
+    // and rejected by the C/HIP build backends.
+    let string = || Type::Prim(Prim::String);
+    let list_of = |element: Type| Type::Adt("List".to_string(), vec![element]);
+    let mapped_file = || Type::Adt("MappedFile".to_string(), Vec::new());
+    for (name, params, result) in [
+        ("read_file", vec![string()], string()),
+        ("write_file", vec![string(), string()], Type::Unit),
+        ("read_lines", vec![string()], list_of(string())),
+        (
+            "read_bytes",
+            vec![string()],
+            list_of(Type::Prim(Prim::Int64)),
+        ),
+        ("file_exists", vec![string()], Type::Prim(Prim::Bool)),
+        ("list_dir", vec![string()], list_of(string())),
+        ("mmap_file", vec![string()], mapped_file()),
+        (
+            "process_run",
+            vec![string(), list_of(string())],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
+        ),
+    ] {
+        env.bind(
+            name.to_string(),
+            Scheme::mono(Type::Fn(params, Box::new(result))),
+        );
+    }
     generic_binop("round_to", &mut env, &mut vg);
     // Host-lane CSV I/O (chelis#903); the concrete contracts live in
     // `check_csv_builtin_signature` (infer/app_hostio.rs).
@@ -3099,8 +3118,27 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_triop("csv_f64", &mut env, &mut vg);
     generic_triop("csv_int", &mut env, &mut vg);
     generic_triop("csv_str", &mut env, &mut vg);
-    generic_triop("mmap_read", &mut env, &mut vg);
-    generic_unop("mmap_len", &mut env, &mut vg);
+    // chelis#2524: the mapped-file reads take the handle and exact `i64`
+    // offsets and counts ([05-OP-60]). The handle keeps the owned parameter
+    // mode the generic scheme gave it, so ownership lowering is unchanged.
+    env.bind(
+        "mmap_read".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![
+                Type::Adt("MappedFile".to_string(), Vec::new()),
+                Type::Prim(Prim::Int64),
+                Type::Prim(Prim::Int64),
+            ],
+            Box::new(Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)])),
+        )),
+    );
+    env.bind(
+        "mmap_len".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![Type::Adt("MappedFile".to_string(), Vec::new())],
+            Box::new(Type::Prim(Prim::Int64)),
+        )),
+    );
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
     generic_triop_first_borrow("split", &mut env, &mut vg);
     generic_triop_first_two_borrow("gather", &mut env, &mut vg);

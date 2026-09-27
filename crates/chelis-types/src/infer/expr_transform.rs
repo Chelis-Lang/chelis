@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::unsupported::{SpanRef, Stage, Unsupported, UnsupportedKind};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_grad(
@@ -22,51 +23,284 @@ pub(super) fn infer_grad(
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&f_ty);
+    if let Type::Error(w) = &resolved {
+        return propagate(w);
+    }
+    // chelis#2626: the `wrt` slot names parameter positions and depends on no
+    // type, so it is read before anything about the operand is decided. A
+    // program's diagnostics then do not depend on whether the operand's type
+    // was already known here. `Err` already means a diagnostic was pushed.
+    let wrt = match grad_wrt_indices(node, errors) {
+        Ok(wrt) => wrt,
+        Err(_) => return vg.fresh_type(),
+    };
 
-    match resolved {
-        Type::Fn(args, ret) => {
-            let ret = *ret;
-            if !grad_output_supported(&ret) {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::Other,
-                        format!("grad requires a scalar floating output, got {}", ret),
-                        vec![
-                            "Reduce the function result to a scalar before applying grad"
-                                .to_string(),
-                        ],
-                    ),
-                );
-            }
-
-            match grad_result_type(node, &args, adt_reg, errors) {
-                Some(grad_ret) => Type::Fn(args, Box::new(grad_ret)),
-                None => vg.fresh_type(),
+    match &resolved {
+        Type::Fn(args, _) => {
+            let awaits_group =
+                |ty: &Type, subst: &Subst| product.awaits_group_completion(ty, subst);
+            match decide_grad(
+                &resolved,
+                wrt.as_deref(),
+                &[],
+                &awaits_group,
+                adt_reg,
+                subst,
+            ) {
+                GradDecision::Decided(Ok(grad_ty)) => grad_ty,
+                GradDecision::Decided(Err(error)) => report(errors, *error),
+                // chelis#2626: the rule reads a variable of a group member's
+                // provisional type, which a sibling determines: the output, a
+                // differentiated parameter, or a variable inside one. Deciding
+                // it here decided it on whatever the group's declaration order
+                // had reached, so the same program was accepted in one order
+                // and rejected in another ([04-INF-5]). The call publishes the
+                // gradient's type with a fresh result, so a later application
+                // still binds the parameters, and suspends the rule on the
+                // deferred ledger until those variables bind or the group
+                // completes.
+                GradDecision::Awaits {
+                    operand,
+                    awaited,
+                    frozen,
+                } => {
+                    let published = Type::Fn(args.clone(), Box::new(vg.fresh_type()));
+                    let mut operands = vec![operand];
+                    operands.extend(awaited);
+                    product.defer_shape_check(
+                        DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt, frozen }),
+                        Vec::new(),
+                        operands,
+                        published.clone(),
+                    );
+                    published
+                }
             }
         }
-        Type::Error(w) => propagate(&w),
-        // An operand whose type is still a variable decides nothing yet: it is
-        // not KNOWN to be a non-function, and reporting here would invent a
-        // rejection against an undecided type (chelis#731 §C3). Deferring it is
-        // what the checker does with unresolved variables elsewhere, and it is
-        // the one input the arm below must not claim.
-        Type::Var(_) => vg.fresh_type(),
+        // chelis#2626: an operand whose type is still a variable is not KNOWN
+        // to be a non-function (chelis#731 §C3), and it is not known to be a
+        // function either, so neither answer can be published. It used to
+        // publish a fresh variable that nothing ever checked, so a `grad` of
+        // an unresolved operand was never decided at all. The rule is
+        // suspended on the deferred ledger instead, against a fresh variable
+        // that stands for the gradient's type: decided once the operand binds,
+        // or at the declaration boundary if it never does.
+        Type::Var(_) => {
+            let published = vg.fresh_type();
+            product.defer_shape_check(
+                DeferredShapeRule::Derivation(TypeDerivation::Grad {
+                    wrt,
+                    frozen: Vec::new(),
+                }),
+                Vec::new(),
+                vec![resolved.clone()],
+                published.clone(),
+            );
+            published
+        }
         // chelis#874 R4 / [04-TOT-1]: this arm used to be
         // `_ => vg.fresh_type()`, commented "Can't determine function
         // structure, return fresh var". A resolved non-function IS determined,
         // and the sibling `infer_vmap` rejects the identical input with the
         // message below; the two were written to the same template and only one
         // kept a disposition, so an `f32`-typed `grad` operand scored 1.0.
-        other => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                format!("grad expects a function, got {other}"),
-                vec!["Apply `grad` to a named function or inline lambda".to_string()],
-            ),
-        ),
+        other => report(errors, *grad_expects_a_function(other)),
     }
+}
+
+/// What the `grad` rule concludes about an operand, or what it still waits on.
+pub(super) enum GradDecision {
+    /// The gradient's function type, or the rule's own rejection.
+    Decided(Result<Type, Box<CheckError>>),
+    /// The rule waits on `awaited`, the variables of a group member's
+    /// provisional type that it reads, each bare so that the ledger's
+    /// readiness test sees it bind. `operand` is the operand's type as the
+    /// rule read it, which a later decision starts from. `frozen` are the
+    /// variables of another kind that the rule read and decided as variables.
+    Awaits {
+        operand: Type,
+        awaited: Vec<Type>,
+        frozen: Vec<TypeVar>,
+    },
+}
+
+/// The one `grad` rule, for a call whose operand is known where the call is
+/// inferred and for one suspended on the deferred ledger (chelis#2626), so the
+/// two cannot drift.
+///
+/// The output is read first and the parameters only once the output is
+/// admitted, the order the rule always had. A differentiated parameter is one
+/// `wrt` selects, or, without `wrt`, any parameter, since whether a parameter
+/// is differentiable decides whether it contributes to the gradient's type.
+///
+/// A variable the rule reads is decided where the rule runs, as it always
+/// was: an output variable is not a floating scalar, and a parameter that is a
+/// variable, or holds one where a floating leaf would be (a tuple component, a
+/// list element, a tensor's precision), is not differentiable there. The one
+/// exception is a variable that `awaits_group` says a sibling determines
+/// ([`InferenceProduct::awaits_group_completion`]), wherever it sits in the
+/// type: which order the group is written in decides whether it is bound here
+/// yet. The rule waits on such a variable instead, and records in `frozen` the
+/// other variables it read, so that the suspended rule decides them as this
+/// one did rather than on what they bound to since.
+///
+/// A decision replayed from the ledger passes the `operand` and `frozen` it was
+/// suspended with. It reads the operand with every other variable resolved,
+/// and waits again on any variable of the group that the resolution revealed.
+///
+/// Waiting on any other variable would let the application of the gradient
+/// choose it, which is how `grad` of a generic function would be instantiated,
+/// and the compiled lanes do not implement `grad` of a generic function
+/// (chelis#2626).
+pub(super) fn decide_grad(
+    operand: &Type,
+    wrt: Option<&[usize]>,
+    frozen: &[TypeVar],
+    awaits_group: &dyn Fn(&Type, &Subst) -> bool,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+) -> GradDecision {
+    let target = held(operand, frozen, subst);
+    let Type::Fn(args, ret) = &target else {
+        return GradDecision::Decided(Err(grad_expects_a_function(&target)));
+    };
+    let mut awaited: Vec<Type> = grad_output_variables(ret)
+        .into_iter()
+        .map(Type::Var)
+        .filter(|variable| awaits_group(variable, subst))
+        .collect();
+    if awaited.is_empty() && !grad_output_supported(ret) {
+        return GradDecision::Decided(Err(grad_output_rejection(ret)));
+    }
+    let mut frozen = frozen.to_vec();
+    let selected: Vec<usize> = match wrt {
+        Some(indices) => indices.to_vec(),
+        None => (0..args.len()).collect(),
+    };
+    for index in selected {
+        let Some(arg) = args.get(index) else {
+            continue;
+        };
+        for var in grad_argument_variables(arg) {
+            let variable = Type::Var(var);
+            // A variable the call froze reads as the call saw it, but the
+            // same variable can also stand where a variable the call waited
+            // on resolved to, so it is waited on while the group determines
+            // it.
+            if awaits_group(&variable, subst) {
+                if !awaited.contains(&variable) {
+                    awaited.push(variable);
+                }
+            } else if !frozen.contains(&var) {
+                frozen.push(var);
+            }
+        }
+    }
+    if !awaited.is_empty() {
+        return GradDecision::Awaits {
+            operand: target.clone(),
+            awaited,
+            frozen,
+        };
+    }
+    GradDecision::Decided(grad_function_type(args, ret, wrt, adt_reg))
+}
+
+/// `ty` with every variable resolved except the `frozen` ones, which a
+/// suspended `grad` decided where the call was inferred ([`decide_grad`]) and
+/// reads as the call saw them. A variable another one resolves to is resolved:
+/// only where the call itself saw a frozen variable is it held.
+fn held(ty: &Type, frozen: &[TypeVar], subst: &Subst) -> Type {
+    if !crate::env::free_tvars(ty)
+        .iter()
+        .any(|var| frozen.contains(var))
+    {
+        return resolved(ty, subst);
+    }
+    let hold = |ty: &Type| held(ty, frozen, subst);
+    match ty {
+        Type::Fn(args, ret) => Type::Fn(args.iter().map(hold).collect(), Box::new(hold(ret))),
+        Type::Tuple(items) => Type::Tuple(items.iter().map(hold).collect()),
+        Type::Adt(name, args) => Type::Adt(name.clone(), args.iter().map(hold).collect()),
+        Type::KindedAdt(name, args) => Type::KindedAdt(
+            name.clone(),
+            args.iter()
+                .map(|argument| match argument {
+                    NominalArg::Type(ty) => NominalArg::Type(hold(ty)),
+                    NominalArg::Dimension(_) => argument.clone(),
+                })
+                .collect(),
+        ),
+        Type::Ref(inner) => Type::Ref(Box::new(hold(inner))),
+        // A frozen variable, or a tensor at a frozen precision.
+        leaf => leaf.clone(),
+    }
+}
+
+/// The variables the output rule reads: the output when it is a variable, or
+/// a rank-0 tensor's precision. Every other constructor decides the rule
+/// whatever variables it holds.
+fn grad_output_variables(ret: &Type) -> Vec<TypeVar> {
+    match ret {
+        Type::Tensor(dims, _) if !dims.is_empty() => Vec::new(),
+        Type::Fn(..) | Type::Tuple(_) | Type::Adt(..) | Type::KindedAdt(..) | Type::Ref(_) => {
+            Vec::new()
+        }
+        leaf => crate::env::free_tvars(leaf),
+    }
+}
+
+/// The variables [`grad_argument_type`] reads in a parameter: every variable
+/// outside a function type, which is not differentiable whatever it holds.
+fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
+    match arg {
+        Type::Fn(..) => Vec::new(),
+        Type::Tuple(items) | Type::Adt(_, items) => {
+            items.iter().flat_map(grad_argument_variables).collect()
+        }
+        Type::KindedAdt(_, args) => args
+            .iter()
+            .filter_map(|argument| match argument {
+                NominalArg::Type(ty) => Some(ty),
+                NominalArg::Dimension(_) => None,
+            })
+            .flat_map(grad_argument_variables)
+            .collect(),
+        Type::Ref(inner) => grad_argument_variables(inner),
+        leaf => crate::env::free_tvars(leaf),
+    }
+}
+
+/// The `grad` rule on a function type whose types it decides as they are: an
+/// output that is not a floating scalar is rejected, a variable included, and
+/// a parameter that is not differentiable, a variable included, is skipped, or
+/// rejected when `wrt` selects it.
+fn grad_function_type(
+    args: &[Type],
+    ret: &Type,
+    wrt: Option<&[usize]>,
+    adt_reg: &AdtRegistry,
+) -> Result<Type, Box<CheckError>> {
+    if !grad_output_supported(ret) {
+        return Err(grad_output_rejection(ret));
+    }
+    grad_result_type(args, wrt, adt_reg).map(|grad_ret| Type::Fn(args.to_vec(), Box::new(grad_ret)))
+}
+
+fn grad_output_rejection(ret: &Type) -> Box<CheckError> {
+    Box::new(CheckError::new(
+        CheckErrorKind::Other,
+        format!("grad requires a scalar floating output, got {ret}"),
+        vec!["Reduce the function result to a scalar before applying grad".to_string()],
+    ))
+}
+
+pub(super) fn grad_expects_a_function(operand: &Type) -> Box<CheckError> {
+    Box::new(CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        format!("grad expects a function, got {operand}"),
+        vec!["Apply `grad` to a named function or inline lambda".to_string()],
+    ))
 }
 
 pub(super) fn grad_output_supported(ty: &Type) -> bool {
@@ -77,21 +311,18 @@ pub(super) fn grad_output_supported(ty: &Type) -> bool {
     }
 }
 
-pub(super) fn grad_result_type(
-    node: &DeepNode,
+/// The gradient's result type for a function with parameters `args`, or the
+/// rejection of a `wrt` index that is out of range or not differentiable.
+fn grad_result_type(
     args: &[Type],
+    wrt: Option<&[usize]>,
     adt_reg: &AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-) -> Option<Type> {
-    // `grad_result_type` returns `Option<Type>` where `None` already means "a
-    // diagnostic was pushed", the pre-existing convention at this boundary.
-    // `.ok()?` preserves it exactly; threading the witness further is plumbing
-    // this change does not take on.
-    let targets = if let Some(indices) = grad_wrt_indices(node, errors).ok()? {
+) -> Result<Type, Box<CheckError>> {
+    let targets = if let Some(indices) = wrt {
         let mut selected = Vec::with_capacity(indices.len());
-        for index in indices {
+        for &index in indices {
             let Some(arg) = args.get(index) else {
-                errors.push(CheckError::new(
+                return Err(Box::new(CheckError::new(
                     CheckErrorKind::ArityMismatch,
                     format!(
                         "grad `wrt` index {} is out of bounds for function with {} parameters",
@@ -99,16 +330,14 @@ pub(super) fn grad_result_type(
                         args.len()
                     ),
                     vec![],
-                ));
-                return None;
+                )));
             };
             let Some(grad_ty) = grad_argument_type(arg, adt_reg) else {
-                errors.push(CheckError::new(
+                return Err(Box::new(CheckError::new(
                     CheckErrorKind::TypeMismatch,
                     format!("grad `wrt` index {index} is not differentiable"),
                     vec!["Select floating scalar or tensor parameters in `wrt`".to_string()],
-                ));
-                return None;
+                )));
             };
             selected.push(grad_ty);
         }
@@ -127,7 +356,7 @@ pub(super) fn grad_result_type(
     // is the per-target tuple, whose ADT slot is the field-wise gradient
     // struct (the pytree contract). The eval-lane marshalling packs the
     // flat gradient roots back into this exact structure per argument.
-    Some(match targets.as_slice() {
+    Ok(match targets.as_slice() {
         [] => Type::Unit,
         [single] => single.clone(),
         _ => Type::Tuple(targets),
@@ -247,10 +476,11 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
         match arg {
             Type::Prim(prim) if prim.is_float() => (Type::Prim(*prim), true),
             Type::Prim(_) => (Type::Unit, false),
-            // WS-A5: a polymorphic precision (TensorPrec::Var) is not yet
-            // known to be float, so reject it here. Once monomorphization
-            // resolves the precision, the rule re-fires on the concrete
-            // instantiation. `is_float()` returns false for Var precisions.
+            // WS-A5: a precision that is still a variable is not known to be
+            // floating (`is_float()` is false for it), so the parameter is not
+            // differentiable where this reads it. `decide_grad` reads it only
+            // after a recursive group that determines it has done so
+            // (chelis#2626).
             Type::Tensor(dims, prec) if prec.is_float() => {
                 (Type::Tensor(dims.clone(), prec.clone()), true)
             }
@@ -416,6 +646,9 @@ pub(super) fn infer_vmap(
     let axis = axis as usize;
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    if let Some(member) = vmap_batches_a_group_variable(&f_ty, subst, product) {
+        return report(errors, vmap_group_member_fence(node, member));
+    }
     let resolved = subst.apply(&f_ty);
 
     match resolved {
@@ -469,6 +702,72 @@ pub(super) fn infer_vmap(
             ),
         ),
     }
+}
+
+/// chelis#2651: the recursive-group member whose types the group has yet to
+/// determine and that a position `vmap` batches stands for: a parameter or
+/// the result of the mapped function type `f_ty`, through a reference or a
+/// tuple, that is a type variable the group's completion links
+/// ([`InferenceProduct::group_variable_owner`]). `vmap` decides whether it
+/// batches such a position where it is inferred, and passes a variable
+/// through unbatched; the group's completion can then make it a tensor or a
+/// scalar that should have been batched.
+fn vmap_batches_a_group_variable<'a>(
+    f_ty: &Type,
+    subst: &Subst,
+    product: &'a InferenceProduct,
+) -> Option<&'a str> {
+    fn owner<'a>(ty: &Type, subst: &Subst, product: &'a InferenceProduct) -> Option<&'a str> {
+        match subst.apply(ty) {
+            Type::Ref(inner) => owner(&inner, subst, product),
+            Type::Tuple(elements) => elements
+                .iter()
+                .find_map(|element| owner(element, subst, product)),
+            var @ Type::Var(_) => product.group_variable_owner(&var, subst),
+            _ => None,
+        }
+    }
+    let Type::Fn(args, ret) = subst.apply(f_ty) else {
+        return None;
+    };
+    args.iter()
+        .chain(std::iter::once(ret.as_ref()))
+        .find_map(|position| owner(position, subst, product))
+}
+
+/// chelis#2651: `vmap` decides which parameters and result it batches from
+/// the mapped function's type where it is inferred. Inside a recursive group,
+/// a reference to a sibling is typed at a copy of the sibling's type that the
+/// group links when it completes, so a position `vmap` batches can still be a
+/// variable that the group then determines. Deciding the batching once the
+/// group completes is not implemented, so the case is rejected. A body sees
+/// such a variable unbound in every declaration order
+/// (`group_link::sibling_instance`), so the rejection is the same in every
+/// order, whatever binding the function reached the operand through.
+fn vmap_group_member_fence(node: &DeepNode, member: &str) -> CheckError {
+    let unsupported = Unsupported::new(
+        UnsupportedKind::Construct(format!(
+            "`vmap` over a function whose type the recursive-group member `{member}` has yet \
+             to determine"
+        )),
+        "the batching decision, made before the group determines that member's types",
+        Stage::Checker,
+        crate::unimplemented_rejection!(
+            2651,
+            "write the full signature of the recursive-group member that the mapped function's \
+             parameter or result type depends on; `vmap` over a type its group has yet to \
+             determine is not implemented"
+        ),
+    )
+    .with_span(SpanRef {
+        offset: None,
+        len: None,
+        span_id: node_span_id(node).map(str::to_owned),
+    })
+    .with_supported_alternative(format!(
+        "write `{member}`'s full signature, with every parameter and result type"
+    ));
+    CheckError::from_unsupported(unsupported)
 }
 
 fn vmap_transform_dims(

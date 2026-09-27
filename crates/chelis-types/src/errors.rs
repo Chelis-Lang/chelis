@@ -594,7 +594,7 @@ fn opaque_accessor_hint(message: &str) -> Option<String> {
 }
 
 /// Heuristic: a type name that starts with uppercase, has no brackets/parens,
-/// and isn't a known non-opaque ADT like Option/List/Result is likely opaque.
+/// and isn't a known non-opaque ADT like Option/List is likely opaque.
 fn is_opaque_candidate(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -608,7 +608,7 @@ fn is_opaque_candidate(s: &str) -> bool {
         return false;
     }
     // Exclude well-known non-opaque ADTs
-    !matches!(s, "Option" | "List" | "Result" | "String")
+    !matches!(s, "Option" | "List" | "String")
 }
 
 fn to_snake_case(s: &str) -> String {

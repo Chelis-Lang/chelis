@@ -134,6 +134,7 @@ pub(super) fn check_scatter_elements(
         &subst.apply(&arg_tys[3]),
         &data_ty,
         node,
+        subst,
         errors,
     ) {
         Ok(axis) => axis,

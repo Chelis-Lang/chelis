@@ -5,6 +5,15 @@
 
 use super::*;
 
+/// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
+/// Float, aggregate, tensor and random-key types are not dictionary keys.
+fn is_dict_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
+        _ => false,
+    }
+}
+
 /// The declared extent at one axis of an application's result, read from the
 /// two ingresses a declaration can reach a builtin call through.
 ///
@@ -858,8 +867,7 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 3 {
                     return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
-                if let Err(err) =
-                    reject_non_int32_axis("gather", &subst.apply(&arg_tys[2]), node, errors)
+                if let Err(err) = reject_non_int32_axis("gather", &arg_tys[2], node, subst, errors)
                 {
                     return err;
                 }
@@ -949,6 +957,7 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[1]),
                     &cumsum_operand,
                     node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -989,6 +998,7 @@ pub(super) fn finish_unified_app(
                     &diagonal_operand,
                     0,
                     node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1001,6 +1011,7 @@ pub(super) fn finish_unified_app(
                     &diagonal_operand,
                     1,
                     node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1050,7 +1061,7 @@ pub(super) fn finish_unified_app(
                 }
                 for idx in [1usize, 2] {
                     if let Err(err) =
-                        reject_non_int32_axis("trace", &subst.apply(&arg_tys[idx]), node, errors)
+                        reject_non_int32_axis("trace", &arg_tys[idx], node, subst, errors)
                     {
                         return err;
                     }
@@ -1139,6 +1150,7 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[1]),
                     &sort_operand,
                     node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1174,8 +1186,7 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 5 {
                     return report_builtin_arity(errors, node, fname, 5, arg_tys.len());
                 }
-                if let Err(err) =
-                    reject_non_int32_axis("scatter", &subst.apply(&arg_tys[3]), node, errors)
+                if let Err(err) = reject_non_int32_axis("scatter", &arg_tys[3], node, subst, errors)
                 {
                     return err;
                 }
@@ -1203,12 +1214,9 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 4 {
                     return report_builtin_arity(errors, node, fname, 4, arg_tys.len());
                 }
-                if let Err(err) = reject_non_int32_axis(
-                    "scatter_replace",
-                    &subst.apply(&arg_tys[3]),
-                    node,
-                    errors,
-                ) {
+                if let Err(err) =
+                    reject_non_int32_axis("scatter_replace", &arg_tys[3], node, subst, errors)
+                {
                     return err;
                 }
                 let route = ShapeRoute::Gather {
@@ -1386,9 +1394,14 @@ pub(super) fn finish_unified_app(
                     matches!(&lhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
                 let rhs_is_list =
                     matches!(&rhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
+                // A right operand that is still a variable may be a list as
+                // well as an axis, so it is not constrained to `i32` here; the
+                // match below suspends the call on it.
+                let rhs_is_unresolved = matches!(rhs, Type::Var(_));
                 if lhs_is_list
                     && !rhs_is_list
-                    && let Err(err) = reject_non_int32_axis("concat", &rhs, node, errors)
+                    && !rhs_is_unresolved
+                    && let Err(err) = reject_non_int32_axis("concat", &rhs, node, subst, errors)
                 {
                     return err;
                 }
@@ -1473,7 +1486,7 @@ pub(super) fn finish_unified_app(
                 // The pre-guard predicate here was `precision.is_integer()`,
                 // the same acceptance hole `concat` carried: it admitted an
                 // i64 axis while `sum` rejected one.
-                if let Err(err) = reject_non_int32_axis("split", &axis_ty, node, errors) {
+                if let Err(err) = reject_non_int32_axis("split", &axis_ty, node, subst, errors) {
                     return err;
                 }
                 match (tensor_ty, sizes_ty) {
@@ -2114,18 +2127,30 @@ pub(super) fn finish_unified_app(
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
                         Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                            match &args[0] {
+                            // chelis#2523: `dict_of`'s input is a list of
+                            // `(key, value)` pairs, so an element whose type is
+                            // still a variable is constrained to a pair rather
+                            // than admitted. That ties the result's key and
+                            // value types to the list's element, so a declared
+                            // result determines them (`dict_of([])`), and the
+                            // key rule below decides once the key is known.
+                            if let Type::Var(_) = subst.apply(&args[0]) {
+                                let pair = Type::Tuple(vec![vg.fresh_type(), vg.fresh_type()]);
+                                if let Err(te) = unify(&args[0], &pair, subst) {
+                                    return report(errors, te.into());
+                                }
+                            }
+                            match subst.apply(&args[0]) {
                                 Type::Tuple(items) if items.len() == 2 => {
+                                    let dict = Type::Adt(
+                                        "Dict".to_string(),
+                                        vec![items[0].clone(), items[1].clone()],
+                                    );
                                     match &items[0] {
-                                        Type::Prim(Prim::Int64) | Type::Prim(Prim::String) => {}
+                                        key if is_dict_key_type(key) => {}
                                         Type::Error(_) => return result_ty,
                                         Type::Var(_) => {
-                                            return site.defer(
-                                                &arg_tys,
-                                                &result_ty,
-                                                product,
-                                                result_ty.clone(),
-                                            );
+                                            return site.defer(&arg_tys, &result_ty, product, dict);
                                         }
                                         other => {
                                             return report(
@@ -2135,7 +2160,7 @@ pub(super) fn finish_unified_app(
                                                     with_node_provenance(
                                                         node,
                                                         format!(
-                                                            "dict_of keys must be i64 or string, got {other}"
+                                                            "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56]), got {other}"
                                                         ),
                                                     ),
                                                     vec![],
@@ -2143,20 +2168,9 @@ pub(super) fn finish_unified_app(
                                             );
                                         }
                                     }
-                                    return Type::Adt(
-                                        "Dict".to_string(),
-                                        vec![items[0].clone(), items[1].clone()],
-                                    );
+                                    return dict;
                                 }
                                 Type::Error(_) => return result_ty,
-                                Type::Var(_) => {
-                                    return site.defer(
-                                        &arg_tys,
-                                        &result_ty,
-                                        product,
-                                        result_ty.clone(),
-                                    );
-                                }
                                 other => {
                                     return report(
                                         errors,
@@ -2205,11 +2219,12 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("Option".to_string(), vec![subst.apply(&args[1])]);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
@@ -2239,11 +2254,12 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Prim(Prim::Bool);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
@@ -2276,11 +2292,12 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&args[0]), subst.apply(&args[1])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
@@ -2322,13 +2339,12 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&args[0]), subst.apply(&args[1])],
                         );
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => {
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    // chelis#2523: see `dict_get`.
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty, value_ty) => {
                         return report(
@@ -2536,7 +2552,40 @@ pub(super) fn finish_unified_app(
                                 .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                             return Type::Tensor(dims, TensorPrec::Concrete(precision));
                         }
-                        ToTensorPeel::Pending => return result_ty,
+                        // chelis#2523: `to_tensor` maps `List` nested `r`
+                        // deep around a numeric or bool dtype `p` to a rank-`r`
+                        // tensor of `p`, so an element type that is still a
+                        // variable is determined by a result whose rank and
+                        // precision are known, as a declared field does for
+                        // `IntCol(to_tensor([]))`. Otherwise the call waits for
+                        // either one to bind, and the declaration boundary
+                        // decides it if neither does.
+                        ToTensorPeel::Pending { rank, element } => {
+                            if let Type::Tensor(result_dims, precision) = &result_ty
+                                && result_dims.len() >= rank
+                            {
+                                let scalar = match precision {
+                                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                                    TensorPrec::Var(var) => Type::Var(*var),
+                                };
+                                let inner = (rank..result_dims.len()).fold(scalar, |inner, _| {
+                                    Type::Adt("List".to_string(), vec![inner])
+                                });
+                                if let Err(te) = unify(&Type::Var(element), &inner, subst) {
+                                    return report(errors, te.into());
+                                }
+                                // A concrete precision settles the call; a
+                                // precision variable is decided when it binds,
+                                // or at its instantiations.
+                                if let TensorPrec::Concrete(prim) = precision
+                                    && (prim.is_numeric() || *prim == Prim::Bool)
+                                {
+                                    return result_ty;
+                                }
+                            }
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
+                        ToTensorPeel::Poisoned => return result_ty,
                         ToTensorPeel::BadInner(inner) => {
                             return report(
                                 errors,

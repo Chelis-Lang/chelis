@@ -391,6 +391,14 @@ pub(crate) enum DeferredOperandGate {
         mode: chelis_deep::CastMode,
         result: Box<Type>,
     },
+    /// chelis#2534: a checked `cast` whose TARGET is a declaration's dtype
+    /// binder and whose SOURCE was unresolved. Carries the target binder and
+    /// the result variable the call returned; discharge decides the settled
+    /// source with the same function the eager arm calls.
+    CastToBinder {
+        target: crate::types::TypeVar,
+        result: Box<Type>,
+    },
     /// A host-lane slot that unifies against a fixed expected type:
     /// the ten csv routes, which funnel through `unify_host_slot`. Carries
     /// what the slot expected so discharge can re-decide without re-running
@@ -523,9 +531,10 @@ impl DeferredOperandGate {
     /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result } | Self::Cast { result, .. } | Self::ShapeRoute { result, .. } => {
-                Some(result.as_ref())
-            }
+            Self::Copy { result }
+            | Self::Cast { result, .. }
+            | Self::CastToBinder { result, .. }
+            | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
             Self::HostSlot { .. } => None,
         }
     }
@@ -584,6 +593,20 @@ impl DeferredOperandGate {
                     resolved.clone(),
                     target,
                     mode,
+                    subst,
+                ) {
+                    Ok(settled) => {
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: *error,
+                    }),
+                }
+            }
+            Self::CastToBinder { target, ref result } => {
+                match crate::infer::expr_record::binder_cast_result_from_settled_source(
+                    resolved.clone(),
+                    target,
                     subst,
                 ) {
                     Ok(settled) => {
@@ -659,6 +682,9 @@ impl DeferredOperandGate {
         match self {
             Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
             Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
+            Self::CastToBinder { .. } => format!(
+                "cast to a quantified scalar dtype requires a numeric or bool scalar, got {subject}"
+            ),
             Self::HostSlot {
                 fname, description, ..
             } => format!("{fname} expects {description}, got {subject}"),
@@ -672,7 +698,7 @@ impl DeferredOperandGate {
     pub(crate) fn noun(&self) -> &str {
         match self {
             Self::Copy { .. } => "copy",
-            Self::Cast { .. } => "cast",
+            Self::Cast { .. } | Self::CastToBinder { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
             Self::ShapeRoute { route, .. } => route.op(),
         }
@@ -687,7 +713,7 @@ impl DeferredOperandGate {
     pub(crate) fn kind(&self) -> crate::errors::CheckErrorKind {
         use crate::errors::CheckErrorKind as Kind;
         match self {
-            Self::Cast { .. } => Kind::CastNonTensor,
+            Self::Cast { .. } | Self::CastToBinder { .. } => Kind::CastNonTensor,
             Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
                 Kind::TypeMismatch
             }
@@ -1108,6 +1134,12 @@ impl Subst {
         self.lower_type_to(ty, self.current_level);
     }
 
+    /// Lower every variable reachable through `ty` to the enclosing `level`,
+    /// so no scope entered since generalizes over it.
+    pub(crate) fn lower_type_to_level(&mut self, ty: &Type, level: u32) {
+        self.lower_type_to(ty, level);
+    }
+
     #[cfg(test)]
     pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
         (
@@ -1324,21 +1356,32 @@ impl Subst {
             .push((v, gate));
     }
 
-    /// Every variable that still occurs in a PENDING gate's result (chelis#1489).
+    /// Every variable a PENDING gate waits on or hands out (chelis#1489).
     ///
-    /// Consulted by `Env::generalize`, which must not quantify any of them. A
-    /// suspended `copy`/`cast` hands its consumer a fresh result variable and
-    /// ties it to the operand only through this ledger -- invisibly to levels.
-    /// When an unannotated `let` generalized that variable, every use of the
-    /// bound name got its own unconstrained instance, and discharge later bound
-    /// only the original: a declared result was never checked against what the
-    /// call produces, and a false signature checked and ran.
+    /// Consulted by `Env::generalize`, which must not quantify any of them.
     ///
-    /// ALL free variables of the applied result are returned, not just a
-    /// top-level type variable. A pending result can be partly unified before it
-    /// discharges -- `g` meeting a `tensor[?d, 3, f32]` expectation makes it
-    /// `tensor[?d, 3, f32]` -- and quantifying `?d` reopens the same hole.
-    pub(crate) fn pending_gate_result_vars(
+    /// The result: a suspended `copy`/`cast` hands its consumer a fresh result
+    /// variable and ties it to the operand only through this ledger --
+    /// invisibly to levels. When an unannotated `let` generalized that
+    /// variable, every use of the bound name got its own unconstrained
+    /// instance, and discharge later bound only the original: a declared
+    /// result was never checked against what the call produces, and a false
+    /// signature checked and ran.
+    ///
+    /// The operand: the gate is suspended on this one variable, and only its
+    /// binding discharges the gate. When an unannotated `let` generalized it,
+    /// every application of the bound lambda bound a fresh instance instead,
+    /// the gate stayed on the never-bound template, and the declaration
+    /// boundary rejected a well-typed program as unresolved (chelis#2584:
+    /// `g = fn (y) -> cast(y, p)` then `g(x)`). Keeping it monomorphic is what
+    /// [04-INF-1] requires of a lambda carrying a pending obligation, so its
+    /// first application binds the operand and discharges the gate.
+    ///
+    /// ALL free variables are returned, not just a top-level type variable. A
+    /// pending result can be partly unified before it discharges -- `g` meeting
+    /// a `tensor[?d, 3, f32]` expectation makes it `tensor[?d, 3, f32]` -- and
+    /// quantifying `?d` reopens the same hole.
+    pub(crate) fn pending_gate_vars(
         &self,
     ) -> (UnordSet<TypeVar>, UnordSet<DimVar>, UnordSet<RankVar>) {
         let ledger = self
@@ -1354,16 +1397,41 @@ impl Subst {
         if ledger.is_empty() {
             return (tvars, dvars, rvars);
         }
-        for (_, gate) in ledger.iter() {
-            let Some(result) = gate.result() else {
-                continue;
-            };
-            let result = self.apply(result);
-            tvars.extend(crate::env::free_tvars(&result));
-            dvars.extend(crate::env::free_dvars(&result));
-            rvars.extend(crate::env::free_rvars(&result));
+        for (operand, gate) in ledger.iter() {
+            let operand = self.apply(&Type::Var(*operand));
+            let result = gate.result().map(|result| self.apply(result));
+            for pending in std::iter::once(&operand).chain(result.as_ref()) {
+                tvars.extend(crate::env::free_tvars(pending));
+                dvars.extend(crate::env::free_dvars(pending));
+                rvars.extend(crate::env::free_rvars(pending));
+            }
         }
         (tvars, dvars, rvars)
+    }
+
+    /// chelis#2584, [04-INF-1]: whether a pending gate waits on or hands out a
+    /// variable of `ty` that generalization at the current level would
+    /// quantify. A `let`-bound lambda for which this holds carries a deferred
+    /// obligation, so the whole lambda stays monomorphic until its first
+    /// application, and every later use has that same instantiation; an
+    /// unchecked second parameter does not become polymorphic beside a
+    /// checked one.
+    pub(crate) fn has_generalizable_pending_gate(&self, ty: &Type) -> bool {
+        let (tvars, dvars, rvars) = self.pending_gate_vars();
+        if tvars.is_empty() && dvars.is_empty() && rvars.is_empty() {
+            return false;
+        }
+        let ty = self.apply(ty);
+        let level = self.current_level();
+        crate::env::free_tvars(&ty)
+            .iter()
+            .any(|v| tvars.contains(v) && self.level_of_tvar(*v) > level)
+            || crate::env::free_dvars(&ty)
+                .iter()
+                .any(|v| dvars.contains(v) && self.level_of_dvar(*v) > level)
+            || crate::env::free_rvars(&ty)
+                .iter()
+                .any(|v| rvars.contains(v) && self.level_of_rvar(*v) > level)
     }
 
     /// Record one fresh use of a checked collection-operation contract.
@@ -1688,9 +1756,9 @@ impl Subst {
     /// Identifying two variables must carry the obligation across, exactly as
     /// the shape ledgers' `merge_alias` does; dropping it here would silently
     /// un-defer the constraint.
-    /// Remove and decide every suspended scalar `Cast` gate whose operand now
-    /// resolves to a variable with a declared dtype-family bound, when that
-    /// bound alone settles it (chelis#2151). See
+    /// Remove and decide every suspended scalar `Cast` or `CastToBinder` gate
+    /// whose operand now resolves to a variable with a declared dtype-family
+    /// bound, when that bound alone settles it (chelis#2151, chelis#2534). See
     /// [`discharge_bounded_scalar_casts`].
     ///
     /// Almost every binding runs with an empty ledger, so it returns early
@@ -1711,9 +1779,12 @@ impl Subst {
         }
         let mut decided = Vec::new();
         ledger.retain(|(tv, gate)| {
-            let DeferredOperandGate::Cast { target, mode, .. } = gate else {
+            if !matches!(
+                gate,
+                DeferredOperandGate::Cast { .. } | DeferredOperandGate::CastToBinder { .. }
+            ) {
                 return true;
-            };
+            }
             let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
                 return true;
             };
@@ -1725,7 +1796,16 @@ impl Subst {
             else {
                 return true;
             };
-            match crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode) {
+            let decision = match gate {
+                DeferredOperandGate::Cast { target, mode, .. } => {
+                    crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode)
+                }
+                // chelis#2534: every member of a numeric bound is a scalar
+                // source a binder-target `cast` admits ([05-OP-63]).
+                DeferredOperandGate::CastToBinder { target, .. } => Some(Ok(Type::Var(*target))),
+                _ => None,
+            };
+            match decision {
                 Some(decision) => {
                     decided.push((gate.clone(), decision));
                     false
@@ -3228,7 +3308,9 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
 /// that reads only the target); a gate it declines stays suspended.
 fn discharge_bounded_scalar_casts(subst: &mut Subst) {
     for (gate, decision) in subst.take_bounded_scalar_cast_gates() {
-        let DeferredOperandGate::Cast { ref result, .. } = gate else {
+        let (DeferredOperandGate::Cast { ref result, .. }
+        | DeferredOperandGate::CastToBinder { ref result, .. }) = gate
+        else {
             continue;
         };
         match decision {

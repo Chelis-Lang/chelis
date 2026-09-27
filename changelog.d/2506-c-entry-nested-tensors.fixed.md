@@ -7,7 +7,5 @@ names the parameter path, such as `p.1`, `r.square`, `c.Ints.0` or `xs[1]`.
 Previously a nested tensor was checked only where a tensor kernel received it,
 under an internal helper name, and one that reached no kernel was read at the
 declared dtype and extents whatever it held. A named extent of a tensor inside
-an ADT, list, option or dictionary is not yet compared. The built-in `Result`
-has no constructor through which a program reads its payload, so its payload
-is not checked. See
+an ADT, list, option or dictionary is not yet compared. See
 [#2506](https://github.com/Chelis-Lang/chelis/issues/2506).

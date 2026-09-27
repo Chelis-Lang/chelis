@@ -816,6 +816,7 @@ pub(super) fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), Stri
     match value {
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => Ok(()),
         RuntimeValue::String(_) => Ok(()),
+        RuntimeValue::Bool(_) => Ok(()),
         other => Err(format!(
             "dict keys must be i64 or string in 3d, got {other:?}"
         )),

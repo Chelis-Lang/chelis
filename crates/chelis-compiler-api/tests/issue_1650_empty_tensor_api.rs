@@ -170,13 +170,20 @@ fn separate_signatures_do_not_supply_unrelated_or_conflicting_dtypes() {
         source: "sig make[p: Numeric]: p -> p\ndef make(x) = {\n unused = to_tensor([])\n x\n}\nout = make(1i64)\n".into(),
         bindings: Default::default(),
     }).expect_err("the argument dtype does not constrain the unrelated empty List");
-    assert_eq!(error.stage, "eval");
+    // chelis#2518: nothing in `make` determines the empty list's element type,
+    // so the checker decides `to_tensor` at an arbitrary type and rejects the
+    // declaration before evaluation, rather than leaving the eval lane to
+    // refuse the unresolved element dtype.
+    assert_eq!(error.stage, "check");
     assert!(
         error.errors.iter().any(|diagnostic| {
-            diagnostic.kind() == chelis_vocab::DiagnosticKind::EvalError
+            diagnostic.kind() == chelis_vocab::DiagnosticKind::TypeMismatch
                 && diagnostic
                     .message
-                    .contains("to_tensor requires a resolved checked element dtype [05-OP-57]")
+                    .contains("`to_tensor` admits only some operand types")
+                && diagnostic
+                    .message
+                    .contains("never determined within `make`")
         }),
         "{error:?}"
     );

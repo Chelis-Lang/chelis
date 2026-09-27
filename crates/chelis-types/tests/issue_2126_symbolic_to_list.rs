@@ -116,6 +116,7 @@ fn a_genuinely_unknown_collection_constructor_still_rejects() {
     assert_rejects(
         "unknown index operand",
         "def at(xs, i: i64) = index(xs, i)\n",
-        "unresolved `index` shape obligation",
+        // chelis#2518: decided at an arbitrary type like every suspended call.
+        "`index` admits only some operand types",
     );
 }
