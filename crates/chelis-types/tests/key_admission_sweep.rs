@@ -124,9 +124,11 @@ fn tag_witnesses(tag: DeepTag) -> Vec<Shows> {
             "def f(ks: List[key]) = quote(splice(ks))\n".to_string(),
             "Deep tag `quote`",
         )],
-        // Surf has no spelling of `handle-effect`; its operands are a handler
-        // and a body, and the allow-list refuses a key-carrying one.
-        DeepTag::HandleEffect => vec![],
+        // A handler region's result moves out as a block's does.
+        DeepTag::HandleEffect => vec![
+            key("def f(k: key) -> key = with device(\"cpu\") { fold_in(k, 1i64) }\n"),
+            key("def f(k: key) -> (key, key) = with device(\"cpu\") { split_key(k) }\n"),
+        ],
         // A transform's own operand is a function, which carries no key
         // (spec/04 section 8.4.1). A key reaches the transform's application,
         // an `App` whose callee is the transform, through the target's key
@@ -237,7 +239,8 @@ fn every_deep_tag_answers_a_key_carrying_operand_as_the_allow_list_says() {
 }
 
 /// The allow-list's tags, pinned: the brief's list is construction and
-/// destructuring, joins, moves, and applications (whose callee decides).
+/// destructuring, joins, moves (a handler region's result among them), and
+/// applications (whose callee decides).
 /// Every transform tag (`grad`, `vmap`, `jit`, `realize`, `cast`, `copy`,
 /// `borrow`) refuses a key operand of its own.
 #[test]
@@ -261,7 +264,8 @@ fn the_admitting_tags_are_exactly_moves_joins_aggregates_and_applications() {
             "block",
             "tuple",
             "tuple-get",
-            "record-update"
+            "record-update",
+            "handle-effect"
         ]
     );
     for tag in [

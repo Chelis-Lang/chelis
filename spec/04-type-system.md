@@ -3144,8 +3144,9 @@ lexical binding, change which callable is selected, or memoize function results.
 > ([05-OP-70] to [05-OP-72]) or a draw ([05-OP-8], [05-OP-37]) at its key
 > operand; `drop` ([05-OP-67]); a runtime branch's join; the construction
 > and destructuring of tuples, records and data values; a binding, or a
-> block's or a function's result; a builtin operation whose atom routes each
-> value of a type parameter to exactly one consumer; and a call through a
+> block's, a handler region's or a function's result; a builtin operation
+> whose atom routes each value of a type parameter to exactly one consumer;
+> and a call through a
 > parameter whose declared type carries a key, whether direct or through
 > `grad`, `vmap` or `jit`. Every other operation refuses it, `realize`,
 > `cast` and `copy` included, and a builtin passed as a function value

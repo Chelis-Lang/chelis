@@ -49,17 +49,6 @@ impl KeyPrimitive {
         }
     }
 
-    /// The atom that names `key` as this primitive's operand.
-    pub const fn atom(self) -> &'static str {
-        match self {
-            Self::SplitKey => "[05-OP-70]",
-            Self::SplitKeys => "[05-OP-71]",
-            Self::FoldIn => "[05-OP-72]",
-            Self::Dropout => "[05-OP-8]",
-            Self::UniformLike => "[05-OP-37]",
-        }
-    }
-
     pub fn of_builtin(name: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -79,8 +68,8 @@ pub enum KeyAdmission {
     Join,
     /// Construction and destructuring of tuples, records and data values.
     Aggregate,
-    /// A binding, a block's result, or a function's result: the value moves
-    /// unchanged to its one new owner.
+    /// A binding, or a block's, a handler region's or a function's result:
+    /// the value moves unchanged to its one new owner.
     Move,
     /// A builtin case that routes each value of a type parameter to one
     /// consumer ([`KeyRouting::OneConsumer`]).
@@ -156,7 +145,12 @@ pub const fn tag_keys(tag: DeepTag) -> TagKeys {
     use KeyAdmission::{Aggregate, Join, Move};
     match tag {
         DeepTag::App | DeepTag::Pipe => TagKeys::ByCallee,
-        DeepTag::Let | DeepTag::Block | DeepTag::Fn => TagKeys::Admits(Move),
+        // A handler region (`with device(..) { .. }`) lowers to its body, so
+        // its result moves out as a block's does; its handler is a literal
+        // the effects gate admits, never a runtime operand.
+        DeepTag::Let | DeepTag::Block | DeepTag::HandleEffect | DeepTag::Fn => {
+            TagKeys::Admits(Move)
+        }
         DeepTag::If | DeepTag::Match => TagKeys::Admits(Join),
         DeepTag::Record
         | DeepTag::Access
@@ -167,7 +161,6 @@ pub const fn tag_keys(tag: DeepTag) -> TagKeys {
         // `grad`, `vmap` and `jit` take a function, which carries no key;
         // their application passes keys to its target's key parameters.
         DeepTag::Par
-        | DeepTag::HandleEffect
         | DeepTag::Grad
         | DeepTag::Vmap
         | DeepTag::Jit
