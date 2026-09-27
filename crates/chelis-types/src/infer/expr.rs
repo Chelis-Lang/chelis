@@ -525,9 +525,10 @@ fn infer_expr_with_type_metadata_ownership_frame(
             // changing every tag-specific `infer_*(&List, ...)` signature;
             // that is the #1029 carrier-deletion refactor, not a leaf-reader
             // repair. Keep this exception visible rather than presenting the
-            // inference audit as a universal no-bridge claim.
+            // inference audit as a universal no-bridge claim. The view's
+            // metadata and children are clones, which keep the node
+            // identities owner stamps and the call ledger are keyed by.
             let list = node.to_list(*span);
-            product.register_bridge_children(node.children_slice(), children(&list));
             match node.tag() {
                 DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Lit => {

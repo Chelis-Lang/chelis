@@ -295,6 +295,13 @@ impl Node {
         &self.children
     }
 
+    /// Crate-private access for [`crate::assign_node_identities`], which
+    /// writes only the identity in the metadata and descends into the
+    /// children. Neither write can change what validation admitted.
+    pub(crate) fn identity_parts_mut(&mut self) -> (&mut Metadata, &mut [Expr]) {
+        (&mut self.meta, &mut self.children)
+    }
+
     // === Bridge: reconstruct List for transition-period consumers ===
 
     /// Reconstruct the canonical `List` representation that existing

@@ -78,6 +78,14 @@ MODELS = {
     "collection_convert_models": "CollectionConvertModels",
     "str_convert_models": "StrConvertModels",
     "fmt_hex_char_models": "FmtHexCharModels",
+    "nonzero_models": "NonzeroModels",
+    "reverse_models": "ReverseModels",
+    "string_write_models": "StringWriteModels",
+    "cow_asref_models": "CowAsrefModels",
+    "small_std_models": "SmallStdModels",
+    "btree_from_array_models": "BtreeFromArrayModels",
+    "assert_unwind_safe_models": "AssertUnwindSafeModels",
+    "hash_slice_models": "HashSliceModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate

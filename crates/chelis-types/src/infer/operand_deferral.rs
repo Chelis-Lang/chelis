@@ -72,7 +72,6 @@ impl<'a> UnresolvedOperandSite<'a> {
         product.defer_shape_check(
             DeferredShapeRule::PostApp {
                 replay: PostAppReplay::Route,
-                site: product.post_app_key(self.list),
                 list: self.list.clone(),
                 kids: self.kids.to_vec(),
                 func_name: self.fname.to_string(),
@@ -104,9 +103,9 @@ impl<'a> UnresolvedOperandSite<'a> {
     /// `matmul` and `layer_norm` already carry their own ledger entry for the
     /// same call, so the shape diagnostic would be reported twice.
     ///
-    /// The entry shares [`InferenceProduct::post_app_key`] with the route
-    /// registration above, so chelis#1774's key translation, its report-once
-    /// cancellation and its silent declaration boundary all apply unchanged.
+    /// The entry shares the call's node identity with the route registration
+    /// above, so chelis#1774's key, its report-once cancellation and its
+    /// silent declaration boundary all apply unchanged.
     fn register_dtype_admissibility(
         &self,
         arg_tys: &[Type],
@@ -132,7 +131,6 @@ impl<'a> UnresolvedOperandSite<'a> {
         }
         let rule = DeferredShapeRule::PostApp {
             replay: PostAppReplay::DtypeAdmissibility,
-            site: product.post_app_key(self.list),
             list: self.list.clone(),
             kids: self.kids.to_vec(),
             func_name: self.fname.to_string(),

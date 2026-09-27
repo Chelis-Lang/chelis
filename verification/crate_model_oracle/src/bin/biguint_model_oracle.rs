@@ -1,10 +1,29 @@
 //! Native oracle for BigUintModelChecks.lean: compare stdout verbatim. Exercises
 //! the num-bigint 0.4.6 `BigUint` operations modeled in `Aeneas/Std/BigUint.lean`,
-//! including the zero-divisor panics.
+//! including the zero-divisor panics and the bytes `Hash` writes.
 
 use num_bigint::BigUint;
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// A hasher that records every byte written and counts the `write` calls.
+#[derive(Default)]
+struct Log {
+    bytes: Vec<u8>,
+    writes: u32,
+}
+
+impl Hasher for Log {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        self.writes += 1;
+    }
+}
 
 fn show(r: std::thread::Result<BigUint>) -> String {
     match r {
@@ -76,5 +95,11 @@ fn main() {
     }
     for (i, n) in [0u128, u128::MAX].into_iter().enumerate() {
         println!("from-u128-{i}={}", BigUint::from(n));
+    }
+    // `Hash`: the digit vector's `Hash` (`[u64]`: length prefix, then one write of the digits).
+    for (i, v) in values.iter().enumerate() {
+        let mut log = Log::default();
+        v.hash(&mut log);
+        println!("hash-{i}={} {:?}", log.writes, log.bytes);
     }
 }

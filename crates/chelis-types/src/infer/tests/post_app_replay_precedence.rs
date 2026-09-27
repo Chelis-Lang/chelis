@@ -37,8 +37,14 @@ fn probe() -> (
     Subst,
     Vec<Type>,
 ) {
+    // One call of the numbered program: the ledger keys it by its identity.
+    let deep::Expr::List(call, _) =
+        crate::infer::checked::numbered(node_expr(DeepTag::App, vec![]))
+    else {
+        unreachable!("node_expr produces a list")
+    };
     (
-        deep::List { elements: vec![] },
+        call,
         Vec::new(),
         Env::new(),
         InferenceProduct::default(),

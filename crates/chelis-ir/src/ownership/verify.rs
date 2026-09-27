@@ -597,7 +597,7 @@ fn site_error(index: usize, detail: &'static str) -> OwnershipError {
 /// ownership IR or the site builder. This is deliberately a second traversal
 /// over the retained emission payload: verification would be circular if it
 /// derived its expected sites from the lowering result it is checking.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct ExpectedHostSite<'a> {
     unit: usize,
     kind: super::ir::HostSiteKind,
