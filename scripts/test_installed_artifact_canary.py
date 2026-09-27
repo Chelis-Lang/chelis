@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from pathlib import Path
 import signal
@@ -77,6 +78,41 @@ class ArtifactTests(unittest.TestCase):
         inventory = canary.archive_inventory(self.archive([("stage/bin/chelis", b"x")]))
         with self.assertRaises(ValueError):
             canary.require_runtime_inventory(inventory)
+
+    def test_staged_runtime_must_be_the_shipped_sealed_runtime(self) -> None:
+        entries = [("stage/" + name, name.encode()) for name in canary.REQUIRED_FILES]
+        inventory = canary.archive_inventory(self.archive(entries))
+        output = self.root / "generated"
+        output.mkdir()
+        for name in ("lib/libchelis_runtime.a", *canary.HEADERS):
+            (output / Path(name).name).write_bytes(name.encode())
+        receipt = output / "chelis_runtime.receipt.json"
+        sealed = {"schema": "chelis-runtime-staging/1", "archive": "libchelis_runtime.a",
+                  "archive_sha256": inventory["lib/libchelis_runtime.a"], "mode": "sealed",
+                  "headers": {}, "chelis_version": "0.18.6"}
+        receipt.write_text(json.dumps(sealed))
+        canary.require_staged_runtime(output, inventory)
+        for name, change in (
+            ("development build", {"mode": "development"}),
+            ("receipt for other bytes", {"archive_sha256": "0" * 64}),
+            ("other schema", {"schema": "chelis-runtime-staging/2"}),
+        ):
+            with self.subTest(case=name):
+                receipt.write_text(json.dumps({**sealed, **change}))
+                with self.assertRaisesRegex(ValueError, "sealed runtime"):
+                    canary.require_staged_runtime(output, inventory)
+        for name, text in (("malformed", "{"), ("not an object", "[]")):
+            with self.subTest(case=name):
+                receipt.write_text(text)
+                with self.assertRaises(ValueError):
+                    canary.require_staged_runtime(output, inventory)
+        receipt.unlink()
+        with self.assertRaisesRegex(ValueError, "unreadable staging receipt"):
+            canary.require_staged_runtime(output, inventory)
+        receipt.write_text(json.dumps(sealed))
+        (output / "libchelis_runtime.a").write_bytes(b"swapped")
+        with self.assertRaisesRegex(ValueError, "different runtime archive"):
+            canary.require_staged_runtime(output, inventory)
 
     def test_dev_root_mapping_preserves_every_original_payload(self) -> None:
         original = self.archive([("chelis-dev-abcd1234/bin/chelis", b"compiler"),
