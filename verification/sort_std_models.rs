@@ -3,16 +3,20 @@
 //! compare `Equal` is unspecified; the models (a stable sort) are admitted only
 //! where `Equal` holds exactly for indistinguishable values, so that every
 //! sorted permutation is the same list: `Ord` of integers, `bool`, `char`,
-//! `str`, `String`, references, tuples and `#[derive(Ord)]` types of those, and
-//! comparators `|a, b| a.cmp(b)` / `|a, b| b.cmp(a)` on such types. Custom
-//! `Ord` impls, other comparators and key functions are rejected with
+//! `str`, `String`, references, tuples, `Option`, `Reverse` and
+//! `#[derive(PartialOrd, Ord)]` types of those, and comparators
+//! `|a, b| a.cmp(b)` / `|a, b| b.cmp(a)` on such types. Custom `Ord` or
+//! `PartialOrd` impls, other comparators and key functions are rejected with
 //! E_UNSUPPORTED_SORT.
 //!
-//! `<[T]>::sort_by` (stable) is admitted where the comparator is `Ord::cmp` of the
-//! same key of both elements, projected without computation (fields, borrows,
-//! copies, tuples), on such a key type: a pure total preorder, for which the
-//! stable order is unique. Equal keys keep their input order.
-use std::cmp::Ordering;
+//! The stable sorts keep the input order of equal elements. `<[T]>::sort` is
+//! admitted on the element types above. `<[T]>::sort_by` is admitted where the
+//! comparator is `Ord::cmp` of the same key of both elements, projected without
+//! computation (fields, borrows, copies, tuples), on such a key type: a pure
+//! total preorder, for which the stable order is unique. `<[T]>::sort_by_key` is
+//! admitted where the key function is an `Fn` closure (it does not mutate its
+//! captures) or a function item, with such a key type.
+use std::cmp::{Ordering, Reverse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BindingId(u32);
@@ -219,6 +223,172 @@ pub fn reject_by_custom_ord(mut values: Vec<Keyed>) -> Vec<Keyed> {
     values
 }
 
+/// `sort` (stable) on a derived `Ord` newtype (chelis-ir capacity_key.rs
+/// `obligations.sort()`).
+pub fn sort_stable_ids(raw: &[u32]) -> Vec<u32> {
+    let mut ids: Vec<BindingId> = raw.iter().map(|&n| BindingId(n)).collect();
+    ids.sort();
+    ids.into_iter().map(|id| id.0).collect()
+}
+
+/// `sort` on strings (chelis-ir span_merge.rs `merged_spans.sort()`).
+pub fn sort_stable_strings(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values
+}
+
+/// `sort` on `Option` (`None` first) and `Reverse` (descending) components.
+pub fn sort_stable_options(mut values: Vec<(Option<u32>, Reverse<u8>)>) -> Vec<(Option<u32>, Reverse<u8>)> {
+    values.sort();
+    values
+}
+
+/// A derived `Ord` through boxes and boxed slices (the field types of chelis-ir
+/// capacity_key.rs `CanonicalCapacity`, `canonical_factors.sort()`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Capacity {
+    Literal(u64),
+    Product(Box<[u32]>),
+    Quotient { dividend: Box<u32>, divisor: Box<u32> },
+}
+
+pub fn sort_capacities(mut values: Vec<Capacity>) -> Vec<Capacity> {
+    values.sort();
+    values
+}
+
+/// `sort` in place: the sorted slice is given back.
+pub fn sort_stable_in_place(values: &mut [(u8, Slot)]) {
+    values.sort();
+}
+
+/// `sort_by_key` on a copied field (chelis-types env.rs `vars.sort_by_key(|v| v.0)`):
+/// equal keys keep their input order.
+pub fn sort_by_key_field(mut values: Vec<(u32, char)>) -> Vec<(u32, char)> {
+    values.sort_by_key(|v| v.0);
+    values
+}
+
+/// A tuple of copied fields (chelis-ir ownership/last_use.rs
+/// `seeds.sort_by_key(|seed| (seed.definition_order, seed.id))`).
+pub fn sort_by_key_fields(mut values: Vec<(u8, u32, char)>) -> Vec<(u8, u32, char)> {
+    values.sort_by_key(|v| (v.1, v.0));
+    values
+}
+
+/// `Reverse` of a field (last_use.rs `sort_by_key(|placed| Reverse(placed.definition_order))`).
+pub fn sort_by_key_reverse(mut values: Vec<(usize, char)>) -> Vec<(usize, char)> {
+    values.sort_by_key(|v| Reverse(v.0));
+    values
+}
+
+/// A borrowed `&str` key through a method call (chelis-deep printer.rs
+/// `sorted.sort_by_key(|(key, _)| key.as_str())`).
+pub fn sort_by_key_str(entries: Vec<(String, u32)>) -> Vec<u32> {
+    let mut sorted: Vec<&(String, u32)> = entries.iter().collect();
+    sorted.sort_by_key(|(key, _)| key.as_str());
+    sorted.iter().map(|(_, value)| *value).collect()
+}
+
+/// A key read through a captured table (last_use.rs
+/// `expected.sort_by_key(|owner| Reverse(definitions[owner]))`): an index out of
+/// bounds panics in both sorts once there are two elements to compare.
+pub fn sort_by_key_captured(mut owners: Vec<usize>, definitions: &[u32]) -> Vec<usize> {
+    owners.sort_by_key(|owner| Reverse(definitions[*owner]));
+    owners
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Member {
+    pub slot: Option<usize>,
+    pub node: u32,
+}
+
+impl Member {
+    fn key(&self) -> (bool, Option<usize>, u32) {
+        (self.slot.is_none(), self.slot, self.node)
+    }
+}
+
+fn members(raw: &[(Option<usize>, u32)]) -> Vec<Member> {
+    raw.iter().map(|&(slot, node)| Member { slot, node }).collect()
+}
+
+fn member_nodes(members: Vec<Member>) -> Vec<u32> {
+    members.into_iter().map(|member| member.node).collect()
+}
+
+/// A method as the key function (chelis-ir axis_sources.rs
+/// `members.sort_by_key(OrderedMember::key)`).
+pub fn sort_by_key_fn_item(raw: &[(Option<usize>, u32)]) -> Vec<u32> {
+    let mut members = members(raw);
+    members.sort_by_key(Member::key);
+    member_nodes(members)
+}
+
+/// A closure variable that reads its captures (axis_sources.rs `order_key`).
+pub fn sort_by_key_local_closure(raw: &[(Option<usize>, u32)], by_node: bool) -> Vec<u32> {
+    let mut members = members(raw);
+    let order_key = |member: &Member| if by_node { (false, None, member.node) } else { member.key() };
+    members.sort_by_key(order_key);
+    member_nodes(members)
+}
+
+/// A cloned `String` in the key (chelis-types infer/declarations.rs
+/// `(definition.item_index, definition.name.clone())`).
+pub fn sort_by_key_cloned(mut values: Vec<(usize, String, u32)>) -> Vec<(usize, String, u32)> {
+    values.sort_by_key(|v| (v.0, v.1.clone()));
+    values
+}
+
+/// `sort_by_key` in place: the sorted slice is given back.
+pub fn sort_by_key_in_place(values: &mut [(u32, u32)]) {
+    values.sort_by_key(|v| v.1);
+}
+
+/// `sort` on a hand-written `Ord`.
+pub fn reject_sort_custom_ord(mut values: Vec<Keyed>) -> Vec<Keyed> {
+    values.sort();
+    values
+}
+
+/// A derived `Ord` with a hand-written `PartialOrd`: the sorts call its `lt`.
+#[allow(clippy::derive_ord_xor_partial_ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord)]
+pub struct Backwards(u32);
+
+impl PartialOrd for Backwards {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(other.0.cmp(&self.0))
+    }
+}
+
+pub fn reject_sort_custom_lt(mut values: Vec<Backwards>) -> Vec<Backwards> {
+    values.sort();
+    values
+}
+
+pub fn reject_unstable_custom_lt(mut values: Vec<Backwards>) -> Vec<Backwards> {
+    values.sort_unstable();
+    values
+}
+
+/// A key function that updates its state (`FnMut`).
+pub fn reject_by_key_stateful(mut values: Vec<u32>) -> (Vec<u32>, u32) {
+    let mut calls = 0;
+    values.sort_by_key(|v| {
+        calls += 1;
+        *v
+    });
+    (values, calls.min(1))
+}
+
+/// A key with a hand-written `Ord`.
+pub fn reject_by_key_custom_ord(mut values: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    values.sort_by_key(|v| Keyed { key: v.0, payload: v.1 });
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +471,95 @@ mod tests {
         assert_eq!(reject_custom_ord_comparator(vec![Keyed { key: 2, payload: 0 }]).len(), 1);
         assert_eq!(reject_key(vec![(2, 0), (1, 5)]), vec![(1, 5), (2, 0)]);
         assert_eq!(reject_custom_ord(vec![Keyed { key: 2, payload: 0 }]).len(), 1);
+    }
+
+    #[test]
+    fn stable_sorts() {
+        assert_eq!(sort_stable_ids(&[7, 3, 5, 3]), vec![3, 3, 5, 7]);
+        assert_eq!(sort_stable_ids(&[]), vec![]);
+        assert_eq!(
+            sort_stable_strings(vec!["b".to_string(), "ab".to_string(), "a".to_string(), "b".to_string()]),
+            vec!["a".to_string(), "ab".to_string(), "b".to_string(), "b".to_string()]
+        );
+        assert_eq!(
+            sort_stable_options(vec![
+                (Some(2), Reverse(1)),
+                (None, Reverse(0)),
+                (Some(2), Reverse(5)),
+                (None, Reverse(3)),
+                (Some(1), Reverse(0)),
+            ]),
+            vec![
+                (None, Reverse(3)),
+                (None, Reverse(0)),
+                (Some(1), Reverse(0)),
+                (Some(2), Reverse(5)),
+                (Some(2), Reverse(1)),
+            ]
+        );
+        let product = |factors: &[u32]| Capacity::Product(factors.to_vec().into_boxed_slice());
+        let quotient = Capacity::Quotient { dividend: Box::new(1), divisor: Box::new(2) };
+        assert_eq!(
+            sort_capacities(vec![product(&[2, 1]), Capacity::Literal(3), quotient.clone(), product(&[2]), Capacity::Literal(1)]),
+            vec![Capacity::Literal(1), Capacity::Literal(3), product(&[2]), product(&[2, 1]), quotient]
+        );
+        let mut slots = [(2, Slot::Free), (1, Slot::Held(3, true)), (2, Slot::Held(0, false)), (1, Slot::Free)];
+        sort_stable_in_place(&mut slots);
+        assert_eq!(
+            slots,
+            [(1, Slot::Free), (1, Slot::Held(3, true)), (2, Slot::Free), (2, Slot::Held(0, false))]
+        );
+    }
+
+    #[test]
+    fn stable_by_key_functions() {
+        assert_eq!(
+            sort_by_key_field(vec![(2, 'b'), (1, 'z'), (2, 'a'), (1, 'y')]),
+            vec![(1, 'z'), (1, 'y'), (2, 'b'), (2, 'a')]
+        );
+        assert_eq!(
+            sort_by_key_fields(vec![(1, 5, 'a'), (0, 3, 'b'), (2, 3, 'c'), (0, 5, 'd'), (0, 3, 'e')]),
+            vec![(0, 3, 'b'), (0, 3, 'e'), (2, 3, 'c'), (0, 5, 'd'), (1, 5, 'a')]
+        );
+        assert_eq!(
+            sort_by_key_reverse(vec![(1, 'a'), (3, 'b'), (1, 'c'), (2, 'd'), (3, 'e')]),
+            vec![(3, 'b'), (3, 'e'), (2, 'd'), (1, 'a'), (1, 'c')]
+        );
+        let entries = vec![("b".to_string(), 1), ("a".to_string(), 2), ("b".to_string(), 3), (String::new(), 4)];
+        assert_eq!(sort_by_key_str(entries), vec![4, 2, 1, 3]);
+        assert_eq!(sort_by_key_captured(vec![0, 1, 2, 3], &[5, 7, 5, 9]), vec![3, 1, 0, 2]);
+        assert_eq!(sort_by_key_captured(vec![4], &[1]), vec![4]);
+        assert!(std::panic::catch_unwind(|| sort_by_key_captured(vec![0, 4], &[1])).is_err());
+        let raw = [(Some(2), 10), (None, 11), (Some(0), 12), (Some(2), 9), (None, 8)];
+        assert_eq!(sort_by_key_fn_item(&raw), vec![12, 9, 10, 8, 11]);
+        assert_eq!(sort_by_key_local_closure(&raw, true), vec![8, 9, 10, 11, 12]);
+        assert_eq!(sort_by_key_local_closure(&raw, false), vec![12, 9, 10, 8, 11]);
+        assert_eq!(
+            sort_by_key_cloned(vec![
+                (1, "b".to_string(), 0),
+                (0, "z".to_string(), 1),
+                (1, "a".to_string(), 2),
+                (1, "b".to_string(), 3),
+            ]),
+            vec![
+                (0, "z".to_string(), 1),
+                (1, "a".to_string(), 2),
+                (1, "b".to_string(), 0),
+                (1, "b".to_string(), 3),
+            ]
+        );
+        let mut pairs = [(1, 3), (2, 1), (3, 3), (4, 0)];
+        sort_by_key_in_place(&mut pairs);
+        assert_eq!(pairs, [(4, 0), (2, 1), (1, 3), (3, 3)]);
+    }
+
+    #[test]
+    fn rejected_stable_are_native_behaviors() {
+        assert_eq!(reject_sort_custom_ord(vec![Keyed { key: 2, payload: 0 }]).len(), 1);
+        let backwards = vec![Backwards(1), Backwards(3), Backwards(2)];
+        assert_eq!(reject_sort_custom_lt(backwards.clone()), vec![Backwards(3), Backwards(2), Backwards(1)]);
+        assert_eq!(reject_unstable_custom_lt(backwards), vec![Backwards(3), Backwards(2), Backwards(1)]);
+        assert_eq!(reject_by_key_stateful(vec![2, 1]), (vec![1, 2], 1));
+        assert_eq!(reject_by_key_custom_ord(vec![(2, 0), (1, 5)]), vec![(1, 5), (2, 0)]);
     }
 }

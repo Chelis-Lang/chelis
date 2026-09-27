@@ -74,3 +74,34 @@ def byte (value : Option U8) : Option Nat := value.map (fun (x : U8) => x.val)
         (copy.code.val.map (fun (b : U8) => b.val), copy.line.val))
       (text_std_models.clone_diagnostic { code := toStr "E0042 é", line := 3#u32 }))
     (.ok ([0x45, 0x30, 0x30, 0x34, 0x32, 0x20, 0xc3, 0xa9], 3))
+
+def chars (l : List Char) (h : l.length ≤ Usize.max := by scalar_tac) : Slice Char := ⟨l, h⟩
+
+#eval do
+  expect "String::new, then pushes"
+    (decode id (text_std_models.built (chars ['a', 'é', 'z']))) (.ok "aéz")
+  expect "String::new alone" (decode id (text_std_models.built (chars []))) (.ok "")
+  expect "Default for String"
+    (decode (fun ((s, n) : String × Usize) => (s, n.val)) text_std_models.defaulted) (.ok ("", 0))
+  expect "String::pop, the given-back string"
+    (decode id (text_std_models.pop_last "abé")) (.ok (some 'é', "ab"))
+  expect "String::pop of the empty string"
+    (decode id (text_std_models.pop_last "")) (.ok (none, ""))
+  expect "char::len_utf8 at the width boundaries"
+    ((['a', Char.ofNat 0x7f, Char.ofNat 0x80, 'é', Char.ofNat 0x7ff, Char.ofNat 0x800, '€',
+        Char.ofNat 0xffff, Char.ofNat 0x10000, '😀'].map fun c =>
+      decode (fun (n : Usize) => n.val) (text_std_models.utf8_width c)))
+    ([1, 1, 2, 2, 2, 3, 3, 3, 4, 4].map .ok)
+  expect "char ASCII digit and alphanumeric classes"
+    ((['0', '9', 'a', 'z', 'A', 'Z', '/', ':', '@', '[', '`', '{', 'é'].map fun c =>
+      decode id (text_std_models.char_classes c)))
+    ([(true, true), (true, true), (false, true), (false, true), (false, true), (false, true),
+      (false, false), (false, false), (false, false), (false, false), (false, false), (false, false),
+      (false, false)].map .ok)
+  expect "u8 ASCII digit, alphabetic and alphanumeric classes"
+    (([48#u8, 57#u8, 97#u8, 122#u8, 65#u8, 90#u8, 47#u8, 58#u8, 64#u8, 91#u8, 96#u8, 123#u8,
+        0xc3#u8].map fun b => decode id (text_std_models.byte_classes b)))
+    ([(true, false, true), (true, false, true), (false, true, true), (false, true, true),
+      (false, true, true), (false, true, true), (false, false, false), (false, false, false),
+      (false, false, false), (false, false, false), (false, false, false), (false, false, false),
+      (false, false, false)].map .ok)

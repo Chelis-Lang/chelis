@@ -60,6 +60,7 @@ MODELS = {
     "misc_std_models": "MiscStdModels",
     "sort_std_models": "SortStdModels",
     "preflight_std_models": "PreflightStdModels",
+    "collection_std_models": "CollectionStdModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
@@ -79,6 +80,18 @@ MODEL_EDITIONS = {"join_shared_projection": "2024"}
 
 # These regressions require a restricted root, rather than all local items.
 MODEL_ROOTS = {
+    "production_sequences": tuple(f"production_sequences::{entry}" for entry in (
+        "remove_at",
+        "clear_then_extend",
+        "append_resumes",
+        "extend_callback_state",
+        "extend_failure",
+        "stable_duplicate_keys",
+        "sort_values",
+        "sort_key_failure",
+        "collect_ad_callback_order",
+        "collect_result_short_circuit",
+    )),
     "inherited_dispatch": ("inherited_dispatch::count_visible",),
     # Charon's canonical patterns, as in the whole-core chunks, and a comma-joined list.
     "start_from_roots": (
@@ -117,6 +130,11 @@ MODEL_ROOTS = {
         "sort_usizes", "sort_pairs", "sort_strings", "sort_strs", "sort_flags", "sort_ids",
         "sort_slots", "sort_descending", "sort_ascending_by", "sort_ids_descending",
         "sort_by_first", "sort_by_names", "sort_by_name_descending", "sort_by_copied",
+        "sort_stable_ids", "sort_stable_strings", "sort_stable_options", "sort_stable_in_place",
+        "sort_capacities",
+        "sort_by_key_field", "sort_by_key_fields", "sort_by_key_reverse", "sort_by_key_str",
+        "sort_by_key_captured", "sort_by_key_fn_item", "sort_by_key_local_closure",
+        "sort_by_key_cloned", "sort_by_key_in_place",
     )),
     "associated_iterators": tuple(f"associated_iterators::{entry}" for entry in (
         "copied_signature", "cloned_signature", "copied_resume", "cloned_resume",
@@ -134,6 +152,9 @@ MODEL_ROOTS = {
 # These native behaviors require collection hooks absent from the value-only
 # models. Strict extraction must reject them, including through generic delegates.
 REJECTED_ROOTS = {
+    # A sort_by_key whose key function has captured mutable state (see
+    # llbc/SortContracts.ml): its final state depends on std's evaluation sequence.
+    "production_sequences": ("production_sequences::reject_stateful_sort_key",),
     "collection_contracts": tuple(f"collection_contracts::{entry}" for entry in (
         "reject_vec_hint", "reject_empty_hint", "reject_map_hint", "reject_set_hint",
         "reject_extend_hint", "reject_wrapped_hint", "reject_result_hint",
@@ -144,18 +165,22 @@ REJECTED_ROOTS = {
     # A native-shell scope on a borrow of a borrow: its instance is not the model at
     # an extended state (a staged backward function, see ModelStateABI.threaded_fun_body).
     "lowering_runtime_models": ("chelis_ir::reject_nested_borrow_state",),
-    # Sorts whose Equal may hold between distinct elements, and stable sorts whose
-    # comparator is not Ord::cmp of one key of both elements (see llbc/SortContracts.ml).
+    # Sorts whose Equal may hold between distinct elements, stable sorts whose
+    # comparator is not Ord::cmp of one key of both elements, key functions that
+    # mutate their captures, and types whose Ord or PartialOrd is hand-written
+    # (see llbc/SortContracts.ml).
     "sort_std_models": tuple(f"sort_std_models::{entry}" for entry in (
         "reject_custom_ord", "reject_partial_comparator", "reject_stateful_comparator",
         "reject_custom_ord_comparator", "reject_key", "reject_by_crossed_keys",
         "reject_by_computed_key", "reject_by_stateful", "reject_by_float",
-        "reject_by_custom_ord",
+        "reject_by_custom_ord", "reject_sort_custom_ord", "reject_sort_custom_lt",
+        "reject_unstable_custom_lt", "reject_by_key_stateful", "reject_by_key_custom_ord",
     )),
 }
 
 # The admission diagnostic that each fixture's rejected roots must report.
 REJECTED_DIAGNOSTICS = {
+    "production_sequences": "E_UNSUPPORTED_SORT",
     "collection_contracts": "E_UNSUPPORTED_COLLECTION",
     "lowering_runtime_models": "Model at a borrowing state",
     "sort_std_models": "E_UNSUPPORTED_SORT",

@@ -80,3 +80,73 @@ def slot : sort_std_models.Slot → String
       (sort_std_models.sort_by_copied
         (vec [(1#u32, 5#u8, 2#u8), (2#u32, 0#u8, 1#u8), (3#u32, 9#u8, 2#u8), (0#u32, 0#u8, 1#u8)])))
     (.ok [(0, 0, 1), (2, 0, 1), (1, 5, 2), (3, 9, 2)])
+
+def capacity : sort_std_models.Capacity → String
+  | .Literal n => s!"L{n.val}"
+  | .Product factors => s!"P{factors.val.map (·.val)}"
+  | .Quotient a b => s!"Q({a.val},{b.val})"
+
+def rawMembers : Slice (Option Usize × U32) :=
+  ⟨[(some 2#usize, 10#u32), (none, 11#u32), (some 0#usize, 12#u32), (some 2#usize, 9#u32),
+    (none, 8#u32)], by scalar_tac⟩
+
+#eval show IO Unit from do
+  expect "sort, derived newtype" (decode (·.val.map (·.val))
+    (sort_std_models.sort_stable_ids ⟨[7#u32, 3#u32, 5#u32, 3#u32], by scalar_tac⟩)) (.ok [3, 3, 5, 7])
+  expect "sort, empty" (decode (·.val.map (·.val))
+    (sort_std_models.sort_stable_ids ⟨[], by scalar_tac⟩)) (.ok [])
+  expect "sort, strings" (decode (·.val)
+    (sort_std_models.sort_stable_strings (vec ["b", "ab", "a", "b"]))) (.ok ["a", "ab", "b", "b"])
+  expect "sort, Option and Reverse"
+    (decode (·.val.map fun ((o, r) : Option U32 × U8) => (o.map (·.val), r.val))
+      (sort_std_models.sort_stable_options (vec [(some 2#u32, 1#u8), (none, 0#u8), (some 2#u32, 5#u8),
+        (none, 3#u8), (some 1#u32, 0#u8)])))
+    (.ok [(none, 3), (none, 0), (some 1, 0), (some 2, 5), (some 2, 1)])
+  expect "sort, a derived Ord through boxes and boxed slices" (decode (·.val.map capacity)
+    (sort_std_models.sort_capacities (vec [.Product ⟨[2#u32, 1#u32], by scalar_tac⟩, .Literal 3#u64,
+      .Quotient 1#u32 2#u32, .Product ⟨[2#u32], by scalar_tac⟩, .Literal 1#u64])))
+    (.ok ["L1", "L3", "P[2]", "P[2, 1]", "Q(1,2)"])
+  expect "sort in place, the given-back slice"
+    (decode (·.val.map fun ((n, s) : U8 × sort_std_models.Slot) => (n.val, slot s))
+      (sort_std_models.sort_stable_in_place ⟨[(2#u8, .Free), (1#u8, .Held 3#u32 true),
+        (2#u8, .Held 0#u32 false), (1#u8, .Free)], by scalar_tac⟩))
+    (.ok [(1, "Free"), (1, "Held(3, true)"), (2, "Free"), (2, "Held(0, false)")])
+  expect "sort_by_key a field, stable" (decode (·.val.map fun ((k, c) : U32 × Char) => (k.val, c))
+    (sort_std_models.sort_by_key_field (vec [(2#u32, 'b'), (1#u32, 'z'), (2#u32, 'a'), (1#u32, 'y')])))
+    (.ok [(1, 'z'), (1, 'y'), (2, 'b'), (2, 'a')])
+  expect "sort_by_key a tuple of fields"
+    (decode (·.val.map fun ((a, b, c) : U8 × U32 × Char) => (a.val, b.val, c))
+      (sort_std_models.sort_by_key_fields (vec [(1#u8, 5#u32, 'a'), (0#u8, 3#u32, 'b'), (2#u8, 3#u32, 'c'),
+        (0#u8, 5#u32, 'd'), (0#u8, 3#u32, 'e')])))
+    (.ok [(0, 3, 'b'), (0, 3, 'e'), (2, 3, 'c'), (0, 5, 'd'), (1, 5, 'a')])
+  expect "sort_by_key Reverse, stable" (decode (·.val.map fun ((k, c) : Usize × Char) => (k.val, c))
+    (sort_std_models.sort_by_key_reverse (vec [(1#usize, 'a'), (3#usize, 'b'), (1#usize, 'c'),
+      (2#usize, 'd'), (3#usize, 'e')])))
+    (.ok [(3, 'b'), (3, 'e'), (2, 'd'), (1, 'a'), (1, 'c')])
+  expect "sort_by_key as_str" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_str (vec [("b", 1#u32), ("a", 2#u32), ("b", 3#u32), ("", 4#u32)])))
+    (.ok [4, 2, 1, 3])
+  expect "sort_by_key through a captured table" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_captured (vec [0#usize, 1#usize, 2#usize, 3#usize])
+      ⟨[5#u32, 7#u32, 5#u32, 9#u32], by scalar_tac⟩)) (.ok [3, 1, 0, 2])
+  expect "sort_by_key one element: no key computed" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_captured (vec [4#usize]) ⟨[1#u32], by scalar_tac⟩)) (.ok [4])
+  expect "sort_by_key key out of bounds: panic" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_captured (vec [0#usize, 4#usize]) ⟨[1#u32], by scalar_tac⟩))
+    (.error "failure")
+  expect "sort_by_key a method" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_fn_item rawMembers)) (.ok [12, 9, 10, 8, 11])
+  expect "sort_by_key a closure variable, by node" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_local_closure rawMembers true)) (.ok [8, 9, 10, 11, 12])
+  expect "sort_by_key a closure variable, by key" (decode (·.val.map (·.val))
+    (sort_std_models.sort_by_key_local_closure rawMembers false)) (.ok [12, 9, 10, 8, 11])
+  expect "sort_by_key a cloned String"
+    (decode (·.val.map fun ((i, s, n) : Usize × String × U32) => (i.val, s, n.val))
+      (sort_std_models.sort_by_key_cloned (vec [(1#usize, "b", 0#u32), (0#usize, "z", 1#u32),
+        (1#usize, "a", 2#u32), (1#usize, "b", 3#u32)])))
+    (.ok [(0, "z", 1), (1, "a", 2), (1, "b", 0), (1, "b", 3)])
+  expect "sort_by_key in place, the given-back slice"
+    (decode (·.val.map fun ((a, b) : U32 × U32) => (a.val, b.val))
+      (sort_std_models.sort_by_key_in_place ⟨[(1#u32, 3#u32), (2#u32, 1#u32), (3#u32, 3#u32),
+        (4#u32, 0#u32)], by scalar_tac⟩))
+    (.ok [(4, 0), (2, 1), (1, 3), (3, 3)])

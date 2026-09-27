@@ -1,6 +1,8 @@
 //! Core/alloc items of the production metadata checks (chelis-deep metadata,
 //! annotations, extension_data): `Option::iter` as a collection source, the
-//! consumers of `str::bytes`, `str::to_ascii_lowercase` and `String == &str`.
+//! consumers of `str::bytes`, `str::to_ascii_lowercase` and `String == &str`;
+//! `String::new`, `Default for String`, `String::pop`, `char::len_utf8` and the
+//! ASCII classes of `char` and `u8`.
 
 pub struct Storage {
     pub values: Vec<u32>,
@@ -69,6 +71,42 @@ pub fn clone_diagnostic(diagnostic: &Diagnostic) -> Diagnostic {
     diagnostic.clone()
 }
 
+/// `String::new`, then pushes (chelis-deep printer.rs).
+pub fn built(chars: &[char]) -> String {
+    let mut out = String::new();
+    for &c in chars {
+        out.push(c);
+    }
+    out
+}
+
+/// `Default for String`.
+pub fn defaulted() -> (String, usize) {
+    let text: String = Default::default();
+    let len = text.len();
+    (text, len)
+}
+
+/// `String::pop` on a borrowed string: the last char and the given-back string.
+pub fn pop_last(text: &mut String) -> Option<char> {
+    text.pop()
+}
+
+/// `char::len_utf8`.
+pub fn utf8_width(c: char) -> usize {
+    c.len_utf8()
+}
+
+/// `char::is_ascii_digit` and `char::is_ascii_alphanumeric`.
+pub fn char_classes(c: char) -> (bool, bool) {
+    (c.is_ascii_digit(), c.is_ascii_alphanumeric())
+}
+
+/// `u8::is_ascii_digit`, `u8::is_ascii_alphabetic` and `u8::is_ascii_alphanumeric`.
+pub fn byte_classes(b: u8) -> (bool, bool, bool) {
+    (b.is_ascii_digit(), b.is_ascii_alphabetic(), b.is_ascii_alphanumeric())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +147,44 @@ mod tests {
         let diagnostic = Diagnostic { code: "E0042 é".into(), line: 3 };
         let copy = clone_diagnostic(&diagnostic);
         assert_eq!((&*copy.code, copy.line), ("E0042 é", 3));
+    }
+
+    #[test]
+    fn strings_and_char_classes() {
+        assert_eq!(built(&['a', 'é', 'z']), "aéz");
+        assert_eq!(built(&[]), "");
+        assert_eq!(defaulted(), (String::new(), 0));
+        let mut text = "abé".to_string();
+        assert_eq!(pop_last(&mut text), Some('é'));
+        assert_eq!(text, "ab");
+        let mut empty = String::new();
+        assert_eq!(pop_last(&mut empty), None);
+        assert_eq!(empty, "");
+        let widths: Vec<usize> = ['a', '\u{7f}', '\u{80}', 'é', '\u{7ff}', '\u{800}', '€', '\u{ffff}', '\u{10000}', '😀']
+            .iter()
+            .map(|&c| utf8_width(c))
+            .collect();
+        assert_eq!(widths, vec![1, 1, 2, 2, 2, 3, 3, 3, 4, 4]);
+        let classes: Vec<(bool, bool)> =
+            ['0', '9', 'a', 'z', 'A', 'Z', '/', ':', '@', '[', '`', '{', 'é'].iter().map(|&c| char_classes(c)).collect();
+        assert_eq!(
+            classes,
+            vec![
+                (true, true), (true, true), (false, true), (false, true), (false, true), (false, true),
+                (false, false), (false, false), (false, false), (false, false), (false, false), (false, false),
+                (false, false),
+            ]
+        );
+        let bytes: Vec<(bool, bool, bool)> =
+            [b'0', b'9', b'a', b'z', b'A', b'Z', b'/', b':', b'@', b'[', b'`', b'{', 0xc3].iter().map(|&b| byte_classes(b)).collect();
+        assert_eq!(
+            bytes,
+            vec![
+                (true, false, true), (true, false, true), (false, true, true), (false, true, true),
+                (false, true, true), (false, true, true), (false, false, false), (false, false, false),
+                (false, false, false), (false, false, false), (false, false, false), (false, false, false),
+                (false, false, false),
+            ]
+        );
     }
 }

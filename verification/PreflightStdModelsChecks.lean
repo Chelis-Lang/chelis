@@ -160,7 +160,31 @@ set_option synthInstance.maxSize 512 in
   expect "sum overflow panics"
     (decode (·.val) (preflight_std_models.total_sizes (sl [core.num.Usize.MAX, 1#usize])))
     (.error "failure")
+  -- Iterator::sum and product consume the iterator; the models give back its final state
+  expect "sum of a counting map, the counter given back"
+    (decode (fun ((s, c) : Usize × Usize) => (s.val, c.val))
+      (preflight_std_models.counted_total (sl [1#u32, 2#u32, 3#u32]) 5#usize)) (.ok (6, 8))
+  expect "sum of an empty counting map, the counter given back"
+    (decode (fun ((s, c) : Usize × Usize) => (s.val, c.val))
+      (preflight_std_models.counted_total (sl []) 8#usize)) (.ok (0, 8))
+  expect "product of a recording map, the last factor given back"
+    (decode (fun ((p, l) : Usize × Usize) => (p.val, l.val))
+      (preflight_std_models.recorded_product (sl [2#usize, 3#usize, 4#usize]) 0#usize)) (.ok (24, 4))
+  expect "product of an empty recording map, the state given back"
+    (decode (fun ((p, l) : Usize × Usize) => (p.val, l.val))
+      (preflight_std_models.recorded_product (sl []) 7#usize)) (.ok (1, 7))
+  expect "product overflow panics"
+    (decode (fun ((p, l) : Usize × Usize) => (p.val, l.val))
+      (preflight_std_models.recorded_product (sl [core.num.Usize.MAX, 2#usize]) 0#usize))
+    (.error "failure")
+  expect "sum of borrowed usizes"
+    (decode (·.val) (preflight_std_models.extent_total (sl [3#usize, 4#usize, 5#usize]))) (.ok 12)
+  expect "sum of no borrowed usizes"
+    (decode (·.val) (preflight_std_models.extent_total (sl []))) (.ok 0)
+  expect "sum of borrowed usizes overflow panics"
+    (decode (·.val) (preflight_std_models.extent_total (sl [core.num.Usize.MAX, 1#usize])))
+    (.error "failure")
   -- AsRef for Box
   expect "Box as_ref" (decode (fun ((a, n) : U32 × Usize) => (a.val, n.val))
     (preflight_std_models.unbox (4#u32, "abc"))) (.ok (5, 3))
-  IO.println "preflight std models: 49 checks passed"
+  IO.println "preflight std models: 57 checks passed"

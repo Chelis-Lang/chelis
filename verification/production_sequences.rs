@@ -62,14 +62,21 @@ pub fn extend_failure() -> Vec<u32> {
     values
 }
 
-pub fn stable_duplicate_keys() -> (Vec<(u32, u32)>, bool) {
+pub fn stable_duplicate_keys() -> Vec<(u32, u32)> {
+    let mut values = Vec::from([(2, 10), (1, 11), (2, 12), (1, 13)]);
+    values.sort_by_key(|item| item.0);
+    values
+}
+
+// A key function with captured mutable state: its final state depends on how often
+// and in which order std evaluates the key, so the sort_by_key model rejects it.
+pub fn reject_stateful_sort_key() -> (Vec<(u32, u32)>, bool) {
     let mut values = Vec::from([(2, 10), (1, 11), (2, 12), (1, 13)]);
     let mut called = false;
     values.sort_by_key(|item| {
         called = true;
         item.0
     });
-    // No assertion about how often or in which order the key was evaluated.
     (values, called)
 }
 
@@ -146,6 +153,10 @@ mod tests {
     fn sorting_is_stable_and_observes_key_callbacks() {
         assert_eq!(
             stable_duplicate_keys(),
+            vec![(1, 11), (1, 13), (2, 10), (2, 12)]
+        );
+        assert_eq!(
+            reject_stateful_sort_key(),
             (vec![(1, 11), (1, 13), (2, 10), (2, 12)], true)
         );
         assert_eq!(sort_values(), vec![1, 1, 2, 3]);

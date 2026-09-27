@@ -34,11 +34,11 @@ def failed {α : Type} : Result α → Bool
       production_sequences.extend_callback_state) (.ok ([8, 11, 12], 3))
   expect "extend propagates iterator callback failure"
     (failed production_sequences.extend_failure) true
-  expect "stable sorting preserves duplicate order and restores key callback state"
-    (decode (fun ((v, called) : alloc.vec.Vec (U32 × U32) × Bool) =>
-      (v.val.map (fun ((key, tag) : U32 × U32) => (key.val, tag.val)), called))
+  expect "stable sorting preserves duplicate order"
+    (decode (fun (v : alloc.vec.Vec (U32 × U32)) =>
+      v.val.map (fun ((key, tag) : U32 × U32) => (key.val, tag.val)))
       production_sequences.stable_duplicate_keys)
-    (.ok ([(1, 11), (1, 13), (2, 10), (2, 12)], true))
+    (.ok [(1, 11), (1, 13), (2, 10), (2, 12)])
   expect "sort uses the element ordering"
     (decode values production_sequences.sort_values) (.ok [1, 1, 2, 3])
   expect "sort_by_key propagates callback failure"

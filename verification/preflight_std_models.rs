@@ -4,7 +4,10 @@
 //! `BTreeMap::get_mut`, `<[T]>::first_mut` and `last_mut`, `RangeFull` slice
 //! indexing (`[..]`, `get(..)`, `get_mut(..)`), `String::with_capacity`, `push`,
 //! `push_str` and `len`, `str::repeat` and `contains`, `bool::then`,
-//! `Iterator::sum` (`Sum<usize> for usize`, through `Map`) and `AsRef for Box`.
+//! `Iterator::sum` (`Sum<usize> for usize`, through `Map`) and `AsRef for Box`;
+//! `Iterator::sum` and `product` of a `Map` whose closure captures a mutable borrow
+//! (the models return the consumed iterator), `Product<usize> for usize` and
+//! `Sum<&usize> for usize` through the slice iterator.
 //! The functions taking `&mut` check the values given back.
 use std::collections::{BTreeMap, VecDeque};
 
@@ -172,6 +175,35 @@ pub fn total_sizes(items: &[usize]) -> usize {
     items.iter().map(|size| *size).sum()
 }
 
+/// `sum` of a `Map` whose closure counts its calls through a mutable borrow: the
+/// counter is given back after the sum consumed the iterator.
+pub fn counted_total(items: &[u32], calls: &mut usize) -> usize {
+    items
+        .iter()
+        .map(|x| {
+            *calls += 1;
+            *x as usize
+        })
+        .sum::<usize>()
+}
+
+/// `product` (`Product<usize> for usize`) of a `Map` whose closure records the last
+/// factor through a mutable borrow.
+pub fn recorded_product(items: &[usize], last: &mut usize) -> usize {
+    items
+        .iter()
+        .map(|x| {
+            *last = *x;
+            *x
+        })
+        .product::<usize>()
+}
+
+/// `Sum<&usize> for usize` on a slice iterator (lower.rs `concat_extents.iter().sum()`).
+pub fn extent_total(extents: &[usize]) -> usize {
+    extents.iter().sum()
+}
+
 /// `AsRef<T> for Box<T>`.
 pub fn unbox(boxed: &Box<(u32, String)>) -> (u32, usize) {
     let inner: &(u32, String) = boxed.as_ref();
@@ -281,6 +313,21 @@ mod tests {
         assert_eq!(total(&[]), 0);
         assert_eq!(total_sizes(&[usize::MAX, 0]), usize::MAX);
         assert!(std::panic::catch_unwind(|| total_sizes(&[usize::MAX, 1])).is_err());
+        let mut calls = 5;
+        assert_eq!(counted_total(&[1, 2, 3], &mut calls), 6);
+        assert_eq!(calls, 8);
+        assert_eq!(counted_total(&[], &mut calls), 0);
+        assert_eq!(calls, 8);
+        let mut last = 0;
+        assert_eq!(recorded_product(&[2, 3, 4], &mut last), 24);
+        assert_eq!(last, 4);
+        let mut last = 7;
+        assert_eq!(recorded_product(&[], &mut last), 1);
+        assert_eq!(last, 7);
+        assert!(std::panic::catch_unwind(|| recorded_product(&[usize::MAX, 2], &mut 0)).is_err());
+        assert_eq!(extent_total(&[3, 4, 5]), 12);
+        assert_eq!(extent_total(&[]), 0);
+        assert!(std::panic::catch_unwind(|| extent_total(&[usize::MAX, 1])).is_err());
     }
 
     #[test]
