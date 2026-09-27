@@ -1425,7 +1425,7 @@ fn where_elementwise(
     // condition selecting one branch everywhere yields that branch, and an
     // empty condition yields an empty result of its own shape.
     let then_selected = condition_values.iter().any(|selected| *selected != 0);
-    let else_selected = condition_values.iter().any(|selected| *selected == 0);
+    let else_selected = condition_values.contains(&0);
     match (then_selected, else_selected) {
         (true, false) => return Ok(then_value.clone()),
         (false, true) => return Ok(else_value.clone()),

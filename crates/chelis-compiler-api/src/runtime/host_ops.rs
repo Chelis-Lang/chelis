@@ -2550,7 +2550,7 @@ pub(super) fn tensor_where_value(
     // [05-OP-53]: shapes agree only across what the condition selects. A
     // branch selected nowhere is neither read nor shape-checked.
     let then_selected = cond_mask.iter().any(|flag| *flag != 0);
-    let else_selected = cond_mask.iter().any(|flag| *flag == 0);
+    let else_selected = cond_mask.contains(&0);
     match (then_selected, else_selected) {
         (true, false) => return Ok(then_tensor.clone()),
         (false, true) => return Ok(else_tensor.clone()),
