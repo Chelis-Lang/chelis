@@ -161,16 +161,8 @@ fn require_shipped(
     expected: &str,
     version: &str,
 ) -> Result<(), String> {
-    let path = unpacked.join(relative);
-    let observed = fs::symlink_metadata(&path)
-        .and_then(|metadata| {
-            if metadata.is_file() {
-                Ok(())
-            } else {
-                Err(io::Error::other("not a regular file"))
-            }
-        })
-        .and_then(|()| sha256_file(&path))
+    let observed = within_release(unpacked, relative)
+        .and_then(|()| sha256_file(&unpacked.join(relative)))
         .map_err(|e| {
             format!(
                 "the chelis {version} release has no usable {}: {e}",
@@ -183,6 +175,29 @@ fn require_shipped(
              exports {expected}",
             relative.display()
         ));
+    }
+    Ok(())
+}
+
+/// Fail unless every component of `relative` below `root` is a real directory
+/// and the last is a regular file, so the check reads nothing a link points to.
+fn within_release(root: &Path, relative: &Path) -> io::Result<()> {
+    let mut path = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component);
+        let file_type = fs::symlink_metadata(&path)?.file_type();
+        let (expected, found) = if components.peek().is_some() {
+            ("directory", file_type.is_dir())
+        } else {
+            ("regular file", file_type.is_file())
+        };
+        if !found {
+            return Err(io::Error::other(format!(
+                "{} is not a {expected}",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            )));
+        }
     }
     Ok(())
 }

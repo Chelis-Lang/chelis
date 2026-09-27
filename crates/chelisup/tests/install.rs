@@ -81,7 +81,7 @@ type Refusal = (&'static str, fn(&mut ReleaseRuntime), &'static str);
 
 #[test]
 fn install_refuses_runtime_files_its_export_does_not_report() {
-    let cases: [Refusal; 11] = [
+    let cases: [Refusal; 12] = [
         (
             "swapped archive",
             |runtime| runtime.shipped_archive = b"another runtime".to_vec(),
@@ -90,7 +90,12 @@ fn install_refuses_runtime_files_its_export_does_not_report() {
         (
             "linked archive",
             |runtime| runtime.archive_is_symlink = true,
-            "no usable lib/libchelis_runtime.a",
+            "no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",
+        ),
+        (
+            "linked lib directory",
+            |runtime| runtime.lib_is_symlink = true,
+            "no usable lib/libchelis_runtime.a: lib is not a directory",
         ),
         (
             "swapped header",

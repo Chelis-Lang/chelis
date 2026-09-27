@@ -76,6 +76,8 @@ pub struct ReleaseRuntime {
     /// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding
     /// `shipped_archive`.
     pub archive_is_symlink: bool,
+    /// Ship `lib` as a symlink to a sibling `lib.real` directory.
+    pub lib_is_symlink: bool,
     /// `include/<name>` files in the tarball.
     pub shipped_headers: Vec<(String, Vec<u8>)>,
     /// The staging receipt the fake export writes.
@@ -108,6 +110,7 @@ impl ReleaseRuntime {
         Self {
             shipped_archive: archive,
             archive_is_symlink: false,
+            lib_is_symlink: false,
             shipped_headers: headers,
             receipt,
             export_status: 0,
@@ -175,6 +178,10 @@ pub fn build_release_tarball(
     }
     for (name, bytes) in &runtime.shipped_headers {
         fs::write(root.join("include").join(name), bytes).unwrap();
+    }
+    if runtime.lib_is_symlink {
+        fs::rename(root.join("lib"), root.join("lib.real")).unwrap();
+        std::os::unix::fs::symlink("lib.real", root.join("lib")).unwrap();
     }
     write_tarball(release_dir, &root)
 }
