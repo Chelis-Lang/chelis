@@ -343,7 +343,7 @@ class VerifiedCompilerJsonBindings:
 
 
 def verify_compiler_json_bindings(root: Path, target: Path):
-    from capacity_census_wire_calls import build_driver, collect_library
+    from capacity_census_wire_calls import build_binding_driver, collect_library
     from capacity_census_wire_schema import SchemaWireGraph
     from capacity_census_wire_verifier import verify_wire_census
     from capacity_census_compiler_json_construction import compile_construction_controls
@@ -370,7 +370,7 @@ def verify_compiler_json_bindings(root: Path, target: Path):
                      *(json.loads(item) for item in wire.schema.imported_documents)]
         graph = SchemaWireGraph(documents, wire.schema)
         graph.publication_graph()
-        driver = build_driver(root, target / "compiler-json-driver")
+        driver = build_binding_driver(root, target)
         evidence = collect_library(root, target, driver, scope="compiler-json")
         # Retain the actual compiler packet before obligation reconciliation,
         # including when a new ownership check rejects. This file is output

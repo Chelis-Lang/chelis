@@ -3133,6 +3133,24 @@ reason = "the dtype oracle executes the exact compiler-call inventory and Cargo-
 tracking_issue = "chelis#2048"
 
 [[path_rule]]
+prefix = "scripts/capacity_census_compiler_json.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes current compiler JSON binding authority and construction controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_native_authority.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes current native binding authority and execution controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
 prefix = "scripts/capacity_census_wire_invocation_owners.py"
 disposition = "owner"
 workflow = "heavy-e2e.yml"

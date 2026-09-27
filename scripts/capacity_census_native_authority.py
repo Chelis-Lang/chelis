@@ -176,7 +176,7 @@ def verify_native_bindings(root: Path, target: Path) -> VerifiedNativeBindings:
     """Collect every current native witness; accept no saved evidence input."""
 
     from capacity_census_typed import generate_rustdoc_json
-    from capacity_census_wire_calls import build_driver, collect_library
+    from capacity_census_wire_calls import build_binding_driver, collect_library
 
     root, target = root.resolve(), target.resolve()
     _require(target.is_relative_to(root / "target"),
@@ -196,7 +196,7 @@ def verify_native_bindings(root: Path, target: Path) -> VerifiedNativeBindings:
         )
     ]
     graph = RustdocGraph(documents)
-    driver = build_driver(root, target / "native-authority-driver")
+    driver = build_binding_driver(root, target)
     compiler_evidence = collect_library(
         root, target, driver, scope="native-bindings"
     )
