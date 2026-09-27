@@ -33,7 +33,7 @@
 
 use chelis_deep::DeepTag;
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
-use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph_cached};
+use chelis_reef::{EntryImports, PreparedReefGraph, SourceDigest, prepare_reef_graph_for_entries};
 use chelis_types::{CheckedProgram, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -515,10 +515,26 @@ impl CompiledContext {
     /// shares name+version+source bytes, or a cache file written by a
     /// differently-built `chelis` binary — is treated as a clean miss
     /// (`Ok(None)`), never a stale hit.
+    ///
+    /// This form serves entries that are package modules; see
+    /// [`Self::load_if_fresh_for_entries`].
     pub fn load_if_fresh(
+        path: &Path,
+        reef_home: &Path,
+        package_dir: &Path,
+    ) -> Result<Option<Self>, CacheError> {
+        Self::load_if_fresh_for_entries(path, reef_home, package_dir, &EntryImports::none())
+    }
+
+    /// [`Self::load_if_fresh`] for a caller that will also run `entries`
+    /// against the context (chelis#2558). They choose the chelis-std modules
+    /// the live graph links, and the source digests name that set, so a
+    /// context linked for other entries is a clean miss.
+    pub fn load_if_fresh_for_entries(
         path: &Path,
         _reef_home: &Path,
         package_dir: &Path,
+        entries: &EntryImports,
     ) -> Result<Option<Self>, CacheError> {
         // Read the entire file into memory before any decode work — no
         // streaming-decode windows where a half-written tail looks like
@@ -540,7 +556,8 @@ impl CompiledContext {
         // Recompute the source hash from the live package_dir. If the file
         // was named with a hash prefix that collides with a different
         // package, the recomputed hash will not match → cache miss.
-        let live_graph = prepare_reef_graph_cached(package_dir).map_err(CacheError::Reef)?;
+        let live_graph =
+            prepare_reef_graph_for_entries(package_dir, entries).map_err(CacheError::Reef)?;
         let live_digests = live_graph.source_digests().map_err(CacheError::Reef)?;
         let live_hash = ContextHash::from_digests(&live_digests);
         if envelope.source_hash != live_hash {
@@ -646,9 +663,14 @@ impl CompiledContext {
 /// The fallback path is `Ok` even if the post-compile `save` fails (the
 /// compile itself succeeded; surface a stderr warning and continue with
 /// the in-memory context). The next invocation will retry the save.
+///
+/// `entries` are the imports of every entry the caller will run against the
+/// context (chelis#2558). The context links only the chelis-std modules the
+/// package and those entries reach, and is cached per such set.
 pub fn load_or_compile_for_package(
     reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
 ) -> Result<CompiledContext, CompilerError> {
     // Resolve the compiled-context cache directory. When `CHELIS_REEF_HOME`
@@ -664,7 +686,7 @@ pub fn load_or_compile_for_package(
     let cache_dir = if reef_home.as_os_str().is_empty() {
         match crate::stdlib_cache::cache_dir_for("compiled") {
             Some(dir) => dir,
-            None => return compile_reef_context(reef_home, package_dir),
+            None => return compile_reef_context_for_entries(reef_home, package_dir, entries),
         }
     } else {
         reef_home.join(".cache").join("compiled")
@@ -673,7 +695,7 @@ pub fn load_or_compile_for_package(
     // mandatory pre-work for both the cache probe AND a full compile, so
     // we always pay it. On Coral-shape packages this is ~5s; the savings
     // come from skipping the rest of `compile_reef_context` on a hit.
-    let live_graph = match prepare_reef_graph_cached(package_dir) {
+    let live_graph = match prepare_reef_graph_for_entries(package_dir, entries) {
         Ok(g) => g,
         Err(e) => return Err(reef_error(&e)),
     };
@@ -703,7 +725,7 @@ pub fn load_or_compile_for_package(
     // Step 2: probe the disk cache. A clean miss (Ok(None)) is fine.
     // Corrupt / version-skewed / hash-mismatched files fall through to a
     // full compile + overwrite, with a stderr breadcrumb for the operator.
-    match CompiledContext::load_if_fresh(&cache_path, reef_home, package_dir) {
+    match CompiledContext::load_if_fresh_for_entries(&cache_path, reef_home, package_dir, entries) {
         Ok(Some(ctx)) => return Ok(ctx),
         Ok(None) => {}
         // A cancelled load judged nothing: propagate the cancellation and
@@ -727,7 +749,7 @@ pub fn load_or_compile_for_package(
     // The save is best-effort — if it fails, the compile result is still
     // usable for this invocation; only the next invocation pays the cold
     // cost again.
-    let ctx = compile_reef_context(reef_home, package_dir)?;
+    let ctx = compile_reef_context_for_entries(reef_home, package_dir, entries)?;
     if let Err(e) = ctx.save(&cache_path)
         && verbose_corruption_to_stderr
     {
@@ -774,12 +796,18 @@ pub enum ContextLoadPath {
 pub fn load_or_compile_with_local_registry_fallback(
     reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
     verbose_corruption_to_stderr: bool,
 ) -> Result<(CompiledContext, ContextLoadPath), CompilerError> {
-    match load_or_compile_for_package(reef_home, package_dir, verbose_corruption_to_stderr) {
+    match load_or_compile_for_package(
+        reef_home,
+        package_dir,
+        entries,
+        verbose_corruption_to_stderr,
+    ) {
         Ok(context) => Ok((context, ContextLoadPath::Cached)),
         Err(err) if is_local_registry_hash_gap(&err) => {
-            compile_reef_context(reef_home, package_dir)
+            compile_reef_context_for_entries(reef_home, package_dir, entries)
                 .map(|context| (context, ContextLoadPath::LocalRegistryFallback))
         }
         Err(err) => Err(err),
@@ -1296,8 +1324,20 @@ fn sanitize_path_component(s: &str) -> String {
 /// `_reef_home` is currently unused; reserved for the Phase I disk-cache
 /// key (the cache lives under `$CHELIS_REEF_HOME/.cache/compiled/...`).
 pub fn compile_reef_context(
+    reef_home: &Path,
+    package_dir: &Path,
+) -> Result<CompiledContext, CompilerError> {
+    compile_reef_context_for_entries(reef_home, package_dir, &EntryImports::none())
+}
+
+/// [`compile_reef_context`] for a caller that will also run `entries`
+/// against the context: it links, and checks, every chelis-std module the
+/// package or those entries reach and no other (chelis#2558).
+/// `compile_reef_context` itself serves entries that are package modules.
+pub fn compile_reef_context_for_entries(
     _reef_home: &Path,
     package_dir: &Path,
+    entries: &EntryImports,
 ) -> Result<CompiledContext, CompilerError> {
     // RFC v5 (RT-1 F2 bypass): the entire reef library is linker output
     // (internal-name-mangled), so the reserved linker-name rejection is
@@ -1329,7 +1369,8 @@ pub fn compile_reef_context(
     // lives in `chelis-types`; `prepare_reef_graph_cached` itself is
     // filesystem work and is not covered.
     bail_if_cancelled("reef")?;
-    let reef_state = prepare_reef_graph_cached(package_dir).map_err(|e| reef_error(&e))?;
+    let reef_state =
+        prepare_reef_graph_for_entries(package_dir, entries).map_err(|e| reef_error(&e))?;
     log_phase("prepare_reef_graph", &mut t);
     bail_if_cancelled("check")?;
     let digests = reef_state

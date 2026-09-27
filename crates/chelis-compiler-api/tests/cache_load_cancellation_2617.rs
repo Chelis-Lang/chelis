@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use chelis_compiler_api::{
-    COMPILER_VERSION, CancelToken, EVAL_CANCELLED_MSG, install_cancel_token,
+    COMPILER_VERSION, CancelToken, EVAL_CANCELLED_MSG, EntryImports, install_cancel_token,
     load_or_build_library_context, load_or_build_stdlib_context, load_or_compile_for_package,
     stdlib_cache_key,
 };
@@ -137,7 +137,8 @@ fn load_site(site: Site, package_root: &Path, reef_home: &Path, cancelled: bool)
             if cancelled {
                 token.cancel();
             }
-            load_or_compile_for_package(reef_home, package_root, true).map(|_| ())
+            load_or_compile_for_package(reef_home, package_root, &EntryImports::none(), true)
+                .map(|_| ())
         }
     };
     match result {

@@ -58,13 +58,17 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
     fs::write(
         root.join("reef.toml"),
         format!(
-            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n",
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"App\"\n\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\nchelis-std = {{ version = \"{}\" }}\n",
+            chelis_reef::compiler_bundled_chelis_std_version()
         ),
     )
     .expect("write app reef.toml");
     fs::write(
         root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
+        format!(
+            "module App.Main\n{}\ndef placeholder() -> i32 = cast(0, i32)\n",
+            every_stdlib_module_import()
+        ),
     )
     .expect("write main.ch");
     fs::write(
@@ -92,6 +96,37 @@ fn library_fixture(body: &str) -> (TempDir, PathBuf) {
 /// several megabytes and is dominated by the package's own definitions, so a
 /// handful of them compares the two routes over a payload nothing like the one
 /// they carry in production.
+/// A qualified `import` of every chelis-std module (chelis#2558). A package
+/// links only the chelis-std modules it imports, so a fixture that stands
+/// for a package linking the whole standard library imports all of them.
+fn every_stdlib_module_import() -> String {
+    fn collect(dir: &Path, modules: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).expect("read chelis-std sources") {
+            let path = entry.expect("chelis-std source entry").path();
+            if path.is_dir() {
+                collect(&path, modules);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("ch") {
+                let source = fs::read_to_string(&path).expect("read chelis-std module");
+                let module = source
+                    .lines()
+                    .find_map(|line| line.strip_prefix("module "))
+                    .expect("a chelis-std source declares its module");
+                modules.push(module.trim().to_string());
+            }
+        }
+    }
+    let mut modules = Vec::new();
+    collect(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std/src"),
+        &mut modules,
+    );
+    modules.sort();
+    modules
+        .iter()
+        .map(|module| format!("import {module}\n"))
+        .collect()
+}
+
 fn primary_library(bulk: usize) -> String {
     let mut names: Vec<String> = ["add", "square", "host_len", "decay", "bias", "settle"]
         .iter()
