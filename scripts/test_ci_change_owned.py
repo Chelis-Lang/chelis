@@ -1839,6 +1839,168 @@ class SchemaTests(unittest.TestCase):
 
 
 class DurationBaselineTests(unittest.TestCase):
+    def _write_expansion_sample(self, root: Path) -> tuple[Path, Path]:
+        identities = [owned.Identity("p", "alpha"), owned.Identity("p", "beta")]
+        plan = {
+            "version": owned.PLAN_VERSION,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": "e" * 40,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p"],
+            "eligible_targets": [identity.canonical for identity in identities],
+            "target_features": {identity.canonical: [] for identity in identities},
+            "change_owned": [],
+            "package_expansion": [],
+            "standing_targets": [],
+            "standing_coverage_reuse": [],
+            "manual_only_targets": [],
+            "manual_gate_targets": [],
+            "target_exclusions": [],
+            "test_exclusions": [],
+            **shard_fields([], []),
+        }
+        set_package_expansion(plan, identities)
+        owned.attach_plan_digest(plan)
+        plan_path = root / "plan.json"
+        plan_path.write_bytes(owned.canonical_json(plan))
+        receipts_root = root / "receipts"
+        for shard in owned.SHARDS:
+            selected = owned.execution_shards(plan, "package-expansion")[str(shard)]
+            output = receipts_root / f"shard-{shard}"
+            output.mkdir(parents=True)
+            tests = [f"{canonical}::case" for canonical in selected]
+            timings = {
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:04Z",
+                "elapsed_seconds": 4.0 if selected else 0.0,
+                "workspace_products": None,
+                "targets": {
+                    canonical: {
+                        "command_group": [canonical],
+                        "list_started_at": "2026-09-16T00:00:00Z",
+                        "list_finished_at": "2026-09-16T00:00:01Z",
+                        "list_seconds": 1.0,
+                        "run_started_at": "2026-09-16T00:00:01Z",
+                        "run_finished_at": "2026-09-16T00:00:04Z",
+                        "run_seconds": 3.0,
+                    }
+                    for canonical in selected
+                },
+            }
+            junit = "<testsuites>" + "".join(
+                f'<testsuite><testcase classname="{canonical}" name="case" time="2.5"/></testsuite>'
+                for canonical in selected
+            ) + "</testsuites>"
+            sidecars = {
+                "commands.json": owned.canonical_json([]),
+                "timings.json": owned.canonical_json(timings),
+                "test-list.json": owned.canonical_json({
+                    "selected_targets": selected,
+                    "selected_tests": tests,
+                    "executed_targets": selected,
+                    "executed_tests": tests,
+                    "not_applicable_targets": [],
+                    "manual_gate_tests": [],
+                }),
+                "junit.xml": junit.encode(),
+            }
+            for name, payload in sidecars.items():
+                (output / name).write_bytes(payload)
+            receipt = {
+                "version": owned.RECEIPT_VERSION,
+                "lane": "package-expansion",
+                "shard": shard,
+                "plan_digest": plan["plan_digest"],
+                "selected_targets": selected,
+                "executed_targets": selected,
+                "selected_tests": tests,
+                "executed_tests": tests,
+                "manual_gate_tests": [],
+                "commands_file": "commands.json",
+                "timings_file": "timings.json",
+                "test_list_file": "test-list.json",
+                "junit_file": "junit.xml",
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:04Z",
+                "elapsed_seconds": timings["elapsed_seconds"],
+                "soft_budget_seconds": owned.SOFT_BUDGET_SECONDS,
+                "soft_budget_exceeded": False,
+                "sidecars": {name: owned.sha256_bytes(payload) for name, payload in sidecars.items()},
+                "success": True,
+                "failures": [],
+            }
+            owned.attach_receipt_digest(receipt)
+            (output / "receipt.json").write_bytes(owned.canonical_json(receipt))
+        return plan_path, receipts_root
+
+    def test_builder_uses_complete_expansion_junit_and_keeps_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = self._write_expansion_sample(Path(tmp))
+            seed = owned.DURATION_BASELINE_PATH
+            result = owned.build_duration_baseline([sample], seed=seed)
+            self.assertEqual(result["targets"]["p::alpha"]["milliseconds"], 4000)
+            self.assertEqual(result["targets"]["p::beta"]["milliseconds"], 4000)
+            self.assertIn("chelis-backend-c::exec_compile", result["targets"])
+            self.assertEqual(
+                len(result["sources"]),
+                len(owned._strict_json_object(seed)["sources"]) + 1,
+            )
+
+    def test_builder_rejects_incomplete_expansion_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, receipts = sample = self._write_expansion_sample(Path(tmp))
+            receipt_path = next(receipts.rglob("receipt.json"))
+            receipt = json.loads(receipt_path.read_text())
+            receipt["success"] = False
+            receipt["failures"] = ["test failed"]
+            owned.attach_receipt_digest(receipt)
+            receipt_path.write_bytes(owned.canonical_json(receipt))
+            with self.assertRaisesRegex(ValueError, "successful.*expansion|expansion.*successful"):
+                owned.build_duration_baseline([sample])
+
+    def test_grouped_expansion_time_is_apportioned_by_junit_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(
+                '<testsuites><testcase classname="p::alpha" name="case" time="9"/>'
+                '<testcase classname="p::beta" name="case" time="1"/></testsuites>'
+            )
+            group = ["p::alpha", "p::beta"]
+            timing = {
+                "command_group": group,
+                "list_started_at": "now",
+                "list_finished_at": "now",
+                "list_seconds": 1.0,
+                "run_started_at": "now",
+                "run_finished_at": "now",
+                "run_seconds": 19.0,
+            }
+            receipt = {
+                "success": True,
+                "failures": [],
+                "selected_targets": group,
+                "executed_targets": group,
+                "selected_tests": [f"{target}::case" for target in group],
+                "executed_tests": [f"{target}::case" for target in group],
+                "manual_gate_tests": [],
+            }
+            timings = {"targets": {target: dict(timing) for target in group}}
+            result = owned._expansion_duration_observations(receipt, timings, junit)
+            self.assertEqual(result[owned.Identity("p", "alpha")], 18_000)
+            self.assertEqual(result[owned.Identity("p", "beta")], 2_000)
+            timings["targets"]["p::beta"]["run_seconds"] = 20.0
+            with self.assertRaisesRegex(ValueError, "grouped timing rows disagree"):
+                owned._expansion_duration_observations(receipt, timings, junit)
+            timings["targets"]["p::beta"]["run_seconds"] = 19.0
+            receipt["executed_tests"] = ["p::alpha::case"]
+            with self.assertRaisesRegex(ValueError, "incomplete coverage"):
+                owned._expansion_duration_observations(receipt, timings, junit)
+
     def _write_sample(
         self,
         root: Path,
