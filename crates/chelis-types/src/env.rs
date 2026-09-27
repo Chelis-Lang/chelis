@@ -223,14 +223,15 @@ pub struct Env {
     #[serde(skip)]
     holed_group_members: UnordMap<String, Arc<Scheme>>,
     /// The declared dtype-family bound of each binder variable those members
-    /// share, read from the header when it was bound. A sibling's call can
-    /// identify the variable before the member's own body is inferred, and
-    /// the binding then carries the merged family, not the declared one.
+    /// share, read from the header when it was bound. The group's completion
+    /// can identify the variable with a sibling's copy of it before the
+    /// member's contract is decided, and the binding then carries the merged
+    /// family, not the declared one.
     #[serde(skip)]
     holed_declared_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
-    /// The inference level of the group those members belong to.
+    /// The inference level of the recursive group being inferred.
     #[serde(skip)]
-    holed_group_level: Option<u32>,
+    group_level: Option<u32>,
     /// The composed `fresh TypeVar -> source name` map for the definition
     /// currently being inferred.
     ///
@@ -657,10 +658,12 @@ impl Env {
     /// type, as [04-INF-2] provides for a recursive call". [04-INF-2] keeps the
     /// two kinds of signature variable apart. An authored binder admits no
     /// substitute, so the header's binders are instantiated once, at fresh
-    /// variables minted inside the component's level, and every in-group
-    /// reference shares them with the member's own body: a call that swaps two
-    /// of them identifies them, which [04-INF-6] rejects. An inference hole
-    /// admits the caller's own type or a fully concrete one, so the provisional
+    /// variables minted inside the component's level, which the member's own
+    /// body and its own references share; a sibling's reference takes a copy
+    /// of them that the component's completion identifies with them
+    /// (`infer::group_link::sibling_instance`), so a call that swaps two of
+    /// them identifies them, which [04-INF-6] rejects. An inference hole admits
+    /// the caller's own type or a fully concrete one, so the provisional
     /// scheme quantifies the holes alone: the member's body and each in-group
     /// reference take their own instance, and the component's completion
     /// decides each reference's instance against the body's
@@ -812,15 +815,28 @@ impl Env {
         }
         self.holed_group_members
             .insert(name.to_string(), provisional);
-        self.holed_group_level = Some(inference_subst.current_level());
         true
     }
 
-    /// The level of the group whose holed members are bound: an in-group
-    /// reference's instance of a hole is lowered to it, so it stays
-    /// monomorphic until the group completes, as the group's own variables do.
-    pub(crate) fn holed_group_level(&self) -> Option<u32> {
-        self.holed_group_level
+    /// Enter the recursive group whose members are about to be bound at their
+    /// provisional types, inferred at `level`.
+    pub(crate) fn begin_group_level(&mut self, level: u32) {
+        self.group_level = Some(level);
+    }
+
+    /// The level of the recursive group being inferred: an in-group
+    /// reference's instance of a hole, and a sibling reference's copy of a
+    /// member's type, is lowered to it, so it stays monomorphic until the
+    /// group completes, as the group's own variables do.
+    pub(crate) fn group_level(&self) -> Option<u32> {
+        self.group_level
+    }
+
+    /// The dtype-family bound the header of a holed member of the group being
+    /// inferred declares for its binder variable `var`, or `None` when `var`
+    /// is no such binder or declares none.
+    pub(crate) fn declared_group_binder_bound(&self, var: TypeVar) -> Option<TypeVarRestriction> {
+        self.holed_declared_bounds.get(&var).copied().flatten()
     }
 
     /// Whether `name` is bound at its provisional type by
@@ -880,7 +896,7 @@ impl Env {
     pub(crate) fn end_holed_group(&mut self) {
         self.holed_group_members = UnordMap::default();
         self.holed_declared_bounds = UnordMap::default();
-        self.holed_group_level = None;
+        self.group_level = None;
     }
 
     /// The declared dtype-family bound of the authored binder variable `var`:

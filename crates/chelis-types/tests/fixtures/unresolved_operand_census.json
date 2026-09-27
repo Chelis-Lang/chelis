@@ -984,6 +984,14 @@
       "disposition": "deferred"
     },
     {
+      "file": "expr_transform.rs",
+      "function": "owner",
+      "ordinal": 1,
+      "pattern": "var @ Type::Var(_)",
+      "disposition": "not_a_route",
+      "reason": "asks which recursive-group member a variable at a position vmap batches stands for, so the caller can fence it (chelis#2651); no operand is admitted"
+    },
+    {
       "file": "group_link.rs",
       "function": "instance",
       "ordinal": 1,
@@ -1006,6 +1014,14 @@
       "pattern": "Type::Var(representative)",
       "disposition": "not_a_route",
       "reason": "classifies what a signature variable resolves to for the in-group instantiation rule; no operand is admitted"
+    },
+    {
+      "file": "group_link.rs",
+      "function": "sibling_instance",
+      "ordinal": 1,
+      "pattern": "Type::Var(copy)",
+      "disposition": "not_a_route",
+      "reason": "reads the fresh variable an instantiation minted as a sibling reference's copy of a member's variable; no operand is admitted"
     },
     {
       "file": "recursion.rs",

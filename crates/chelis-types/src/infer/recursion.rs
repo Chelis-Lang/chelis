@@ -399,6 +399,17 @@ pub(super) fn record_occurrence(
     });
 }
 
+/// Pin `vars`, a sibling reference's copies of a member's variables
+/// (`group_link::sibling_instance`), against generalization for the rest of
+/// the group, as an in-group instantiation's variables are.
+pub(super) fn pin(vars: impl IntoIterator<Item = TypeVar>) {
+    GROUP_CTX.with(|ctx| {
+        if let Some(c) = ctx.borrow_mut().as_mut() {
+            c.pinned.extend(vars);
+        }
+    });
+}
+
 /// Whether `v` was minted for an in-group instantiation of the active
 /// group. Consulted by `Env::generalize` so a `let`-bound alias of a group
 /// member stays monomorphic in the group's instantiation variables.

@@ -1070,7 +1070,7 @@ impl TopLevelReferenceGraph {
     }
 }
 
-pub(super) fn collect_top_level_references(
+fn collect_top_level_references(
     expr: &deep::Expr,
     vertex_by_name: &UnordMap<String, usize>,
     bound: &mut Vec<UnordSet<String>>,

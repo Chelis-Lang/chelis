@@ -17,6 +17,19 @@
 //! state that some processing order reaches first, so it cannot depend on
 //! the order of the group's declarations or references:
 //!
+//! 0. [`sibling_instance`] types a reference to a sibling, a member other
+//!    than the one whose body holds it, at a fresh copy of every variable of
+//!    the sibling's provisional type, so no body observes what a sibling's
+//!    body has determined ([04-INF-5]: "no reference can observe the hole
+//!    before the body has filled it"). What a body infers, and every rule
+//!    decided on it, is then the same in every declaration order. When the
+//!    group completes, [`link_group_references`] first identifies each copy of
+//!    a variable the rule below does not decide with the variable itself: an
+//!    authored binder, and every variable of a member that writes no
+//!    signature. These are the equations that sharing the variables would have
+//!    imposed as each reference was inferred, so the group's solution is the
+//!    same up to renaming.
+//!
 //! 1. [`solve`] links every reference and solves the group's constraints to a
 //!    fixed point, refusing nothing. A member's type parameters are the
 //!    variables of its body-determined type that are neither authored binders
@@ -56,9 +69,88 @@ pub(super) struct GroupReference {
     pub(super) span_offset: Option<usize>,
 }
 
+/// One reference to a sibling member: the fresh instance it was typed at,
+/// and the variables of the member's provisional type that the instance
+/// copied rather than instantiated, each paired with its copy.
+pub(super) struct SiblingLink {
+    /// The declaration whose body holds the reference.
+    pub(super) caller: Option<String>,
+    pub(super) callee: String,
+    pub(super) ty: Type,
+    /// The member's provisional type the instance copies.
+    pub(super) own: Type,
+    pub(super) copies: Vec<(Variable, Variable)>,
+    /// Whether the member writes no signature. Its instance is then the
+    /// member's own type once linked, so a rule that cannot be decided on one
+    /// of the instance's variables can wait for the group to complete.
+    pub(super) awaits: bool,
+    pub(super) span_id: Option<String>,
+    pub(super) span_offset: Option<usize>,
+}
+
+/// A sibling reference's instance of `scheme`, its callee's provisional
+/// scheme: a fresh variable for each hole the scheme quantifies, as at any
+/// reference, and a copy of every other variable of its type, which the
+/// callee's own body and references share. A copied binder keeps the bound
+/// its header declares, and nothing else a body has inferred about it.
+/// Returns the instance and each copied variable paired with its copy.
+pub(super) fn sibling_instance(
+    scheme: &Scheme,
+    env: &Env,
+    vg: &mut VarGen,
+    subst: &Subst,
+) -> (crate::env::InstantiatedScheme, Vec<(Variable, Variable)>) {
+    let copied_tvars = crate::env::free_tvars(&scheme.body)
+        .into_iter()
+        .filter(|var| !scheme.tvars.contains(var))
+        .collect::<Vec<_>>();
+    let copied_dvars = crate::env::free_dvars(&scheme.body)
+        .into_iter()
+        .filter(|var| !scheme.dvars.contains(var))
+        .collect::<Vec<_>>();
+    let copied_rvars = crate::env::free_rvars(&scheme.body)
+        .into_iter()
+        .filter(|var| !scheme.rvars.contains(var))
+        .collect::<Vec<_>>();
+    let mut copying = scheme.clone();
+    for var in &copied_tvars {
+        copying.tvars.push(*var);
+        if let Some(bound) = env.declared_group_binder_bound(*var) {
+            copying.tvar_restrictions.push((*var, bound));
+        }
+    }
+    copying.dvars.extend(copied_dvars.iter().copied());
+    copying.rvars.extend(copied_rvars.iter().copied());
+    let instantiated = env.instantiate_scheme(&copying, vg, subst);
+    let copies = instantiated
+        .tvars
+        .iter()
+        .filter(|(from, _)| copied_tvars.contains(from))
+        .filter_map(|(from, to)| match to {
+            Type::Var(copy) => Some((Variable::Type(*from), Variable::Type(*copy))),
+            _ => None,
+        })
+        .chain(
+            instantiated
+                .dvars
+                .iter()
+                .filter(|(from, _)| copied_dvars.contains(from))
+                .map(|(from, to)| (Variable::Dim(*from), Variable::Dim(*to))),
+        )
+        .chain(
+            instantiated
+                .rvars
+                .iter()
+                .filter(|(from, _)| copied_rvars.contains(from))
+                .map(|(from, to)| (Variable::Rank(*from), Variable::Rank(*to))),
+        )
+        .collect();
+    (instantiated, copies)
+}
+
 /// A signature variable of any kind.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Variable {
+pub(super) enum Variable {
     Type(TypeVar),
     Dim(DimVar),
     Rank(RankVar),
@@ -400,7 +492,8 @@ impl<'a> Group<'a> {
     }
 }
 
-/// Decide every in-group reference to a holed member of the completed
+/// Link every sibling reference's copies to the variables they copy, then
+/// decide every in-group reference to a holed member of the completed
 /// component (chelis#2590). Runs before the component's obligations are
 /// decided, so a check waiting on a reference's type sees the linked type.
 pub(super) fn link_group_references(
@@ -411,7 +504,10 @@ pub(super) fn link_group_references(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let (references, members) = product.take_group_links();
+    let (references, members, siblings) = product.take_group_links();
+    for link in &siblings {
+        link_copies(link, subst, errors);
+    }
     if references.is_empty() {
         return;
     }
@@ -424,6 +520,31 @@ pub(super) fn link_group_references(
         .collect::<Vec<_>>();
     if let Some(links) = solve(&group, product, env, vg, subst, adt_reg, errors) {
         decide(&group, &links, &locals, subst, errors);
+    }
+}
+
+/// Identify each of a sibling reference's copies with the variable it copies.
+/// When the reference's use disagrees with the member's type, the group is
+/// rejected at the reference, and the reference's variables the member's type
+/// does not share take the reported error's witness, so a check waiting on
+/// one stays silent rather than reporting the same mismatch again
+/// (chelis#731 §C3).
+fn link_copies(link: &SiblingLink, subst: &mut Subst, errors: &mut DiagnosticSink<'_>) {
+    let Some(error) = link
+        .copies
+        .iter()
+        .find_map(|(own, copy)| identify(*own, *copy, subst).err())
+    else {
+        return;
+    };
+    let own = resolved(&link.own, subst);
+    let used = resolved(&link.ty, subst);
+    let witness = report_witness(errors, sibling_disagreement(link, &own, &used, &error));
+    let shared = crate::env::free_tvars(&own);
+    for var in crate::env::free_tvars(&used) {
+        if !shared.contains(&var) {
+            let _ = unify(&Type::Var(var), &propagate(&witness), subst);
+        }
     }
 }
 
@@ -822,6 +943,37 @@ fn disagreement(
     error.expected = Some(own);
     error.got = Some(used);
     at_reference(error, reference)
+}
+
+/// [04-INF-2]: a sibling reference's use disagrees with the member's type,
+/// at which every in-group reference to the member is typed. The diagnostic
+/// keeps the kind of the mismatch that caused it.
+fn sibling_disagreement(
+    link: &SiblingLink,
+    own: &Type,
+    used: &Type,
+    cause: &TypeError,
+) -> CheckError {
+    let mut renaming = Renaming::default();
+    let own = renamed(own, &mut renaming).to_string();
+    let used = renamed(used, &mut renaming).to_string();
+    let caller = link.caller.as_deref().unwrap_or("<top level>");
+    let callee = &link.callee;
+    let mut error = CheckError::from(cause.clone());
+    error.message = format!(
+        "`{caller}` uses `{callee}` at `{used}`, which disagrees with `{callee}`'s type in its \
+         recursive group, `{own}`: {cause} (spec/04-type-system.md \u{a7}3.1.1 [04-INF-2])",
+        cause = cause.message,
+    );
+    error.suggestions.push(format!(
+        "every in-group reference to `{callee}` is typed at `{callee}`'s own type, which its \
+         body and the group's references to it determine together"
+    ));
+    error.expected = Some(own);
+    error.got = Some(used);
+    error.span_id.clone_from(&link.span_id);
+    error.span_offset = link.span_offset;
+    error
 }
 
 /// [04-INF-3]: an instance that is neither the parameter nor fully concrete.

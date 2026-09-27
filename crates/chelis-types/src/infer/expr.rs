@@ -895,37 +895,82 @@ pub(super) fn infer_var(
             // `env::tests::dvar_mapping_instantiation_matches_plain_instantiation`
             // pins that this is the same instantiation the two projections
             // used to perform.
-            let instantiated = env.instantiate_scheme(&scheme, vg, subst);
+            //
+            // A reference to a sibling, a member of the recursive group being
+            // inferred other than the declaration that holds the reference,
+            // also copies every variable of the member's provisional type that
+            // the scheme does not quantify, so it observes nothing a sibling's
+            // body has determined ([04-INF-5]); the group's completion links
+            // the copies (`group_link::sibling_instance`).
+            let holed = env.is_holed_group_reference(name, &scheme);
+            let unsigned = !holed && product.is_unsigned_group_reference(name, &scheme);
+            let sibling = (holed || unsigned) && product.references_a_sibling(name);
+            let (instantiated, copies) = if sibling {
+                super::group_link::sibling_instance(&scheme, env, vg, subst)
+            } else {
+                (env.instantiate_scheme(&scheme, vg, subst), Vec::new())
+            };
             // chelis#1801: the application rule reads these back to decide
             // which of THIS call's fresh dimension variables denote a
             // runtime extent they met (spec/04-type-system.md section 3.2).
-            product.record_instantiation_dvars(instantiated.dvars.iter().map(|(_, fresh)| *fresh));
-            if env.is_holed_group_reference(name, &scheme) {
+            product.record_instantiation_dvars(
+                instantiated
+                    .dvars
+                    .iter()
+                    .filter(|(quantified, _)| scheme.dvars.contains(quantified))
+                    .map(|(_, fresh)| *fresh),
+            );
+            if holed || sibling {
                 // chelis#2590: an in-group reference to a member whose header
                 // omits a type is decided against the member's body when its
-                // component completes (`group_link`). Until then its instance
+                // component completes (`group_link`), and a sibling
+                // reference's copies are linked then. Until then its instance
                 // belongs to the group's level, so a `let` inside a member
                 // cannot generalize over it and escape that decision.
-                if let Some(level) = env.holed_group_level() {
+                if let Some(level) = env.group_level() {
                     subst.lower_type_to_level(&instantiated.ty, level);
                 }
                 let span_id = node_span_id(node).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                product.record_group_reference(name, instantiated.ty.clone(), span_id, span_offset);
+                if holed {
+                    product.record_group_reference(
+                        name,
+                        instantiated.ty.clone(),
+                        span_id.clone(),
+                        span_offset,
+                    );
+                }
+                if sibling {
+                    super::recursion::pin(copies.iter().filter_map(|(_, copy)| match *copy {
+                        super::group_link::Variable::Type(var) => Some(var),
+                        _ => None,
+                    }));
+                    product.record_sibling_link(
+                        name,
+                        instantiated.ty.clone(),
+                        scheme.body.clone(),
+                        copies,
+                        unsigned,
+                        span_id,
+                        span_offset,
+                    );
+                }
             }
             if super::recursion::should_record_occurrence(name, &scheme) {
                 // spec/04 section 3.1.1: inside a recursive binding group,
                 // record the instantiation minted for an in-group reference
                 // so the group can be validated for uniform recursive
-                // instantiation.
+                // instantiation. A sibling reference's copies are linked to
+                // the member's own variables, not instantiated.
                 let span_id = node_span_id(node).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                super::recursion::record_occurrence(
-                    name,
-                    &instantiated.tvars,
-                    span_id,
-                    span_offset,
-                );
+                let quantified = instantiated
+                    .tvars
+                    .iter()
+                    .filter(|(quantified, _)| scheme.tvars.contains(quantified))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                super::recursion::record_occurrence(name, &quantified, span_id, span_offset);
             }
             let resolved = subst.apply(&instantiated.ty);
             // RFC D-CHECK: a bare reference to an out-of-module

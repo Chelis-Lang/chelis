@@ -106,10 +106,14 @@ pub(super) struct InferenceProduct {
     /// (`group_link::link_group_references`).
     group_references: Vec<GroupReference>,
     group_member_types: Vec<(String, Type)>,
+    /// The references to a sibling member of the recursive group being
+    /// inferred, each typed at a fresh copy of the member's provisional type
+    /// and linked to it when the group completes (`group_link::SiblingLink`).
+    sibling_links: Vec<SiblingLink>,
     /// chelis#2626: the name and provisional monomorphic type of each member
     /// of the recursive group being inferred whose declaration writes no
-    /// signature. Every reference shares it, so a sibling inferred earlier can
-    /// determine it. Dropped when the group completes.
+    /// signature. The member's own body and references share it; a sibling's
+    /// reference copies it. Dropped when the group completes.
     group_provisional_types: Vec<(String, Type)>,
 }
 
@@ -395,6 +399,51 @@ impl InferenceProduct {
         });
     }
 
+    /// Whether a reference to `name` from the declaration being inferred is a
+    /// reference to a sibling: a member of its recursive group other than
+    /// itself.
+    pub(super) fn references_a_sibling(&self, name: &str) -> bool {
+        self.active_declaration_name.as_deref() != Some(name)
+    }
+
+    /// Whether a reference to `name` that resolved to `scheme` is an in-group
+    /// reference to a member that writes no signature, and not to a local
+    /// binding that shadows it.
+    pub(super) fn is_unsigned_group_reference(&self, name: &str, scheme: &Scheme) -> bool {
+        scheme.tvars.is_empty()
+            && scheme.dvars.is_empty()
+            && scheme.rvars.is_empty()
+            && self
+                .group_provisional_types
+                .iter()
+                .any(|(member, provisional)| member == name && *provisional == scheme.body)
+    }
+
+    /// A reference to a sibling member, typed at the copy `ty` of its
+    /// provisional type `own` (`group_link::sibling_instance`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_sibling_link(
+        &mut self,
+        callee: &str,
+        ty: Type,
+        own: Type,
+        copies: Vec<(Variable, Variable)>,
+        awaits: bool,
+        span_id: Option<String>,
+        span_offset: Option<usize>,
+    ) {
+        self.sibling_links.push(SiblingLink {
+            caller: self.active_declaration_name.clone(),
+            callee: callee.to_string(),
+            ty,
+            own,
+            copies,
+            awaits,
+            span_id,
+            span_offset,
+        });
+    }
+
     /// chelis#2590: the instance of `name`'s provisional scheme that its own
     /// body is inferred against.
     pub(super) fn record_group_member_type(&mut self, name: &str, ty: Type) {
@@ -410,77 +459,80 @@ impl InferenceProduct {
         self.group_provisional_types.extend(types);
     }
 
-    /// chelis#2626: whether `ty` is a type variable of the provisional type of
-    /// a member of the recursive group being inferred that writes no
-    /// signature. Every reference to such a member shares that type, so
-    /// whichever member is inferred first can bind it, and a member's body
-    /// sees it bound or not depending on the order the group is written in. A
-    /// rule that cannot be decided on such a variable waits for it rather than
-    /// deciding on whatever that order has reached ([04-INF-5]).
+    /// chelis#2626: whether `ty` is a type variable that the completion of
+    /// the recursive group being inferred determines further: a variable of
+    /// the provisional type of a member that writes no signature, or of a
+    /// sibling reference's copy of one. A rule that cannot be decided on such
+    /// a variable waits for it. A body sees neither bound by a sibling, in any
+    /// order (`group_link::sibling_instance`), so the wait, and the decision
+    /// the group's completion replays, is the same in every declaration order.
     ///
     /// A reference to a member whose signature omits only some types takes a
-    /// fresh instance of them (chelis#2590), which is a variable wherever the
-    /// reference appears, in every order, so a rule decided on it is decided
-    /// the same way in every order. Waiting on it instead would let the
+    /// fresh instance of them (chelis#2590), which the completion decides as
+    /// the member's own type or a concrete one. Waiting on it would let the
     /// caller's own use of the reference choose the instance, which is how a
-    /// generic function is instantiated.
+    /// generic function is instantiated, so a rule is decided on it where it
+    /// is inferred.
     ///
-    /// A variable anywhere inside a provisional type qualifies, not only the
-    /// whole type of a parameter or result: a tuple component, a list element
-    /// or a tensor's precision is shared by every reference just the same.
+    /// A variable anywhere inside those types qualifies, not only the whole
+    /// type of a parameter or result: a tuple component, a list element or a
+    /// tensor's precision is linked just the same.
     pub(super) fn awaits_group_completion(&self, ty: &Type, subst: &Subst) -> bool {
         let Type::Var(var) = subst.apply(ty) else {
             return false;
         };
-        self.group_provisional_types.iter().any(|(_, provisional)| {
-            crate::env::free_tvars(&resolved(provisional, subst)).contains(&var)
-        })
-    }
-
-    /// chelis#2651: the first member of the recursive group being inferred
-    /// that writes no signature and that `operand` names, or calls from a
-    /// lambda's body, where the operand is written. `vmap` decides which
-    /// parameters and result it batches from the mapped function's type, and
-    /// such a member's type is its provisional one, which a sibling inferred
-    /// earlier or later determines. The answer is read off the syntax and the
-    /// group, which the reference graph fixes, so it is the same in every
-    /// declaration order.
-    ///
-    /// A name the operand binds itself (a lambda parameter, a `let`, a `match`
-    /// arm) is not the member, and neither is one bound in the enclosing
-    /// scope: there `env` binds the name to something other than the member's
-    /// provisional type.
-    pub(super) fn vmap_operand_group_member(
-        &self,
-        operand: &deep::Expr,
-        env: &Env,
-    ) -> Option<&str> {
-        if self.group_provisional_types.is_empty() {
-            return None;
-        }
-        let vertex_by_name: UnordMap<String, usize> = self
-            .group_provisional_types
+        self.group_provisional_types
             .iter()
-            .enumerate()
-            .map(|(index, (name, _))| (name.clone(), index))
-            .collect();
-        let mut references = std::collections::BTreeSet::new();
-        collect_top_level_references(operand, &vertex_by_name, &mut Vec::new(), &mut references);
-        references.iter().find_map(|reference| {
-            let (name, provisional) = &self.group_provisional_types[reference.target];
-            env.lookup(name)
-                .is_some_and(|scheme| scheme.body == *provisional)
-                .then_some(name.as_str())
-        })
+            .map(|(_, provisional)| provisional)
+            .chain(
+                self.sibling_links
+                    .iter()
+                    .filter(|link| link.awaits)
+                    .map(|link| &link.ty),
+            )
+            .any(|linked| crate::env::free_tvars(&resolved(linked, subst)).contains(&var))
     }
 
-    /// The component's in-group references and member types, taken for its
-    /// completion.
-    pub(super) fn take_group_links(&mut self) -> (Vec<GroupReference>, Vec<(String, Type)>) {
+    /// chelis#2651: the member of the recursive group being inferred whose
+    /// types the group has yet to determine and that `ty`, a type variable,
+    /// stands for part of: a variable of a signature-less member's
+    /// provisional type, of a sibling reference's copy of a member's type, or
+    /// of an in-group reference's instance of a member's omitted types. A body
+    /// sees each of these unbound by any sibling, in every declaration order,
+    /// so the answer is the same in every order.
+    pub(super) fn group_variable_owner(&self, ty: &Type, subst: &Subst) -> Option<&str> {
+        let Type::Var(var) = subst.apply(ty) else {
+            return None;
+        };
+        let holds = |linked: &Type| crate::env::free_tvars(&resolved(linked, subst)).contains(&var);
+        self.group_provisional_types
+            .iter()
+            .find(|(_, provisional)| holds(provisional))
+            .map(|(name, _)| name.as_str())
+            .or_else(|| {
+                self.sibling_links
+                    .iter()
+                    .find(|link| holds(&link.ty))
+                    .map(|link| link.callee.as_str())
+            })
+            .or_else(|| {
+                self.group_references
+                    .iter()
+                    .find(|reference| holds(&reference.ty))
+                    .map(|reference| reference.callee.as_str())
+            })
+    }
+
+    /// The component's in-group references, member types and sibling links,
+    /// taken for its completion.
+    pub(super) fn take_group_links(
+        &mut self,
+    ) -> (Vec<GroupReference>, Vec<(String, Type)>, Vec<SiblingLink>) {
         self.group_provisional_types.clear();
         (
             std::mem::take(&mut self.group_references),
             std::mem::take(&mut self.group_member_types),
+            std::mem::take(&mut self.sibling_links),
         )
     }
 

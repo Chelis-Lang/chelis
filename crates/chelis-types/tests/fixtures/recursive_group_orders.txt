@@ -1823,3 +1823,50 @@ def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
 def h(n: i32) = f(to_tensor([1.0f32, 1.0f32, 1.0f32]), n)
 
 def main() -> f32 = g(1)
+==== round5/adt
+type Box[a] =
+  | Box { v: a }
+
+def unbox[a](b: Box[a]) -> a = b.v
+
+def f(x, n) = {
+  k = unbox(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(f)
+  r = d(Box { v: 2.0f32 }, 0i32)
+  r.v
+}
+
+def h(n: i32) -> f32 = f(Box { v: 2.0f32 }, n)
+
+def main() -> f32 = g(1)
+==== round5/ctl_after
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else f(to_tensor([1.0f32]), n)
+
+def main() -> tensor[2, f32] = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+==== round5/ctl_nongroup_in_group
+def s(x) = tensor_to_scalar(sum(x, 0))
+
+def f(x: tensor[3, f32], n: i32) -> f32 = if eq(n, 0i32) then s(x) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  v = vmap(fn (row: tensor[3, f32]) -> s(row))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  add(tensor_to_scalar(sum(v, 0)), f(to_tensor([1.0f32, 2.0f32, 3.0f32]), n - 1))
+}
+
+def main() -> f32 = g(1)
+==== round5/ctl_shadow
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  f = fn (row: tensor[3, f32]) -> tensor_to_scalar(sum(row, 0))
+  v = vmap(f)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  tensor_to_scalar(sum(v, 0))
+}
+
+def main() -> f32 = g(1)

@@ -646,7 +646,7 @@ pub(super) fn infer_vmap(
     let axis = axis as usize;
 
     let f_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    if let Some(member) = product.vmap_operand_group_member(&kids[0], env) {
+    if let Some(member) = vmap_batches_a_group_variable(&f_ty, subst, product) {
         return report(errors, vmap_group_member_fence(node, member));
     }
     let resolved = subst.apply(&f_ty);
@@ -704,29 +704,59 @@ pub(super) fn infer_vmap(
     }
 }
 
+/// chelis#2651: the recursive-group member whose types the group has yet to
+/// determine and that a position `vmap` batches stands for: a parameter or
+/// the result of the mapped function type `f_ty`, through a reference or a
+/// tuple, that is a type variable the group's completion links
+/// ([`InferenceProduct::group_variable_owner`]). `vmap` decides whether it
+/// batches such a position where it is inferred, and passes a variable
+/// through unbatched; the group's completion can then make it a tensor or a
+/// scalar that should have been batched.
+fn vmap_batches_a_group_variable<'a>(
+    f_ty: &Type,
+    subst: &Subst,
+    product: &'a InferenceProduct,
+) -> Option<&'a str> {
+    fn owner<'a>(ty: &Type, subst: &Subst, product: &'a InferenceProduct) -> Option<&'a str> {
+        match subst.apply(ty) {
+            Type::Ref(inner) => owner(&inner, subst, product),
+            Type::Tuple(elements) => elements
+                .iter()
+                .find_map(|element| owner(element, subst, product)),
+            var @ Type::Var(_) => product.group_variable_owner(&var, subst),
+            _ => None,
+        }
+    }
+    let Type::Fn(args, ret) = subst.apply(f_ty) else {
+        return None;
+    };
+    args.iter()
+        .chain(std::iter::once(ret.as_ref()))
+        .find_map(|position| owner(position, subst, product))
+}
+
 /// chelis#2651: `vmap` decides which parameters and result it batches from
-/// the mapped function's type where it is inferred. When the operand is, or
-/// is a lambda that calls, a member of the caller's own recursive group that
-/// writes no signature, that type is the member's provisional one, which a
-/// sibling determines before or after this point depending on the order the
-/// group is written in ([04-INF-5]). Deciding the batching then gave a
-/// different verdict in each order, and in one order accepted a program whose
-/// evaluation contradicts its type. Deciding it once the group completes is
-/// not implemented, so the case is rejected, in every order: whether it
-/// applies is read off the operand's syntax and the group's membership, which
-/// the reference graph fixes.
+/// the mapped function's type where it is inferred. Inside a recursive group,
+/// a reference to a sibling is typed at a copy of the sibling's type that the
+/// group links when it completes, so a position `vmap` batches can still be a
+/// variable that the group then determines. Deciding the batching once the
+/// group completes is not implemented, so the case is rejected. A body sees
+/// such a variable unbound in every declaration order
+/// (`group_link::sibling_instance`), so the rejection is the same in every
+/// order, whatever binding the function reached the operand through.
 fn vmap_group_member_fence(node: &DeepNode, member: &str) -> CheckError {
     let unsupported = Unsupported::new(
         UnsupportedKind::Construct(format!(
-            "`vmap` over the signature-less recursive-group member `{member}`"
+            "`vmap` over a function whose type the recursive-group member `{member}` has yet \
+             to determine"
         )),
         "the batching decision, made before the group determines that member's types",
         Stage::Checker,
         crate::unimplemented_rejection!(
             2651,
-            "write the signature of the recursive-group member that the mapped function is or \
-             calls; `vmap` over a member whose types its group has yet to determine is not \
-             implemented"
+            "write the full signature of the recursive-group member that the mapped function's \
+             parameter or result type depends on; `vmap` over a type its group has yet to \
+             determine is not implemented"
         ),
     )
     .with_span(SpanRef {
@@ -735,7 +765,7 @@ fn vmap_group_member_fence(node: &DeepNode, member: &str) -> CheckError {
         span_id: node_span_id(node).map(str::to_owned),
     })
     .with_supported_alternative(format!(
-        "write `{member}`'s signature, with every parameter and result type"
+        "write `{member}`'s full signature, with every parameter and result type"
     ));
     CheckError::from_unsupported(unsupported)
 }

@@ -2254,6 +2254,12 @@ fn close_scope(cyclic: bool) -> CloseScope {
 /// full-reference component. Functions receive arity-shaped function types;
 /// eager values receive one fresh type variable. The component is removed and
 /// generalized as a unit after every body has unified with its provisional.
+///
+/// A member's body and its own references are typed at its provisional type.
+/// A sibling's reference is typed at a fresh copy of it, which the component's
+/// completion unifies with it (`group_link::sibling_instance`): no reference
+/// observes a member's type before the group has determined it ([04-INF-5]),
+/// so nothing a body infers depends on which sibling was inferred first.
 pub(super) fn prebind_cyclic_component_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
@@ -2264,6 +2270,7 @@ pub(super) fn prebind_cyclic_component_schemes(
     subst: &Subst,
 ) -> UnordMap<usize, Type> {
     let mut provisional = UnordMap::new();
+    env.begin_group_level(subst.current_level());
     for index in indices {
         let expr = items[*index].1;
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
