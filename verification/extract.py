@@ -19,7 +19,7 @@ CHARON_STRICT = ("--error-on-warnings", "--abort-on-error")
 ITERATOR_ADAPTERS = (
     "map::Map", "filter_map::FilterMap", "filter::Filter",
     "copied::Copied", "cloned::Cloned", "enumerate::Enumerate",
-    "take::Take", "rev::Rev",
+    "take::Take", "rev::Rev", "skip_while::SkipWhile",
 )
 # Specialize mutable control-flow payloads from their real Rust bodies;
 # the generic value-only Lean models cannot restore borrowed payload state.

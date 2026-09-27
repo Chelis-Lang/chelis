@@ -74,6 +74,9 @@ MODELS = {
     "slice_search_models": "SliceSearchModels",
     "scalar_ref_models": "ScalarRefModels",
     "collection_misc_models": "CollectionMiscModels",
+    "iter_order_models": "IterOrderModels",
+    "collection_convert_models": "CollectionConvertModels",
+    "str_convert_models": "StrConvertModels",
 }
 
 # Fixtures of crate-local native primitives compile under the production crate
@@ -125,6 +128,12 @@ MODEL_ROOTS = {
         "collect_result_short_circuit",
     )),
     "inherited_dispatch": ("inherited_dispatch::count_visible",),
+    # Every item but the rejected root (see REJECTED_ROOTS).
+    "iter_order_models": tuple(f"iter_order_models::{entry}" for entry in (
+        "representative", "least_index", "counted_min", "earliest_even_half",
+        "counted_filter_min", "is_identity", "axes_differ", "quotients_equal",
+        "quotients_differ_from_odd", "module_segments", "counted_skip", "first_two_kept",
+    )),
     # Charon's canonical patterns, as in the whole-core chunks, and a comma-joined list.
     "start_from_roots": (
         "start_from_roots::plain,start_from_roots::other",
@@ -184,6 +193,9 @@ MODEL_ROOTS = {
 # These native behaviors require collection hooks absent from the value-only
 # models. Strict extraction must reject them, including through generic delegates.
 REJECTED_ROOTS = {
+    # Iterator::eq over a closure capturing a mutable borrow: its model returns no state
+    # (see ModelStateABI.value_only_model).
+    "iter_order_models": ("iter_order_models::reject_stateful_eq",),
     # A sort_by_key whose key function has captured mutable state (see
     # llbc/SortContracts.ml): its final state depends on std's evaluation sequence.
     "production_sequences": ("production_sequences::reject_stateful_sort_key",),
@@ -212,6 +224,7 @@ REJECTED_ROOTS = {
 
 # The admission diagnostic that each fixture's rejected roots must report.
 REJECTED_DIAGNOSTICS = {
+    "iter_order_models": "takes its inputs by value and returns no state",
     "production_sequences": "E_UNSUPPORTED_SORT",
     "collection_contracts": "E_UNSUPPORTED_COLLECTION",
     "lowering_runtime_models": "Model at a borrowing state",
@@ -290,7 +303,7 @@ def charon_command(
             for adapter in (
                 "map::Map", "filter_map::FilterMap", "filter::Filter",
                 "copied::Copied", "cloned::Cloned", "enumerate::Enumerate",
-                "take::Take", "rev::Rev",
+                "take::Take", "rev::Rev", "skip_while::SkipWhile",
             )
             for argument in ("--include", f"core::iter::adapters::{adapter}")
         ],
