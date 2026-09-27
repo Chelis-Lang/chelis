@@ -28,11 +28,18 @@ arm is taken. An untaken arm's integer arithmetic, division or cast, integer
 sum, `max_reduce` or `argmax_reduce` over an empty axis, runtime `shrink`, `stride` or
 `pad` bound, call or result extent claim, axis restated under another
 extent name ([#2512](https://github.com/Chelis-Lang/chelis/issues/2512)),
-local tensor ascription, abort, or dead value reference checks nothing in
+abort, or dead value reference checks nothing in
 the DAG evaluator and in compiled C,
 including under `grad`, per `vmap` row, at a `vmap` call site and in the
 body of a `vmap` of `grad`
-([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)). Under `grad`
+([#2563](https://github.com/Chelis-Lang/chelis/issues/2563)). The same
+holds, in the DAG evaluator, the host interpreter and compiled C, for an
+untaken arm holding a callee's result claim, a local tensor ascription, or
+a broadcast `expand` of a local or a parameter whose axis the arm claims is
+1: the claim is not checked, a node sized by it yields zeros, and the `if`
+returns the other branch. `where` no longer reads or shape-checks a branch
+its condition selects in no element, so a condition that selects one branch
+everywhere returns that branch at its own shape. Under `grad`
 such an arm also contributes exactly nothing to the gradient, even where the
 values it computes are not finite, so a `log` of zero in an untaken arm, or
 of the zeros an untaken draw yields, no longer turns the gradient into NaN;
