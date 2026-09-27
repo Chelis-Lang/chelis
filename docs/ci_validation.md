@@ -471,3 +471,9 @@ unfinished starts identify the command active at cancellation. Test and class-se
 timings identify costs hidden in `setUpClass`. Set `CHELIS_CI_TIMING_DIR` to an
 absolute directory to enable census subprocess diagnostics locally. Timing data
 is diagnostic only and carries no correctness authority.
+
+When a change-owned or manual package-expansion shard selects a census, its
+uploaded shard receipt also contains `census-timings/*.jsonl` for the nested
+commands. The directory is inside the receipt so a failed or partial shard
+can upload the timings it reached; no prior timing or build result satisfies a
+test obligation.

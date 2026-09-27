@@ -1311,6 +1311,7 @@ jobs:
         if: steps.shard-selection.outputs.has_targets == 'true'
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+          CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/integration-change/change-owned-${{ matrix.shard }}/census-timings
         run: >-
           python scripts/ci_change_owned.py run-shard
           --plan target/integration-change/plan.json
