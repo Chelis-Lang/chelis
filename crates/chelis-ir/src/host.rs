@@ -16053,15 +16053,21 @@ fn tensor_helper_args(
 /// The host type of the top-level value declaration `name` resolves to: the
 /// checked type of its initializer, which its global holds. `None` when
 /// `name` resolves to no declaration or to a function.
+///
+/// The checked type the checker recorded for the declaration comes first: a
+/// block initializer's names are bound only inside it, so inferring the
+/// initializer again here, outside any scope, can leave a host inference
+/// variable unresolved (chelis#2547).
 fn top_level_value_host_type(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Option<HostTypeTerm> {
-    let (_, value) = program.def_named(name)?;
+    let (declaration, value) = program.def_named(name)?;
     if matches!(stamped_parts(value), Some((DeepTag::Fn, _, _))) {
         return None;
     }
-    Some(expr_host_type(value, program, &UnordMap::new()))
+    lookup_declared_host_type(program, declaration)
+        .or_else(|| Some(expr_host_type(value, program, &UnordMap::new())))
 }
 
 fn tensor_helper_inputs(dag: &crate::Dag) -> Vec<HostTensorInput> {
