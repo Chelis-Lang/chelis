@@ -60,3 +60,23 @@ def slot : sort_std_models.Slot → String
   expect "derived descending" (decode (·.val.map (·.val))
     (sort_std_models.sort_ids_descending ⟨[3#u32, 7#u32, 3#u32, 5#u32], by scalar_tac⟩))
     (.ok [7, 5, 3, 3])
+  expect "sort_by first component, stable" (decode (·.val.map fun ((k, v) : U32 × String) => (k.val, v))
+    (sort_std_models.sort_by_first (vec [(2#u32, "b"), (1#u32, "z"), (2#u32, "a"), (1#u32, "y")])))
+    (.ok [(1, "z"), (1, "y"), (2, "b"), (2, "a")])
+  expect "sort_by first component, empty" (decode (·.val.map fun ((k, v) : U32 × String) => (k.val, v))
+    (sort_std_models.sort_by_first (vec []))) (.ok [])
+  expect "sort_by a tuple of borrowed fields"
+    (decode (·.val.map fun ((a, c, n) : String × String × U32) => (a, c, n.val))
+      (sort_std_models.sort_by_names
+        (vec [("B", "x", 1#u32), ("A", "y", 2#u32), ("A", "x", 3#u32), ("B", "x", 4#u32)])))
+    (.ok [("A", "x", 3), ("A", "y", 2), ("B", "x", 1), ("B", "x", 4)])
+  expect "sort_by one field, descending, stable"
+    (decode (·.val.map fun ((a, c, n) : String × String × U32) => (a, c, n.val))
+      (sort_std_models.sort_by_name_descending
+        (vec [("a", "", 1#u32), ("c", "", 2#u32), ("b", "", 3#u32), ("c", "", 4#u32)])))
+    (.ok [("c", "", 2), ("c", "", 4), ("b", "", 3), ("a", "", 1)])
+  expect "sort_by a tuple of copied fields"
+    (decode (·.val.map fun ((a, b, c) : U32 × U8 × U8) => (a.val, b.val, c.val))
+      (sort_std_models.sort_by_copied
+        (vec [(1#u32, 5#u8, 2#u8), (2#u32, 0#u8, 1#u8), (3#u32, 9#u8, 2#u8), (0#u32, 0#u8, 1#u8)])))
+    (.ok [(0, 0, 1), (2, 0, 1), (1, 5, 2), (3, 9, 2)])

@@ -7,6 +7,11 @@
 //! comparators `|a, b| a.cmp(b)` / `|a, b| b.cmp(a)` on such types. Custom
 //! `Ord` impls, other comparators and key functions are rejected with
 //! E_UNSUPPORTED_SORT.
+//!
+//! `<[T]>::sort_by` (stable) is admitted where the comparator is `Ord::cmp` of the
+//! same key of both elements, projected without computation (fields, borrows,
+//! copies, tuples), on such a key type: a pure total preorder, for which the
+//! stable order is unique. Equal keys keep their input order.
 use std::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -134,6 +139,86 @@ pub fn reject_key(mut values: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     values
 }
 
+/// `sort_by` on the first component of pairs (chelis-deep annotations_codec.rs):
+/// equal keys keep their input order.
+pub fn sort_by_first(mut entries: Vec<(u32, String)>) -> Vec<(u32, String)> {
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries
+}
+
+pub struct Definition {
+    pub adt_name: String,
+    pub ctor_name: String,
+    pub arity: u32,
+}
+
+fn definitions(raw: Vec<(String, String, u32)>) -> Vec<Definition> {
+    raw.into_iter()
+        .map(|(adt_name, ctor_name, arity)| Definition { adt_name, ctor_name, arity })
+        .collect()
+}
+
+fn flatten(definitions: Vec<Definition>) -> Vec<(String, String, u32)> {
+    definitions.into_iter().map(|d| (d.adt_name, d.ctor_name, d.arity)).collect()
+}
+
+/// A tuple of borrowed fields as the key (chelis-ir host.rs `sort_by` of the
+/// constructor definitions).
+pub fn sort_by_names(raw: Vec<(String, String, u32)>) -> Vec<(String, String, u32)> {
+    let mut definitions = definitions(raw);
+    definitions.sort_by(|left, right| {
+        (&left.adt_name, &left.ctor_name).cmp(&(&right.adt_name, &right.ctor_name))
+    });
+    flatten(definitions)
+}
+
+/// One field as the key (chelis-types builtins.rs), descending.
+pub fn sort_by_name_descending(raw: Vec<(String, String, u32)>) -> Vec<(String, String, u32)> {
+    let mut definitions = definitions(raw);
+    definitions.sort_by(|a, b| b.adt_name.cmp(&a.adt_name));
+    flatten(definitions)
+}
+
+/// A tuple of copied fields as the key.
+pub fn sort_by_copied(mut values: Vec<(u32, u8, u8)>) -> Vec<(u32, u8, u8)> {
+    values.sort_by(|a, b| (a.2, a.0).cmp(&(b.2, b.0)));
+    values
+}
+
+/// Different keys of the two elements: not a preorder.
+pub fn reject_by_crossed_keys(mut values: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    values.sort_by(|a, b| a.0.cmp(&b.1));
+    values
+}
+
+/// A computed key.
+pub fn reject_by_computed_key(mut values: Vec<u32>) -> Vec<u32> {
+    values.sort_by(|a, b| (a % 3).cmp(&(b % 3)));
+    values
+}
+
+/// Returns `Ord::cmp` of keys, but also updates its state.
+pub fn reject_by_stateful(mut values: Vec<(u32, u32)>) -> (Vec<(u32, u32)>, u32) {
+    let mut calls = 0;
+    values.sort_by(|a, b| {
+        calls += 1;
+        a.0.cmp(&b.0)
+    });
+    (values, calls.min(1))
+}
+
+/// A float key (`partial_cmp`): no total order.
+pub fn reject_by_float(mut values: Vec<f64>) -> Vec<f64> {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values
+}
+
+/// `Ord::cmp` of a hand-written `Ord` (not checked to be a total order).
+pub fn reject_by_custom_ord(mut values: Vec<Keyed>) -> Vec<Keyed> {
+    values.sort_by(|a, b| a.cmp(b));
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +255,43 @@ mod tests {
             vec![(1, 'a'), (2, 'b'), (3, 'c')]
         );
         assert_eq!(sort_ids_descending(&[3, 7, 3, 5]), vec![7, 5, 3, 3]);
+    }
+
+    fn owned(raw: &[(&str, &str, u32)]) -> Vec<(String, String, u32)> {
+        raw.iter().map(|(a, c, n)| (a.to_string(), c.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn stable_by_keys() {
+        let entries = |raw: &[(u32, &str)]| -> Vec<(u32, String)> {
+            raw.iter().map(|(k, v)| (*k, v.to_string())).collect()
+        };
+        assert_eq!(
+            sort_by_first(entries(&[(2, "b"), (1, "z"), (2, "a"), (1, "y")])),
+            entries(&[(1, "z"), (1, "y"), (2, "b"), (2, "a")])
+        );
+        assert_eq!(sort_by_first(vec![]), vec![]);
+        assert_eq!(
+            sort_by_names(owned(&[("B", "x", 1), ("A", "y", 2), ("A", "x", 3), ("B", "x", 4)])),
+            owned(&[("A", "x", 3), ("A", "y", 2), ("B", "x", 1), ("B", "x", 4)])
+        );
+        assert_eq!(
+            sort_by_name_descending(owned(&[("a", "", 1), ("c", "", 2), ("b", "", 3), ("c", "", 4)])),
+            owned(&[("c", "", 2), ("c", "", 4), ("b", "", 3), ("a", "", 1)])
+        );
+        assert_eq!(
+            sort_by_copied(vec![(1, 5, 2), (2, 0, 1), (3, 9, 2), (0, 0, 1)]),
+            vec![(0, 0, 1), (2, 0, 1), (1, 5, 2), (3, 9, 2)]
+        );
+    }
+
+    #[test]
+    fn rejected_by_keys_are_native_behaviors() {
+        assert_eq!(reject_by_crossed_keys(vec![(1, 0)]), vec![(1, 0)]);
+        assert_eq!(reject_by_computed_key(vec![4, 3]), vec![3, 4]);
+        assert_eq!(reject_by_stateful(vec![(2, 0), (1, 0)]), (vec![(1, 0), (2, 0)], 1));
+        assert_eq!(reject_by_float(vec![2.0, 1.0]), vec![1.0, 2.0]);
+        assert_eq!(reject_by_custom_ord(vec![Keyed { key: 2, payload: 0 }]).len(), 1);
     }
 
     #[test]
