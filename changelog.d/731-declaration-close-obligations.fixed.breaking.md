@@ -144,14 +144,28 @@ completes.
   some types, as in `def f(x, n: i32) -> f32`, whose every reference takes a
   fresh instance of them. `chelis build --target c` does not implement `grad`
   of a generic function.
+- Inside a recursive group, no member's body sees what another member's body
+  has determined about that member's types before the group completes, in
+  any declaration order ([04-INF-5]): a reference to another member is typed
+  at a fresh copy of that member's type, which the group's completion then
+  unifies with it. A use of a member that writes no signature that disagrees
+  with the member's type is reported at that use, naming both types
+  ([04-INF-2]), with the kind of the mismatch; `main` reported it at the use
+  in some declaration orders and with no location in others.
 - Now rejected in every declaration order, with a typed not-yet-supported
   diagnostic citing [#2651](https://github.com/Chelis-Lang/chelis/issues/2651):
-  a `vmap` over a member of its own recursive group that writes no signature,
-  or over a lambda that calls one, such as
+  a `vmap` whose mapped function has a parameter or result, directly or inside
+  a tuple or reference type, whose type a member of the enclosing recursive group has yet to
+  determine, however the function reaches `vmap`: a sibling that writes no
+  signature or omits a type, a lambda that calls one, such as
   `vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))` inside `g` where
-  `def f(x, n)` is a sibling. `vmap` decides which parameters and result it
-  batches before the group has determined `f`'s types. `main` checked such a
-  program with `g` declared first, when its body adds `1.0f32` to the mapped
-  result, as `f32`, although `eval` returns a tensor, and rejected the others
-  with unrelated diagnostics. The diagnostic names the member, and writing its
-  signature makes the same programs check in every order.
+  `def f(x, n)` is a sibling, or a `let` binding of either. `vmap` decides
+  which parameters and result it batches before the group has determined
+  `f`'s types. `main` checked such a program as `f32` when `g`'s body adds
+  `1.0f32` to the mapped result, although `eval` returns a tensor: with `g`
+  declared first, and in every order when `f` omits only its result, as in
+  `def f(x: tensor[3, f32], n: i32)`. It rejected the others with unrelated
+  diagnostics. The diagnostic names the member, and writing its full
+  signature makes the same programs check in every order. A lambda that calls
+  such a member but whose parameters and result do not depend on it is not
+  rejected.
