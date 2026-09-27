@@ -886,16 +886,24 @@ def manual_gate_entries(document: str) -> dict[str, list[str]]:
 COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
 PLAIN_WORD = re.compile(r"[A-Za-z0-9_.,/:=-]+")
 ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+NEXTEST_RUN = ("cargo", "nextest", "run")
 # The value-taking options each runner accepts before ``--``, by role, and the
 # harness options and flags after it. A bare word is a test-name filter.
 CARGO_TEST_RUNNERS: dict[tuple[str, ...], dict[str, str]] = {
     ("cargo", "test"): {"-p": "package", "--package": "package", "--test": "test"},
-    ("cargo", "nextest", "run"): {
+    NEXTEST_RUN: {
         "-p": "package",
         "--package": "package",
         "--test": "test",
         "--run-ignored": "run-ignored",
     },
+}
+# Without this flag nextest applies its profile's default-filter, which can
+# exclude the target, so only a run that passes it is unfiltered.
+IGNORE_DEFAULT_FILTER = "--ignore-default-filter"
+CARGO_TEST_RUNNER_FLAGS: dict[tuple[str, ...], frozenset[str]] = {
+    ("cargo", "test"): frozenset(),
+    NEXTEST_RUN: frozenset({IGNORE_DEFAULT_FILTER}),
 }
 HARNESS_OPTIONS = {"--test-threads": "setting"}
 HARNESS_FLAGS = {"--ignored", "--exact", "--nocapture"}
@@ -946,8 +954,10 @@ def _cargo_test_run(segment: list[str]) -> CargoTestRun:
     for word in segment:
         if not PLAIN_WORD.fullmatch(word):
             raise ValueError(f"unrecognized word {word!r}")
-    while segment and ENV_ASSIGNMENT.fullmatch(segment[0]):
-        segment = segment[1:]
+    # An assignment can select a nextest profile whose filter excludes the
+    # target, or compile its tests out, so none is accepted before the runner.
+    if segment and ENV_ASSIGNMENT.fullmatch(segment[0]):
+        raise ValueError(f"environment assignment {segment[0]!r}")
     runner = next(
         (
             runner
@@ -960,9 +970,9 @@ def _cargo_test_run(segment: list[str]) -> CargoTestRun:
         raise ValueError("not `cargo test` or `cargo nextest run`")
     args = segment[len(runner) :]
     split = args.index("--") if "--" in args else len(args)
-    arguments = _arguments(args[:split], CARGO_TEST_RUNNERS[runner]) + _arguments(
-        args[split + 1 :], HARNESS_OPTIONS, HARNESS_FLAGS
-    )
+    arguments = _arguments(
+        args[:split], CARGO_TEST_RUNNERS[runner], CARGO_TEST_RUNNER_FLAGS[runner]
+    ) + _arguments(args[split + 1 :], HARNESS_OPTIONS, HARNESS_FLAGS)
     run_ignored = [value for role, value in arguments if role == "run-ignored"]
     if not set(run_ignored) <= {"all", "only"}:
         raise ValueError(f"unrecognized --run-ignored value in {run_ignored}")
@@ -970,7 +980,8 @@ def _cargo_test_run(segment: list[str]) -> CargoTestRun:
         packages=tuple(value for role, value in arguments if role == "package"),
         tests=tuple(value for role, value in arguments if role == "test"),
         ignored=bool(run_ignored) or ("--ignored", "") in arguments,
-        filtered=any(role == "filter" for role, _ in arguments),
+        filtered=any(role == "filter" for role, _ in arguments)
+        or (runner == NEXTEST_RUN and (IGNORE_DEFAULT_FILTER, "") not in arguments),
     )
 
 
@@ -1027,9 +1038,10 @@ def validate_manual_gate_entries(
 
     Each cited entry must exist once, and every segment of its command must be
     a Cargo test run of exactly the row's package and target with its ignored
-    tests; at least one cited entry must run them with no name filter. An
-    uncited entry that runs the target makes the row stale, and a segment of
-    any entry that names the target but cannot be classified is rejected.
+    tests; at least one cited entry must run them with no name filter, a
+    nextest profile's default-filter included. An uncited entry that runs the
+    target makes the row stale, and a segment of any entry that names the
+    target but cannot be classified is rejected.
     """
     entries = manual_gate_entries(document)
     for identity, gate in sorted(targets.items()):
@@ -1056,7 +1068,7 @@ def validate_manual_gate_entries(
             raise ValueError(
                 f"manual-gate target {identity.canonical} cites no "
                 f"{MANUAL_GATES_PATH} entry that runs its whole ignored suite "
-                "without a name filter"
+                "without a name filter or a nextest default-filter"
             )
         uncited = []
         for name, commands in sorted(entries.items()):

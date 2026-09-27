@@ -592,10 +592,14 @@ class SchemaTests(unittest.TestCase):
                     ("q_case", Q_CASE),
                     (
                         "q_nextest",
-                        "`CHELIS_X=1 cargo nextest run --package=q --test=smoke "
+                        "`cargo nextest run --package=q --test=smoke "
                         "-- --ignored --test-threads=1`",
                     ),
-                    ("q_all", "`cargo nextest run -p q --test smoke --run-ignored all`"),
+                    (
+                        "q_all",
+                        "`cargo nextest run -p q --test smoke --run-ignored all "
+                        "--ignore-default-filter`",
+                    ),
                 )
             ),
         )
@@ -701,6 +705,15 @@ class SchemaTests(unittest.TestCase):
             ("q_gate", Q_GATE),
             ("q_case", Q_CASE),
         )
+        nextest = "cargo nextest run -p q --test smoke --run-ignored only"
+        validate(manual_gate_row(), ("q_gate", f"`{nextest} --ignore-default-filter`"))
+        # Without the flag the profile's default-filter applies, so this entry
+        # counts only beside a whole-suite one.
+        validate(
+            manual_gate_row(manual_gates=["q_gate", "q_nextest"]),
+            ("q_gate", Q_GATE),
+            ("q_nextest", f"`{nextest}`"),
+        )
         cases = [
             ("`cargo test -p q --test smoke`", "does not run exactly q::smoke"),
             ("`cargo nextest run -p q --test smoke`", "does not run exactly q::smoke"),
@@ -718,6 +731,23 @@ class SchemaTests(unittest.TestCase):
             (
                 "`cargo test -p q --test smoke no_such_test -- --ignored --exact`",
                 "cites no docs/manual_gates.md entry that runs its whole",
+            ),
+            (f"`{nextest}`", "cites no docs/manual_gates.md entry that runs its whole"),
+            (
+                f"`NEXTEST_PROFILE=nightly {nextest} --ignore-default-filter`",
+                "environment assignment 'NEXTEST_PROFILE=nightly'",
+            ),
+            (
+                "`RUSTFLAGS=--cfg=skip_all cargo test -p q --test smoke -- --ignored`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
+            ),
+            (
+                "`CARGO_TARGET_DIR=/tmp/t cargo test -p q --test smoke -- --ignored`",
+                "environment assignment 'CARGO_TARGET_DIR=/tmp/t'",
+            ),
+            (
+                f"`{Q_GATE[1:-1]} && RUSTFLAGS=--cfg=skip_all {Q_GATE[1:-1]}`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
             ),
         ]
         for command, message in cases:
@@ -771,6 +801,9 @@ class SchemaTests(unittest.TestCase):
         with self.subTest(uncited="prose"):
             with self.assertRaisesRegex(ValueError, "not one code span"):
                 validate(("q_gate", Q_GATE), ("q_extra", "Run smoke by hand"))
+        with self.subTest(uncited="environment assignment"):
+            with self.assertRaisesRegex(ValueError, "environment assignment 'X=1'"):
+                validate(("q_gate", Q_GATE), ("q_extra", f"`X=1 {Q_GATE[1:-1]}`"))
         cited = [
             f"{smoke} && {other.replace('cargo test', 'cargo t')}",
             f"{smoke} && {other.replace('cargo', 'cargo +stable')}",
