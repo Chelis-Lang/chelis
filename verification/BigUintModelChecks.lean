@@ -29,6 +29,11 @@ def u128 (n : Nat) : U128 := ⟨BitVec.ofNat _ n⟩
 instance {ty} : Inhabited (core.result.Result (UScalar ty) (num_bigint.TryFromBigIntError Nat)) :=
   ⟨.Err ⟨0⟩⟩
 
+/-- A hasher that records every byte written and counts the `write` calls (the oracle's `Log`). -/
+def logHasher : core.hash.Hasher (List Nat × Nat) :=
+  { finish := fun _ => .ok 0#u64
+    write := fun (bytes, writes) s => .ok (bytes ++ s.val.map (·.val), writes + 1) }
+
 def tryStr {ty} : core.result.Result (UScalar ty) (num_bigint.TryFromBigIntError Nat) → String
   | .Ok n => s!"ok {n.val}"
   | .Err e => s!"err {e.original}"
@@ -75,6 +80,9 @@ def main : IO Unit := do
     IO.println s!"from-usize-{i}={ok! (FromUsize.from_ (usize n))}"
   for (n, i) in [0, 2 ^ 128 - 1].zipIdx do
     IO.println s!"from-u128-{i}={ok! (FromU128.from_ (u128 n))}"
+  for (v, i) in values.zipIdx do
+    let (bytes, writes) := ok! (HashBigUint.hash logHasher v ([], 0))
+    IO.println s!"hash-{i}={writes} {bytes}"
 
 #eval main
 
