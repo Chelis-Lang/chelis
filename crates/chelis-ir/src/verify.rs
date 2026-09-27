@@ -1128,6 +1128,11 @@ pub enum SplitCount {
 /// random operand rules each have one implementation on both sides of the
 /// codec. A node is named by its position; a position that names no node
 /// has no dtype and no dims.
+///
+/// The view has a node's value inputs and its activation, and no other
+/// edge: a shape dependency reads only its node's extent, which is not key
+/// material ([04-LIN-9]), and a result-claim dependency orders a witness, so
+/// no key rule can count either as a use.
 pub trait KeyGraph {
     fn node_count(&self) -> usize;
     fn role(&self, node: usize) -> KeyRole;
@@ -1138,8 +1143,6 @@ pub trait KeyGraph {
     /// The node at `node`'s input `slot`, if the slot exists. Slots are
     /// dense: the first missing slot ends the node's inputs.
     fn input(&self, node: usize, slot: usize) -> Option<usize>;
-    /// The nodes `node` depends on without reading their values.
-    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_;
     /// `node`'s own activation (spec/10 §3.2), if it has one.
     fn activation(&self, node: usize) -> Option<usize>;
     fn roots(&self) -> impl Iterator<Item = usize> + '_;
@@ -1233,13 +1236,6 @@ impl KeyGraph for Dag {
 
     fn input(&self, node: usize, slot: usize) -> Option<usize> {
         Some(self.get(NodeId(node))?.inputs.get(slot)?.0)
-    }
-
-    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.get(NodeId(node))
-            .into_iter()
-            .flat_map(|node| node.shape_deps.iter().chain(&node.result_claim_deps))
-            .map(|dependency| dependency.0)
     }
 
     fn activation(&self, node: usize) -> Option<usize> {
@@ -1341,10 +1337,12 @@ fn activations_exclusive(graph: &impl KeyGraph, left: usize, right: usize) -> bo
 ///   activation conjoined with the two arms of one branch ([`join_arms`]).
 ///   Rule S: a key derived under such sharing is consumed only under that
 ///   activation, or by the join of its branch ([`verify_confinement`]).
-/// - V4: a key reaching any other operation or slot, or a dependency list,
-///   is rejected: the slots are those of the key allow-list's graph
-///   admissions ([`KeyRole::admission`]). Replays read their forward draw's
-///   key, and extent reads their key tensor's extent, without consuming it.
+/// - V4: a key reaching any other operation or slot is rejected: the slots
+///   are those of the key allow-list's graph admissions
+///   ([`KeyRole::admission`]). Replays read their forward draw's key, and
+///   extent reads their key tensor's extent, without consuming it; so does a
+///   node that names a key in its shape dependencies, which [`KeyGraph`]
+///   does not show.
 ///
 /// Each message names a key by [`KeyGraph::describe_key`] and a node by
 /// [`KeyGraph::describe_node`].
@@ -1393,15 +1391,6 @@ pub fn verify_key_rules(graph: &impl KeyGraph, errors: &mut Vec<String>) {
                 "{} produces a key, but only a key operation, a join or a Load produces one",
                 graph.describe_node(node)
             ));
-        }
-        for dependency in graph.dependencies(node) {
-            if is_key(dependency) {
-                errors.push(format!(
-                    "{} takes {} as a dependency",
-                    graph.describe_node(node),
-                    key(dependency)
-                ));
-            }
         }
         let inputs = (0..).map_while(|slot| graph.input(node, slot));
         for (slot, input) in inputs.enumerate().filter(|(_, input)| is_key(*input)) {
@@ -2962,6 +2951,12 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                 axis < node.output_type.dims.len()
                     && (crate::axis_sources::expand_or_reshape_carrier(&node.op, axis).is_some()
                         || crate::axis_sources::op_computed_axis_extent(&node.op, axis).is_some()
+                        // [05-OP-71]: a split's count axis produces its extent
+                        // as an expansion's size does, and the split checks
+                        // every extent its type declares before any key
+                        // exists, in both lanes.
+                        || matches!(node.op, RiscOp::SplitN { .. })
+                            && axis + 1 == node.output_type.dims.len()
                         || matches!(
                             crate::axis_sources::same_shape_result_agreement(dag, node.id),
                             Ok(Some(_))

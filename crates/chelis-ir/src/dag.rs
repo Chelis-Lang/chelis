@@ -3288,21 +3288,17 @@ pub(crate) fn op_declared_axes_by_node(dag: &Dag) -> UnordMap<NodeId, Vec<(Strin
 
 /// chelis#616: add a shape-dep from every node that references an
 /// op-declared runtime dim (in its output dims or op-internal fields) to the
-/// dim's declaring node. DCE and grad's output pruning honor `shape_deps`,
-/// so this keeps the declarer — and, transitively, its bound-scalar chain —
+/// dim's declaring node, when the declarer is earlier: a dependency names an
+/// earlier node, and a node before the declarer that names the dim has it
+/// from elsewhere (a parameter's shape). The declarer may be a key split: the
+/// edge reads its extent, which is not key material ([04-LIN-9]). DCE and
+/// grad's output pruning honor `shape_deps`, so this keeps the declarer — and, transitively, its bound-scalar chain —
 /// alive for consumers that need the extent at run time even when the
 /// declarer's VALUE is dead (e.g. a backward `Expand` over a runtime reshape
 /// extent whose forward result the gradient never reads).
 pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     let mut declarers: UnordMap<String, NodeId> = UnordMap::new();
     for node in dag.nodes() {
-        // chelis#2413: a runtime-count `SplitN` declares its count axis, but
-        // its value is a key, which no node may take as a dependency (spec/10
-        // §3.2). It needs no edge: a runtime count can trap, so every pruner
-        // keeps the split live by itself (`Dag::random_node_may_trap`).
-        if node.output_type.precision == Prim::Key {
-            continue;
-        }
         for (symbol, _) in op_declared_output_axes(dag, node) {
             declarers.entry(symbol).or_insert(node.id);
         }
@@ -3324,7 +3320,7 @@ pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
         names.extend(op_internal_symbolic_dims(&node.op));
         for name in names {
             if let Some(declarer) = declarers.get(&name)
-                && *declarer != node.id
+                && *declarer < node.id
             {
                 deps.push((node.id, *declarer));
             }

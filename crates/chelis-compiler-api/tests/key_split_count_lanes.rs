@@ -137,8 +137,14 @@ fn a_runtime_count_that_disagrees_traps_domain_in_eval_and_c() {
             "extent `3`: claimed = 3, split_keys axis 0 = 4",
         ),
     ];
+    traps_in_both_lanes(trap, &rows);
+}
+
+/// Each row traps with `trap` after its `claimed =` context line, the same
+/// two lines in the DAG evaluator and in compiled C.
+fn traps_in_both_lanes(trap: &str, rows: &[(&str, String, &str)]) {
     let mut failures = Vec::new();
-    for (label, source, context) in &rows {
+    for (label, source, context) in rows {
         let expected = [context.to_string(), trap.to_string()];
         let lines = |text: &str| {
             text.lines()
@@ -158,6 +164,115 @@ fn a_runtime_count_that_disagrees_traps_domain_in_eval_and_c() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// [04-LIN-9], spec/10 §3.2: a key tensor's extent is not key material. A
+/// split bound under a claim on its count axis (`ks: tensor[n, key]`) is the
+/// extent every later node of that extent observes, and a function result
+/// claim may rest on the split's count axis as on an expansion's size. The
+/// keys are returned (`a4`) or drawn from (`a5`, `v6`), and eval equals C
+/// equals the reference, with a balanced ownership ledger.
+///
+/// Evidentiary status: REGRESSION TEST. At `96f5a4f9d` all three rows
+/// evaluated and failed `chelis build`: `a4` with "result claim at node 6
+/// requires an earlier witness and a supported producing axis", `a5` and
+/// `v6` with "node 9 takes the `split_keys` key at node 5 as a dependency".
+#[test]
+fn a_split_under_an_extent_claim_runs_in_eval_and_c() {
+    let bound = "  ks: tensor[n, key] = split_keys(k, shape(xs, 0i32))\n";
+    let rows = [
+        (
+            "a4",
+            format!(
+                "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, key] = {{\n{bound}  ks\n}}\ndef main() -> tensor[3, key] = f(key_from_seed(1i64), {DATA3})\n"
+            ),
+            "main = tensor(shape=[3], data=[key(f2e0ed7d61bc7ab1), key(1c3be871ed9d079c), key(b2fe04bac90dd534)])",
+        ),
+        (
+            "a5",
+            format!(
+                "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, f32] = {{\n{bound}  {DRAW}(ks, xs)\n}}\ndef main() -> tensor[2, f32] = f(key_from_seed(1i64), to_tensor([0.0f32, 0.0f32]))\n"
+            ),
+            "main = tensor(shape=[2], data=[0.120874755, 0.03584103])",
+        ),
+        (
+            "v6",
+            format!(
+                "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, f32] = {{\n{bound}  {DRAW}(ks, xs)\n}}\ndef main() -> tensor[3, f32] = f(key_from_seed(1i64), {DATA3})\n"
+            ),
+            UNIFORM_ROWS,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (label, source, expected) in &rows {
+        match eval_lines(source) {
+            Ok(lines) if lines == [*expected] => {}
+            other => failures.push(format!("eval {label}: {other:?}\n{source}")),
+        }
+        let generated = ownership_support::emit(source, label);
+        let (summary, stdout) = ownership_support::run_program(&generated);
+        ownership_support::balanced(&summary);
+        if stdout.lines().collect::<Vec<_>>() != [*expected] {
+            failures.push(format!("C {label}: {stdout:?}\n{source}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Negative parity: a runtime count that disagrees with the claim on the
+/// split's count axis, from a binding's ascription (drawn from or returned)
+/// or from the function's result, traps the typed `Domain` error in both
+/// lanes before any key exists.
+///
+/// Evidentiary status: REGRESSION TEST. At `96f5a4f9d` `chelis build`
+/// refused all three rows before any count was compared:
+/// `ascribed_and_drawn` with "node 9 takes the `split_keys` key at node 5 as
+/// a dependency" (and the evaluator with the same key rule), the other two
+/// with "result claim at node ... requires an earlier witness and a supported
+/// producing axis".
+#[test]
+fn a_split_count_that_disagrees_with_its_extent_claim_traps_domain_in_eval_and_c() {
+    let rows = [
+        (
+            "ascribed_and_drawn",
+            format!(
+                "def f[n](k: key, c: i64, xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  ks: tensor[n, key] = split_keys(k, c)\n  {DRAW}(ks, xs)\n}}\ndef main() -> tensor[3, f32] = f(key_from_seed(1i64), 2i64, {DATA3})\n"
+            ),
+            "extent `3`: claimed = 3, split_keys axis 0 = 2",
+        ),
+        (
+            "claimed_and_returned",
+            format!(
+                "def f[n](k: key, c: i64, xs: tensor[n, f32]) -> tensor[n, key] = {{\n  ks: tensor[n, key] = split_keys(k, c)\n  ks\n}}\ndef main() -> tensor[3, key] = f(key_from_seed(1i64), 4i64, {DATA3})\n"
+            ),
+            "extent `3`: claimed = 3, split_keys axis 0 = 4",
+        ),
+        (
+            "result_claim",
+            format!(
+                "def f[n](k: key, c: i64, xs: tensor[n, f32]) -> tensor[n, key] = split_keys(k, c)\ndef main() -> tensor[3, key] = f(key_from_seed(1i64), 4i64, {DATA3})\n"
+            ),
+            "extent `3`: claimed = 3, split_keys axis 0 = 4",
+        ),
+    ];
+    traps_in_both_lanes("numeric trap: domain in split_keys at i64", &rows);
+}
+
+/// Observing a split's extent is not a use, so the keys are still consumed
+/// exactly once: a second draw from `ks` is [04-LIN-9]'s reuse error.
+///
+/// Evidentiary status: LOCK (refused the same way at `96f5a4f9d`).
+#[test]
+fn a_split_under_an_extent_claim_is_still_consumed_once() {
+    let source = format!(
+        "def f[n](k: key, xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  ks: tensor[n, key] = split_keys(k, shape(xs, 0i32))\n  a = {DRAW}(ks, xs)\n  b = {DRAW}(ks, xs)\n  add(a, b)\n}}\ndef main() -> tensor[3, f32] = f(key_from_seed(1i64), {DATA3})\n"
+    );
+    let error = eval_lines(&source).expect_err("a second draw from `ks` is a reuse");
+    assert!(
+        error.contains("key-carrying variable `ks` was already consumed")
+            && error.contains("[04-LIN-9]"),
+        "{error}"
+    );
 }
 
 /// A literal count is a literal extent, so a mismatch the checker can see is

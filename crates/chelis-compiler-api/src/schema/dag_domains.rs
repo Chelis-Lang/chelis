@@ -161,15 +161,6 @@ impl KeyGraph for DecodedKeys<'_> {
         wire_position(*self.0.nodes.get(node)?.inputs.get(slot)?)
     }
 
-    fn dependencies(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.0
-            .nodes
-            .get(node)
-            .into_iter()
-            .flat_map(|node| node.shape_deps.iter().copied())
-            .filter_map(wire_position)
-    }
-
     fn activation(&self, node: usize) -> Option<usize> {
         wire_position(self.0.nodes.get(node)?.activation?)
     }
@@ -568,6 +559,9 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                     Some(WireRtDim::Node { .. } | WireRtDim::InputAxis { .. })
                 ),
                 WireRiscOp::Shrink { .. } | WireRiscOp::Pad { .. } => true,
+                // [05-OP-71]: a split's count axis, as an expansion's size;
+                // the split checks it before any key exists.
+                WireRiscOp::SplitN { .. } => result_axis + 1 == node.output_type.dims.len(),
                 _ => same_shape_result_relation_is_supported(dag, node),
             };
             if !supported || result_axis >= node.output_type.dims.len() {

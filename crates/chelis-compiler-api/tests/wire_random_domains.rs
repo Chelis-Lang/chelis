@@ -1,9 +1,9 @@
 //! spec/10 §§3.2–3.4 and [05-OP-8/37]: random nodes carry no fields; their
 //! controls and key are operands. A key is produced by a key operation or
 //! enters as a key-precision `Load`, and is consumed at most once; adjoint
-//! replays read a key without consuming it, and no key is a shape dependency
-//! or a constant. These tests exercise codecs and object admission, not
-//! random kernel output.
+//! replays read a key without consuming it, a shape dependency observes a
+//! key's extent without a use, and no key is a constant. These tests
+//! exercise codecs and object admission, not random kernel output.
 use chelis_compiler_api::schema::{
     CheckRequest, GradRequest, LowerRequest, SourceKind, WIRE_DAG_SCHEMA_VERSION, WireDag,
     WireDagDecodeError, WireDagNode, WireRiscOp,
@@ -211,6 +211,25 @@ fn a_key_tensors_extent_read_is_not_a_use_on_the_wire() {
     rejects_domain(&twice, "is consumed twice");
 }
 
+/// [05-OP-71]: a function result claim rests on a split's count axis, as on
+/// an expansion's size, so the codec admits the lowered graph whose split
+/// retains the claim's witness.
+///
+/// Evidentiary status: REGRESSION TEST. At `96f5a4f9d` `lower` refused it.
+#[test]
+fn a_result_claim_on_a_split_count_round_trips_on_the_wire() {
+    let source =
+        "def f[n](k: key, c: i64, xs: tensor[n, f32]) -> tensor[n, key] = split_keys(k, c)\n";
+    let dag = lower(source, "f");
+    accepts(&dag);
+    let split = first(&dag, "split_n");
+    let witness = dag["nodes"][split]["shape_deps"][0].as_u64().unwrap() as usize;
+    assert_eq!(
+        dag["nodes"][witness]["op"]["site"],
+        json!({"result_claim":{"axis":{"axis":"lit","value":0},"claim":"n"}})
+    );
+}
+
 /// A key computed inside a lowered definition is used once: the draw that
 /// consumes it is its only reader, and no compiler-inserted `Drop` reads it
 /// again (a `Drop` of a key would be a second use and a key reaching an
@@ -313,10 +332,13 @@ fn a_computed_key_tensor_and_a_gradient_export_keep_one_consumer_per_key() {
 }
 
 /// spec/10 §3.2: a key enters a graph as a key operation's output or as a
-/// key-precision `Load`, and may be a root; it is never a shape dependency,
-/// and no constant carries one.
+/// key-precision `Load`, and may be a root; a shape dependency observes its
+/// extent without a use, and no constant carries one.
+///
+/// Evidentiary status of the shape-dependency row: REGRESSION TEST (at
+/// `96f5a4f9d` the codec refused it with "as a dependency").
 #[test]
-fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
+fn a_key_may_be_loaded_rooted_or_observed_and_is_never_a_constant() {
     let dag = lower(KEYED, "sample");
     let dropout = first(&dag, "dropout");
     let key = input(&dag, dropout, 2);
@@ -340,10 +362,11 @@ fn a_key_may_be_loaded_or_rooted_and_is_never_a_dependency_or_a_constant() {
     key_root["roots"].as_array_mut().unwrap().push(json!(key));
     rejects_domain(&key_root, "is a graph root and is also consumed");
 
-    // A key as a shape dependency of its own consumer.
+    // A key as a shape dependency of its own consumer: an extent is not key
+    // material, so the dependency observes the key without a use ([04-LIN-9]).
     let mut key_dependency = dag.clone();
     key_dependency["nodes"][dropout]["shape_deps"] = json!([key]);
-    rejects_domain(&key_dependency, "as a dependency");
+    accepts(&key_dependency);
 
     // A constant typed as a key: every key is a node's output, never bits.
     let mut constant = dag.clone();
@@ -530,9 +553,25 @@ fn the_codec_admits_the_key_chain_and_rejects_every_malformed_key_form() {
         ),
     );
 
+    // The draw's keys named as a shape dependency observe their extent
+    // (refused "as a dependency" at `96f5a4f9d`), and they are still
+    // consumed exactly once (a lock).
     let mut dependency = key_chain();
     dependency["nodes"][9]["shape_deps"] = json!([6]);
-    rejects_domain(&dependency, "as a dependency");
+    accepts(&dependency);
+    let observed_and_reused = push(
+        &mut dependency,
+        json!({"kind":"dropout"}),
+        &[7, 8, 6],
+        &[3, 4],
+        "f32",
+    );
+    dependency["nodes"][observed_and_reused]["shape_deps"] = json!([6]);
+    dependency["roots"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(observed_and_reused));
+    rejects_domain(&dependency, "is consumed twice");
 
     // V5: a key batch that does not match the data's leading axis.
     let mut batch = key_chain();

@@ -1224,7 +1224,7 @@ fn a_root_and_every_load_of_one_parameter_count_as_uses_of_one_key() {
 }
 
 #[test]
-fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
+fn a_key_reaching_arithmetic_or_selection_is_rejected() {
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let key = root_key(&mut dag, decl);
@@ -1264,17 +1264,58 @@ fn a_key_reaching_arithmetic_selection_or_a_shape_dependency_is_rejected() {
     // `key` is an active tensor element dtype, but `where` names no `key`,
     // so its own scheme rejects key branches too, independently of V4.
     assert_rejected(&dag, "branches must use an active data element dtype");
+}
 
+/// [04-LIN-9], spec/10 §3.2: a shape dependency reads only its node's
+/// extent, which is not key material, so a node may name a key there, before
+/// or after the key's one use, and the key is still consumed exactly once.
+///
+/// Evidentiary status: REGRESSION TEST for the acceptance (at `96f5a4f9d`
+/// both accepting graphs failed with "takes the `key_from_seed` key at
+/// node 1 as a dependency"); the two rejections are locks.
+#[test]
+fn a_shape_dependency_on_a_key_observes_it_without_a_use() {
+    let observed = |second_draw: bool| {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let key = root_key(&mut dag, decl);
+        let drawn = draw(&mut dag, decl, key, None);
+        let x = load(&mut dag, decl, "y", &[4], Prim::F32);
+        let negated = node(&mut dag, decl, RiscOp::Neg, vec![x], &[4], Prim::F32);
+        dag.node_mut(negated).unwrap().shape_deps.push(key);
+        dag.add_root(drawn);
+        dag.add_root(negated);
+        if second_draw {
+            let again = draw(&mut dag, decl, key, None);
+            dag.add_root(again);
+        }
+        dag
+    };
+    assert_eq!(verify(&observed(false)), Vec::<String>::new());
+    assert_rejected(&observed(true), "is consumed twice");
+
+    // A split's keys named as a shape dependency by their draw's result.
     let mut dag = Dag::new();
     let decl = dag.declare("test");
     let key = root_key(&mut dag, decl);
-    let drawn = draw(&mut dag, decl, key, None);
-    let x = load(&mut dag, decl, "y", &[4], Prim::F32);
-    let negated = node(&mut dag, decl, RiscOp::Neg, vec![x], &[4], Prim::F32);
-    dag.node_mut(negated).unwrap().shape_deps.push(key);
-    dag.add_root(drawn);
-    dag.add_root(negated);
-    assert_rejected(&dag, "as a dependency");
+    let keys = node(
+        &mut dag,
+        decl,
+        RiscOp::SplitN {
+            count: RtDim::Lit(4),
+        },
+        vec![key],
+        &[4],
+        Prim::Key,
+    );
+    let drawn = draw(&mut dag, decl, keys, None);
+    let copied = node(&mut dag, decl, RiscOp::Copy, vec![drawn], &[4], Prim::F32);
+    dag.node_mut(copied).unwrap().shape_deps.push(keys);
+    dag.add_root(copied);
+    assert_eq!(verify(&dag), Vec::<String>::new());
+    let reused = draw(&mut dag, decl, keys, None);
+    dag.add_root(reused);
+    assert_rejected(&dag, "is consumed twice");
 }
 
 #[test]
@@ -2301,12 +2342,18 @@ fn a_key_takes_no_cotangent_and_grad_replays_the_forward_key() {
 }
 
 /// A runtime-count split declares its count axis `n`, which the data it
-/// batches also binds, but its value is a key, and no node takes a key as a
-/// dependency (V4). `grad`'s runtime-extent pass records none on it, whether
-/// the count is a parameter or read from the data with `shape(x, 0)`, and the
-/// backward graph verifies with the split still in it.
+/// batches also binds. `grad`'s runtime-extent pass records a shape
+/// dependency on the split from each later node of that extent, an
+/// observation of the keys' extent that is not a use ([04-LIN-9]), and none
+/// from the earlier data, whether the count is a parameter or read from the
+/// data with `shape(x, 0)`; the backward graph verifies with the split still
+/// in it.
+///
+/// Evidentiary status: LOCK. At `96f5a4f9d` the pass recorded no dependency
+/// on a key at all; without its earlier-declarer rule it records the data's
+/// forward dependency on the split, which the verifier refuses.
 #[test]
-fn grad_records_no_dependency_on_a_runtime_count_split() {
+fn grad_records_extent_dependencies_on_a_runtime_count_split() {
     for count_from_data in [false, true] {
         let prim = Prim::F32;
         let mut dag = Dag::new();
@@ -2381,11 +2428,15 @@ fn grad_records_no_dependency_on_a_runtime_count_split() {
             Vec::<String>::new(),
             "count from data: {count_from_data}"
         );
-        assert!(
-            recorded
-                .nodes()
-                .iter()
-                .all(|node| !node.shape_deps.contains(&keys)),
+        let observers = recorded
+            .nodes()
+            .iter()
+            .filter(|node| node.shape_deps.contains(&keys))
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observers,
+            [drawn, rows],
             "count from data: {count_from_data}"
         );
 
