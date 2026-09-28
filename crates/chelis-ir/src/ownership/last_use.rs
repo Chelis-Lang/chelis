@@ -473,7 +473,9 @@ fn apply_placements(unit: &mut Unit, placements: &[Placed]) -> Result<(), Owners
             }
         }
         block.ops = rebuilt;
-        for edge in block.terminator.edges_mut() {
+        let mut edge_index = 0;
+        while let Some(edge) = block.terminator.edge_mut(edge_index) {
+            edge_index += 1;
             if let Some(terminals) = edge_sites.get(&edge.id) {
                 edge.terminals
                     .extend(terminals.iter().map(|placed| EdgeTerminal {

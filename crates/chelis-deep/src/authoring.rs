@@ -1764,10 +1764,18 @@ fn single_module_mut(exprs: &mut [Expr]) -> Result<&mut List, AuthoringError> {
     if count > 1 {
         return Err(AuthoringError::MultipleModules { count });
     }
-    exprs
-        .iter_mut()
-        .find_map(|expr| tagged_list_mut(expr, DeepTag::Module))
-        .ok_or(AuthoringError::NoModule)
+    let mut next_index = 0;
+    while next_index < exprs.len() {
+        let index = next_index;
+        next_index += 1;
+        // Test immutably, then borrow the one module mutably on the return
+        // path: returning a loop-conditional mutable borrow does not check.
+        if tagged_list(&exprs[index], DeepTag::Module).is_some() {
+            return tagged_list_mut(&mut exprs[index], DeepTag::Module)
+                .ok_or(AuthoringError::NoModule);
+        }
+    }
+    Err(AuthoringError::NoModule)
 }
 
 fn expr_tag(expr: &Expr) -> Option<DeepTag> {

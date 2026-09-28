@@ -802,12 +802,13 @@ impl HostExecutionPlan {
     /// recover an ordinary host program while either is retained.
     #[cfg(feature = "lowering-trace")]
     pub fn discard_helper_traces(mut self) -> Self {
-        for product in self
-            .global
-            .iter_mut()
-            .chain(self.functions.iter_mut().flatten())
-        {
+        for product in self.global.iter_mut() {
             product.trace = None;
+        }
+        for products in self.functions.iter_mut() {
+            for product in products.iter_mut() {
+                product.trace = None;
+            }
         }
         self
     }
