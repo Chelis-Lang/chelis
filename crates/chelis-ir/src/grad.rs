@@ -786,9 +786,11 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 
 /// Run reverse-mode AD on `forward`, differentiating `output` with respect to each node in `wrt`.
 ///
-/// Returns `None` if the forward DAG is empty or the output node doesn't exist.
+/// Returns `None` if the checked gradient is structurally unsupported or its
+/// backward DAG cannot be constructed. This compatibility entry point uses the
+/// same validation as [`grad_dag_checked`].
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
-    grad_dag_result(forward, output, wrt).ok()
+    grad_dag_checked(forward, output, wrt).ok()
 }
 
 /// Like [`grad_dag`] but returns a structured failure string instead of
@@ -3362,6 +3364,7 @@ mod tests {
             let output = dag.add_node(owner, RiscOp::Mul, vec![x, coefficient], scalar_f32(), None);
             let result =
                 grad_dag_checked(&dag, output, &[x]).expect("unselected runtime coefficient");
+            assert!(grad_dag(&dag, output, &[x]).is_some());
             let inputs = UnordMap::from_iter([("x".to_string(), 1.25), ("n".to_string(), 6.0)]);
             let actual = eval_scalar(&result.dag, &inputs);
             let expected = match kind {
@@ -3466,6 +3469,88 @@ mod tests {
                 "{} must reject even through comparison zero-cotangent edges",
                 kind.name()
             );
+            assert!(grad_dag(&dag, out, &[x]).is_none());
+        }
+    }
+
+    #[test]
+    fn unchecked_grad_uses_the_checked_structural_rejection_path() {
+        for kind in [
+            chelis_types::BitwiseKind::And,
+            chelis_types::BitwiseKind::Or,
+            chelis_types::BitwiseKind::Xor,
+            chelis_types::BitwiseKind::ShiftLeft,
+            chelis_types::BitwiseKind::ShiftRight,
+        ] {
+            let mut dag = Dag::new();
+            let owner = dag.declare("test");
+            let int_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Int32,
+            };
+            let bool_ty = TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            };
+            let x = dag.add_node(
+                owner,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let n = dag.add_node(
+                owner,
+                RiscOp::Load { name: "n".into() },
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let discrete = dag.add_node(
+                owner,
+                RiscOp::Cast {
+                    new_precision: Prim::Int32,
+                },
+                vec![n],
+                int_ty.clone(),
+                None,
+            );
+            let one = dag.add_node(
+                owner,
+                RiscOp::synth_const(Prim::Int32, 1.0),
+                vec![],
+                int_ty.clone(),
+                None,
+            );
+            let bits = dag.add_node(
+                owner,
+                RiscOp::Bitwise(kind),
+                vec![discrete, one],
+                int_ty,
+                None,
+            );
+            let predicate = dag.add_node(
+                owner,
+                RiscOp::Compare(ComparisonKind::Eq),
+                vec![bits, one],
+                bool_ty,
+                None,
+            );
+            let output = dag.add_node(
+                owner,
+                RiscOp::Where,
+                vec![predicate, x, x],
+                scalar_f32(),
+                None,
+            );
+            assert!(matches!(
+                grad_dag_checked(&dag, output, &[x]),
+                Err(AdError::NotSupported {
+                    op: "cast",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                })
+            ));
+            assert!(grad_dag(&dag, output, &[x]).is_none(), "{}", kind.name());
         }
     }
 
