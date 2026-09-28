@@ -7454,7 +7454,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 19);
+        assert_eq!(json["schema_version"], 20);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

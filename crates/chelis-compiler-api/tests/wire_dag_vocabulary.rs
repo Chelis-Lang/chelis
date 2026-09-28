@@ -103,6 +103,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "checked_reshape_extent",
         "checked_unit_axis",
         "mod",
+        // Version 20 (chelis#2631): one tagged signed-integer bitwise family.
+        "bitwise",
         // Version 16 (chelis#1464): the guarded abort that keeps a
         // transformed `fail(...)` branch from becoming a placeholder value.
         "guarded_fail",
@@ -122,10 +124,10 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 19,
+        WIRE_DAG_SCHEMA_VERSION, 20,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 73);
+    assert_eq!(actual.len(), 74);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

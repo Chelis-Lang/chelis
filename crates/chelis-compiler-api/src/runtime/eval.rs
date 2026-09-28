@@ -3112,10 +3112,11 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => bool_unop(args, |value| !value),
             },
-            name if chelis_types::BitwiseKind::from_name(name).is_some() => bitwise_binop(
-                args,
-                chelis_types::BitwiseKind::from_name(name).expect("bitwise identity"),
-            ),
+            "bitand" => bitwise_binop(args, chelis_types::BitwiseKind::And),
+            "bitor" => bitwise_binop(args, chelis_types::BitwiseKind::Or),
+            "bitxor" => bitwise_binop(args, chelis_types::BitwiseKind::Xor),
+            "shl" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftLeft),
+            "shr" => bitwise_binop(args, chelis_types::BitwiseKind::ShiftRight),
             "string_len" => {
                 let value = expect_string_arg(args, 0)?;
                 Ok(RuntimeValue::int64(value.chars().count() as i64))

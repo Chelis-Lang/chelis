@@ -2139,7 +2139,10 @@ pub struct WireRecordPatternField {
 ///   version-18 graph may hold that bridge operation, which has no
 ///   version-19 spelling, so it is rejected like every other earlier
 ///   version.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;
+/// - `20`: the five signed integer bitwise identities share one tagged
+///   `Bitwise` operation. A version-19 reader does not know that operation,
+///   so the complete graph is rejected before node decoding.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
