@@ -624,13 +624,21 @@ impl<'a> EvalContext<'a> {
         }
         let mut provider_failed = false;
         let prepare_input = |name: &str, demand: TensorInputDemand| {
+            let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;
             // eval_compiled supplies manifested Tensor-lane root values in
             // tensor_bindings, not raw caller parameters. Actual arguments
             // were evaluated separately and own the placeholders first.
-            if let Some(value) = placeholder_tensors
-                .get(name)
-                .cloned()
-                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+            // A resolved top-level Load has its own private label; it must
+            // never consult a same-spelled formal or caller capture.
+            if let Some(value) = top_level_source
+                .is_none()
+                .then(|| {
+                    placeholder_tensors
+                        .get(name)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                })
+                .flatten()
                 .or_else(|| captured_tensors.get(name).cloned())
             {
                 return Ok(Some(value));
@@ -638,7 +646,8 @@ impl<'a> EvalContext<'a> {
             // Unknown or ambiguous names may be optional shape declarers.
             // Do not confuse this absence with an error *inside* a known
             // initializer, even if that error also names an unknown binding.
-            let Some((resolved, _)) = self.lookup_top_level_def(name) else {
+            let source_name = top_level_source.as_deref().unwrap_or(name);
+            let Some((resolved, _)) = self.lookup_top_level_def(source_name) else {
                 return Ok(None);
             };
             if declaration_captures
@@ -649,7 +658,7 @@ impl<'a> EvalContext<'a> {
                 // value, but cannot enter a previously caller-masked initializer.
                 return Ok(None);
             }
-            match self.resolve_top_level(name) {
+            match self.resolve_top_level(source_name) {
                 Ok(RuntimeValue::Tensor(tensor)) => {
                     captured_tensors.insert(name.to_string(), tensor.value.clone());
                     Ok(Some(tensor.value))

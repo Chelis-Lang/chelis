@@ -317,10 +317,13 @@ pub(crate) fn emit_host_abi_program(
     if !captured_globals.is_empty() {
         body.push("// Top-level bindings captured by compiled functions (issue #352):".to_string());
         for name in &captured_globals {
+            let source = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+                .map_err(|reason| invalid_abi_shape(reason, "captured global identity"))?
+                .unwrap_or_else(|| name.clone());
             let binding = program
                 .globals
                 .iter()
-                .find(|binding| binding.name == *name)
+                .find(|binding| binding.name == source)
                 .expect("captured global name comes from program.globals");
             body.push(format!("static {};", c_decl(&binding.ty, name)?));
         }
@@ -2852,10 +2855,31 @@ fn emit_main(
                 c_decl(&binding.ty, &binding.name)?
             ));
         }
+        // A top-level read and a same-spelled lexical binder have distinct
+        // identities. The alias is a second C name for this binding's value;
+        // only the authored binding owns storage and participates in roots.
+        let global_label = chelis_ir::LoadStoreName::top_level(&binding.name);
+        if hoisted.contains(global_label.as_str()) {
+            emitter.lines.push(format!(
+                "    {} = {};",
+                c_ident(global_label.as_str()),
+                c_ident(&binding.name)
+            ));
+        } else {
+            emitter.lines.push(format!(
+                "    {} = {};",
+                c_decl(&binding.ty, global_label.as_str())?,
+                c_ident(&binding.name)
+            ));
+        }
         let binding_origin = result_origin_name(&binding.name);
         let value_origin = result_origin_name(&binding_var);
         emitter.lines.push(format!(
             "    const __chelis_host_result_origin *{binding_origin} = {value_origin};"
+        ));
+        emitter.lines.push(format!(
+            "    const __chelis_host_result_origin *{} = {binding_origin};",
+            result_origin_name(global_label.as_str())
         ));
     }
     let root_sites = ownership_sites
@@ -3022,13 +3046,21 @@ fn captured_global_names(program: &HostProgram) -> Vec<String> {
     for function in &program.functions {
         collect_var_names(&function.body, &mut referenced);
     }
-    let mut seen: UnordSet<&str> = UnordSet::new();
+    let mut seen: UnordSet<String> = UnordSet::new();
     program
         .globals
         .iter()
-        .filter(|binding| referenced.contains(&binding.name))
-        .filter(|binding| seen.insert(binding.name.as_str()))
-        .map(|binding| binding.name.clone())
+        .flat_map(|binding| {
+            [
+                binding.name.clone(),
+                chelis_ir::LoadStoreName::top_level(&binding.name)
+                    .as_str()
+                    .to_string(),
+            ]
+            .into_iter()
+            .filter(|name| referenced.contains(name))
+        })
+        .filter(|name| seen.insert(name.clone()))
         .collect()
 }
 

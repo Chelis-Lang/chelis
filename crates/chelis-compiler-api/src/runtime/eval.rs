@@ -803,11 +803,18 @@ impl<'a> EvalContext<'a> {
         }
         let mut staged: UnordMap<String, IrTensorValue> = UnordMap::new();
         for input in &kernel.inputs {
-            let value = match kernel
-                .params
-                .iter()
-                .position(|param| param.name == input.name)
-            {
+            let top_level_source =
+                chelis_ir::LoadStoreName::top_level_source_for_label(&input.name)?;
+            let param_index = top_level_source.as_ref().map_or_else(
+                || {
+                    kernel
+                        .params
+                        .iter()
+                        .position(|param| param.name == input.name)
+                },
+                |_| None,
+            );
+            let value = match param_index {
                 Some(index) => {
                     stage_kernel_argument(name, &input.name, &args[index], input.ty.precision)?
                 }
@@ -816,9 +823,10 @@ impl<'a> EvalContext<'a> {
                 // chelis#377 rule) and staged like a parameter, so a captured
                 // scalar becomes the rank-0 input the C wrapper passes.
                 None => {
-                    let captured = self.resolve_top_level(&input.name)?;
+                    let source_name = top_level_source.as_deref().unwrap_or(&input.name);
+                    let captured = self.resolve_top_level(source_name)?;
                     let staged_value =
-                        stage_kernel_argument(name, &input.name, &captured, input.ty.precision)?;
+                        stage_kernel_argument(name, source_name, &captured, input.ty.precision)?;
                     // A captured kernel input keeps its authored rank. Any
                     // mapped batch lift is an explicit consumer inside the
                     // DAG, never a widened `Load` contract. Keep this guard as
@@ -828,7 +836,7 @@ impl<'a> EvalContext<'a> {
                             "host runtime: kernel `{name}` capture rank invariant failed for \
                              top-level binding `{}`: the authored-rank input expects rank {} \
                              but the binding has rank {}.",
-                            input.name,
+                            source_name,
                             input.ty.dims.len(),
                             staged_value.shape.len(),
                         ));

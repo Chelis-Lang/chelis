@@ -591,6 +591,7 @@ use crate::dag::{
     RtDim, TensorType,
 };
 use crate::grad::grad_dag_checked;
+use crate::load_store_name::LoadStoreName;
 use crate::tier2;
 use crate::vmap;
 
@@ -1816,10 +1817,17 @@ pub(crate) fn prepare_subexpr_lowering_context(
         defs.extend(folded);
         Arc::new(defs)
     };
-    let program_types = full_type_env
+    let mut program_types: BTreeMap<String, TensorType> = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
         .collect();
+    for (name, body) in program_defs.iter() {
+        if !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
+            && let Some(ty) = program_types.get(name).cloned()
+        {
+            program_types.insert(LoadStoreName::top_level(name).as_str().to_string(), ty);
+        }
+    }
     SubexprLoweringContext {
         program_types: Arc::new(program_types),
         program_defs,
@@ -7293,13 +7301,23 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// The `Load` for a name no enclosing scope binds, which its consumer
-    /// resolves as a top-level declaration. Loads are identified by name, so
-    /// when this graph already gives the name to a kernel input or transform
-    /// formal the reference has no faithful spelling here: the lowering
-    /// declines it rather than let the input capture it (chelis#2588).
+    /// The `Load` for a name no enclosing scope binds. A known top-level
+    /// value keeps its resolved declaration identity in the IR Load name;
+    /// graph formals and ordinary external inputs keep their source names.
+    /// The two cannot alias even when their source spellings match.
     fn free_name_load(&mut self, name: &str, ty: TensorType, span: Option<Span>) -> NodeId {
-        if self.interface_loads.contains(name) {
+        let resolved_global = LoadStoreName::top_level_source_for_label(name)
+            .expect("compiler-created top-level label is well formed");
+        let top_level_value = resolved_global.is_some()
+            || self
+                .program_defs
+                .get(name)
+                .is_some_and(|body| !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _))))
+                && self.decl.is_none_or(|decl| {
+                    let declaration = self.dag.declaration(decl);
+                    !declaration.value || declaration.name != name
+                });
+        if !top_level_value && self.interface_loads.contains(name) {
             raise_lowering_error(
                 format!(
                     "the name `{name}` that an inlined body reads from its own scope shares its \
@@ -7312,7 +7330,13 @@ impl<'program> LowerCtx<'program> {
         }
         self.dag.add_node(
             self.owner(),
-            RiscOp::Load { name: name.into() },
+            RiscOp::Load {
+                name: if top_level_value {
+                    LoadStoreName::top_level(resolved_global.as_deref().unwrap_or(name))
+                } else {
+                    name.into()
+                },
+            },
             vec![],
             ty,
             self.current_span_id.clone(),

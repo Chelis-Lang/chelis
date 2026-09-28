@@ -21,6 +21,7 @@ use chelis_types::types::{Dim, NominalArg, NominalParamKind, Prim, TensorPrec, T
 use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
+use crate::LoadStoreName;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
@@ -34,17 +35,6 @@ thread_local! {
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
     static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
-    // chelis#2588: the top-level declarations whose bodies host lowering is
-    // currently inside, innermost last. With `INLINING_STACK` these are the
-    // bodies whose binders surround a call site.
-    static HOST_DECLARATION_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    // chelis#2588: beside each entry of `HOST_DECLARATION_STACK`, for a
-    // global binding's body, the local names in scope at each of its nodes.
-    static SITE_BINDERS: RefCell<Vec<Option<Arc<GlobalSites>>>> = const { RefCell::new(Vec::new()) };
-    // chelis#2588: beside each substitution on `INLINING_STACK`, in push
-    // order, the global body's binders in scope where it was substituted,
-    // when that site is a node of the global body.
-    static INLINING_FRAMES: RefCell<Vec<Option<Arc<UnordSet<String>>>>> = const { RefCell::new(Vec::new()) };
     // The per-program memos that used to live here are fields of
     // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
     // track where the lowerer currently IS, which is a property of the
@@ -246,313 +236,91 @@ fn is_inlining(name: &str) -> bool {
     INLINING_STACK.with(|stack| stack.borrow().contains(name))
 }
 
-/// Mark `name` as being substituted at `site`, returning whether it was not
-/// already. While it is lowered, the frame keeps the binders in scope at
-/// `site` and every binder inside `site`: the call's own actuals are
-/// substituted into the body with it, and can bring their locals along.
-fn push_inlining(name: &str, site: Option<&Expr>) -> bool {
-    let frame = site.and_then(|site| {
-        let outer = site_binders(site)?;
-        let mut inner = UnordMap::new();
-        record_site_binders(site, &outer, &mut inner);
-        Some(Arc::new(binders_anywhere(&inner)))
-    });
-    let pushed = INLINING_STACK.with(|stack| stack.borrow_mut().insert(name.to_string()));
-    if pushed {
-        INLINING_FRAMES.with(|frames| frames.borrow_mut().push(frame));
-    }
-    pushed
+fn push_inlining(name: &str, _site: Option<&Expr>) -> bool {
+    INLINING_STACK.with(|stack| stack.borrow_mut().insert(name.to_string()))
 }
 
 fn pop_inlining(name: &str) {
-    let removed = INLINING_STACK.with(|stack| stack.borrow_mut().remove(name));
-    if removed {
-        INLINING_FRAMES.with(|frames| {
-            frames.borrow_mut().pop();
-        });
-    }
-}
-
-/// Keeps a top-level declaration on `HOST_DECLARATION_STACK` while host
-/// lowering is inside its body.
-struct HostDeclarationGuard;
-
-impl HostDeclarationGuard {
-    /// A function: its host scope starts empty, so every scope entry is a
-    /// local and no site map is needed.
-    fn enter(name: &str) -> Self {
-        Self::push(name, None)
-    }
-
-    /// A global binding: its host scope starts with the globals, so a scope
-    /// entry spelled like one is the global unless a local binder of `body`
-    /// is in scope at the site, matched by the site's source span.
-    fn enter_global(name: &str, body: &Expr) -> Self {
-        let mut sites = UnordMap::new();
-        record_site_binders(body, &Arc::new(UnordSet::new()), &mut sites);
-        let anywhere = Arc::new(binders_anywhere(&sites));
-        Self::push(name, Some(Arc::new(GlobalSites { sites, anywhere })))
-    }
-
-    fn push(name: &str, sites: Option<Arc<GlobalSites>>) -> Self {
-        HOST_DECLARATION_STACK.with(|stack| stack.borrow_mut().push(name.to_string()));
-        SITE_BINDERS.with(|stack| stack.borrow_mut().push(sites));
-        Self
-    }
-}
-
-impl Drop for HostDeclarationGuard {
-    fn drop(&mut self) {
-        HOST_DECLARATION_STACK.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-        SITE_BINDERS.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
-/// The local names in scope at each node of one body, keyed by the node's
-/// source span. Host lowering rewrites and clones subtrees before it lowers
-/// them, so a node's address does not survive; its span does.
-type SiteBinders = UnordMap<String, Arc<UnordSet<String>>>;
-
-/// A global binding body's binders: in scope at each spanned node, and bound
-/// anywhere in it.
-struct GlobalSites {
-    sites: SiteBinders,
-    anywhere: Arc<UnordSet<String>>,
-}
-
-/// Every name some node of a body has in scope.
-fn binders_anywhere(sites: &SiteBinders) -> UnordSet<String> {
-    let mut all = UnordSet::new();
-    for (_, bound) in sites.to_sorted() {
-        all.extend(bound.to_sorted().into_iter().cloned());
-    }
-    all
-}
-
-/// The binders in scope at `site`, when it is a node of the global binding's
-/// own body. A body substituted into it carries its callee's spans, so no
-/// answer is given while a substitution is being lowered.
-fn site_binders(site: &Expr) -> Option<Arc<UnordSet<String>>> {
-    if INLINING_STACK.with(|stack| !stack.borrow().is_empty()) {
-        return None;
-    }
-    let key = site.span_id()?;
-    SITE_BINDERS.with(|stack| {
-        stack
-            .borrow()
-            .last()
-            .cloned()
-            .flatten()
-            .and_then(|global| global.sites.get(key).cloned())
-    })
-}
-
-/// Record, for `expr` and every node under it, the names its enclosing
-/// `fn` parameters, `let` binders and match patterns bring into scope.
-fn record_site_binders(expr: &Expr, bound: &Arc<UnordSet<String>>, sites: &mut SiteBinders) {
-    if let Some(key) = expr.span_id() {
-        // Nodes that share a span keep the union of their binders, which can
-        // only decline more.
-        let entry = sites
-            .entry(key.to_string())
-            .or_insert_with(|| bound.clone());
-        if !Arc::ptr_eq(entry, bound) && entry.as_ref() != bound.as_ref() {
-            let mut union = entry.as_ref().clone();
-            union.extend(bound.to_sorted().into_iter().cloned());
-            *entry = Arc::new(union);
-        }
-    }
-    let extended = |names: UnordSet<String>| -> Arc<UnordSet<String>> {
-        if names.is_empty() {
-            return bound.clone();
-        }
-        let mut next = bound.as_ref().clone();
-        next.extend(names.into_sorted());
-        Arc::new(next)
-    };
-    match expr {
-        Expr::MetaExpr(meta, _) => record_site_binders(&meta.expr, bound, sites),
-        Expr::BareList(items, _) => {
-            for item in items {
-                record_site_binders(item, bound, sites);
-            }
-        }
-        Expr::Node(node, _) if node.tag() == DeepTag::Fn => {
-            let kids = node.children_slice();
-            // A `fn` with no params list binds no parameter; spelled out
-            // rather than defaulted (loud_unsupported.md B2.5).
-            let params = match kids.first().and_then(as_node) {
-                Some(params) => params
-                    .children_slice()
-                    .iter()
-                    .filter_map(param_name)
-                    .collect::<UnordSet<_>>(),
-                None => UnordSet::new(),
-            };
-            let inner = extended(params);
-            for kid in kids {
-                record_site_binders(kid, &inner, sites);
-            }
-        }
-        Expr::Node(node, _) if node.tag() == DeepTag::Let => {
-            let kids = node.children_slice();
-            let mut current = bound.clone();
-            if let Some(bind) = kids.first().and_then(as_node) {
-                for pair in bind.children_slice().chunks(2) {
-                    if let Some(value) = pair.get(1) {
-                        record_site_binders(value, &current, sites);
-                    }
-                    if let Some(name) = pair.first().and_then(symbol_name) {
-                        let mut next = current.as_ref().clone();
-                        next.insert(name.to_string());
-                        current = Arc::new(next);
-                    }
-                }
-            }
-            for kid in kids.iter().skip(1) {
-                record_site_binders(kid, &current, sites);
-            }
-        }
-        Expr::Node(node, _) if node.tag() == DeepTag::Match => {
-            let kids = node.children_slice();
-            if let Some(scrutinee) = kids.first() {
-                record_site_binders(scrutinee, bound, sites);
-            }
-            for arm in kids.iter().skip(1) {
-                let mut names = UnordSet::new();
-                // An unreadable pattern binds whatever it might: the arm is
-                // then treated as binding every name, which only declines.
-                let inner = match as_node(arm)
-                    .and_then(|arm| arm.children_slice().first())
-                    .map(|pattern| names_bound_in(pattern, &mut names))
-                {
-                    Some(Ok(())) | None => extended(names),
-                    Some(Err(_)) => extended(UnordSet::from_iter([String::from("*")])),
-                };
-                record_site_binders(arm, &inner, sites);
-            }
-        }
-        Expr::Node(node, _) => {
-            for kid in node.children_slice() {
-                record_site_binders(kid, bound, sites);
-            }
-        }
-        _ => {}
-    }
+    INLINING_STACK.with(|stack| stack.borrow_mut().remove(name));
 }
 
 /// Whether substituting top-level `callee`'s body at the current call site
 /// would let a surrounding binder capture one of the body's free names
 /// (chelis#2588).
 ///
-/// A substituted body is lowered, and emitted, inside the scope of the call
-/// site, where every free name it reads must still mean the top-level
-/// declaration it meant where the callee was written. A callee that reads a
-/// name `scope` binds at the site is therefore not substituted, unless that
-/// entry can only be the top-level value itself (a global binding's scope
-/// carries the globals). The caller then keeps an ordinary call, which
-/// resolves the callee's names in its own scope.
+/// A substituted body's top-level value reads carry resolved private labels.
+/// Callable reads still use their source spelling, and the scope carries a
+/// companion origin key for the top-level callable until a local shadows it.
 fn inlining_would_capture(
     program: &HostLoweringSession<'_>,
     callee: &str,
     scope: &UnordMap<String, HostTypeTerm>,
-    site: &Expr,
+    _site: &Expr,
 ) -> bool {
     let Some((_, body)) = program.def_named(callee) else {
         return false;
     };
-    chelis_types::linearity::free_runtime_variables(body)
+    let qualified = qualify_top_level_value_reads(program, body);
+    chelis_types::linearity::free_runtime_variables(&qualified)
         .iter()
         .any(|name| {
-            scope.contains_key(name) && !is_unshadowed_top_level_value(program, name, Some(site))
+            scope.contains_key(name)
+                && LoadStoreName::top_level_source_for_label(name)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                && !scope.contains_key(&callable_origin_key(name))
         })
 }
 
-/// The names that may be bound around the current site while a body
-/// substituted into a global binding is lowered: the binders in scope where
-/// the outermost substitution happened (every binder of the global body when
-/// that site had no span), and every binder of each substituted body.
-fn substitution_binders(program: &HostLoweringSession<'_>) -> UnordSet<String> {
-    let mut bound = UnordSet::new();
-    match INLINING_FRAMES.with(|frames| frames.borrow().first().cloned()) {
-        Some(Some(frame)) => bound.extend(frame.to_sorted().into_iter().cloned()),
-        _ => {
-            if let Some(global) =
-                SITE_BINDERS.with(|stack| stack.borrow().last().cloned().flatten())
-            {
-                bound.extend(global.anywhere.to_sorted().into_iter().cloned());
-            }
-        }
+fn callable_origin_key(name: &str) -> String {
+    let mut key = String::from("__chelis_host_callable_");
+    for byte in name.as_bytes() {
+        use std::fmt::Write;
+        write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
     }
-    let substituted = INLINING_STACK.with(|stack| {
-        stack
-            .borrow()
-            .to_sorted()
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>()
-    });
-    for name in substituted {
-        bound.extend(def_binders(program, &name).to_sorted().into_iter().cloned());
-    }
-    bound
+    key
 }
 
-/// Every name top-level `name`'s definition binds anywhere in its body, its
-/// parameters included.
-fn def_binders(program: &HostLoweringSession<'_>, name: &str) -> Arc<UnordSet<String>> {
-    let Some((canonical, body)) = program.def_named(name) else {
-        return Arc::new(UnordSet::new());
-    };
-    if let Some(cached) = program.facts.def_binders.borrow().get(canonical) {
-        return cached.clone();
-    }
-    let mut sites = UnordMap::new();
-    record_site_binders(body, &Arc::new(UnordSet::new()), &mut sites);
-    let binders = Arc::new(binders_anywhere(&sites));
-    program
-        .facts
-        .def_binders
-        .borrow_mut()
-        .insert(canonical.to_string(), binders.clone());
-    binders
+/// Bind a lexical host name. The private companion key records that a
+/// same-spelled top-level callable was visible before this binder; removing
+/// it makes the current scope's origin exact after shadowing.
+fn bind_host_local(scope: &mut UnordMap<String, HostTypeTerm>, name: String, ty: HostTypeTerm) {
+    scope.remove(&callable_origin_key(&name));
+    scope.insert(name, ty);
 }
 
-/// Whether a kernel for this definition would have to read a top-level name
-/// that one of its own parameters also spells (chelis#2588). A kernel names
-/// both by one `Load` name, so such a definition stays in the host lane,
-/// where each callee resolves its names in its own scope.
-fn kernel_params_shadow_callee_reads(
-    program: &HostLoweringSession<'_>,
-    signature: &HostDefSignature,
-) -> bool {
-    let params = signature
-        .params
-        .iter()
-        .map(|param| param.name.as_str())
-        .collect::<UnordSet<_>>();
-    let definitions = cached_program_defs(program);
-    let mut pending = chelis_types::linearity::free_runtime_variables(&signature.body_expr);
-    let mut visited = UnordSet::new();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        let Some(body) = lookup_program_def(&definitions, &name) else {
-            continue;
-        };
-        for read in chelis_types::linearity::free_runtime_variables(body) {
-            if params.contains(read.as_str()) {
-                return true;
-            }
-            pending.push(read);
-        }
-    }
-    false
+fn bind_top_level_callable(
+    scope: &mut UnordMap<String, HostTypeTerm>,
+    name: &str,
+    ty: HostTypeTerm,
+) {
+    scope.insert(name.to_string(), ty);
+    scope.insert(callable_origin_key(name), HostTypeTerm::Unit);
+}
+
+/// Give each free top-level value read the identity of its declaration
+/// before substituting a callee body into a different lexical scope. The
+/// linearity walk honors function parameters, block locals and patterns; a
+/// same-spelled binder anywhere inside the body remains an ordinary local.
+fn qualify_top_level_value_reads(program: &HostLoweringSession<'_>, expr: &Expr) -> Expr {
+    let renames = chelis_types::linearity::free_runtime_variables(expr)
+        .into_iter()
+        .filter(|name| {
+            program.def_named(name).is_some_and(|(_, body)| {
+                !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
+                    && !matches!(
+                        lookup_declared_host_type(program, name),
+                        Some(HostTypeTerm::Fn(..))
+                    )
+            })
+        })
+        .map(|name| {
+            let label = LoadStoreName::top_level(&name).as_str().to_string();
+            (name, label)
+        })
+        .collect::<BTreeMap<_, _>>();
+    chelis_types::linearity::rename_free_runtime_variables(expr, &renames)
 }
 
 /// Each top-level fn's directly called top-level fns.
@@ -587,8 +355,6 @@ struct DefLaneFacts {
     dropout_reaching_defs: RefCell<Option<Arc<UnordSet<String>>>>,
     /// Program-wide: which definitions reach a runtime-shaped `to_tensor`.
     dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
-    /// Per def: every name its body binds (chelis#2588).
-    def_binders: RefCell<UnordMap<String, Arc<UnordSet<String>>>>,
 }
 
 /// One host-lowering session: a checked program, plus the facts host lowering
@@ -3285,8 +3051,9 @@ fn lower_host_program_with_execution(
             // node's own span, if any, is already on the body via the
             // body-collapse rule applied by `lower_host_expr`.)
             function.body.append_merged_span(expr.span_id());
-            global_scope.insert(
-                name.to_string(),
+            bind_top_level_callable(
+                &mut global_scope,
+                name,
                 HostTypeTerm::Fn(
                     function
                         .params
@@ -3304,8 +3071,8 @@ fn lower_host_program_with_execution(
             // before host lowering — same rationale as in
             // `lower_host_function`.
             global_tensor_helpers.declaration_name = Some(name.to_string());
-            let inlined_body = inline_local_callable_lets(body);
-            let _declaration = HostDeclarationGuard::enter_global(name, &inlined_body);
+            let qualified = qualify_top_level_value_reads(program, body);
+            let inlined_body = inline_local_callable_lets(&qualified);
             let mut value = lower_host_expr(
                 &inlined_body,
                 program,
@@ -3373,7 +3140,11 @@ fn lower_host_program_with_execution(
                 ty: ty.clone(),
                 value: value.clone(),
             });
-            global_scope.insert(name.to_string(), ty);
+            if matches!(ty, HostTypeTerm::Fn(..)) {
+                bind_top_level_callable(&mut global_scope, name, ty);
+            } else {
+                global_scope.insert(LoadStoreName::top_level(name).as_str().to_string(), ty);
+            }
         }
     }
     // chelis#1158: append the monomorphized specializations produced while
@@ -5376,9 +5147,6 @@ fn def_body_decision(
     if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, true).is_some() {
         return Ok(DefBodyDecision::Host);
     }
-    if kernel_params_shadow_callee_reads(program, signature) {
-        return Ok(DefBodyDecision::Host);
-    }
     // The callee summary probe is asked LAST of the host-lane predicates, and
     // only after the declared result type, the effect row and the body form
     // have each had their chance to answer. It is the only one that lowers a
@@ -5655,6 +5423,8 @@ fn host_def_signature(
     ty_expr: Option<&Expr>,
     program: &HostLoweringSession<'_>,
 ) -> Option<HostDefSignature> {
+    let qualified = qualify_top_level_value_reads(program, body);
+    let body = &qualified;
     // Preserve authored dimension identities while expanding only the
     // checker-validated nominal aliases below. Replacing this expression with
     // the canonical checked signature turns `batch` into an anonymous `dN`
@@ -5702,7 +5472,7 @@ fn host_def_signature(
                             .filter(|ty| !ty.is_unresolved())
                     })
                     .unwrap_or_else(fresh_host_inference);
-                scope.insert(pname.clone(), pty.clone());
+                bind_host_local(&mut scope, pname.clone(), pty.clone());
                 params.push(HostParam {
                     name: pname,
                     ty: pty,
@@ -5715,7 +5485,7 @@ fn host_def_signature(
             }
             for (index, param_ty) in param_tys.iter().enumerate() {
                 let pname = format!("arg{index}");
-                scope.insert(pname.clone(), param_ty.clone());
+                bind_host_local(&mut scope, pname.clone(), param_ty.clone());
                 params.push(HostParam {
                     name: pname,
                     ty: param_ty.clone(),
@@ -5758,7 +5528,6 @@ fn lower_host_function(
     let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
         return Ok(None);
     };
-    let _declaration = HostDeclarationGuard::enter(name);
     let mut tensor_helpers = TensorHelperSink::for_declaration(collect_trace, name);
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
@@ -6171,7 +5940,11 @@ fn lower_host_body_with_record_locals(
     }
     let mut scope = signature.scope.clone();
     for hoist in &hoists {
-        scope.insert(hoist.name.clone(), HostTypeTerm::Tensor(hoist.ty.clone()));
+        bind_host_local(
+            &mut scope,
+            hoist.name.clone(),
+            HostTypeTerm::Tensor(hoist.ty.clone()),
+        );
     }
     // Re-ask the kernel question on the rewritten body. The projection was the
     // form the DAG could not carry, and it is gone, so a body that is now
@@ -6739,7 +6512,7 @@ fn lower_staged_host_plan(
                         callable_spans.push(span);
                     }
                     callable_sources.insert(output.clone(), function);
-                    scope.insert(output.clone(), ty.clone());
+                    bind_host_local(&mut scope, output.clone(), ty.clone());
                     continue;
                 }
                 let mut captured_scope = scope.clone();
@@ -6748,7 +6521,11 @@ fn lower_staged_host_plan(
                 for capture in captures {
                     if let Some(function) = callable_sources.get(&capture.value) {
                         callable_aliases.insert(capture.binding.clone(), function.clone());
-                        captured_scope.insert(capture.binding.clone(), capture.ty.clone());
+                        bind_host_local(
+                            &mut captured_scope,
+                            capture.binding.clone(),
+                            capture.ty.clone(),
+                        );
                         continue;
                     }
                     let value_ty = scope
@@ -6773,7 +6550,11 @@ fn lower_staged_host_plan(
                         ty: capture.ty.clone(),
                         value,
                     });
-                    captured_scope.insert(capture.binding.clone(), capture.ty.clone());
+                    bind_host_local(
+                        &mut captured_scope,
+                        capture.binding.clone(),
+                        capture.ty.clone(),
+                    );
                 }
                 let ty = ty.clone();
                 let mut body = lower_host_expr_with_expected(
@@ -6796,7 +6577,7 @@ fn lower_staged_host_plan(
                     ty: ty.clone(),
                     value,
                 });
-                scope.insert(output.clone(), ty);
+                bind_host_local(&mut scope, output.clone(), ty);
             }
             staged::HostStage::Kernel { dag, outputs } => {
                 let expected = dag
@@ -6815,7 +6596,7 @@ fn lower_staged_host_plan(
                         ty: ty.clone(),
                         value: call,
                     });
-                    scope.insert(outputs[0].clone(), ty);
+                    bind_host_local(&mut scope, outputs[0].clone(), ty);
                 } else {
                     let mut tuple_name = format!("{}__tuple", outputs[0]);
                     while reserved.contains(&tuple_name) {
@@ -6850,7 +6631,7 @@ fn lower_staged_host_plan(
                             ty: output_ty.clone(),
                             value,
                         });
-                        scope.insert(output.clone(), output_ty);
+                        bind_host_local(&mut scope, output.clone(), output_ty);
                     }
                 }
             }
@@ -8688,7 +8469,7 @@ fn refine_host_globals(globals: &mut [HostBinding], functions: &[HostFunction]) 
                 binding.ty = inferred.clone();
                 changed = true;
             }
-            scope.insert(binding.name.clone(), binding.ty.clone());
+            bind_host_local(&mut scope, binding.name.clone(), binding.ty.clone());
         }
 
         if !changed {
@@ -9181,7 +8962,7 @@ fn refine_host_expr_types(
             let mut some_scope = scope.clone();
             let inner_ty = option_inner_type(scrutinee);
             if !inner_ty.is_unresolved() {
-                some_scope.insert(bind_name.clone(), inner_ty);
+                bind_host_local(&mut some_scope, bind_name.clone(), inner_ty);
             }
             changed |= refine_host_expr_types(some_expr, &mut some_scope, signatures);
             changed |= refine_host_expr_types(none_expr, scope, signatures);
@@ -9209,7 +8990,7 @@ fn refine_host_expr_types(
             for arm in arms.iter_mut() {
                 let mut arm_scope = scope.clone();
                 for binding in &arm.bindings {
-                    arm_scope.insert(binding.name.clone(), binding.ty.clone());
+                    bind_host_local(&mut arm_scope, binding.name.clone(), binding.ty.clone());
                 }
                 changed |= refine_host_expr_types(&mut arm.expr, &mut arm_scope, signatures);
             }
@@ -9242,7 +9023,7 @@ fn refine_host_expr_types(
                         changed = true;
                     }
                 }
-                local_scope.insert(binding.name.clone(), binding.ty.clone());
+                bind_host_local(&mut local_scope, binding.name.clone(), binding.ty.clone());
             }
             changed |= refine_host_expr_types(body, &mut local_scope, signatures);
             if ty.is_unresolved() {
@@ -9387,7 +9168,7 @@ fn refine_host_callback_types(
         HostCallbackKind::Inline { params, body } => {
             let mut callback_scope = scope.clone();
             for param in params.iter() {
-                callback_scope.insert(param.name.clone(), param.ty.clone());
+                bind_host_local(&mut callback_scope, param.name.clone(), param.ty.clone());
             }
             let mut changed = refine_host_expr_types(body, &mut callback_scope, signatures);
             let inferred = host_expr_type(body);
@@ -9938,7 +9719,7 @@ impl HostPatternPlan {
             Self::Bind {
                 lowered_name, ty, ..
             } => {
-                scope.insert(lowered_name.clone(), ty.clone());
+                bind_host_local(scope, lowered_name.clone(), ty.clone());
             }
             Self::As {
                 lowered_name,
@@ -9946,7 +9727,7 @@ impl HostPatternPlan {
                 inner,
                 ..
             } => {
-                scope.insert(lowered_name.clone(), ty.clone());
+                bind_host_local(scope, lowered_name.clone(), ty.clone());
                 inner.extend_scope(scope);
             }
             Self::ListCons { head, tail, .. } => {
@@ -13559,7 +13340,8 @@ fn lower_named_retained_host_invocation(
     let Some((canonical, body)) = program.def_named(name) else {
         return Ok(None);
     };
-    let Some(signature) = host_def_signature(canonical, body, None, program) else {
+    let qualified = qualify_top_level_value_reads(program, body);
+    let Some(signature) = host_def_signature(canonical, &qualified, None, program) else {
         return Ok(None);
     };
     let mut prepared_actuals = if actualize_polymorphic_contract {
@@ -13732,7 +13514,7 @@ fn lower_retained_host_invocation(
             ty: ty.clone(),
             value,
         });
-        local_scope.insert(actual_local.clone(), ty.clone());
+        bind_host_local(&mut local_scope, actual_local.clone(), ty.clone());
         let formal_local = loop {
             let candidate = format!("__chelis_entry_arg_{serial}");
             if reserved.insert(candidate.clone()) {
@@ -13750,7 +13532,7 @@ fn lower_retained_host_invocation(
                 ty: ty.clone(),
             }),
         });
-        local_scope.insert(formal_local.clone(), ty.clone());
+        bind_host_local(&mut local_scope, formal_local.clone(), ty.clone());
         if matches!(formal.ty, HostTypeTerm::Tensor(_)) {
             observations.push(HostExpr::new(HostExprKind::Var(
                 formal_local.clone(),
@@ -13847,7 +13629,8 @@ fn inline_top_level_host_call(
     }
     let defs = cached_program_defs(program);
     let body = lookup_program_def(&defs, callee_name)?;
-    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
+    let qualified = qualify_top_level_value_reads(program, body);
+    let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(&qualified) else {
         return None;
     };
     let params_list = fn_kids.first().and_then(as_node)?;
@@ -14401,7 +14184,7 @@ fn ensure_mono_specialization(
                 ),
             ));
         };
-        spec_scope.insert(pname.clone(), param_ty.clone());
+        bind_host_local(&mut spec_scope, pname.clone(), param_ty.clone());
         spec_params.push(HostParam {
             name: pname,
             ty: param_ty.clone(),
@@ -15897,7 +15680,7 @@ fn lower_host_callback(
                     .filter(|ty| !ty.is_unresolved())
                     .or_else(|| param_host_type(param))
                     .unwrap_or_else(fresh_host_inference);
-                callback_scope.insert(name.clone(), ty.clone());
+                bind_host_local(&mut callback_scope, name.clone(), ty.clone());
                 params.push(HostParam { name, ty });
             }
             let Some(body_expr) = kids.get(1) else {
@@ -16087,6 +15870,10 @@ fn top_level_value_host_type(
     program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Option<HostTypeTerm> {
+    let decoded = LoadStoreName::top_level_source_for_label(name)
+        .ok()
+        .flatten();
+    let name = decoded.as_deref().unwrap_or(name);
     let (declaration, value) = program.def_named(name)?;
     if matches!(stamped_parts(value), Some((DeepTag::Fn, _, _))) {
         return None;
@@ -17545,52 +17332,29 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 /// The tensor inputs a helper over `scope` takes.
 ///
-/// A top-level value that `scope` carries under its own name, which no
-/// surrounding body rebinds, stays a free read of that declaration rather
-/// than becoming an input (chelis#2588). Kernel lowering declines a free
-/// top-level read that shares its name with an input, because an input
-/// usually stands for a local that shadows the declaration; here the name
-/// can only mean the declaration, as it does for a host function's kernel.
+/// Include every lexical binder the helper can read. Resolved top-level
+/// value reads use private labels, so they never collide with a same-spelled
+/// formal or local input. Dead inputs are removed after lowering.
 fn collect_tensor_scope(
-    program: &HostLoweringSession<'_>,
+    _program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     site: Option<&Expr>,
 ) -> UnordMap<String, TensorType> {
+    let reads = site.map(chelis_types::linearity::free_runtime_variables);
     scope
         .to_sorted()
         .into_iter()
-        .filter(|(name, _)| !is_unshadowed_top_level_value(program, name, site))
+        .filter(|(name, _)| {
+            LoadStoreName::top_level_source_for_label(name)
+                .ok()
+                .flatten()
+                .is_none()
+        })
+        .filter(|(name, _)| reads.as_ref().is_none_or(|reads| reads.contains(name)))
         .filter_map(|(name, ty)| {
             tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
         })
         .collect()
-}
-
-/// Whether `name` in the current host scope can only be the top-level value
-/// declared under it: no body surrounding the current site binds it.
-///
-/// At a node of the global binding's own body the answer is exact: whether a
-/// local binder is in scope there. Elsewhere, inside a body substituted into
-/// it, any binder of a surrounding body counts, which can only decline.
-fn is_unshadowed_top_level_value(
-    program: &HostLoweringSession<'_>,
-    name: &str,
-    site: Option<&Expr>,
-) -> bool {
-    // Only a global binding's scope carries top-level entries: in a
-    // function's, every entry is a local or a parameter.
-    if program.def_named(name).is_none()
-        || SITE_BINDERS
-            .with(|stack| stack.borrow().last().cloned().flatten())
-            .is_none()
-    {
-        return false;
-    }
-    let bound = match site.and_then(site_binders) {
-        Some(in_scope) => in_scope.as_ref().clone(),
-        None => substitution_binders(program),
-    };
-    !bound.contains(name) && !bound.contains("*")
 }
 
 pub(crate) fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
@@ -17836,6 +17600,7 @@ fn expr_host_type_raw(
                         scope
                             .get(name)
                             .cloned()
+                            .or_else(|| top_level_value_host_type(program, name))
                             .or_else(|| lookup_declared_host_type(program, name))
                     })
             })

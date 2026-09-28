@@ -185,12 +185,8 @@ out = outer(fn (v: tensor[1, f32]) -> {\n  n = to_tensor([10.0f32])\n  add(v, n)
     assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
 }
 
-/// A transform in a top-level value's block runs through the host
-/// interpreter's transform route on the evaluator. On the compiled lane these
-/// have no lowering that can name the top-level value beside the shadowing
-/// local (chelis#2604, and an unrelated host-site failure for the last), so
-/// only the evaluator value is pinned and the compiled lane must not build a
-/// value.
+/// Callable target identity has a separate residual (#2062). The evaluator
+/// resolves this local function name; the C lane still rejects it explicitly.
 fn assert_evaluator_only(source: &str, expected: &str) {
     assert_eq!(printed(&eval(source), "out"), expected, "eval\n{source}");
     let dir = tempdir().expect("tempdir");
@@ -208,21 +204,23 @@ fn assert_evaluator_only(source: &str, expected: &str) {
 
 #[test]
 fn transform_route_vmap_of_a_declaration_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes(
         "y = to_tensor([2.0f32])\n\
 def f(x: tensor[1, f32]) -> tensor[1, f32] = add(x, y)\n\
 out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\n}\n",
+        "out",
         "tensor(shape=[2, 1], data=[3.0, 5.0])",
     );
 }
 
 #[test]
 fn transform_route_grad_through_a_callee_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes(
         "w = to_tensor([3.0f32, 5.0f32])\n\
 def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
 def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
 out = {\n  w = to_tensor([7.0f32, 11.0f32])\n  grad(loss)(to_tensor([1.0f32, 2.0f32]))\n}\n",
+        "out",
         "tensor(shape=[2], data=[3.0, 5.0])",
     );
 }
