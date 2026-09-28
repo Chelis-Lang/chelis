@@ -55,6 +55,11 @@ syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [[test]]
+name = "key_alias_lowering"
+path = "tests/key_alias_lowering.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
 name = "key_tensor_forms"
 path = "tests/key_tensor_forms.rs"
 required-features = ["ownership-ledger"]
