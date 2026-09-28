@@ -278,6 +278,25 @@ class RuntimeBundleOracleContracts(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "exactly once"):
             oracle.replace_exact(b"before before", b"before", b"after", path=path)
 
+    def test_two_runtime_mutations_apply_and_restore_as_one_source_build(self) -> None:
+        path = self.root / "source.rs"
+        original = b"before::middle::start\n"
+        path.write_bytes(original)
+
+        with oracle.mutated_source(
+            path, b"before", b"after", additional=((b"start", b"finish"),)
+        ) as mutation:
+            self.assertEqual(path.read_bytes(), b"after::middle::finish\n")
+            self.assertNotEqual(mutation["original_sha256"], mutation["mutated_sha256"])
+
+        self.assertEqual(path.read_bytes(), original)
+        with self.assertRaisesRegex(oracle.OracleFailure, "exactly once"):
+            with oracle.mutated_source(
+                path, b"before", b"after", additional=((b"missing", b"finish"),)
+            ):
+                self.fail("an absent second anchor must be rejected before mutation")
+        self.assertEqual(path.read_bytes(), original)
+
     def test_incomplete_rows_cannot_claim_oracle_success(self) -> None:
         receipt = oracle.new_receipt("c" * 40, self.root)
         receipt["overall"] = "passed"

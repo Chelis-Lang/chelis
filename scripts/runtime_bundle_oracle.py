@@ -405,12 +405,16 @@ def replace_exact(source: bytes, old: bytes, new: bytes, *, path: Path) -> bytes
 
 
 @contextmanager
-def mutated_source(path: Path, old: bytes, new: bytes) -> Iterator[dict[str, str]]:
+def mutated_source(
+    path: Path, old: bytes, new: bytes, *, additional: Sequence[tuple[bytes, bytes]] = ()
+) -> Iterator[dict[str, str]]:
     if path.is_symlink() or not path.is_file():
         raise OracleFailure(f"mutation source is missing or not a regular file: {path}")
     original = path.read_bytes()
     original_mode = stat.S_IMODE(path.stat().st_mode)
     changed = replace_exact(original, old, new, path=path)
+    for other_old, other_new in additional:
+        changed = replace_exact(changed, other_old, other_new, path=path)
     record = {
         "path": str(path),
         "original_sha256": sha256_bytes(original),
@@ -1212,6 +1216,7 @@ def mutation_build_witness(
     old: bytes,
     new: bytes,
     mutant_values: Sequence[float],
+    additional_mutations: Sequence[tuple[bytes, bytes]] = (),
 ) -> dict[str, Any]:
     source_path = context["candidate"] / changed_path
     no_rebuild_dir = context["run_dir"] / "freshness" / label
@@ -1220,7 +1225,7 @@ def mutation_build_witness(
     python_no_rebuild.mkdir(parents=True, exist_ok=True)
     saved_build_artifact = None
     mutation: dict[str, str]
-    with mutated_source(source_path, old, new) as mutation:
+    with mutated_source(source_path, old, new, additional=additional_mutations) as mutation:
         stale_cli = runner.run(
             f"{label}-cli-no-rebuild-freshness",
             [str(context["cli_a"]), "build", str(context["cli_source"]), "--target", "c", "--output", str(no_rebuild_dir)],
@@ -1369,6 +1374,10 @@ def mutation_build_witness(
 def runtime_mutation_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[str, Any]:
     old = b"metadata_or_fail(destination_metadata.byte_offset(destination_index), context);"
     new = b"metadata_or_fail(destination_metadata.byte_offset(destination_index ^ 1), context);"
+    # Compiled Python concat lowers to PAD movement plans, not the host
+    # chelis_tensor_concat path above. Mutate both executed paths in one B.
+    movement_old = b"affine_result(plan.metadata.index(affine_scalar(linear, plan.op)), plan.op)"
+    movement_new = b"affine_result(plan.metadata.index(affine_scalar(linear, plan.op) ^ 1), plan.op)"
     return mutation_build_witness(
         runner,
         context,
@@ -1376,6 +1385,7 @@ def runtime_mutation_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[s
         changed_path="crates/chelis-runtime/src/lib.rs",
         old=old,
         new=new,
+        additional_mutations=((movement_old, movement_new),),
         mutant_values=RUNTIME_MUTANT_VALUES,
     )
 
