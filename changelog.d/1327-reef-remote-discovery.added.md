@@ -1,7 +1,9 @@
 Reef now performs bounded GitHub release discovery. Normal commands reuse a
 valid lock without listing releases. `chelis reef update [<package>]` performs
 a full or targeted refresh, and `chelis reef outdated [<package>] [--json]`
-reports available versions without final writes. Candidate scans, requests,
+reports available versions without final writes. Both commands reject a cached
+package whose artifact hashes disagree with an existing lock, including an
+unrelated package during a targeted refresh. Candidate scans, requests,
 downloads, and resolver states have finite limits, and Reef publishes complete
 verified cache entries before it replaces `reef.lock`. An explicit `chelis-std`
 dependency uses the compiler bundle without network access. Cyclic path

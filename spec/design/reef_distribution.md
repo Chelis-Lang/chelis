@@ -74,7 +74,7 @@ Discovery traversal rejects a cyclic path dependency graph with an ordered cycle
 
 A valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
 
-A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error.
+A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error. Refresh and inspect check cached registry candidates against their existing lock pins before selecting or reporting versions, even for packages outside a targeted refresh.
 
 Remote discovery uses one private provider interface. `GitHubReleaseProvider` is the only implementation.
 

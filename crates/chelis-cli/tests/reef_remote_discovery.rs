@@ -1214,6 +1214,84 @@ async fn targeted_refresh_keeps_unrelated_locks_and_allows_required_transitive_c
     );
 }
 
+#[test]
+fn targeted_refresh_and_outdated_reject_an_unrelated_corrupt_locked_hash() {
+    let directory = tempdir().unwrap();
+    let artifacts = directory.path().join("artifacts");
+    fs::create_dir_all(&artifacts).unwrap();
+    let registry = directory.path().join("registry");
+    for name in ["coral", "nautilus"] {
+        let (archive, shell) = build_release_artifacts(&artifacts, name, "1.0.0");
+        chelis_reef::install_validated_artifact_pair(
+            &archive, &shell, name, "1.0.0", &registry, None,
+        )
+        .unwrap();
+    }
+
+    let root = directory.path().join("app");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"locked-app\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\ncoral = \"^1\"\nnautilus = \"^1\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.ch"),
+        "module Remote.Main\n\ndef main() -> i32 = 1\n",
+    )
+    .unwrap();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .args(["reef", "update", "--offline"])
+        .assert()
+        .success();
+
+    let lock_path = root.join("reef.lock");
+    let good_lock = fs::read_to_string(&lock_path).unwrap();
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(registry.join("index.json")).unwrap()).unwrap();
+    let digest = index["packages"]["nautilus"][0]["archive_sha256"]
+        .as_str()
+        .unwrap();
+    let damaged_lock = good_lock.replacen(
+        &format!("archive_sha256 = \"{digest}\""),
+        &format!("archive_sha256 = \"{}\"", "0".repeat(64)),
+        1,
+    );
+    assert_ne!(damaged_lock, good_lock);
+    fs::write(&lock_path, &damaged_lock).unwrap();
+
+    for arguments in [
+        ["reef", "outdated", "--offline", "--json"].as_slice(),
+        ["reef", "update", "coral", "--offline"].as_slice(),
+    ] {
+        chelis(&root)
+            .env("CHELIS_REEF_HOME", &registry)
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "locked archive hash mismatch for `nautilus`",
+            ));
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), damaged_lock);
+    }
+
+    fs::write(&lock_path, &good_lock).unwrap();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .args(["reef", "outdated", "--offline", "--json"])
+        .assert()
+        .success();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .args(["reef", "update", "coral", "--offline"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), good_lock);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exact_requirements_report_incompatible_remote_versions_without_changes() {
     let directory = tempdir().unwrap();

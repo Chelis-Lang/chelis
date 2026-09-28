@@ -191,7 +191,10 @@ GitHub Releases is the only remote provider. Reef does not use descriptive packa
 
 When network access is disabled, Reef does not create a provider client. Local candidates and exact locked origins remain available.
 
-A locked hash failure or unavailable origin is a hard error. Reef does not replace damaged locked bytes with another version.
+A locked hash failure or unavailable origin is a hard error. `reef update` and
+`reef outdated` also check cached registry packages against existing lock hashes
+before replacing a lock or reporting versions, including packages outside a
+targeted refresh. Reef does not replace damaged locked bytes with another version.
 
 ### Remote limits
 
@@ -236,7 +239,8 @@ chelis reef outdated [<package>] --json
 
 Add `--offline` to either command for local candidates only.
 
-A targeted refresh keeps unrelated locked packages fixed. It changes a transitive package only when the selected target requires that change.
+A targeted refresh keeps unrelated locked packages fixed, including their hashes.
+It changes a transitive package only when the selected target requires that change.
 
 Reef verifies all selected remote pairs in temporary storage. Then Reef gets the project lock before the registry lock.
 
@@ -451,7 +455,7 @@ Each new `reef.lock` starts with `schema = "1"`. Its schema evolves independentl
 `reef.lock` records every resolved dependency as a tuple of
 `(name, version, source-kind, compiler-pin, archive_sha256,
 shell_sha256)`. The `source-kind` discriminator (`LockSource`) has
-three variants:
+four variants:
 
 - `Path`: a path-source dependency (rare; mostly for local development)
 - `LocalRegistry { remote_origin }`: installed from the local
@@ -463,6 +467,8 @@ three variants:
   from the compiler binary's embedded bundle. Recorded for
   auditability, so a lockfile reader can see which compiler version
   supplied the runtime bytes.
+- `Binary { remote_origin, platform, asset, sha256 }`: a host-specific
+  executable artifact; it has no `.chb` shell or source modules.
 
 **Project-driven blanket synthesis:** every reef.toml's `compiler =`
 pin is itself the runtime declaration. `build_lockfile` therefore

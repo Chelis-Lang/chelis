@@ -1572,6 +1572,25 @@ impl DiscoverySession {
                             .to_string(),
                     });
                 }
+                // Refresh and Inspect may choose new versions, but a local
+                // candidate for an existing registry pin must still match
+                // the lock before either command can report or publish it.
+                // The compiler-bundled runtime is handled separately above.
+                if let Some(locked) = self.locked.get(&package)
+                    && locked.version == entry.version
+                    && matches!(&locked.source, LockSource::LocalRegistry { .. })
+                {
+                    crate::verify_locked_package(
+                        locked,
+                        &parsed,
+                        Some(&entry.archive_sha256),
+                        Some(&entry.shell_sha256),
+                    )
+                    .map_err(|message| DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message,
+                    })?;
+                }
                 let dependencies =
                     self.requests_for_manifest(&package, Some(&installed.root), &parsed.typed)?;
                 self.insert_material(
