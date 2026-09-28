@@ -17141,13 +17141,13 @@ impl<'program> LowerCtx<'program> {
     /// Admitted runtime arithmetic is lowered before this legacy fallback;
     /// it retains the computed target and its independent result claims.
     ///
-    /// Returns true only when `expr` (cast-stripped) is an integer app of
-    /// the supported runtime vocabulary (`neg`/`add`/`sub`/`mul`/
-    /// `floor_div`/`trunc_div`/`mod` or any [05-OP-47] bitwise kind, with
-    /// matching arity) and EVERY leaf is a recognized static, shape-derived,
-    /// or already-lowered rank-zero integer producer. The bitwise family intentionally uses the runtime scalar node
-    /// even with static operands: its shift traps and signed-width behavior
-    /// are owned by the typed operation, not a second extent-only evaluator.
+    /// The legacy arithmetic vocabulary still checks its shape/static leaves.
+    /// A [05-OP-47] bitwise result instead admits its complete checked call:
+    /// operand spelling cannot decide whether an inline cast, helper call, or
+    /// tensor-to-scalar conversion produces a usable rank-zero integer. The
+    /// lowered result is checked at the target boundary. Even with static
+    /// operands, its shift traps and signed-width behavior belong to the
+    /// typed operation, not a second extent-only evaluator.
     /// A leaf outside the language returns false and keeps the pre-existing
     /// wildcard fallback for forms this pass never claimed to understand.
     fn is_shape_derived_arith_dim(&self, expr: &Expr) -> bool {
@@ -17163,12 +17163,12 @@ impl<'program> LowerCtx<'program> {
                     return false;
                 };
                 let operands = &kids[1..];
+                if chelis_types::BitwiseKind::from_name(&op).is_some() {
+                    return operands.len() == 2;
+                }
                 let arity_ok = match op.as_str() {
                     "neg" => operands.len() == 1,
                     "add" | "sub" | "mul" | "floor_div" | "trunc_div" | "mod" => {
-                        operands.len() == 2
-                    }
-                    name if chelis_types::BitwiseKind::from_name(name).is_some() => {
                         operands.len() == 2
                     }
                     _ => false,
@@ -18695,6 +18695,14 @@ impl<'program> LowerCtx<'program> {
                 } else {
                     self.lower_expr_node(elem, "computed reshape target")
                 };
+                let actual_type = &self.dag.get(actual).expect("computed target").output_type;
+                if !actual_type.dims.is_empty() || !actual_type.precision.is_integer() {
+                    raise_lowering_error(
+                        "computed reshape target must lower to a rank-zero integer",
+                        Some(elem.span()),
+                        elem.span_id().map(ToOwned::to_owned),
+                    );
+                }
                 let slot = inputs.len();
                 inputs.push(actual);
                 computed_targets.push((axis, slot));

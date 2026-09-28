@@ -274,6 +274,61 @@ fn bitwise_runtime_scalar_operands_and_aliases_keep_reshape_extents() {
 }
 
 #[test]
+fn bitwise_inline_scalar_producers_keep_reshape_extents() {
+    if !c_toolchain_available() {
+        return;
+    }
+    let cases = [
+        ("cast", "count: f32", "cast(count, i64)", "2.0f32", ""),
+        (
+            "helper",
+            "count: i64",
+            "extent(count)",
+            "2i64",
+            "def extent(n: i64) -> i64 = add(n, 0i64)\n",
+        ),
+        (
+            "tensor_scalar",
+            "count: tensor[i64]",
+            "tensor_to_scalar(count)",
+            "scalar_to_tensor(2i64)",
+            "",
+        ),
+    ];
+    for (label, param, producer, argument, prelude) in cases {
+        let program = format!(
+            "{prelude}def shaped(x: tensor[4, f32], {param}) -> tensor[2, 2, f32] = \
+             reshape(x, [bitand({producer}, 3i64), 2i64])\n\
+             out = print(shaped(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), {argument}))\n"
+        );
+        let evaluated = eval_first_line(&program)
+            .unwrap_or_else(|error| panic!("{label}: inline bitwise extent producer: {error}"));
+        assert!(evaluated.contains("shape=[2, 2]"), "{label}: {evaluated}");
+        assert_eq!(
+            c_first_line(&program, &format!("bitwise_inline_{label}")),
+            evaluated
+        );
+    }
+
+    let fractional = "def shaped(x: tensor[4, f32], count: f32) -> tensor[2, 2, f32] = \
+        reshape(x, [bitand(cast(count, i64), 3i64), 2i64])\n\
+        out = print(shaped(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), 2.5f32))\n";
+    let error = eval_first_line(fractional).expect_err("fractional cast must trap");
+    assert!(
+        error.contains("numeric trap: domain in cast at i64"),
+        "{error}"
+    );
+    let run = c_ubsan_run(fractional, "bitwise_inline_fractional_cast");
+    assert!(!run.status.success());
+    let error = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        error.contains("numeric trap: domain in cast at i64"),
+        "{error}"
+    );
+    assert!(!error.contains("runtime error:"), "{error}");
+}
+
+#[test]
 fn bitwise_computed_extent_traps_before_reshape_in_eval_and_c() {
     if !c_toolchain_available() {
         return;
