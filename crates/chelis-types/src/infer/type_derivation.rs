@@ -162,6 +162,8 @@ pub(super) fn resolve_type_derivation(
         (Type::Fn(args, _), TypeDerivation::Grad { wrt }) => {
             // An operand that was a variable at the call published a variable
             // for the gradient, which applications since may have constrained.
+            // Result ascriptions stay on the separate result-constraint ledger
+            // until this derivation settles; they cannot supply these inputs.
             // The gradient's parameters are the operand's, as they are for a
             // call that published the function itself, so tie them first and
             // decide on what those applications determined.

@@ -571,7 +571,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Ok(declared) => declared,
             Err(witness) => propagate(&witness),
         };
-        if product.defer_grad_result_ascription(&result, &declared, subst) {
+        if product.defer_result_type_constraint(&result, &declared, subst) {
             result
         } else {
             if let Err(error) = unify(&result, &declared, subst) {

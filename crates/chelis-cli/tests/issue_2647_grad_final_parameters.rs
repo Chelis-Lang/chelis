@@ -60,6 +60,9 @@ fn incorrect_gradient_payloads_fail_at_checking() {
         "def main() = grad(fn (z: f32, w) -> mul(z, z))",
         "def make_grad() -> (f32 -> f32) = grad(fn (w) -> 1.0f32)",
         "def make_grad() = {\n g: (f32 -> f32) = grad(fn (w) -> 1.0f32)\n g\n}",
+        "def main() = {\n make = fn (f) -> {\n d: (f32 -> f32) = grad(f)\n d\n }\n make(fn (w) -> 1.0f32)\n}",
+        "def main(flag: bool) = if flag then grad(fn (w) -> 1.0f32) else grad(fn (w: f32) -> 1.0f32)",
+        "def main(flag: bool) -> (f32 -> f32) = if flag then grad(fn (w) -> 1.0f32) else main(flag)",
     ] {
         std::fs::write(&path, source).unwrap();
         let output = Command::new(assert_cmd::cargo_bin!("chelis"))

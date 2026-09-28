@@ -158,7 +158,7 @@ pub(super) fn decide_grad(
     GradDecision::Decided(grad_function_type(args, ret, wrt, adt_reg))
 }
 
-pub(super) fn unresolved_grad_parameter(index: usize) -> CheckError {
+fn unresolved_grad_parameter(index: usize) -> CheckError {
     CheckError::new(
         CheckErrorKind::TypeMismatch,
         format!("grad parameter {index} has an unresolved type at the declaration boundary"),
@@ -181,7 +181,7 @@ fn grad_output_variables(ret: &Type) -> Vec<TypeVar> {
 
 /// The variables [`grad_argument_type`] reads in a parameter: every variable
 /// outside a function type, which is not differentiable whatever it holds.
-pub(super) fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
+fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
     match arg {
         Type::Fn(..) => Vec::new(),
         Type::Tuple(items) | Type::Adt(_, items) => {

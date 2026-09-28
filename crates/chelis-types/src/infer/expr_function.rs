@@ -548,7 +548,7 @@ pub(super) fn infer_let(
                             Err(witness) => propagate(&witness),
                         },
                     };
-                    if product.defer_grad_result_ascription(&expr_ty, &declared_ty, subst) {
+                    if product.defer_result_type_constraint(&expr_ty, &declared_ty, subst) {
                         expr_ty
                     } else {
                         match unify(&expr_ty, &declared_ty, subst) {
@@ -720,6 +720,10 @@ pub(super) fn infer_if(
 
     let then_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let else_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
+
+    if let Some(joined) = product.defer_result_join(&then_ty, &else_ty, vg, subst) {
+        return joined;
+    }
 
     match unify(&then_ty, &else_ty, subst) {
         Ok(()) => subst.apply(&then_ty),

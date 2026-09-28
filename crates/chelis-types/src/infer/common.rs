@@ -2512,8 +2512,12 @@ pub(super) fn infer_top_level(
             }
             declared_ty
         } else if let Some(decl_ty) = declared_ty {
-            product.finish_local_grad_parameters(vg, subst, adt_reg, errors);
-            let unify_result = unify(&body_ty, &decl_ty, subst);
+            product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+            let unify_result = if product.defer_result_type_constraint(&body_ty, &decl_ty, subst) {
+                Ok(())
+            } else {
+                unify(&body_ty, &decl_ty, subst)
+            };
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
             // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1

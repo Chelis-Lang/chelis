@@ -60,7 +60,9 @@ components. An unresolved type variable is not a non-differentiable type and
 cannot justify omitting a gradient component. Application may determine a
 lambda's parameter types under [04-INF-1]; an unresolved classification at
 the enclosing declaration boundary is a type error. A result annotation on
-the gradient value does not supply a parameter binding site.
+the gradient value does not supply a parameter binding site, including when
+application determines the operand's function type before its parameter types.
+A join with another branch's result likewise does not supply that binding site.
 
 The optional `wrt` parameter restricts differentiation to specific parameters:
 

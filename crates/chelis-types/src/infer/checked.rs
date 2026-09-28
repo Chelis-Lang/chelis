@@ -47,6 +47,11 @@ pub(super) struct InferenceProduct {
     replaying_post_app: Option<(usize, usize)>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
+    /// Result annotations check what inference produces. They are not input
+    /// constraints for a suspended type derivation ([04-INF-1]). Keeping them
+    /// separate lets readiness follow a producer whose constructor or nested
+    /// parameter types are revealed later, rather than snapshotting its holes.
+    result_type_constraints: Vec<ResultTypeConstraint>,
     /// [04-PAT-1]: a literal pattern first seen against a flexible type must
     /// be decided after its enclosing declaration has supplied the type.
     deferred_literal_patterns: Vec<DeferredLiteralPattern>,
@@ -156,12 +161,17 @@ impl InferredAdmissionContract {
     }
 }
 
+struct ResultTypeConstraint {
+    actual: Type,
+    declared: Type,
+}
+
 #[derive(Clone)]
 pub(super) enum DeferredShapeRule {
-    /// A value ascription cannot supply a suspended Grad parameter type.
-    /// Check it after an application supplies the awaited parameter types.
-    ResultAscription {
-        declared: Type,
+    /// Branch results agree after their semantic producers settle. The
+    /// published type carries only structure common to both branches.
+    ResultJoin {
+        last_propagated: Option<Type>,
     },
     Matmul,
     Reduction {
@@ -1091,61 +1101,184 @@ impl InferenceProduct {
         // nothing new, so a check that became ready mid-pass is not carried
         // to `finish_deferred_shape_checks` and reported as never bound.
         loop {
-            let before = self.deferred_shape_checks.len();
+            let before = self.deferred_shape_checks.len() + self.result_type_constraints.len();
+            let joined = self.replay_result_joins(vg, subst, errors);
             self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
-            if self.deferred_shape_checks.len() >= before {
+            self.replay_result_type_constraints(subst, errors);
+            if !joined
+                && self.deferred_shape_checks.len() + self.result_type_constraints.len() >= before
+            {
                 break;
             }
         }
         self.replaying_shape_checks = false;
     }
 
-    /// Keep result constraints separate from parameter binding constraints.
-    /// An ascription on a Grad value (including one carried in an aggregate)
-    /// must not instantiate its unbound parameters. Publish the inferred type
-    /// until an application binds them, then check the same ascription.
-    pub(super) fn defer_grad_result_ascription(
+    /// An ascription may check a suspended derivation's output only after its
+    /// rule has settled. Its dependency is the published type, not a
+    /// list of parameter holes read before the producer's constructor is known.
+    /// Projection and alias transport retain that dependency through ordinary
+    /// type unification. Each replay reads it anew from the remaining producers.
+    pub(super) fn defer_result_type_constraint(
         &mut self,
         actual: &Type,
         declared: &Type,
         subst: &Subst,
     ) -> bool {
-        let actual_variables = crate::env::free_tvars(&resolved(actual, subst));
-        let mut awaited = Vec::new();
-        for check in &self.deferred_shape_checks {
-            let DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }) = &check.rule else {
-                continue;
-            };
-            let Type::Fn(args, _) = resolved(&check.arg_tys[0], subst) else {
-                continue;
-            };
-            for (index, arg) in args.iter().enumerate() {
-                if wrt
-                    .as_ref()
-                    .is_some_and(|indices| !indices.contains(&index))
-                {
-                    continue;
-                }
-                for variable in grad_argument_variables(arg) {
-                    let ty = Type::Var(variable);
-                    if actual_variables.contains(&variable) && !awaited.contains(&ty) {
-                        awaited.push(ty);
-                    }
-                }
-            }
-        }
-        if awaited.is_empty() {
+        if resolved(actual, subst) == resolved(declared, subst)
+            || !self.result_has_pending_producer(actual, subst)
+        {
             return false;
         }
+        self.result_type_constraints.push(ResultTypeConstraint {
+            actual: actual.clone(),
+            declared: declared.clone(),
+        });
+        true
+    }
+
+    fn result_has_pending_producer(&self, actual: &Type, subst: &Subst) -> bool {
+        self.result_has_pending_producer_with(actual, subst, false)
+    }
+
+    fn result_has_pending_producer_with(
+        &self,
+        actual: &Type,
+        subst: &Subst,
+        binding_only: bool,
+    ) -> bool {
+        let variables = crate::env::free_tvars(&resolved(actual, subst));
+        self.deferred_shape_checks.iter().any(|check| {
+            // These rules derive a type from an operand: their output is not
+            // an input that a result annotation may choose. Ordinary call
+            // inference retains its result constraints, e.g. to_tensor([]).
+            matches!(check.rule, DeferredShapeRule::Derivation(_) | DeferredShapeRule::ResultJoin { .. })
+                // [04-INF-2] lets a recursive group's bodies determine its
+                // result constructors. A projection of that result is not a
+                // lambda input awaiting the [04-INF-1] binding site. Grad's
+                // differentiated parameters still require that binding site.
+                && !(binding_only
+                    && matches!(check.rule, DeferredShapeRule::Derivation(TypeDerivation::TupleProjection { .. } | TypeDerivation::RecordField { .. }))
+                    && self.is_group_result_variable(&check.arg_tys[0], subst))
+                && crate::env::free_tvars(&resolved(&check.result_ty, subst))
+                    .iter()
+                    .any(|variable| variables.contains(variable))
+        })
+    }
+
+    fn is_group_result_variable(&self, ty: &Type, subst: &Subst) -> bool {
+        let Type::Var(variable) = resolved(ty, subst) else {
+            return false;
+        };
+        self.group_provisional_types
+            .iter()
+            .map(|(_, ty)| ty)
+            .chain(self.group_member_types.iter().map(|(_, ty)| ty))
+            .chain(self.group_references.iter().map(|reference| &reference.ty))
+            .chain(self.sibling_links.iter().map(|link| &link.ty))
+            .any(|ty| match resolved(ty, subst) {
+                Type::Fn(_, result) => crate::env::free_tvars(&result).contains(&variable),
+                _ => false,
+            })
+    }
+
+    pub(super) fn defer_result_join(
+        &mut self,
+        left: &Type,
+        right: &Type,
+        vg: &mut VarGen,
+        subst: &Subst,
+    ) -> Option<Type> {
+        if !self.result_has_pending_producer_with(left, subst, true)
+            && !self.result_has_pending_producer_with(right, subst, true)
+        {
+            return None;
+        }
+        let published =
+            common_result_structure(&resolved(left, subst), &resolved(right, subst), vg);
+        let published = independent_type_variables(&published, vg, subst);
         self.defer_shape_check(
-            DeferredShapeRule::ResultAscription {
-                declared: declared.clone(),
+            DeferredShapeRule::ResultJoin {
+                last_propagated: None,
             },
             Vec::new(),
-            awaited,
-            actual.clone(),
+            vec![left.clone(), right.clone()],
+            published.clone(),
         );
-        true
+        Some(published)
+    }
+
+    fn replay_result_joins(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) -> bool {
+        // Keep the complete producer graph visible while deciding readiness.
+        let joins: Vec<_> = self
+            .deferred_shape_checks
+            .iter()
+            .filter_map(|check| match &check.rule {
+                DeferredShapeRule::ResultJoin { last_propagated } => Some((
+                    check.id,
+                    check.arg_tys.clone(),
+                    check.result_ty.clone(),
+                    last_propagated.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut progressed = false;
+        for (id, inputs, published, last_propagated) in joins {
+            let pending = inputs
+                .iter()
+                .any(|ty| self.result_has_pending_producer_with(ty, subst, true));
+            let output = resolved(&published, subst);
+            if pending && last_propagated.as_ref() == Some(&output) {
+                continue;
+            }
+            progressed = true;
+            for input in &inputs {
+                // Until every branch is ready, only constraints arriving at
+                // the published result (an application) may flow into a branch.
+                // Fresh holes prevent a concrete sibling from feeding back
+                // through the published result into another pending branch.
+                let expected = if pending {
+                    independent_type_variables(&output, vg, subst)
+                } else {
+                    published.clone()
+                };
+                if let Err(error) = unify(&expected, input, subst) {
+                    errors.push(error.into());
+                }
+            }
+            if !pending {
+                self.deferred_shape_checks.retain(|check| check.id != id);
+            } else if let Some(check) = self
+                .deferred_shape_checks
+                .iter_mut()
+                .find(|check| check.id == id)
+            {
+                check.rule = DeferredShapeRule::ResultJoin {
+                    last_propagated: Some(output),
+                };
+            }
+        }
+        progressed
+    }
+
+    fn replay_result_type_constraints(
+        &mut self,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        for constraint in std::mem::take(&mut self.result_type_constraints) {
+            if self.result_has_pending_producer(&constraint.actual, subst) {
+                self.result_type_constraints.push(constraint);
+            } else if let Err(error) = unify(&constraint.actual, &constraint.declared, subst) {
+                errors.push(error.into());
+            }
+        }
     }
 
     fn replay_ready_shape_checks_once(
@@ -1158,13 +1291,15 @@ impl InferenceProduct {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         let prior_owner = self.replaying_owner.take();
         for check in checks {
-            if check.arg_tys.iter().any(|ty| {
-                if matches!(check.rule, DeferredShapeRule::ResultAscription { .. }) {
-                    !grad_argument_variables(&resolved(ty, subst)).is_empty()
-                } else {
-                    shape_operand_awaits_binding(ty, subst)
-                }
-            }) {
+            if matches!(check.rule, DeferredShapeRule::ResultJoin { .. }) {
+                self.deferred_shape_checks.push(check);
+                continue;
+            }
+            if check
+                .arg_tys
+                .iter()
+                .any(|ty| shape_operand_awaits_binding(ty, subst))
+            {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
@@ -1172,11 +1307,8 @@ impl InferenceProduct {
             self.replaying_owner.clone_from(&check.owner);
 
             let resolved = match &check.rule {
-                DeferredShapeRule::ResultAscription { declared } => {
-                    if let Err(error) = unify(&check.result_ty, declared, subst) {
-                        errors.push(error.into());
-                    }
-                    continue;
+                DeferredShapeRule::ResultJoin { .. } => {
+                    unreachable!("joins replay with the complete producer graph")
                 }
                 DeferredShapeRule::Matmul => {
                     check_matmul_signature(&check.arg_tys, &check.result_ty, subst, errors)
@@ -1370,50 +1502,6 @@ impl InferenceProduct {
         }
     }
 
-    /// [04-INF-1]: close locally authored Grad parameter holes before checking
-    /// the declaration's result annotation. Unifying that annotation first
-    /// would erase whether the body actually supplied a parameter binding site.
-    /// Recursive sibling variables remain owned by the group's later solve.
-    pub(super) fn finish_local_grad_parameters(
-        &mut self,
-        vg: &mut VarGen,
-        subst: &mut Subst,
-        adt_reg: &AdtRegistry,
-        errors: &mut DiagnosticSink<'_>,
-    ) {
-        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
-        let mut rejected = Vec::new();
-        for check in &self.deferred_shape_checks {
-            if check.owner != self.active_declaration_name {
-                continue;
-            }
-            let DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }) = &check.rule else {
-                continue;
-            };
-            let Type::Fn(args, _) = resolved(&check.arg_tys[0], subst) else {
-                continue;
-            };
-            for (index, arg) in args.iter().enumerate() {
-                if wrt
-                    .as_ref()
-                    .is_some_and(|indices| !indices.contains(&index))
-                {
-                    continue;
-                }
-                if grad_argument_variables(arg)
-                    .into_iter()
-                    .any(|var| !self.awaits_group_completion(&Type::Var(var), subst))
-                {
-                    errors.push(unresolved_grad_parameter(index));
-                    rejected.push(check.id);
-                    break;
-                }
-            }
-        }
-        self.deferred_shape_checks
-            .retain(|check| !rejected.contains(&check.id));
-    }
-
     /// Acceptance boundary for bind-on-first-use shape lambdas, and for every
     /// other obligation still open when the declaration closes. Every ledger
     /// entry left after the ready replay is decided or reported here; none is
@@ -1440,7 +1528,7 @@ impl InferenceProduct {
                     check.rule,
                     DeferredShapeRule::PostApp { .. }
                         | DeferredShapeRule::Derivation(_)
-                        | DeferredShapeRule::ResultAscription { .. }
+                        | DeferredShapeRule::ResultJoin { .. }
                 )
             })
             .flat_map(|check| &check.arg_tys)
@@ -1451,7 +1539,10 @@ impl InferenceProduct {
             .collect();
         for check in checks {
             let operation = match check.rule {
-                DeferredShapeRule::ResultAscription { .. } => "result ascription".to_string(),
+                DeferredShapeRule::ResultJoin { .. } => {
+                    self.deferred_shape_checks.push(check);
+                    continue;
+                }
                 DeferredShapeRule::Matmul => "matmul".to_string(),
                 DeferredShapeRule::Reduction { name } => name,
                 DeferredShapeRule::Expand { builtin, .. } => builtin.to_string(),
@@ -1544,6 +1635,11 @@ impl InferenceProduct {
                 ],
             ));
         }
+        // Every semantic producer was decided above, including the universal
+        // decision for authored binders. Result annotations can now be checked
+        // without making an unresolved semantic rule appear admissible. The
+        // authored-binder checks still run after this last unification step.
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     }
 
     pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
@@ -1824,6 +1920,73 @@ pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
         Type::Ref(inner) => shape_operand_awaits_binding(&inner, subst),
         _ => false,
     }
+}
+
+/// A branch join exposes only constructors both branches already have.
+/// A hole on either side stays a fresh hole, even opposite a concrete type.
+fn common_result_structure(left: &Type, right: &Type, vg: &mut VarGen) -> Type {
+    match (left, right) {
+        (Type::Var(_), _) | (_, Type::Var(_)) => vg.fresh_type(),
+        (Type::Fn(a, ar), Type::Fn(b, br)) if a.len() == b.len() => Type::Fn(
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| common_result_structure(a, b, vg))
+                .collect(),
+            Box::new(common_result_structure(ar, br, vg)),
+        ),
+        (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => Type::Tuple(
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| common_result_structure(a, b, vg))
+                .collect(),
+        ),
+        (Type::Ref(a), Type::Ref(b)) => Type::Ref(Box::new(common_result_structure(a, b, vg))),
+        (Type::Adt(a, aa), Type::Adt(b, ba)) if a == b && aa.len() == ba.len() => Type::Adt(
+            a.clone(),
+            aa.iter()
+                .zip(ba)
+                .map(|(a, b)| common_result_structure(a, b, vg))
+                .collect(),
+        ),
+        (Type::KindedAdt(a, aa), Type::KindedAdt(b, ba))
+            if a == b
+                && aa.len() == ba.len()
+                && aa.iter().zip(ba).all(|(a, b)| {
+                    matches!((a, b), (NominalArg::Type(_), NominalArg::Type(_))) || a == b
+                }) =>
+        {
+            Type::KindedAdt(
+                a.clone(),
+                aa.iter()
+                    .zip(ba)
+                    .map(|(a, b)| match (a, b) {
+                        (NominalArg::Type(a), NominalArg::Type(b)) => {
+                            NominalArg::Type(common_result_structure(a, b, vg))
+                        }
+                        _ => a.clone(),
+                    })
+                    .collect(),
+            )
+        }
+        _ if left == right => left.clone(),
+        _ => vg.fresh_type(),
+    }
+}
+
+fn independent_type_variables(ty: &Type, vg: &mut VarGen, subst: &Subst) -> Type {
+    let mut scheme = Scheme::mono(ty.clone());
+    scheme.tvars = crate::env::free_tvars(ty).into_iter().collect();
+    scheme.tvars.sort();
+    scheme.tvar_restrictions = scheme
+        .tvars
+        .iter()
+        .filter_map(|var| {
+            subst
+                .tvar_restriction(*var)
+                .map(|restriction| (*var, restriction))
+        })
+        .collect();
+    Env::new().instantiate(&scheme, vg, subst)
 }
 
 pub(super) fn expr_key(expr: &deep::Expr) -> usize {
