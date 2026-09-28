@@ -68,8 +68,8 @@ pub fn build_fixture_tarball(release_dir: &Path, version: &str, build: &str) -> 
     write_tarball(release_dir, &root)
 }
 
-/// The runtime files a fixture release ships, and what its fake
-/// `chelis runtime export` reports about the runtime it carries.
+/// The runtime files a fixture release ships and what its fake
+/// `chelis runtime export` independently writes and reports.
 pub struct ReleaseRuntime {
     /// `lib/libchelis_runtime.a` in the tarball.
     pub shipped_archive: Vec<u8>,
@@ -83,6 +83,13 @@ pub struct ReleaseRuntime {
     pub root_is_symlink: bool,
     /// `include/<name>` files in the tarball.
     pub shipped_headers: Vec<(String, Vec<u8>)>,
+    /// The fake compiler's separately carried runtime archive. `None`
+    /// makes `runtime export` omit the archive.
+    pub exported_archive: Option<Vec<u8>>,
+    /// Make the fake compiler export the archive as a symlink.
+    pub exported_archive_is_symlink: bool,
+    /// Header files independently written by the fake compiler's export.
+    pub exported_headers: Vec<(String, Vec<u8>)>,
     /// The staging receipt the fake export writes.
     pub receipt: serde_json::Value,
     /// The fake export's exit status; a failed export writes nothing.
@@ -94,7 +101,7 @@ pub struct ReleaseRuntime {
 
 impl ReleaseRuntime {
     /// A sealed release of `version` whose shipped runtime files are the
-    /// ones its export reports.
+    /// ones its independent export reports.
     pub fn matching(version: &str) -> Self {
         let archive = b"carried runtime archive".to_vec();
         let headers = vec![
@@ -114,11 +121,14 @@ impl ReleaseRuntime {
             "chelis_version": version,
         });
         Self {
-            shipped_archive: archive,
+            shipped_archive: archive.clone(),
             archive_is_symlink: false,
             lib_is_symlink: false,
             root_is_symlink: false,
-            shipped_headers: headers,
+            shipped_headers: headers.clone(),
+            exported_archive: Some(archive),
+            exported_archive_is_symlink: false,
+            exported_headers: headers,
             receipt,
             export_status: 0,
             chelis_interpreter: "/bin/sh",
@@ -136,9 +146,9 @@ pub fn sha256(bytes: &[u8]) -> String {
 }
 
 /// Build a release tarball that ships `runtime`'s files, with a fake
-/// `chelis` whose `runtime export <dir>` writes `runtime.receipt` into
-/// `<dir>` (and, like the real export, refuses a set `CHELIS_RUNTIME_DIR`).
-/// Other invocations echo their arguments.
+/// `chelis` whose `runtime export <dir>` copies independent runtime payloads
+/// and writes `runtime.receipt` into `<dir>` (and, like the real export,
+/// refuses a set `CHELIS_RUNTIME_DIR`). Other invocations echo their args.
 pub fn build_release_tarball(
     release_dir: &Path,
     version: &str,
@@ -161,6 +171,7 @@ pub fn build_release_tarball(
              \x20 fi\n\
              \x20 if [ {status} -ne 0 ]; then echo 'error: export refused' >&2; exit {status}; fi\n\
              \x20 mkdir -p \"$3\" || exit 1\n\
+             \x20 cp -R -P \"$(dirname \"$0\")/.runtime-export/.\" \"$3/\" || exit 1\n\
              \x20 cat > \"$3/chelis_runtime.receipt.json\" <<'RECEIPT'\n\
              {receipt}\n\
              RECEIPT\n\
@@ -174,6 +185,17 @@ pub fn build_release_tarball(
     )
     .unwrap();
     set_exec(&chelis);
+    let runtime_export = root.join("bin/.runtime-export");
+    fs::create_dir_all(&runtime_export).unwrap();
+    for (name, bytes) in &runtime.exported_headers {
+        fs::write(runtime_export.join(name), bytes).unwrap();
+    }
+    let exported_archive = runtime_export.join("libchelis_runtime.a");
+    if runtime.exported_archive_is_symlink {
+        std::os::unix::fs::symlink("chelis_runtime.h", exported_archive).unwrap();
+    } else if let Some(archive) = &runtime.exported_archive {
+        fs::write(exported_archive, archive).unwrap();
+    }
     let archive = root.join("lib/libchelis_runtime.a");
     if runtime.archive_is_symlink {
         fs::write(
