@@ -3501,6 +3501,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                 result_origin: Some(ResultOrigin {
                     body: signature(Type::Var(callback_result), Type::Var(published)),
                     tvars: vec![initial, item, callback_result, published],
+                    tvar_restrictions: vec![],
                     dvars: vec![],
                     rvars: vec![],
                     equations: vec![ResultConstraint::Join {

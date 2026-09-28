@@ -94,7 +94,8 @@ impl CachePayload for crate::LibraryContext {
     // V22: checked fold/scan aliases retain accumulator/result equations.
     // V23: result-origin quantifiers preserve complete scope components.
     // V24: result-origin schemes also carry scalar/tensor key relations.
-    const FORMAT_VERSION: u32 = 24;
+    // V25: raw origins retain their own quantified dtype restrictions.
+    const FORMAT_VERSION: u32 = 25;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -139,7 +140,8 @@ impl CachePayload for crate::StdLibContext {
     // V37: checked fold/scan aliases retain accumulator/result equations.
     // V38: result-origin quantifiers preserve complete scope components.
     // V39: result-origin schemes also carry scalar/tensor key relations.
-    const FORMAT_VERSION: u32 = 39;
+    // V40: raw origins retain their own quantified dtype restrictions.
+    const FORMAT_VERSION: u32 = 40;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

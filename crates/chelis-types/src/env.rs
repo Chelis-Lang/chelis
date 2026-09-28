@@ -1111,15 +1111,24 @@ impl Env {
             subst
                 .insert_type(tv, fresh.clone())
                 .expect("a fresh quantified type-variable renaming is valid");
-            if let Type::Var(fresh_var) = fresh
-                && let Some((_, restriction)) = scheme
+            if let Type::Var(fresh_var) = fresh {
+                // Raw origins and published signatures can use different
+                // representatives. Rename both restriction ledgers with the
+                // same quantifiers; neither view may erase the other's domain.
+                for (_, restriction) in scheme
                     .tvar_restrictions
                     .iter()
-                    .find(|(restricted, _)| *restricted == tv)
-            {
-                inference_subst
-                    .narrow_tvar_restriction(fresh_var, *restriction)
-                    .expect("a fresh instantiation variable carries no prior dtype bound");
+                    .chain(
+                        origin
+                            .into_iter()
+                            .flat_map(|origin| &origin.tvar_restrictions),
+                    )
+                    .filter(|(restricted, _)| *restricted == tv)
+                {
+                    inference_subst
+                        .narrow_tvar_restriction(fresh_var, *restriction)
+                        .expect("a checked scheme's restriction ledgers are compatible");
+                }
             }
             // [04-LIN-10]: a generic's type parameter stays key-free at every
             // instantiation. The mark lives on the quantified variable, which

@@ -272,6 +272,7 @@ mod tests {
         scheme.body = Type::Var(shared);
         scheme.result_origin = Some(ResultOrigin {
             body: Type::Var(shared),
+            tvar_restrictions: vec![],
             tvars: vec![],
             dvars: vec![],
             rvars: vec![],

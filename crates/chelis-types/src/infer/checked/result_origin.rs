@@ -6,6 +6,9 @@ impl InferenceProduct {
     /// An ascription may check a suspended derivation's output only after its
     /// rule has settled. Its dependency is the published type, not a
     /// list of parameter holes read before the producer's constructor is known.
+    /// A closed first-order value annotation can settle ordinary element/dtype
+    /// holes immediately. It cannot hide a callable parameter, and a pending
+    /// semantic producer still prevents result-to-input inference.
     /// Projection and alias transport retain that dependency through ordinary
     /// type unification. Each replay reads it anew from the remaining producers.
     pub(in crate::infer) fn defer_result_type_constraint(
@@ -15,7 +18,8 @@ impl InferenceProduct {
         subst: &Subst,
     ) -> bool {
         if resolved(actual, subst) == resolved(declared, subst)
-            || (crate::env::free_tvars(&resolved(actual, subst)).is_empty()
+            || ((crate::env::free_tvars(&resolved(actual, subst)).is_empty()
+                || is_closed_first_order(&resolved(declared, subst)))
                 && !self.result_has_pending_producer(actual, subst))
         {
             return false;
@@ -90,6 +94,7 @@ impl InferenceProduct {
         let origin = ResultOrigin {
             body,
             tvars: scheme.tvars.clone(),
+            tvar_restrictions: scheme.tvar_restrictions.clone(),
             dvars: scheme.dvars.clone(),
             rvars: scheme.rvars.clone(),
             equations,
@@ -128,6 +133,15 @@ impl InferenceProduct {
             .iter()
             .copied()
             .filter(|variable| free.contains(variable))
+            .collect();
+        scheme.tvar_restrictions = scheme
+            .tvars
+            .iter()
+            .filter_map(|variable| {
+                trial
+                    .tvar_restriction(*variable)
+                    .map(|restriction| (*variable, restriction))
+            })
             .collect();
         for variable in &scheme.tvars {
             subst.forbid_key_instantiation(*variable, crate::unify::GenericParameter::default());
@@ -419,7 +433,8 @@ impl InferenceProduct {
         for constraint in std::mem::take(&mut self.result_type_constraints) {
             if self.result_has_pending_producer(&constraint.actual, subst)
                 || (!self.result_inputs_closed
-                    && self.result_has_open_inputs(&constraint.actual, subst))
+                    && self.result_has_open_inputs(&constraint.actual, subst)
+                    && !is_closed_first_order(&resolved(&constraint.declared, subst)))
             {
                 self.result_type_constraints.push(constraint);
             } else if let Err(error) = unify(&constraint.actual, &constraint.declared, subst) {

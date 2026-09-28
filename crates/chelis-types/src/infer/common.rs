@@ -2270,11 +2270,9 @@ pub(super) fn generalize_deferred_recursive_binding(
             scheme.constraints = raw.constraints;
         }
         scheme.result_origin = raw.result_origin;
-        for restriction in raw.tvar_restrictions {
-            if !scheme.tvar_restrictions.contains(&restriction) {
-                scheme.tvar_restrictions.push(restriction);
-            }
-        }
+        // The origin owns restrictions on its raw representatives. The
+        // freshly generalized public scheme already carries the restrictions
+        // on its solved signature; mixing the ledgers exports hidden IDs.
     }
     subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
     (binding.name, scheme)

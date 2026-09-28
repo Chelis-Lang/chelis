@@ -992,6 +992,9 @@ impl ResultConstraint {
 pub struct ResultOrigin {
     pub body: Type,
     pub tvars: Vec<TypeVar>,
+    /// Restrictions belong to these raw quantifiers; the published scheme
+    /// has a separately normalized restriction ledger for its solved body.
+    pub tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
     pub dvars: Vec<DimVar>,
     pub rvars: Vec<RankVar>,
     pub equations: Vec<ResultConstraint>,
@@ -1082,6 +1085,7 @@ impl ResultOrigin {
         (!equations.is_empty()).then(|| Self {
             body: Type::Fn(params, result.clone()),
             tvars: quantified,
+            tvar_restrictions: Vec::new(),
             dvars: dvars.to_vec(),
             rvars: rvars.to_vec(),
             equations,

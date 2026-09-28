@@ -426,6 +426,7 @@ fn origin_scheme(
         scheme.result_origin = Some(ResultOrigin {
             body,
             tvars: scheme.tvars.clone(),
+            tvar_restrictions: scheme.tvar_restrictions.clone(),
             dvars: scheme.dvars.clone(),
             rvars: scheme.rvars.clone(),
             equations,

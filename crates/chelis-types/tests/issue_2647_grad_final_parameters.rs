@@ -1143,3 +1143,94 @@ fn callable_result_components_survive_transport_alias_depth_and_cache() {
         }
     }
 }
+
+#[test]
+fn restricted_result_origins_publish_a_coherent_scheme() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    for source in [
+        "def choose[p: Numeric](x: p, flag: bool) -> p = if flag then x else x\n",
+        "sig choose[n, p: Numeric]: p -> tensor[n, p]\ndef choose(x) = to_tensor(skip([x], 1i64))\n",
+        "def choose[p: Numeric](a: p, b: p) -> p = if lt(a, b) then a else b\n",
+        "def choose[p: Int](current: p, stop: p, out: List[p]) -> List[p] = if gte(current, stop) then out else choose(add(current, cast(1, p)), stop, append(out, current))\n",
+    ] {
+        let library = desugar_program(&parse_str(source).unwrap()).unwrap();
+        let live = build_type_env_from_library(&library).unwrap();
+        let scheme = live.scheme("choose").unwrap();
+        for (variable, _) in &scheme.tvar_restrictions {
+            assert!(
+                scheme.tvars.contains(variable),
+                "{source}: restriction must quantify a published variable: {scheme:?}"
+            );
+            assert!(
+                chelis_types::env::free_tvars(&scheme.body).contains(variable),
+                "{source}: restriction must occur in the published body: {scheme:?}"
+            );
+        }
+    }
+    let library = desugar_program(
+        &parse_str("def choose[p: Numeric](x: p, flag: bool) -> p = if flag then x else x\n")
+            .unwrap(),
+    )
+    .unwrap();
+    let live = build_type_env_from_library(&library).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        for (source, accepted) in [
+            ("out = choose(1.0f32, true)", true),
+            ("out = choose(1i64, false)", true),
+            ("out = choose(true, true)", false),
+            ("out = choose(\"bad\", false)", false),
+        ] {
+            let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+            let result = check_ir_with_context(context, &deep);
+            assert_eq!(result.is_ok(), accepted, "{source}: {result:?}");
+        }
+    }
+}
+
+#[test]
+fn concrete_empty_list_result_evidence_reaches_shape_operations() {
+    check(
+        "values: List[f64] = []\nempty = to_tensor(values)\nreshaped = reshape(empty, [2147483648i64, 0i64])",
+        true,
+    );
+    check(
+        "values: List[f64] = []\nempty = to_tensor(values)\nreshaped: tensor[2147483648, 0, f32] = reshape(empty, [2147483648i64, 0i64])",
+        false,
+    );
+    check("def bad() = fn (x) -> reshape(x, [2i64])", false);
+}
+
+#[test]
+fn origin_dtype_restrictions_survive_representative_changes_and_serialization() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    let source =
+        "sig boxed[n, p: Float]: p -> tensor[n, p]\ndef boxed(x) = to_tensor(skip([x], 1i64))\n";
+    let library = desugar_program(&parse_str(source).unwrap()).unwrap();
+    let live = build_type_env_from_library(&library).unwrap();
+    let scheme = live.scheme("boxed").unwrap();
+    let origin = scheme
+        .result_origin
+        .as_ref()
+        .expect("fixture has raw result origins");
+    assert!(!origin.tvar_restrictions.is_empty());
+    let mut wire = serde_json::to_value(scheme).unwrap();
+    wire["result_origin"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tvar_restrictions");
+    assert!(serde_json::from_value::<chelis_types::types::Scheme>(wire).is_err());
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        for (source, accepted) in [
+            ("out = boxed(1.0f32)", true),
+            ("out = boxed(1.0f64)", true),
+            ("out = boxed(1i64)", false),
+            ("out = boxed(true)", false),
+        ] {
+            let deep = desugar_program(&parse_str(source).unwrap()).unwrap();
+            let result = check_ir_with_context(context, &deep);
+            assert_eq!(result.is_ok(), accepted, "{source}: {result:?}");
+        }
+    }
+}
