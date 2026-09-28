@@ -90,7 +90,7 @@ Reef publishes complete package directories, replaces `index.json`, and replaces
 
 Manifest schema 3 owns optional descriptive package metadata. It accepts descriptions, SPDX licenses, HTTPS URLs, READMEs, and custom license files.
 
-Descriptive metadata does not enter package identity, dependency matching, source selection, `reef.lock`, `index.json`, or `.chb`.
+Descriptive metadata is not part of the logical `(name, version, source)` package identity or dependency selection. The fields are not serialized as fields into `reef.lock`, `index.json`, or `.chb`; byte-integrity hashes still reflect the complete source archive, including declared metadata and `reef.toml`.
 
 Declared files use a bounded Unicode NFC path grammar with `/` separators. The grammar rejects unsafe components and platform-sensitive names.
 

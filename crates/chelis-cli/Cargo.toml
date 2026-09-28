@@ -60,7 +60,7 @@ sealed-runtime = ["chelis-runtime-bundle/sealed"]
 
 [dev-dependencies]
 assert_cmd = "2"
-chelis-reef = { workspace = true, features = ["test-hooks"] }
+chelis-reef.workspace = true
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball

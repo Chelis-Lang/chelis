@@ -316,10 +316,7 @@ pub struct PortablePackagePath {
 }
 
 pub(crate) fn archive_collision_key(value: &str) -> String {
-    value
-        .nfc()
-        .map(|character| character.to_ascii_lowercase())
-        .collect()
+    value.nfc().flat_map(char::to_lowercase).nfc().collect()
 }
 
 pub(crate) fn ensure_archive_spellings_do_not_collide(
@@ -333,15 +330,6 @@ pub(crate) fn ensure_archive_spellings_do_not_collide(
         });
     }
     Ok(())
-}
-
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn check_archive_spelling_collision_for_test(
-    existing: &str,
-    declared: &str,
-) -> Result<(), PackageMetadataError> {
-    ensure_archive_spellings_do_not_collide(existing, declared)
 }
 
 impl PortablePackagePath {
@@ -727,9 +715,8 @@ pub fn snapshot_declared_metadata_file(
     })
 }
 
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn snapshot_declared_metadata_file_with_walk_hook<F>(
+#[cfg(test)]
+pub(super) fn snapshot_declared_metadata_file_with_walk_hook<F>(
     root: &Path,
     path: &PortablePackagePath,
     before_segment_open: F,
@@ -751,9 +738,8 @@ where
     })
 }
 
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn snapshot_declared_metadata_file_with_hook<F>(
+#[cfg(test)]
+pub(super) fn snapshot_declared_metadata_file_with_hook<F>(
     root: &Path,
     path: &PortablePackagePath,
     after_first_read: F,
@@ -810,5 +796,61 @@ mod tests {
         let encoded = bincode::serialize(&invalid).unwrap();
         let error = bincode::deserialize::<PackageMetadata>(&encoded).unwrap_err();
         assert!(error.to_string().contains("exclusive alternatives"));
+    }
+
+    #[test]
+    fn snapshot_detects_content_changed_between_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = PortablePackagePath::from_str("README.md").unwrap();
+        std::fs::write(root.join("README.md"), b"first bytes").unwrap();
+        let error = snapshot_declared_metadata_file_with_hook(root, &path, || {
+            std::fs::write(root.join("README.md"), b"second bytes").unwrap();
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, PackageMetadataError::Unstable { .. }),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_rejects_component_swapped_for_symlink_after_root_open() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::create_dir(root.join("attacker")).unwrap();
+        std::fs::write(root.join("docs/README.md"), b"safe bytes").unwrap();
+        std::fs::write(root.join("attacker/README.md"), b"secret bytes").unwrap();
+        let path = PortablePackagePath::from_str("docs/README.md").unwrap();
+        let error = snapshot_declared_metadata_file_with_walk_hook(root, &path, |index| {
+            if index == 0 {
+                std::fs::rename(root.join("docs"), root.join("original-docs")).unwrap();
+                symlink(root.join("attacker"), root.join("docs")).unwrap();
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PackageMetadataError::SymbolicLink { .. } | PackageMetadataError::Open { .. }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn archive_collisions_include_unicode_case_equivalents() {
+        for (existing, declared) in [("src/Readme.md", "src/README.md"), ("src/É.md", "src/é.md")]
+        {
+            let error = ensure_archive_spellings_do_not_collide(existing, declared).unwrap_err();
+            assert!(
+                matches!(error, PackageMetadataError::ArchiveCollision { .. }),
+                "{error}"
+            );
+        }
     }
 }

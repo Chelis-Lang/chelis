@@ -1,10 +1,8 @@
 use assert_cmd::Command;
 use chelis_reef::{
     METADATA_FILE_MAX_BYTES, METADATA_TOTAL_MAX_BYTES, PackageDescription, PackageMetadataError,
-    PackageUrl, PortablePackagePath, SpdxLicense, build_package,
-    build_source_archive_with_snapshot_hook, check_archive_spelling_collision_for_test,
-    manifest_schema_v3_json, read_manifest_for_src, snapshot_declared_metadata_file,
-    snapshot_declared_metadata_file_with_hook, snapshot_declared_metadata_file_with_walk_hook,
+    PackageUrl, PortablePackagePath, SpdxLicense, build_package, manifest_schema_v3_json,
+    read_manifest_for_src, snapshot_declared_metadata_file,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -331,7 +329,7 @@ fn declared_file_snapshots_are_bounded_stable_and_handle_relative() {
 }
 
 #[test]
-fn snapshot_size_and_content_instability_fail_closed() {
+fn snapshot_size_limit_fails_closed() {
     assert_eq!(METADATA_TOTAL_MAX_BYTES, 2 * METADATA_FILE_MAX_BYTES);
     let directory = tempdir().unwrap();
     let root = directory.path();
@@ -354,17 +352,6 @@ fn snapshot_size_and_content_instability_fail_closed() {
         .to_string();
     assert!(
         error.contains("4194304") && error.contains("README.md"),
-        "{error}"
-    );
-
-    fs::write(root.join("README.md"), b"first bytes").unwrap();
-    let error = snapshot_declared_metadata_file_with_hook(root, &path, || {
-        fs::write(root.join("README.md"), b"second bytes").unwrap();
-    })
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("unstable") && error.contains("README.md"),
         "{error}"
     );
 }
@@ -417,34 +404,6 @@ fn nonregular_declared_files_fail_without_a_blocking_open() {
     assert!(error.contains("not one regular file"), "{error}");
 }
 
-#[cfg(unix)]
-#[test]
-fn no_follow_walk_rejects_a_component_replaced_after_the_root_open() {
-    use std::os::unix::fs::symlink;
-
-    let directory = tempdir().unwrap();
-    let root = directory.path();
-    fs::create_dir_all(root.join("docs")).unwrap();
-    fs::create_dir_all(root.join("attacker")).unwrap();
-    fs::write(root.join("docs/README.md"), b"safe bytes").unwrap();
-    fs::write(root.join("attacker/README.md"), b"secret bytes").unwrap();
-    let path = PortablePackagePath::from_str("docs/README.md").unwrap();
-    let error = snapshot_declared_metadata_file_with_walk_hook(root, &path, |index| {
-        if index == 0 {
-            fs::rename(root.join("docs"), root.join("original-docs")).unwrap();
-            symlink(root.join("attacker"), root.join("docs")).unwrap();
-        }
-    })
-    .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            PackageMetadataError::SymbolicLink { .. } | PackageMetadataError::Open { .. }
-        ),
-        "{error}"
-    );
-}
-
 #[test]
 fn source_archive_contains_only_declared_metadata_with_canonical_headers() {
     let directory = tempdir().unwrap();
@@ -493,27 +452,6 @@ fn source_archive_contains_only_declared_metadata_with_canonical_headers() {
 }
 
 #[test]
-fn archive_serialization_uses_the_captured_snapshot_without_reopening() {
-    let directory = tempdir().unwrap();
-    let root = directory.path();
-    stage_buildable_package(root, "readme = \"src/NOTICE.md\"");
-    fs::write(root.join("src/NOTICE.md"), b"captured bytes").unwrap();
-    let archive_path = root.join("snapshot.tar.zst");
-    let manifest_before = fs::read(root.join("reef.toml")).unwrap();
-
-    build_source_archive_with_snapshot_hook(root, &archive_path, || {
-        fs::remove_file(root.join("src/NOTICE.md")).unwrap();
-        fs::write(root.join("src/NOTICE.md"), b"replacement bytes").unwrap();
-        fs::write(root.join("reef.toml"), b"attacker manifest bytes").unwrap();
-    })
-    .unwrap();
-
-    let members = archive_members(&archive_path);
-    assert_eq!(members["src/NOTICE.md"].0, b"captured bytes");
-    assert_eq!(members["reef.toml"].0, manifest_before);
-}
-
-#[test]
 fn duplicate_declared_and_source_paths_produce_one_member_each() {
     let directory = tempdir().unwrap();
     let root = directory.path();
@@ -552,12 +490,6 @@ fn portable_spelling_collisions_fail_instead_of_creating_duplicate_members() {
     stage_buildable_package(root, "readme = \"src/README.md\"");
     fs::write(root.join("src/README.md"), b"declared bytes").unwrap();
     fs::write(root.join("src/Readme.md"), b"case collision").unwrap();
-    let direct_error =
-        check_archive_spelling_collision_for_test("src/Readme.md", "src/README.md").unwrap_err();
-    assert!(
-        matches!(direct_error, PackageMetadataError::ArchiveCollision { .. }),
-        "{direct_error}"
-    );
     if cfg!(target_os = "macos") {
         let build = build_package(root).unwrap();
         let members = archive_members(&build.archive_path);
@@ -808,6 +740,18 @@ fn metadata_does_not_enter_lock_or_source_selection() {
             "metadata entered the shell: {value}"
         );
     }
+
+    let archive_before = fs::read(&build.archive_path).unwrap();
+    fs::write(root.join("README.md"), b"changed metadata bytes").unwrap();
+    let rebuilt = build_package(root).unwrap();
+    assert!(
+        fs::read(&rebuilt.archive_path).unwrap() != archive_before,
+        "declared metadata must change the source archive"
+    );
+    assert!(
+        fs::read(&rebuilt.shell_path).unwrap() != shell,
+        "the shell must carry the changed source archive hash"
+    );
 
     let reef_home = directory.path().join("registry");
     let published = directory.path().join("published");

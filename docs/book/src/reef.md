@@ -154,6 +154,12 @@ Each declared file contains at most 4 MiB. Reef opens each path without symbolic
 
 Reef reads each file twice from one handle. A content mismatch stops archive replacement.
 
+Metadata is not part of the logical package name/version or dependency
+selection. Its fields are not serialized into `reef.lock`, `index.json`, or
+`.chb`. Changing the manifest or a declared file does change the source archive
+hash; the `.chb` embeds that hash, and lock and registry records of artifact
+hashes must match the published bytes.
+
 ### Package identities and resolution
 
 Package names use lowercase ASCII letters, digits, and internal hyphens. Names start with a lowercase letter and contain at most 64 bytes.
@@ -465,6 +471,14 @@ regardless of whether the project listed chelis-std in
 `[dependencies]`. Lockfiles produced by older compilers that recorded
 chelis-std as `LocalRegistry` are auto-migrated to `Bundled` on read
 and rewritten on the next `chelis reef build`.
+
+If a compiler is rebuilt with different bundled runtime bytes but the same
+version, an existing lock's runtime hash mismatch is a hard error. For a
+resolver-2 manifest, explicitly run `chelis reef update --offline` to refresh
+the bundled hashes. For a legacy or schema-1 manifest, first run
+`chelis reef upgrade --inplace` or remove the old lock and then run
+`chelis reef build`. `reef update` requires a schema-2-or-newer resolver-2
+manifest.
 
 ### Prepared package cache
 

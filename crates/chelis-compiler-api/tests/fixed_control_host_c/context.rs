@@ -24,7 +24,7 @@ def single(k: key, x: tensor[1, f32]) -> tensor[1, f32] = dropout(k, x, 0.5f32)
 fn context_with_library(library: &str) -> CompiledContext {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
-    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"context_draw\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"context-draw\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(directory.path().join("src/draw.ch"), library).unwrap();
     compile_reef_context(directory.path(), directory.path()).unwrap()
 }

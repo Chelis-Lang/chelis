@@ -41,12 +41,6 @@ pub use package_metadata::{
     PackageMetadata, PackageMetadataError, PackageUrl, PortablePackagePath, SpdxLicense,
     snapshot_declared_metadata_file,
 };
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub use package_metadata::{
-    check_archive_spelling_collision_for_test, snapshot_declared_metadata_file_with_hook,
-    snapshot_declared_metadata_file_with_walk_hook,
-};
 pub use remote_discovery::{
     BudgetDimension, BudgetError, DiscoveryError, DiscoveryMode, OutdatedPackage, OutdatedReport,
     ResolutionBudget, SourceLocator, UpdateReport, VersionChange,
@@ -9315,22 +9309,6 @@ where
     document_schema::atomic_replace(out_path, &compressed)
 }
 
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub fn build_source_archive_with_snapshot_hook<F>(
-    root: &Path,
-    out_path: &Path,
-    after_snapshots: F,
-) -> Result<(), String>
-where
-    F: FnOnce(),
-{
-    let root = canonical_root(root)?;
-    let _project_lock =
-        document_schema::acquire_project_write_lock(&root).map_err(|error| error.to_string())?;
-    build_archive_with_snapshot_hook(&root, out_path, after_snapshots)
-}
-
 const DEFAULT_ARCHIVE_MTIME: u64 = 0;
 
 fn canonical_archive_mtime() -> Result<u64, String> {
@@ -11661,6 +11639,47 @@ fn checked_library_with_effects(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn archive_serialization_uses_captured_metadata_and_manifest() {
+        use std::io::Read;
+
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "schema = \"3\"\n[package]\nname = \"snapshot-probe\"\nversion = \"0.1.0\"\n\
+                 compiler = \"={}\"\nmodule_prefix = \"Snapshot\"\nresolver = \"2\"\nreadme = \"src/NOTICE.md\"\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/main.ch"), b"module Snapshot.Main\n").unwrap();
+        fs::write(root.join("src/NOTICE.md"), b"captured bytes").unwrap();
+        let archive_path = root.join("snapshot.tar.zst");
+        let manifest_before = fs::read(root.join("reef.toml")).unwrap();
+
+        build_archive_with_snapshot_hook(root, &archive_path, || {
+            fs::write(root.join("src/NOTICE.md"), b"replacement bytes").unwrap();
+            fs::write(root.join("reef.toml"), b"attacker manifest bytes").unwrap();
+        })
+        .unwrap();
+
+        let compressed = fs::read(archive_path).unwrap();
+        let decoded = zstd::stream::decode_all(Cursor::new(compressed)).unwrap();
+        let mut members = BTreeMap::new();
+        for entry in tar::Archive::new(Cursor::new(decoded)).entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            members.insert(path, bytes);
+        }
+        assert_eq!(members[Path::new("src/NOTICE.md")], b"captured bytes");
+        assert_eq!(members[Path::new("reef.toml")], manifest_before);
+    }
 
     #[test]
     fn reserved_linker_name_predicate_matches_only_full_mangled_names() {
