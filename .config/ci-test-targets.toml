@@ -1074,6 +1074,17 @@ prefix = "bindings/python/chelis/"
 disposition = "packages"
 packages = ["chelis-python"]
 
+# These PEP 517 inputs choose the features used to build chelis-python wheels.
+[[path_rule]]
+prefix = "bindings/python/pyproject.toml"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/build_backend/"
+disposition = "packages"
+packages = ["chelis-python"]
+
 [[path_rule]]
 prefix = "bindings/python/tests/"
 disposition = "packages"

@@ -1,6 +1,7 @@
 [build-system]
-requires = ["maturin>=1.8,<2"]
-build-backend = "maturin"
+requires = ["maturin>=1.9.6,<2"]
+build-backend = "chelis_build_backend"
+backend-path = ["build_backend"]
 
 [project]
 name = "chelis"
@@ -20,3 +21,4 @@ manifest-path = "../../crates/chelis-python/Cargo.toml"
 module-name = "chelis._native"
 python-source = "."
 features = ["extension-module"]
+include = [{ path = "build_backend/chelis_build_backend.py", format = "sdist" }]
