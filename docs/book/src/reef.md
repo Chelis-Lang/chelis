@@ -192,9 +192,12 @@ GitHub Releases is the only remote provider. Reef does not use descriptive packa
 When network access is disabled, Reef does not create a provider client. Local candidates and exact locked origins remain available.
 
 A locked hash failure or unavailable origin is a hard error. `reef update` and
-`reef outdated` also check cached registry packages against existing lock hashes
-before replacing a lock or reporting versions, including packages outside a
-targeted refresh. Reef does not replace damaged locked bytes with another version.
+`reef outdated` check registry index entries against existing lock hashes even
+when cached package directories are missing, including packages outside a
+targeted refresh. If an index entry is absent, they compare fetched archives
+and shells against the matching existing lock before reporting versions or
+publishing packages. Reef does not replace damaged locked bytes with another
+version.
 
 ### Remote limits
 

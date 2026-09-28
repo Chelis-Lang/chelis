@@ -6913,6 +6913,14 @@ fn verify_locked_package(
         }
         .to_string());
     }
+    verify_locked_hashes(dependency, archive_sha256, shell_sha256)
+}
+
+pub(crate) fn verify_locked_hashes(
+    dependency: &LockedDependency,
+    archive_sha256: Option<&str>,
+    shell_sha256: Option<&str>,
+) -> Result<(), String> {
     for (kind, expected, actual) in [
         (
             "archive",

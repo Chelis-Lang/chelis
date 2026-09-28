@@ -1214,14 +1214,18 @@ async fn targeted_refresh_keeps_unrelated_locks_and_allows_required_transitive_c
     );
 }
 
-#[test]
-fn targeted_refresh_and_outdated_reject_an_unrelated_corrupt_locked_hash() {
+#[tokio::test(flavor = "multi_thread")]
+async fn targeted_refresh_and_outdated_reject_an_unrelated_corrupt_locked_hash() {
     let directory = tempdir().unwrap();
     let artifacts = directory.path().join("artifacts");
     fs::create_dir_all(&artifacts).unwrap();
     let registry = directory.path().join("registry");
+    let mut nautilus_assets = None;
     for name in ["coral", "nautilus"] {
         let (archive, shell) = build_release_artifacts(&artifacts, name, "1.0.0");
+        if name == "nautilus" {
+            nautilus_assets = Some((fs::read(&archive).unwrap(), fs::read(&shell).unwrap()));
+        }
         chelis_reef::install_validated_artifact_pair(
             &archive, &shell, name, "1.0.0", &registry, None,
         )
@@ -1290,6 +1294,85 @@ fn targeted_refresh_and_outdated_reject_an_unrelated_corrupt_locked_hash() {
         .assert()
         .success();
     assert_eq!(fs::read_to_string(&lock_path).unwrap(), good_lock);
+
+    // A missing cache directory must not bypass the pin by fetching the
+    // same release again while a different package is being updated.
+    fs::write(&lock_path, &damaged_lock).unwrap();
+    fs::remove_dir_all(registry.join("packages/nautilus/1.0.0")).unwrap();
+    let index_before = fs::read(registry.join("index.json")).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wire_path("/repos/chelis-lang/coral/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    let (archive, shell) = nautilus_assets.unwrap();
+    mount_single_release(&server, "nautilus", "1.0.0", 100, 101, archive, shell).await;
+    for arguments in [
+        ["reef", "outdated", "--json"].as_slice(),
+        ["reef", "update", "coral"].as_slice(),
+    ] {
+        chelis(&root)
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", server.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "locked archive hash mismatch for `nautilus`",
+            ));
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), damaged_lock);
+        assert_eq!(fs::read(registry.join("index.json")).unwrap(), index_before);
+        assert!(!registry.join("packages/nautilus/1.0.0").exists());
+    }
+
+    // The lock is still authoritative when the index entry is absent too:
+    // verify both the remote archive and its matching shell before reporting
+    // versions or changing the unrelated package.
+    let mut unindexed = index.clone();
+    unindexed["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("nautilus");
+    let index_without_pin = serde_json::to_vec_pretty(&unindexed).unwrap();
+    fs::write(registry.join("index.json"), &index_without_pin).unwrap();
+    let shell_digest = index["packages"]["nautilus"][0]["shell_sha256"]
+        .as_str()
+        .unwrap();
+    let damaged_shell_lock = good_lock.replacen(
+        &format!("shell_sha256 = \"{shell_digest}\""),
+        &format!("shell_sha256 = \"{}\"", "0".repeat(64)),
+        1,
+    );
+    assert_ne!(damaged_shell_lock, good_lock);
+    for (damaged, kind) in [
+        (damaged_lock.as_str(), "archive"),
+        (damaged_shell_lock.as_str(), "shell"),
+    ] {
+        fs::write(&lock_path, damaged).unwrap();
+        for arguments in [
+            ["reef", "outdated", "--json"].as_slice(),
+            ["reef", "update", "coral"].as_slice(),
+        ] {
+            chelis(&root)
+                .env("CHELIS_REEF_HOME", &registry)
+                .env("CHELIS_REEF_GITHUB_BASE_API", server.uri())
+                .env("GITHUB_TOKEN", "unit-test-token")
+                .args(arguments)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains(format!(
+                    "locked {kind} hash mismatch for `nautilus`"
+                )));
+            assert_eq!(fs::read_to_string(&lock_path).unwrap(), damaged);
+            assert_eq!(
+                fs::read(registry.join("index.json")).unwrap(),
+                index_without_pin
+            );
+            assert!(!registry.join("packages/nautilus/1.0.0").exists());
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

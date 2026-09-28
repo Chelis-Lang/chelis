@@ -650,6 +650,7 @@ struct RemoteMaterial {
     shell_asset: u64,
     archive_path: PathBuf,
     archive_sha256: String,
+    verified_shell_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -1139,6 +1140,7 @@ impl CandidateProvider for GitHubReleaseProvider {
             shell_asset: release.shell_asset,
             archive_path,
             archive_sha256,
+            verified_shell_path: None,
         })
     }
 
@@ -1535,6 +1537,22 @@ impl DiscoverySession {
                 .cloned()
                 .unwrap_or_default();
             for entry in entries {
+                if let Some(locked) = self.locked.get(&package)
+                    && locked.version == entry.version
+                    && matches!(&locked.source, LockSource::LocalRegistry { .. })
+                {
+                    // Compare index hashes before loading: missing cache
+                    // directories must not bypass an existing lock pin.
+                    crate::verify_locked_hashes(
+                        locked,
+                        Some(&entry.archive_sha256),
+                        Some(&entry.shell_sha256),
+                    )
+                    .map_err(|message| DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message,
+                    })?;
+                }
                 let installed = match crate::load_registry_package(package.as_str(), &entry.version)
                 {
                     Ok(installed) => installed,
@@ -1571,25 +1589,6 @@ impl DiscoverySession {
                         message: "registry index and candidate manifest identities disagree"
                             .to_string(),
                     });
-                }
-                // Refresh and Inspect may choose new versions, but a local
-                // candidate for an existing registry pin must still match
-                // the lock before either command can report or publish it.
-                // The compiler-bundled runtime is handled separately above.
-                if let Some(locked) = self.locked.get(&package)
-                    && locked.version == entry.version
-                    && matches!(&locked.source, LockSource::LocalRegistry { .. })
-                {
-                    crate::verify_locked_package(
-                        locked,
-                        &parsed,
-                        Some(&entry.archive_sha256),
-                        Some(&entry.shell_sha256),
-                    )
-                    .map_err(|message| DiscoveryError::CandidateManifest {
-                        package: package.to_string(),
-                        message,
-                    })?;
                 }
                 let dependencies =
                     self.requests_for_manifest(&package, Some(&installed.root), &parsed.typed)?;
@@ -1739,6 +1738,12 @@ impl DiscoverySession {
                     Ok(material) => material,
                     Err(error @ DiscoveryError::CandidateArchive { .. })
                     | Err(error @ DiscoveryError::CandidateManifest { .. }) => {
+                        if self.locked.get(package).is_some_and(|locked| {
+                            locked.version == release.version.to_string()
+                                && matches!(&locked.source, LockSource::LocalRegistry { .. })
+                        }) {
+                            return Err(error);
+                        }
                         self.exclusions
                             .entry(package.clone())
                             .or_default()
@@ -1747,6 +1752,66 @@ impl DiscoverySession {
                     }
                     Err(error) => return Err(error),
                 };
+                if let Some(locked) = self.locked.get(package)
+                    && locked.version == release.version.to_string()
+                    && matches!(&locked.source, LockSource::LocalRegistry { .. })
+                {
+                    crate::verify_locked_hashes(locked, Some(&material.archive_sha256), None)
+                        .map_err(|message| DiscoveryError::CandidateManifest {
+                            package: package.to_string(),
+                            message,
+                        })?;
+                    // A verified installed pin already supplies its shell.
+                    // Fetch the remote shell only if that pin cannot be read
+                    // locally; a selected remote is checked at staging too.
+                    let local_pin_available = self
+                        .candidates
+                        .get(package)
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| {
+                            matches!(
+                                candidate,
+                                CandidateMaterial::Local { entry, .. }
+                                    if entry.version == locked.version
+                            )
+                        });
+                    if !local_pin_available {
+                        let shell_path = provider.fetch_selected_shell(
+                            &material,
+                            &temp_root,
+                            &mut self.budget,
+                        )?;
+                        let verified = verify_artifact_pair(&material.archive_path, &shell_path)
+                            .map_err(|message| DiscoveryError::CandidateManifest {
+                                package: package.to_string(),
+                                message,
+                            })?;
+                        crate::verify_locked_hashes(
+                            locked,
+                            Some(&verified.archive_sha256),
+                            Some(&verified.shell_sha256),
+                        )
+                        .map_err(|message| {
+                            DiscoveryError::CandidateManifest {
+                                package: package.to_string(),
+                                message,
+                            }
+                        })?;
+                        if verified.package.name != package.as_str()
+                            || verified.package.version != release.version.to_string()
+                            || verified.compiler != material.typed.compiler.to_string()
+                        {
+                            return Err(DiscoveryError::CandidateManifest {
+                                package: package.to_string(),
+                                message:
+                                    "locked remote archive, shell, and manifest identities disagree"
+                                        .to_string(),
+                            });
+                        }
+                        material.verified_shell_path = Some(shell_path);
+                    }
+                }
                 let typed = material.typed.clone();
                 if let Some((dependency, path)) = typed.dependencies.iter().find_map(
                     |(dependency, declaration)| match declaration {
@@ -1985,11 +2050,14 @@ fn stage_selected_remote(
                 package: candidate.id.name.to_string(),
                 reason: "the selected provider session is unavailable".to_string(),
             })?;
-        let shell_path = provider_ref.fetch_selected_shell(
-            &material,
-            session.temp.path(),
-            &mut session.budget,
-        )?;
+        let shell_path = match &material.verified_shell_path {
+            Some(path) => path.clone(),
+            None => provider_ref.fetch_selected_shell(
+                &material,
+                session.temp.path(),
+                &mut session.budget,
+            )?,
+        };
         let verified =
             verify_artifact_pair(&material.archive_path, &shell_path).map_err(|message| {
                 DiscoveryError::CandidateManifest {
@@ -2012,6 +2080,20 @@ fn stage_selected_remote(
                 package: candidate.id.name.to_string(),
                 message: "selected archive changed after candidate inspection".to_string(),
             });
+        }
+        if let Some(locked) = session.locked.get(&candidate.id.name)
+            && locked.version == candidate.id.version.to_string()
+            && matches!(&locked.source, LockSource::LocalRegistry { .. })
+        {
+            crate::verify_locked_hashes(
+                locked,
+                Some(&verified.archive_sha256),
+                Some(&verified.shell_sha256),
+            )
+            .map_err(|message| DiscoveryError::CandidateManifest {
+                package: candidate.id.name.to_string(),
+                message,
+            })?;
         }
         staged.push(StagedRemote {
             package: candidate.id.name.clone(),
