@@ -890,3 +890,8 @@ fn parity_generic_host_permutation() {
 fn parity_grad_host_results() {
     drive_parity(&examples_root().join("grad_host_results.ch"), true);
 }
+
+#[test]
+fn parity_keyed_state_wrapper() {
+    drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
+}

@@ -1,0 +1,1 @@
+Tensor-bearing tuple results now retain their components through a statically selected ADT state match, so a keyed stateful wrapper evaluates and compiles to C. See [#2711](https://github.com/Chelis-Lang/chelis/issues/2711).

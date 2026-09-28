@@ -43,6 +43,10 @@ const REUSED_HALF: &str = r#"def pair(k: key, x: tensor[4, f32]) -> tensor[2, 2,
 }
 "#;
 
+// [04] tuple projection and [04-LIN-9] state transport through a selected
+// ADT arm: the wrapper must preserve the direct helper's tuple shape.
+const STATE_WRAPPER: &str = include_str!("../../../examples/keyed_state_wrapper.ch");
+
 fn f32_line(name: &str, shape: &str, bits: &[u32]) -> String {
     let data = bits
         .iter()
@@ -131,5 +135,61 @@ fn a_half_of_the_pair_is_still_used_at_most_once() {
             .iter()
             .any(|error| error["message"].as_str().is_some_and(|m| m.contains("k1"))),
         "a second consuming use of `k1` must be rejected: {report}"
+    );
+}
+
+#[test]
+fn a_keyed_tuple_result_survives_an_adt_state_match_in_eval_and_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state_wrapper.ch");
+    std::fs::write(&file, STATE_WRAPPER).unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(checked.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["score"], 1.0, "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    let (eval, native) = eval_and_c("state_wrapper", STATE_WRAPPER);
+    assert_eq!(eval, f32_line("main", "[2, 1, 1, 1]", &[0x4000_0000, 0]));
+    assert_eq!(native, eval);
+}
+
+#[test]
+fn the_direct_helper_stays_a_positive_control_for_state_tuple_transport() {
+    let direct = STATE_WRAPPER.replace(
+        "wrapped(x, 0.5f32, State { seed: 0i64, next_draw: 0i64 })",
+        "direct(x, 0.5f32, 0i64, 0i64)",
+    );
+    assert_ne!(direct, STATE_WRAPPER, "direct control must change the call");
+    let (eval, native) = eval_and_c("direct_state", &direct);
+    assert_eq!(eval, f32_line("main", "[2, 1, 1, 1]", &[0x4000_0000, 0]));
+    assert_eq!(native, eval);
+}
+
+#[test]
+fn a_projection_past_the_state_tuple_end_is_a_type_error() {
+    let invalid = STATE_WRAPPER.replace("(out, _) = wrapped", "(out, _, extra) = wrapped");
+    assert_ne!(
+        invalid, STATE_WRAPPER,
+        "negative control must change the tuple"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state_bad_arity.ch");
+    std::fs::write(&file, invalid).unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["check", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    let errors = report["errors"].as_array().expect("errors array");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error["kind"] == "TupleIndexOutOfBounds"),
+        "{report}"
     );
 }

@@ -6564,6 +6564,21 @@ fn key_only_aggregate(ty: &crate::host_type_state::HostTypeTerm) -> bool {
     matches!(ty, HostTypeTerm::Tuple(_)) && key_leaf(ty)
 }
 
+/// A tuple with a tensor leaf needs its native lowered tuple structure:
+/// staging the whole tuple as one host value would leave a following
+/// `tuple-get` with no tensor component to project.
+fn tensor_bearing_tuple(ty: &crate::host_type_state::HostTypeTerm) -> bool {
+    use crate::host_type_state::HostTypeTerm;
+    fn has_tensor(ty: &HostTypeTerm) -> bool {
+        match ty {
+            HostTypeTerm::Tensor(_) | HostTypeTerm::PolymorphicTensor(_) => true,
+            HostTypeTerm::Tuple(items) => items.iter().any(has_tensor),
+            _ => false,
+        }
+    }
+    matches!(ty, HostTypeTerm::Tuple(_)) && has_tensor(ty)
+}
+
 const RUNTIME_LIST_VIEW_CTOR: &str = "__chelis_runtime_list_view";
 
 #[derive(Clone)]
@@ -8960,6 +8975,7 @@ impl<'program> LowerCtx<'program> {
             || matches!(ty, HostTypeTerm::Tensor(_))
             || (is_var != is_callable)
             || key_only_aggregate(&ty)
+            || tensor_bearing_tuple(&ty)
         {
             return None;
         }
