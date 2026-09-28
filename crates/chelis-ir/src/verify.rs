@@ -437,7 +437,7 @@ pub(crate) fn verify_mapped_gradient_closure(
                 "vectorization node map gives multiple source nodes the identity {mapped_id:?}"
             ));
         }
-        let expected_deps = source_node
+        let mut expected_deps = source_node
             .shape_deps
             .iter()
             .map(|dep| {
@@ -449,6 +449,17 @@ pub(crate) fn verify_mapped_gradient_closure(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // A scalar predicate acquires its first batch axis during vmap. The
+        // mapped comparison/logical node records the operand that owns that
+        // physical axis; this is a new dependency, not a lost source edge.
+        if matches!(source_node.op, RiscOp::Compare(_) | RiscOp::Logical(_))
+            && source_node.output_type.dims.is_empty()
+            && mapped_node.output_type.dims.len() == 1
+            && let Some(&axis_source) = mapped_node.inputs.first()
+            && !expected_deps.contains(&axis_source)
+        {
+            expected_deps.push(axis_source);
+        }
         if mapped_node.shape_deps != expected_deps {
             return Err(format!(
                 "activation shape dependencies of {:?} were not preserved by vectorization",

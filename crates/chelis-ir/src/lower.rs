@@ -13053,6 +13053,7 @@ impl<'program> LowerCtx<'program> {
         subctx.current_span_id = self.current_span_id.clone();
         let mut wrt = Vec::new();
         let mut wrt_param_indices = Vec::new();
+        let mut mapped_batch_witness = None;
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
@@ -13068,6 +13069,14 @@ impl<'program> LowerCtx<'program> {
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
             );
+            if mapped_batch_witness.is_none()
+                && self
+                    .dag
+                    .get(canonical_args[index])
+                    .is_some_and(|actual| actual.output_type.dims.len() > param_ty.dims.len())
+            {
+                mapped_batch_witness = Some(load);
+            }
             if self.is_selected_wrt(index, &param_ty, wrt_indices) {
                 wrt.push(load);
                 wrt_param_indices.push(index);
@@ -13095,6 +13104,14 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        // Even a constant body has one result per mapped input row. Keep the
+        // formal's shape available through AD pruning so a symbolic batch
+        // broadcast reads its cardinality from the actual at the call site.
+        if let Some(witness) = mapped_batch_witness
+            && witness != output
+        {
+            subctx.dag.add_shape_dep(output, witness);
+        }
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)

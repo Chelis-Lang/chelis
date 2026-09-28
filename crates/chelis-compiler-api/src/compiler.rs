@@ -1,4 +1,4 @@
-use crate::schema::numbers::{NonnegativeExtent, SourceInteger};
+use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
@@ -6874,7 +6874,11 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
         RiscOp::Iota => WireRiscOp::Iota,
         RiscOp::ListMapCapture { first } => WireRiscOp::ListMapCapture { first: *first },
         RiscOp::OrderedAdjointSum { groups } => WireRiscOp::OrderedAdjointSum {
-            groups: groups.clone(),
+            groups: groups
+                .iter()
+                .copied()
+                .map(NonnegativeCount::try_from)
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::KeySelect => WireRiscOp::KeySelect {},
@@ -7588,7 +7592,7 @@ mod tests {
             WireRiscOp::ListMapCapture { .. }
         ));
         assert!(
-            matches!(&decoded.nodes[3].op, WireRiscOp::OrderedAdjointSum { groups } if groups == &[2])
+            matches!(&decoded.nodes[3].op, WireRiscOp::OrderedAdjointSum { groups } if groups.len() == 1 && groups[0].get() == 2)
         );
         for (node, field, replacement) in [
             (

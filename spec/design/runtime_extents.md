@@ -398,6 +398,8 @@ orders entire invocations among outside consumers, then evaluates spec/06
 rows or columns separately. Both operations have exact [05-OP-55] numeric
 registrations and WireDag 21 representations. The invocation carrier's actual
 axis supplies allocation extent; result claims remain checked obligations.
+The wire group arities use sealed `NonnegativeCount` values and are validated
+against the contribution input count before a consumer slices any group.
 
 `issue_2419_range_tensor_ad` covers Eval/native C cancellation, repeated reads,
 outside consumers, distinct maps, recursive float parameters, inactive/empty
@@ -410,7 +412,10 @@ loudly; this is not closure of the recursive List/AD tracker #2515.
 Ordinary `grad` closure does not discharge the mapped path. Before
 differentiation, `vmap(grad(f))` lowers the authored activation signature and
 forms its complete ordered entry-witness set exactly as the corresponding
-unmapped call does. Vectorization remaps each witness input, claim,
+unmapped call does. A constant body still retains one mapped formal as a
+shape-only dependency through AD pruning: its caller owns the symbolic batch
+extent even when the differentiated body never reads the formal's value.
+Vectorization remaps each witness input, claim,
 requirement, shape dependency and rendered dimension origin through the
 `vectorize_axis0_with_node_map` result. Cotangent packing and the final
 `splice_dag` retain those remapped dependencies even when the cotangent is

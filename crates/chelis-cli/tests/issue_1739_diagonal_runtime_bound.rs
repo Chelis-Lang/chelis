@@ -1665,8 +1665,9 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 
 /// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
 /// capability refusals are asserted; local and forwarded declared-result
-/// obligations are read back from the generated program. No shipped example
-/// currently adds one of these host-owned literal result checks.
+/// obligations are read back from the generated program and checked against
+/// their authored return types. An example may gain a host-owned result check
+/// only when its declared result actually names that obligation.
 ///
 /// Entry guards have a different contract: compare their emitted conditions
 /// and labels with an independent parameter-axis traversal of checked source
@@ -1697,12 +1698,67 @@ fn the_census_reader_finds_the_guard_a_block_tail_moved() {
 /// that returned nothing, or that stopped seeing files it used to see, fails
 /// here naming the example it lost. That is an independent fact about the
 /// directory, which a count derived from the same `read_dir` would not be.
+fn assert_result_guards_follow_authored_signature(
+    stem: &str,
+    source: &str,
+    guards: &[(String, String, String, String)],
+) {
+    use chelis_surf::ast::{Decl, TypeExpr};
+    fn authored_result<'a>(decls: &'a [Decl], function: &str) -> Option<&'a TypeExpr> {
+        decls.iter().find_map(|decl| match decl {
+            Decl::FunDef { name, ret_ty, .. } if name == function => ret_ty.as_ref(),
+            Decl::Module { decls, .. } => authored_result(decls, function),
+            _ => None,
+        })
+    }
+    let decls = chelis_surf::parser::parse_str(source).expect("shipped example parses");
+    for (function, _, axis, required) in guards {
+        let result = authored_result(&decls, function).unwrap_or_else(|| {
+            panic!("{stem}: result guard has no authored return type for {function}")
+        });
+        let TypeExpr::Tensor(dims, _, _) = result else {
+            panic!("{stem}: {function} guards a result that is not a tensor")
+        };
+        let index: usize = axis.parse().expect("emitted result axis is decimal");
+        let claim = dims
+            .get(index)
+            .unwrap_or_else(|| panic!("{stem}: {function} guards absent result axis {index}"));
+        let matches = match claim {
+            TypeExpr::DimensionLiteral(value, _) => required == &value.to_string(),
+            TypeExpr::Named(name, _) => required == name,
+            _ => false,
+        };
+        assert!(
+            matches,
+            "{stem}: {function} guards axis {axis} as {required}, but the authored result claims {claim:?}"
+        );
+    }
+}
+
+#[test]
+fn the_census_rejects_a_result_guard_not_in_the_authored_signature() {
+    let source = "def d[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n";
+    let wrong_claim = vec![("d".into(), "__result".into(), "0".into(), "wrong".into())];
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_result_guards_follow_authored_signature("d", source, &wrong_claim)
+        })
+        .is_err()
+    );
+    let wrong_axis = vec![("d".into(), "__result".into(), "1".into(), "n".into())];
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_result_guards_follow_authored_signature("d", source, &wrong_axis)
+        })
+        .is_err()
+    );
+}
+
 #[test]
 fn no_shipped_example_gains_a_host_lane_guard() {
     let dir = tempdir().expect("tempdir");
     let examples = executable_examples();
 
-    let mut census: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
     for example in &examples {
         let stem = example.file_stem().expect("stem").to_str().expect("UTF-8");
@@ -1724,11 +1780,12 @@ fn no_shipped_example_gains_a_host_lane_guard() {
             continue;
         }
         let source = emit_c(path, &out);
-        for (function, target, axis, required) in emitted_guards(&source) {
-            census.push(format!(
-                "{stem}: {function} guards {target} axis {axis} claiming {required}"
-            ));
-        }
+        let guards = emitted_guards(&source);
+        assert_result_guards_follow_authored_signature(
+            stem,
+            &fs::read_to_string(example).expect("read example"),
+            &guards,
+        );
         assert_signature_entry_inventory(
             stem,
             &fs::read_to_string(example).expect("read example"),
@@ -1749,12 +1806,5 @@ fn no_shipped_example_gains_a_host_lane_guard() {
         refused, expected_refusals,
         "every recorded refusal must be reached: a name that no longer matches an \
          example, or an enumeration that returned nothing, silently shrinks the census"
-    );
-
-    assert_eq!(
-        census,
-        Vec::<String>::new(),
-        "these shipped defs gained a host-lane result guard and each one needs a \
-         both-lane check before it lands"
     );
 }

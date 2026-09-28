@@ -2644,23 +2644,32 @@ impl WireDag {
                     }
                 }
                 WireRiscOp::OrderedAdjointSum { groups } => {
+                    let widths = groups
+                        .iter()
+                        .map(|group| usize::try_from(group.get()))
+                        .collect::<Result<Vec<_>, _>>();
+                    let valid_widths = widths.as_ref().is_ok_and(|widths| {
+                        !widths.is_empty()
+                            && widths.iter().all(|width| *width > 0)
+                            && widths
+                                .iter()
+                                .try_fold(0usize, |sum, width| sum.checked_add(*width))
+                                == Some(node.inputs.len())
+                    });
                     if !node.output_type.dims.is_empty()
                         || !matches!(
                             node.output_type.precision.as_str(),
                             "f16" | "bf16" | "f32" | "f64"
                         )
-                        || groups.contains(&0)
-                        || groups
-                            .iter()
-                            .try_fold(0usize, |sum, width| sum.checked_add(*width))
-                            != Some(node.inputs.len())
+                        || !valid_widths
                     {
                         return Err(WireDagContractError::new(
                             "WireDag OrderedAdjointSum has invalid group arity or scalar float output",
                         ));
                     }
+                    let widths = widths.expect("validated group counts");
                     let mut offset = 0;
-                    for &width in groups {
+                    for width in widths {
                         for input in &node.inputs[offset..offset + width] {
                             if !wire_node_by_id(&self.nodes, *input).is_some_and(|input| {
                                 input.output_type.precision == node.output_type.precision
@@ -3942,7 +3951,7 @@ pub enum WireRiscOp {
         first: bool,
     },
     OrderedAdjointSum {
-        groups: Vec<usize>,
+        groups: Vec<NonnegativeCount>,
     },
     Add,
     Sub,
