@@ -2030,7 +2030,11 @@ fn execution_artifact_from_compiled_observed(
                 reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
-                reject_unsized_named_dims(&entry_dag, "c")?;
+                // The C emitter validates each axis's extent source and each
+                // rendered dimension's origin after backend preparation. A
+                // runtime extent is representable when those checks succeed;
+                // rejecting every unsized dimension here also rejects valid
+                // transformed entries with runtime pad/shrink intermediates.
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);

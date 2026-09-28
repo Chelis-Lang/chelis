@@ -412,14 +412,17 @@ def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss, wrt=x)(key_from
 "#,
         "derivative",
     );
-    let derivative = c.symbol("derivative");
+    // A lowerable selected tensor entry uses the fixed callable ABI, even
+    // when its body applies grad under a Resource annotation (spec/11 §2.1).
+    let derivative = c.symbol("chelis_main");
     let expected = c_floats(&mask4(key7(), false));
     let driver = format!(
         r#"
 int main(void) {{
     chelis_tensor *x = input(4);
+    chelis_tensor *inputs[] = {{x}};
     chelis_tensor *outputs[] = {{NULL}};
-    outputs[0] = {derivative}(x);
+    {derivative}(inputs, 1, outputs, 1);
     const float expected[] = {{{expected}}};
     tensor_bits(outputs[0], 4, expected);
     chelis_tensor_release(outputs[0]);
