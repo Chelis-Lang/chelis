@@ -277,6 +277,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::KeySelect
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
+        // [05-OP-54]: runtime range materializes exact signed i64 elements.
+        | RiscOp::Iota
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }
         | RiscOp::ProdReduce { .. }
@@ -380,6 +382,8 @@ fn assert_expected(label: &str, actual: &str, expected: &str) {
 fn agreement_operation_identity_is_derived_from_ir() {
     let cases = [
         (RiscOp::Add, AgreementOp::Exact),
+        // [05-OP-54]: i64 range elements agree bit for bit across lanes.
+        (RiscOp::Iota, AgreementOp::Exact),
         (RiscOp::Exp, AgreementOp::Exp),
         (RiscOp::Log, AgreementOp::Log),
         (RiscOp::Sin, AgreementOp::Sin),
