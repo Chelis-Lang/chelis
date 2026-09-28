@@ -609,8 +609,6 @@ def build_python_extension(
     argv = [
         str(python_env["maturin"]),
         "develop",
-        "--manifest-path",
-        str(context["candidate"] / "crates/chelis-python/Cargo.toml"),
         "--locked",
         "--uv",
     ]
