@@ -89,6 +89,53 @@ fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
 }
 
 #[test]
+fn destructured_entry_keeps_its_own_result_in_the_public_lowering() {
+    use chelis_compiler_api::schema::LowerRequest;
+
+    for source in [
+        "def sample(t: tensor[2, f32]) -> tensor[2, f32] = {\n  (a, b) = (copy(t), t)\n  add(a, b)\n}\n",
+        "def pair(t: tensor[2, f32]) -> (tensor[2, f32], tensor[2, f32]) = (copy(t), t)\n\
+         def sample(t: tensor[2, f32]) -> tensor[2, f32] = {\n  (a, b) = pair(t)\n  add(a, b)\n}\n",
+    ] {
+        let lowered = chelis_compiler_api::compiler::lower(LowerRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            entry: Some("sample".into()),
+        })
+        .expect("a checked destructuring entry must lower");
+        let sample = *lowered
+            .named_roots
+            .get("sample")
+            .expect("the selected entry must have a named root");
+        assert!(lowered.dag.roots.contains(&sample), "{lowered:?}");
+        let root = &lowered.dag.nodes[sample as usize];
+        assert!(
+            matches!(&root.op, chelis_compiler_api::schema::WireRiscOp::Add),
+            "the root must be sample's addition, not an empty or callee graph: {lowered:?}"
+        );
+    }
+}
+
+#[test]
+fn destructured_components_still_obey_consuming_fanout() {
+    let source =
+        "def sample(k: key) -> (key, key) = {\n  (a, unused) = split_key(k)\n  (a, a)\n}\n";
+    let rejected = run_source(request(source, PipelineGoal::FullCheck))
+        .expect_err("a projected key cannot be consumed twice");
+    assert!(
+        matches!(
+            &rejected,
+            PipelineRejection::Linearity { errors }
+                if errors.iter().any(|error| matches!(
+                    &error.kind,
+                    chelis_types::errors::CheckErrorKind::KeyReuse
+                ))
+        ),
+        "the rejection must be key affinity: {rejected:?}"
+    );
+}
+
+#[test]
 fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
     let outcome = run_source(request(
         "def out[n](input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",

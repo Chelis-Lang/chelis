@@ -224,6 +224,46 @@ fn context_native_source_order_saved_mask_and_shapes_survive_decode() {
 }
 
 #[test]
+fn context_c_lowers_split_key_destructuring_in_client_and_library_defs() {
+    let context = context_with_library(
+        "module Probe.Draw\nexport (keep, split_keep)\n\
+         def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n\
+         def split_keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = {\n\
+           (first, unused) = split_key(k)\n\
+           keep(first, x)\n\
+         }\n",
+    );
+    let expected = half_dropout(key_reference::split(key9()).0, &driver_input(4), false);
+    for client in [
+        "module Probe.Client\nimport Probe.Draw (keep)\n\
+         def main(x: tensor[4, f32]) -> tensor[4, f32] = {\n\
+           (first, unused) = split_key(key_from_seed(9i64))\n\
+           keep(first, x)\n\
+         }\n",
+        "module Probe.Client\nimport Probe.Draw (split_keep)\n\
+         def main(x: tensor[4, f32]) -> tensor[4, f32] = split_keep(key_from_seed(9i64), x)\n",
+    ] {
+        let artifact =
+            compile_for_execution_in_context(&context, client, CompileTarget::C, Some("main"))
+                .unwrap_or_else(|error| panic!("{client}: {error:?}"));
+        native(&artifact, &[4], &expected);
+    }
+
+    let host_only = "module Probe.Client\n\
+         def main(x: tensor[4, f32]) -> tensor[4, f32] = {\n\
+           (label, value) = (\"host\", x)\n\
+           value\n\
+         }\n";
+    let error =
+        compile_for_execution_in_context(&context, host_only, CompileTarget::C, Some("main"))
+            .expect_err("a host-only tuple must not produce a fabricated tensor entry");
+    assert!(
+        format!("{error:?}").contains("no callable tensor-kernel form"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn context_source_selection_preserves_siblings_and_ordinary_fallback() {
     let original = context();
     let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
