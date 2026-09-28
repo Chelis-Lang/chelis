@@ -119,6 +119,10 @@ revision stay exact. A job-level `uses` pointing at the same central
 repository with a mutable or different revision fails the workflow-pin row
 even if another job calls the known revision. Comments and run strings are
 not central callers.
+The offline auditor reads YAML jobs structurally, independent of indentation
+width or quoted keys, and resolves aliases before deciding whether a job
+calls that central workflow. Duplicate keys or malformed YAML fail closed.
+Nested step fields, comments, and run blocks cannot become job-level callers.
 For a legacy central CI profile, `chelis-tag` must equal `vX.Y.Z` and
 `chelis-version` must equal `X.Y.Z` for the exact `reef.toml` pin; extra or
 missing `v` prefixes do not count. To certify the CI pin guard and negative

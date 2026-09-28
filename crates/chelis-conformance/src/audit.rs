@@ -1435,42 +1435,25 @@ fn classify_central_reference(uses: &str) -> Option<CentralWorkflowReference> {
     })
 }
 
-/// Classify only job-level `uses` values under a workflow's `jobs` map.
-/// Comments, steps, and run strings cannot masquerade as a central caller.
-fn central_reference_in_workflow(body: &str) -> Option<CentralWorkflowReference> {
-    let mut in_jobs = false;
-    let mut in_job = false;
+/// Both authority paths inspect the same parsed job-level `uses` field.
+/// YAML aliases and merge keys are resolved by the parser; comments, steps,
+/// run blocks, and nested fields never become callable jobs.
+fn central_reference_in_workflow(workflow: &serde_json::Value) -> Option<CentralWorkflowReference> {
+    let jobs = workflow.get("jobs")?.as_object()?;
     let mut known = false;
-    for line in body.lines() {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+    for job in jobs.values() {
+        let Some(uses) = job.get("uses").and_then(serde_json::Value::as_str) else {
             continue;
-        }
-        match leading_spaces(line) {
-            Some(0) => {
-                in_jobs = mapping_at(line, 0)
-                    .is_some_and(|(key, value)| key == "jobs" && value.is_empty());
-                in_job = false;
+        };
+        match classify_central_reference(uses) {
+            Some(CentralWorkflowReference::Unrecognized) => {
+                return Some(CentralWorkflowReference::Unrecognized);
             }
-            Some(2) if in_jobs => {
-                in_job = mapping_at(line, 2).is_some_and(|(_, value)| value.is_empty());
+            Some(CentralWorkflowReference::Known) if known => {
+                return Some(CentralWorkflowReference::Unrecognized);
             }
-            Some(4) if in_jobs && in_job => {
-                if let Some((key, uses)) = mapping_at(line, 4)
-                    && key == "uses"
-                {
-                    match classify_central_reference(&uses) {
-                        Some(CentralWorkflowReference::Unrecognized) => {
-                            return Some(CentralWorkflowReference::Unrecognized);
-                        }
-                        Some(CentralWorkflowReference::Known) if known => {
-                            return Some(CentralWorkflowReference::Unrecognized);
-                        }
-                        Some(CentralWorkflowReference::Known) => known = true,
-                        None => {}
-                    }
-                }
-            }
-            _ => {}
+            Some(CentralWorkflowReference::Known) => known = true,
+            None => {}
         }
     }
     known.then_some(CentralWorkflowReference::Known)
@@ -1480,14 +1463,19 @@ fn central_reference_in_workflow(body: &str) -> Option<CentralWorkflowReference>
 /// unknown-pointer rejection. A known reference with malformed job shape or
 /// an unrelated shell profile cannot earn any audit authority.
 fn central_workflow_evidence(ctx: &Ctx, body: &str) -> CentralWorkflowEvidence {
-    match central_reference_in_workflow(body) {
+    // Reject malformed/ambiguous YAML (including duplicate keys) rather than
+    // deriving absence or authority from a lossy line scan.
+    let Ok(workflow) = serde_saphyr::from_str::<serde_json::Value>(body) else {
+        return CentralWorkflowEvidence::Unrecognized;
+    };
+    match central_reference_in_workflow(&workflow) {
         None => return CentralWorkflowEvidence::Absent,
         Some(CentralWorkflowReference::Unrecognized) => {
             return CentralWorkflowEvidence::Unrecognized;
         }
         Some(CentralWorkflowReference::Known) => {}
     }
-    let Some(call) = parse_central_workflow_call(body) else {
+    let Some(call) = parse_central_workflow_call(&workflow) else {
         return CentralWorkflowEvidence::Unrecognized;
     };
     let matches_shell = match ctx.shell_name.as_deref() {
@@ -1505,11 +1493,10 @@ fn central_workflow_evidence(ctx: &Ctx, body: &str) -> CentralWorkflowEvidence {
     }
 }
 
-/// Recognize a complete thin reusable-workflow calling job. This parser is
-/// intentionally narrower than YAML: it accepts only the canonical block-map
-/// wrapper shape. Comments, run-string lookalikes, conditional jobs, mutable
-/// refs, unexpected inputs, and additional jobs therefore cannot become audit
-/// authority.
+/// Recognize one complete thin reusable-workflow calling job with closed
+/// profile inputs and secret mapping. YAML syntax may vary, but comments,
+/// run-string lookalikes, conditional jobs, mutable refs, unexpected inputs,
+/// and additional jobs cannot become audit authority.
 fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
     match central_workflow_evidence(ctx, body) {
         CentralWorkflowEvidence::Known(call) => Some(call),
@@ -1664,107 +1651,27 @@ fn main_in_branch_list(value: &str) -> Option<bool> {
     Some(main)
 }
 
-fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut jobs_sections = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| leading_spaces(line) == Some(0) && line.trim() == "jobs:");
-    let (jobs_start, _) = jobs_sections.next()?;
-    if jobs_sections.next().is_some() {
-        return None;
-    }
-    let jobs_end = lines
-        .iter()
-        .enumerate()
-        .skip(jobs_start + 1)
-        .find(|(_, line)| !line.trim().is_empty() && leading_spaces(line) == Some(0))
-        .map(|(index, _)| index)
-        .unwrap_or(lines.len());
-
-    let mut jobs: Vec<&[&str]> = Vec::new();
-    let mut index = jobs_start + 1;
-    while index < jobs_end {
-        let line = lines[index];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            index += 1;
-            continue;
-        }
-        let (_, value) = mapping_at(line, 2)?;
-        if !value.is_empty() {
-            return None;
-        }
-        let job_end = lines
-            .iter()
-            .enumerate()
-            .take(jobs_end)
-            .skip(index + 1)
-            .find(|(_, candidate)| {
-                !candidate.trim().is_empty()
-                    && leading_spaces(candidate).is_some_and(|indent| indent <= 2)
-            })
-            .map(|(end, _)| end)
-            .unwrap_or(jobs_end);
-        jobs.push(&lines[index + 1..job_end]);
-        index = job_end;
-    }
+fn parse_central_workflow_call(workflow: &serde_json::Value) -> Option<CentralWorkflowCall> {
+    let jobs = workflow.get("jobs")?.as_object()?;
     if jobs.len() != 1 {
         return None;
     }
-
-    let job = jobs[0];
-    let mut keys: BTreeMap<String, (String, usize, usize)> = BTreeMap::new();
-    let mut index = 0;
-    while index < job.len() {
-        let line = job[index];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            index += 1;
-            continue;
-        }
-        let (key, value) = mapping_at(line, 4)?;
-        if keys.contains_key(&key) {
-            return None;
-        }
-        let child_end = job
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .find(|(_, candidate)| {
-                !candidate.trim().is_empty()
-                    && leading_spaces(candidate).is_some_and(|indent| indent <= 4)
-            })
-            .map(|(end, _)| end)
-            .unwrap_or(job.len());
-        keys.insert(key, (value, index + 1, child_end));
-        index = child_end;
-    }
+    let job = jobs.values().next()?.as_object()?;
     if !["uses", "with", "secrets"]
         .iter()
-        .all(|key| keys.contains_key(*key))
-        || !keys
+        .all(|key| job.contains_key(*key))
+        || !job
             .keys()
             .all(|key| matches!(key.as_str(), "name" | "uses" | "with" | "secrets"))
+        || job.get("name").is_some_and(|name| !name.is_string())
+        || classify_central_reference(job.get("uses")?.as_str()?)
+            != Some(CentralWorkflowReference::Known)
     {
         return None;
     }
 
-    if !keys.get("with")?.0.is_empty() || !keys.get("secrets")?.0.is_empty() {
-        return None;
-    }
-    for scalar_key in ["name", "uses"] {
-        if let Some((_, child_start, child_end)) = keys.get(scalar_key)
-            && child_start != child_end
-        {
-            return None;
-        }
-    }
-    if classify_central_reference(&keys.get("uses")?.0) != Some(CentralWorkflowReference::Known) {
-        return None;
-    }
-
-    let (_, with_start, with_end) = keys.get("with")?;
-    let inputs = nested_mapping(job, *with_start, *with_end, 6)?;
-    let profile = inputs.get("profile")?.to_string();
+    let inputs = job.get("with")?.as_object()?;
+    let profile = inputs.get("profile")?.as_str()?.to_string();
     let expected_inputs: &[&str] = match profile.as_str() {
         "coral-ci" => &[
             "profile",
@@ -1793,18 +1700,20 @@ fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
     };
     if inputs.len() != expected_inputs.len()
         || !expected_inputs.iter().all(|key| inputs.contains_key(*key))
-        || !canonical_sha256(inputs.get("chelis-linux-sha256")?)
+        || !inputs.values().all(serde_json::Value::is_string)
+        || !canonical_sha256(inputs.get("chelis-linux-sha256")?.as_str()?)
         || inputs
             .get("chelis-darwin-sha256")
-            .is_some_and(|digest| !canonical_sha256(digest))
+            .is_some_and(|digest| !digest.as_str().is_some_and(canonical_sha256))
     {
         return None;
     }
 
-    let (_, secrets_start, secrets_end) = keys.get("secrets")?;
-    let secrets = nested_mapping(job, *secrets_start, *secrets_end, 6)?;
+    let secrets = job.get("secrets")?.as_object()?;
     if secrets.len() != 1
-        || secrets.get("CHELIS_RELEASE_TOKEN").map(String::as_str)
+        || secrets
+            .get("CHELIS_RELEASE_TOKEN")
+            .and_then(serde_json::Value::as_str)
             != Some(CENTRAL_SECRET_EXPRESSION)
     {
         return None;
@@ -1812,8 +1721,14 @@ fn parse_central_workflow_call(body: &str) -> Option<CentralWorkflowCall> {
 
     Some(CentralWorkflowCall {
         profile,
-        chelis_version: inputs.get("chelis-version").cloned(),
-        chelis_tag: inputs.get("chelis-tag").cloned(),
+        chelis_version: inputs
+            .get("chelis-version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        chelis_tag: inputs
+            .get("chelis-tag")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -1848,25 +1763,6 @@ fn mapping_at(line: &str, indent: usize) -> Option<(String, String)> {
     let (key, value) = text.split_once(':')?;
     let key = key.trim();
     (!key.is_empty()).then(|| (key.to_string(), yaml_scalar(value)))
-}
-
-fn nested_mapping(
-    lines: &[&str],
-    start: usize,
-    end: usize,
-    indent: usize,
-) -> Option<BTreeMap<String, String>> {
-    let mut values = BTreeMap::new();
-    for line in &lines[start..end] {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        let (key, value) = mapping_at(line, indent)?;
-        if value.is_empty() || values.insert(key, value).is_some() {
-            return None;
-        }
-    }
-    Some(values)
 }
 
 fn canonical_sha256(value: &str) -> bool {

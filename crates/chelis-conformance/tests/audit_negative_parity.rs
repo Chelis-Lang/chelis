@@ -212,6 +212,8 @@ fn central_ci_must_run_for_pull_requests_and_main_pushes() {
         let events = "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:";
         for replacement in [
             "on: workflow_dispatch",
+            "on:",
+            "on: {}",
             "",
             "on:\n  pull_request:\n  workflow_dispatch:",
             "on:\n  push:\n    branches: [main]\n  workflow_dispatch:",
@@ -433,6 +435,100 @@ fn mixed_central_revisions_cannot_hide_behind_github_repository_casing() {
     }
 }
 
+/// YAML accepts either indentation width. Neither an alternate pointer nor
+/// a second accepted caller may hide behind a valid, canonical CI wrapper.
+#[test]
+fn structurally_mapped_job_refs_reject_unaccepted_and_extra_calls_at_either_indentation() {
+    for package in ["coral", "nautilus"] {
+        for indent in [2, 4] {
+            for revision in [
+                "main",
+                "31ab77c35018d72bccdcae8d7330b25312a38114",
+                CENTRAL_SHA,
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let root = stamp(tmp.path(), package);
+                std::fs::write(
+                    root.join(".github/workflows/ci.yml"),
+                    central_ci_wrapper(package, VER),
+                )
+                .unwrap();
+                let other = format!(
+                    "name: alternate\non: workflow_dispatch\njobs:\n{job}alternate:\n{field}uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@{revision}\n",
+                    job = " ".repeat(indent),
+                    field = " ".repeat(indent * 2),
+                );
+                std::fs::write(root.join(".github/workflows/other.yml"), other).unwrap();
+                let report = audit::audit(&root);
+                assert_eq!(
+                    verdict_of(&report, "workflow-env-pins"),
+                    Verdict::Fail,
+                    "{package}: {indent}/{field_indent} job @{revision} must not be laundered behind the accepted CI",
+                    field_indent = indent * 2
+                );
+                assert!(
+                    !report.ok(),
+                    "{package}: {indent}/{field_indent} @{revision}",
+                    field_indent = indent * 2
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn known_caller_remains_recognized_when_jobs_use_four_eight_space_indentation() {
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        let canonical = central_ci_wrapper(package, VER);
+        let (header, jobs) = canonical.split_once("jobs:\n").unwrap();
+        let mut wrapper = format!("{header}jobs:\n");
+        for job_line in jobs.lines() {
+            let indent = job_line.len() - job_line.trim_start().len();
+            wrapper.push_str(&" ".repeat(indent));
+            wrapper.push_str(job_line);
+            wrapper.push('\n');
+        }
+        std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
+        let report = audit::audit(&root);
+        for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+            assert_eq!(verdict_of(&report, row), Verdict::Pass, "{package}: {row}");
+        }
+        assert!(
+            report.ok(),
+            "{package}: alternate indentation is valid YAML"
+        );
+    }
+}
+
+#[test]
+fn quoted_job_keys_and_aliases_do_not_bypass_central_pointer_audit() {
+    for package in ["coral", "nautilus"] {
+        for other in [
+            "name: alternate\non: workflow_dispatch\n\"jobs\":\n    alternate:\n        \"uses\": CHELIS-LANG/CI/.github/workflows/consumer.yml@main\n",
+            "name: alternate\non: workflow_dispatch\nenv: &central\n  uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main\njobs:\n  alternate: *central\n",
+            "name: alternate\non: workflow_dispatch\nenv: &central\n  uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main\njobs:\n  alternate:\n    <<: *central\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper(package, VER),
+            )
+            .unwrap();
+            std::fs::write(root.join(".github/workflows/other.yml"), other).unwrap();
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Fail,
+                "{package}: quoted or aliased job-level pointer must fail"
+            );
+            assert!(!report.ok(), "{package}: quoted or aliased pointer");
+        }
+    }
+}
+
 #[test]
 fn accepted_central_revision_keeps_github_repository_identity_case_insensitive() {
     for package in ["coral", "nautilus"] {
@@ -456,23 +552,34 @@ fn accepted_central_revision_keeps_github_repository_identity_case_insensitive()
 }
 
 #[test]
-fn central_reference_in_an_unrelated_run_string_is_not_a_caller() {
+fn comments_run_blocks_nested_steps_and_inert_aliases_are_not_job_calls() {
     for package in ["coral", "nautilus"] {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = stamp(tmp.path(), package);
-        std::fs::write(
-            root.join(".github/workflows/ci.yml"),
-            central_ci_wrapper(package, VER),
-        )
-        .unwrap();
-        std::fs::write(
-            root.join(".github/workflows/other.yml"),
-            "name: logging\non: workflow_dispatch\njobs:\n  logging:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo 'uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main'\n",
-        )
-        .unwrap();
-        let report = audit::audit(&root);
-        assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Pass);
-        assert!(report.ok(), "{package}: run text is not a job-level uses");
+        for other in [
+            "name: logging\non: workflow_dispatch\njobs:\n  logging:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"echo 'uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main'\"\n",
+            "name: logging\non: workflow_dispatch\n# uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main\njobs:\n    logging:\n        runs-on: ubuntu-latest\n        steps:\n            - run: |\n                uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main\n",
+            "name: logging\non: workflow_dispatch\nenv:\n  NOTE: &annotation \"echo 'uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main'\"\njobs:\n  logging:\n    runs-on: ubuntu-latest\n    steps:\n      - run: *annotation\n",
+            "name: logging\non: workflow_dispatch\njobs:\n  logging:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          uses: CHELIS-LANG/CI/.github/workflows/consumer.yml@main\n",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = stamp(tmp.path(), package);
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper(package, VER),
+            )
+            .unwrap();
+            std::fs::write(root.join(".github/workflows/other.yml"), other).unwrap();
+            let report = audit::audit(&root);
+            assert_eq!(
+                verdict_of(&report, "workflow-env-pins"),
+                Verdict::Pass,
+                "{package}: {}",
+                diagnostic_of(&report, "workflow-env-pins")
+            );
+            assert!(
+                report.ok(),
+                "{package}: inert YAML cannot become a job-level use"
+            );
+        }
     }
 }
 
@@ -486,6 +593,7 @@ fn duplicate_jobs_document_cannot_launder_an_inert_central_call() {
     );
     std::fs::write(root.join(".github/workflows/ci.yml"), wrapper).unwrap();
     let report = audit::audit(&root);
+    assert_eq!(verdict_of(&report, "workflow-env-pins"), Verdict::Fail);
     assert_eq!(verdict_of(&report, "pin-consistency-guard"), Verdict::Fail);
     assert_eq!(verdict_of(&report, "tests-neg"), Verdict::Fail);
 }

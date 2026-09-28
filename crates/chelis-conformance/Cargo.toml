@@ -17,6 +17,10 @@ sha2 = "0.10"
 # a hand-rolled line scan; a parsed document makes spelling-independence hold by
 # construction. Same version chelis-reef/chelis-cli/chelisup already use.
 toml = "0.8"
+# Workflow caller authority is parsed from YAML job mappings, not whitespace:
+# the same parsed jobs determine known callers and unrecognized central refs.
+serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
+serde_json = "1"
 
 [build-dependencies]
 
