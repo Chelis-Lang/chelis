@@ -5444,6 +5444,93 @@ impl<'a> HostEmitter<'a> {
             arg_vars.push((arg_name, arg_ty));
         }
 
+        // Tensor key forms preserve the checked rank; split_keys appends one
+        // axis. Read every extent before allocation and every element through
+        // the dtype-tagged views, as the tensor kernel emitter does.
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && let HostType::Tensor(input_ty) = &arg_vars[0].1
+        {
+            let rank = input_ty.dims.len();
+            let out_rank = rank + usize::from(name == "split_keys");
+            let prefix = self.next_temp("key_tensor");
+            let ind = self.indent.clone();
+            let input = &arg_vars[0].0;
+            self.lines.push(format!(
+                "{ind}chelis_read_view {prefix}_in = chelis_tensor_read_view({input});"
+            ));
+            let dtype = if name == "key_from_seed" {
+                "CHELIS_DTYPE_I64"
+            } else {
+                "CHELIS_DTYPE_KEY"
+            };
+            self.lines.push(format!("{ind}if ({prefix}_in.dtype != {dtype} || chelis_tensor_rank({input}) != {rank}) abort();"));
+            self.lines
+                .push(format!("{ind}int64_t {prefix}_shape[{}];", out_rank.max(1)));
+            for axis in 0..rank {
+                self.lines.push(format!(
+                    "{ind}{prefix}_shape[{axis}] = chelis_tensor_shape({input}, {axis});"
+                ));
+            }
+            if name == "fold_in" {
+                let index = &arg_vars[1].0;
+                self.lines.push(format!(
+                    "{ind}chelis_read_view {prefix}_index = chelis_tensor_read_view({index});"
+                ));
+                self.lines.push(format!("{ind}if ({prefix}_index.dtype != CHELIS_DTYPE_I64 || chelis_tensor_rank({index}) != {rank}) abort();"));
+                for axis in 0..rank {
+                    self.lines.push(format!("{ind}if (chelis_tensor_shape({index}, {axis}) != {prefix}_shape[{axis}]) {{ fprintf(stderr, \"fold_in requires exactly equal key and index shapes ([05-OP-72])\\n\"); chelis_numeric_trap(\"numeric trap: domain in fold_in at i64\"); }}"));
+                }
+            }
+            if name == "split_keys" {
+                let count = &arg_vars[1].0;
+                self.lines.push(format!("{ind}if ({count} < 0) chelis_numeric_trap(\"numeric trap: domain in split_keys at i64\");"));
+                self.lines
+                    .push(format!("{ind}{prefix}_shape[{rank}] = {count};"));
+            }
+            let halves = if name == "split_key" { 2 } else { 1 };
+            for half in 0..halves {
+                self.lines.push(format!("{ind}chelis_tensor *{prefix}_{half} = chelis_alloc({out_rank}, {prefix}_shape, CHELIS_DTYPE_KEY);"));
+                self.lines.push(format!("{ind}chelis_tensor_write *{prefix}_guard_{half} = chelis_tensor_begin_write({prefix}_{half});"));
+                self.lines.push(format!("{ind}chelis_write_view {prefix}_out_{half} = chelis_tensor_write_view({prefix}_guard_{half});"));
+                let source = format!("((const uint64_t *){prefix}_in.data)[i]");
+                let value = match name {
+                    "key_from_seed" => format!("(uint64_t)((const int64_t *){prefix}_in.data)[i]"),
+                    "split_key" => format!("chelis_key_derive({source}, {half}ULL)"),
+                    "fold_in" => format!(
+                        "chelis_key_derive(chelis_key_derive({source}, 2ULL), (uint64_t)((const int64_t *){prefix}_index.data)[i])"
+                    ),
+                    "split_keys" => {
+                        format!("chelis_key_derive(chelis_key_derive({source}, 2ULL), (uint64_t)j)")
+                    }
+                    _ => unreachable!(),
+                };
+                if name == "split_keys" {
+                    self.lines.push(format!("{ind}for (int64_t i = 0; i < {prefix}_in.count; ++i) for (int64_t j = 0; j < {prefix}_shape[{rank}]; ++j) ((uint64_t *){prefix}_out_{half}.data)[i * {prefix}_shape[{rank}] + j] = {value};"));
+                } else {
+                    self.lines.push(format!("{ind}for (int64_t i = 0; i < {prefix}_in.count; ++i) ((uint64_t *){prefix}_out_{half}.data)[i] = {value};"));
+                }
+                self.lines.push(format!(
+                    "{ind}chelis_tensor_end_write({prefix}_guard_{half});"
+                ));
+            }
+            if name == "split_key" {
+                self.lines.push(format!("{ind}chelis_value {prefix}_halves[2] = {{ chelis_value_take_tensor({prefix}_0), chelis_value_take_tensor({prefix}_1) }};"));
+                self.lines.push(format!(
+                    "{ind}{target} = chelis_tuple_from_values({prefix}_halves, 2);"
+                ));
+                for half in 0..2 {
+                    self.lines.push(format!(
+                        "{ind}chelis_value_release({prefix}_halves[{half}]);"
+                    ));
+                }
+            } else {
+                self.lines.push(format!("{ind}{target} = {prefix}_0;"));
+            }
+            return Ok(());
+        }
+
         // [05-OP-69]..[05-OP-72]: the key operations over host scalar keys,
         // with the same derivation the kernels use (`chelis_key_derive`).
         match name {

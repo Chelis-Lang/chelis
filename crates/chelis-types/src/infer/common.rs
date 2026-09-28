@@ -2114,7 +2114,8 @@ pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> UnordSet<String> 
 /// Walk a rank-polymorphic def's body and reject any call whose output shape is
 /// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
 /// builtins and named-axis reductions (the procedural arm verifies those drop a
-/// named axis and carry the rest through). Rejected: positional shape-rewriting
+/// named axis and carry the rest through), and checked ordered-prefix key
+/// derivations. Rejected: positional shape-rewriting
 /// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
 /// callee not proven rank-safe — against a spread `..r` there are no named axes
 /// left to catch an untracked transposition/reshape, so admitting one would
@@ -2167,6 +2168,8 @@ pub(super) fn check_rank_body_discipline(
                     vec![],
                 ));
             }
+            // OrderedPrefix relations retain every operand axis and may only
+            // append trailing axes, including in each tuple result component.
             // Identity (elementwise) or NameTracked (named-axis reduction /
             // named-axis expand) builtin — admissible. For a NameTracked op
             // the procedural inference arm (`check_reduction_signature` /
@@ -2180,7 +2183,9 @@ pub(super) fn check_rank_body_discipline(
                 if builtins::BUILTIN_NAMES.contains(&name)
                     && matches!(
                         builtins::shape_class(name),
-                        builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
+                        builtins::ShapeClass::Identity
+                            | builtins::ShapeClass::NameTracked
+                            | builtins::ShapeClass::OrderedPrefix
                     ) => {}
             // A named builtin that rewrites shape positionally (not name-tracked).
             Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
@@ -2192,7 +2197,7 @@ pub(super) fn check_rank_body_discipline(
                          `..r` there are no named axes left to catch a transposition or reshape \
                          (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
                          (elementwise) operations, named-axis reductions, and the named-axis \
-                         `expand` and `insert` forms only."
+                         `expand` and `insert` forms, and ordered-prefix key derivations only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \

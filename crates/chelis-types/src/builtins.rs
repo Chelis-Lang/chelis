@@ -1140,27 +1140,26 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
-    // [05-OP-69]..[05-OP-72]: the random key operations. Each scheme is
-    // monomorphic in its key and count operands, and the affine key rule
-    // ([04-LIN-9]) is the linearity checker's, not the signature's.
+    // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
+    // the affine key rule ([04-LIN-9]) is the linearity checker's.
     BuiltinDecl {
         name: "key_from_seed",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (i64) -> key fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "split_key",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (key) -> (key, key) fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -1168,17 +1167,17 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fold_in",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
-            reason: "the monomorphic signature (key, i64) -> key fully determines this builtin type",
+            reason: "the transported key-operation relation determines scalar and tensor forms",
         },
         realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
+        shape_class: ShapeClass::OrderedPrefix,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
@@ -2291,6 +2290,10 @@ pub enum ShapeClass {
     /// it rejects a non-existent/ambiguous axis or a positional index at
     /// symbolic rank, so no transposition can slip past.
     NameTracked,
+    /// Every tensor result retains the complete operand shape in order,
+    /// possibly appending trailing axes. Checked operation relations own
+    /// the exact output surface, including tuples of same-shaped tensors.
+    OrderedPrefix,
     /// Rewrites/reorders the shape positionally, is shape-parameterized, or is a
     /// non-tensor/host op whose output shape is *not* name-trackable at symbolic
     /// rank. Forbidden inside a rank-poly body: against an opaque spread there
@@ -2300,14 +2303,15 @@ pub enum ShapeClass {
 
 /// Classify a builtin's shape semantics for the Body-Discipline check.
 ///
-/// `Identity` and `NameTracked` are explicit allowlists; everything else falls
+/// `Identity`, `NameTracked`, and `OrderedPrefix` are explicit allowlists; other ops fall
 /// through to `Rewriting`. That default is the safe direction — a builtin that
-/// is not *provably* shape-identity or name-tracked is rejected inside a
+/// is not proven to preserve symbolic axis order is rejected inside a
 /// rank-poly body, so a missed classification can only over-reject, never open
 /// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
 /// any change is deliberate.
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
+        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
         "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
@@ -2991,52 +2995,56 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
-    // [05-OP-69]..[05-OP-72] (spec/05 section 2.7): the random key
-    // operations. The key operand of `split_key`, `split_keys` and `fold_in`
-    // is owned, never borrowed: [04-LIN-9] makes every key affine, and these
-    // are its consuming uses. `split_keys`'s extent is its count `n`
-    // ([05-OP-71]); its application's result extent is decided from the
-    // count by `check_split_keys_signature`, spec/04 section 4.7.2's
-    // `expand` rule, and the scheme's dimension only types the builtin named
-    // as a value.
-    let key = Type::Prim(Prim::Key);
-    let count = Type::Prim(Prim::Int64);
-    env.bind(
-        "key_from_seed".to_string(),
-        Scheme::mono(Type::Fn(vec![count.clone()], Box::new(key.clone()))),
-    );
-    env.bind(
-        "split_key".to_string(),
-        Scheme::mono(Type::Fn(
-            vec![key.clone()],
-            Box::new(Type::Tuple(vec![key.clone(), key.clone()])),
-        )),
-    );
-    env.bind(
-        "fold_in".to_string(),
-        Scheme::mono(Type::Fn(
-            vec![key.clone(), count.clone()],
-            Box::new(key.clone()),
-        )),
-    );
-    let key_rows = vg.fresh_dvar();
-    env.bind(
-        "split_keys".to_string(),
-        Scheme {
-            constraints: vec![],
-            tvars: vec![],
-            tvar_restrictions: vec![],
-            dvars: vec![key_rows],
-            rvars: vec![],
-            body: Type::Fn(
-                vec![key, count],
-                Box::new(Type::Tensor(
-                    vec![Dim::Var(key_rows)],
-                    TensorPrec::Concrete(Prim::Key),
-                )),
-            ),
-        },
-    );
+    // [05-OP-69]..[05-OP-72]: checked scalar/tensor relations travel
+    // with each builtin value, including aliases and higher-order passage.
+    for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let extra = vg.fresh_tvar();
+        let operand = Type::Var(input);
+        let result = Type::Var(output);
+        let mut args = vec![operand.clone()];
+        let mut tvars = vec![input, output];
+        let constraint = match name {
+            "key_from_seed" => CollectionConstraint::KeyFromSeed {
+                operand,
+                result: result.clone(),
+            },
+            "split_key" => CollectionConstraint::SplitKey {
+                operand,
+                result: result.clone(),
+            },
+            "split_keys" => {
+                args.push(Type::Prim(Prim::Int64));
+                CollectionConstraint::SplitKeys {
+                    operand,
+                    count: Type::Prim(Prim::Int64),
+                    result: result.clone(),
+                }
+            }
+            "fold_in" => {
+                args.push(Type::Var(extra));
+                tvars.push(extra);
+                CollectionConstraint::FoldIn {
+                    operand,
+                    index: Type::Var(extra),
+                    result: result.clone(),
+                }
+            }
+            _ => unreachable!(),
+        };
+        env.bind(
+            name.to_string(),
+            Scheme {
+                constraints: vec![constraint],
+                tvars,
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(args, Box::new(result)),
+            },
+        );
+    }
 
     cmplt_sig("cmplt", &mut env, &mut vg);
 
@@ -3722,6 +3730,8 @@ mod tests {
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
+            } else if ["key_from_seed", "split_key", "split_keys", "fold_in"].contains(name) {
+                ShapeClass::OrderedPrefix
             } else if name_tracked.contains(name) {
                 ShapeClass::NameTracked
             } else {

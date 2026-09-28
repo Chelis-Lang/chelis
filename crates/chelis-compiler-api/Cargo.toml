@@ -17,6 +17,7 @@ compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pi
 ownership-ledger = ["chelis-runtime/ownership-ledger"]
 
 [dependencies]
+chelis-abi.workspace = true
 chelis-unord.workspace = true
 chelis-backend-c.workspace = true
 chelis-backend-hip.workspace = true
@@ -52,6 +53,11 @@ bincode = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[[test]]
+name = "key_tensor_forms"
+path = "tests/key_tensor_forms.rs"
+required-features = ["ownership-ledger"]
 
 [[test]]
 name = "emission_observer"

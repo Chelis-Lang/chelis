@@ -8403,6 +8403,25 @@ mod shell_type_variable_canonicalization_tests {
         Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
     };
 
+    #[test]
+    fn key_operation_relations_are_part_of_published_scheme_identity() {
+        let (env, _) = chelis_types::builtin_env();
+        let mut previous = None;
+        for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
+            let scheme = env.lookup(name).expect("registered key builtin");
+            let canonical = canonical_shell_scheme(scheme).expect("key relation canonicalizes");
+            assert_eq!(canonical.collection_obligations.len(), 1);
+            assert_eq!(canonical.collection_obligations[0].builtin(), name);
+            if let Some(previous) = previous {
+                assert_ne!(
+                    previous, canonical,
+                    "different key relations cannot share identity"
+                );
+            }
+            previous = Some(canonical);
+        }
+    }
+
     fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
         Type::Fn(
             vec![
@@ -8892,6 +8911,34 @@ fn render_collection_obligation(
             .to_string()
     };
     match constraint {
+        CollectionConstraint::KeyFromSeed { operand, result } => {
+            CollectionObligation::KeyFromSeed {
+                operand: render(operand),
+                result: render(result),
+            }
+        }
+        CollectionConstraint::SplitKey { operand, result } => CollectionObligation::SplitKey {
+            operand: render(operand),
+            result: render(result),
+        },
+        CollectionConstraint::SplitKeys {
+            operand,
+            count,
+            result,
+        } => CollectionObligation::SplitKeys {
+            operand: render(operand),
+            count: render(count),
+            result: render(result),
+        },
+        CollectionConstraint::FoldIn {
+            operand,
+            index,
+            result,
+        } => CollectionObligation::FoldIn {
+            operand: render(operand),
+            index: render(index),
+            result: render(result),
+        },
         CollectionConstraint::Len { operand, result } => CollectionObligation::Len {
             operand: render(operand),
             result: render(result),

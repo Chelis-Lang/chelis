@@ -75,6 +75,24 @@ pub enum CollectionObligation {
         rhs: String,
         result: String,
     },
+    KeyFromSeed {
+        operand: String,
+        result: String,
+    },
+    SplitKey {
+        operand: String,
+        result: String,
+    },
+    SplitKeys {
+        operand: String,
+        count: String,
+        result: String,
+    },
+    FoldIn {
+        operand: String,
+        index: String,
+        result: String,
+    },
 }
 
 impl CollectionObligation {
@@ -84,6 +102,10 @@ impl CollectionObligation {
             Self::Index { .. } => "index",
             Self::Append { .. } => "append",
             Self::Concat { .. } => "concat",
+            Self::KeyFromSeed { .. } => "key_from_seed",
+            Self::SplitKey { .. } => "split_key",
+            Self::SplitKeys { .. } => "split_keys",
+            Self::FoldIn { .. } => "fold_in",
         }
     }
 
@@ -101,6 +123,19 @@ impl CollectionObligation {
                 result,
             } => vec![list, value, result],
             Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
+            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
+                vec![operand, result]
+            }
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => vec![operand, count, result],
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => vec![operand, index, result],
         }
     }
 }
@@ -665,6 +700,38 @@ mod tests {
         let encoded = encode_shell(&obligated).expect("checked contract encodes");
         assert_eq!(decode_shell(&encoded).unwrap(), obligated);
         assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+    }
+
+    #[test]
+    fn key_operation_contracts_round_trip_and_change_identity() {
+        for obligation in [
+            CollectionObligation::KeyFromSeed {
+                operand: "(t-var {} t0)".into(),
+                result: "(t-var {} t1)".into(),
+            },
+            CollectionObligation::SplitKey {
+                operand: "(t-var {} t0)".into(),
+                result: "(t-var {} t1)".into(),
+            },
+            CollectionObligation::SplitKeys {
+                operand: "(t-var {} t0)".into(),
+                count: "(t-prim {} i64)".into(),
+                result: "(t-var {} t1)".into(),
+            },
+            CollectionObligation::FoldIn {
+                operand: "(t-var {} t0)".into(),
+                index: "(t-var {} t0)".into(),
+                result: "(t-var {} t1)".into(),
+            },
+        ] {
+            let mut obligated = fixture_shell();
+            let symbol = &mut obligated.modules[0].exports[0];
+            symbol.type_repr = Some("(t-fn {} (t-var {} t0) (t-var {} t1))".into());
+            symbol.collection_obligations = vec![obligation];
+            let encoded = encode_shell(&obligated).unwrap();
+            assert_eq!(decode_shell(&encoded).unwrap(), obligated);
+            assert_ne!(encoded, encode_shell(&fixture_shell()).unwrap());
+        }
     }
 
     #[test]

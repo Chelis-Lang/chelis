@@ -2973,6 +2973,81 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && let Some(RuntimeValue::Tensor(input)) = args.first()
+            && (!input.value.shape.is_empty()
+                || arg_type_exprs
+                    .first()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|ty| {
+                        matches!(
+                            ty.carrier(),
+                            ExprCarrier::DecodedNode(DeepTag::TTensor, _, _)
+                        )
+                    }))
+        {
+            // A lowered scalar key can also use a rank-zero tensor carrier.
+            // Preserve its scalar operation contract using the checked type.
+            use chelis_types::dtype_semantics::{
+                KeyHalf, fold_in_storage, key_from_seed_storage, split_key_storage,
+                split_keys_storage,
+            };
+            let shape = &input.value.shape;
+            let storage = input.value.storage();
+            let tensor = |shape: Vec<usize>, storage| {
+                RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                    shape, storage,
+                )))
+            };
+            let computed = match name {
+                "key_from_seed" => key_from_seed_storage(storage),
+                "split_key" => {
+                    let left =
+                        split_key_storage(storage, KeyHalf::Left).map_err(|e| e.to_string())?;
+                    let right =
+                        split_key_storage(storage, KeyHalf::Right).map_err(|e| e.to_string())?;
+                    return Ok(RuntimeValue::Tuple(
+                        vec![tensor(shape.clone(), left), tensor(shape.clone(), right)].into(),
+                    ));
+                }
+                "fold_in" => {
+                    let index = expect_tensor_arg(args, 1)?;
+                    if shape != &index.value.shape {
+                        return Err(format!(
+                            "fold_in requires exactly equal key and index shapes ([05-OP-72])\n{}",
+                            chelis_types::NumericTrap::Domain {
+                                op: "fold_in",
+                                prim: Prim::Int64,
+                            }
+                        ));
+                    }
+                    fold_in_storage(storage, index.value.storage())
+                }
+                "split_keys" => {
+                    let count = expect_i64_key_operand(args, 1, "split_keys")?
+                        .as_i64_exact()
+                        .ok_or("split_keys expects i64")?;
+                    let count = usize::try_from(count).map_err(|_| {
+                        chelis_types::NumericTrap::Domain {
+                            op: "split_keys",
+                            prim: Prim::Int64,
+                        }
+                        .to_string()
+                    })?;
+                    check_split_keys_declared_extent(result_type_expr, count)?;
+                    let mut shape = shape.clone();
+                    shape.push(count);
+                    admit_host_key_result(&shape)?;
+                    let storage = split_keys_storage(storage, count).map_err(|e| e.to_string())?;
+                    return Ok(tensor(shape, storage));
+                }
+                _ => unreachable!(),
+            }
+            .map_err(|e| e.to_string())?;
+            return Ok(tensor(shape.clone(), computed));
+        }
         match name {
             // [05-OP-69]..[05-OP-72]: the key operations over the scalar key
             // value, with the kernels every lane shares.
@@ -3010,6 +3085,7 @@ impl<'a> EvalContext<'a> {
                     .to_string()
                 })?;
                 check_split_keys_declared_extent(result_type_expr, count)?;
+                admit_host_key_result(&[count])?;
                 Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(
                     IrTensorValue::from_storage(
                         vec![count],
@@ -4941,11 +5017,35 @@ pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Re
     returned.expect("the root comparison returns a result")
 }
 
-/// One evaluated argument as the kernel `Load` its declared parameter names.
-/// A tensor finalizes at the declared element dtype, the same ingress the
-/// interpreter applies to its own frame (chelis#729); a scalar becomes an
-/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
-/// one and the way the C wrapper boxes a scalar parameter.
+/// [05-OP-33]: admit the complete result before deriving any keys.
+fn admit_host_key_result(shape: &[usize]) -> Result<(), String> {
+    use chelis_abi::metadata::{MetadataError, ShapeMetadata};
+    let admitted = shape
+        .iter()
+        .map(|n| i64::try_from(*n).map_err(|_| MetadataError::Overflow("extent exceeds i64")))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|dims| ShapeMetadata::contiguous(&dims, chelis_vocab::RuntimeDType::Key))
+        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata));
+    let metadata = admitted.map_err(|error| {
+        let trap = match error {
+            MetadataError::Domain(_) => chelis_types::NumericTrap::Domain {
+                op: "split_keys",
+                prim: Prim::Int64,
+            },
+            MetadataError::Overflow(_) => chelis_types::NumericTrap::Overflow {
+                op: "split_keys",
+                prim: Prim::Int64,
+            },
+        };
+        format!("{error}\n{trap}")
+    })?;
+    metadata
+        .elements()
+        .scratch_len::<chelis_types::RandomKey>()
+        .map_err(|_| "Domain: chelis_alloc tensor allocation failed".to_string())?;
+    Ok(())
+}
+
 /// The scalar key operand of a key operation or draw: a key value, or the
 /// rank-0 key tensor a kernel returns for one.
 fn expect_key_arg(
@@ -5006,7 +5106,9 @@ fn check_split_keys_declared_extent(
         _ => None,
     };
     let Some(declared) = result_type_expr.and_then(|ty| match ty.carrier() {
-        ExprCarrier::DecodedNode(DeepTag::TTensor, _, [dim, _precision]) => literal_extent(dim),
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, parts) => {
+            parts.iter().rev().nth(1).and_then(literal_extent)
+        }
         _ => None,
     }) else {
         return Ok(());
@@ -5020,6 +5122,11 @@ fn check_split_keys_declared_extent(
     }
 }
 
+/// One evaluated argument as the kernel `Load` its declared parameter names.
+/// A tensor finalizes at the declared element dtype, the same ingress the
+/// interpreter applies to its own frame (chelis#729); a scalar becomes an
+/// exact rank-0 tensor at the declared prim, the way `scalar_to_tensor` builds
+/// one and the way the C wrapper boxes a scalar parameter.
 fn stage_kernel_argument(
     def: &str,
     param: &str,

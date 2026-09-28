@@ -17,6 +17,72 @@ use chelis_types::{
     check_typed_program,
 };
 
+/// [05-OP-69]..[05-OP-72]: rank is preserved except for split_keys' last axis.
+#[test]
+fn tensor_key_operations_preserve_shapes_and_affinity() {
+    for dims in ["", "0, ", "2, ", "2, 3, "] {
+        accepts(
+            "tensor key forms",
+            &format!(
+                "def seed(s: tensor[{dims}i64]) -> tensor[{dims}key] = key_from_seed(s)\n\
+             def halves(k: tensor[{dims}key]) -> (tensor[{dims}key], tensor[{dims}key]) = split_key(k)\n\
+             def children(k: tensor[{dims}key]) -> tensor[{dims}4, key] = split_keys(k, 4i64)\n\
+             def folded(k: tensor[{dims}key], n: tensor[{dims}i64]) -> tensor[{dims}key] = fold_in(k, n)\n"
+            ),
+        );
+    }
+    accepts(
+        "rank-polymorphic key operations",
+        "def seed[r](s: tensor[..r, i64]) -> tensor[..r, key] = key_from_seed(s)\ndef halves[r](k: tensor[..r, key]) -> (tensor[..r, key], tensor[..r, key]) = split_key(k)\ndef children[r](k: tensor[..r, key]) -> tensor[..r, 4, key] = split_keys(k, 4i64)\ndef folded[r](k: tensor[..r, key], n: tensor[..r, i64]) -> tensor[..r, key] = fold_in(k, n)",
+    );
+    accepts(
+        "tensor key builtin callback",
+        "def halves(ks: List[tensor[2, key]]) -> List[(tensor[2, key], tensor[2, key])] = map(split_key, ks)",
+    );
+    for source in [
+        "def bad(k: tensor[2, key]) = (split_key(k), split_key(k))",
+        "def bad(k: tensor[2, key]) = fold_in(k, 1i64)",
+        "def bad(k: tensor[2, key], n: tensor[3, i64]) = fold_in(k, n)",
+        "def bad(k: tensor[2, key]) = split_keys(k, -1i64)",
+        "def bad(s: tensor[2, i32]) = key_from_seed(s)",
+        "def bad(s: tensor[2, i64]) = split_key(s)",
+        "def bad(k: tensor[2, key]) = split_keys(k, 2i32)",
+        "def bad(k: tensor[2, key], n: tensor[2, i32]) = fold_in(k, n)",
+        "def bad(k: tensor[2, key]) -> tensor[2, 3, key] = split_keys(k, 4i64)",
+        "def bad[r](k: tensor[..r, key]) -> tensor[4, ..r, key] = split_keys(k, 4i64)",
+        "def bad(k: &tensor[2, key]) = split_key(k)",
+        "def bad(k: tensor[key]) = fold_in(k, 1i64)",
+        "def bad(k: key, n: tensor[i64]) = fold_in(k, n)",
+    ] {
+        assert!(verdict(source).is_err(), "must reject: {source}");
+    }
+}
+
+#[test]
+fn tensor_key_contracts_survive_checker_context_serialization() {
+    let live =
+        build_type_env_from_library(&surf_program("def untouched(x: i64) -> i64 = x\n")).unwrap();
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        context_verdict(
+            context,
+            "def good(s: tensor[2, 3, i64]) -> tensor[2, 3, key] = fold_in(key_from_seed(s), s)\n",
+        )
+        .unwrap();
+        context_verdict(
+            context,
+            "def bad(s: tensor[2, i64], n: tensor[3, i64]) = fold_in(key_from_seed(s), n)\n",
+        )
+        .expect_err("transport must retain equal-shape contract");
+    }
+    let mut bytes = bincode::serialize(&live).unwrap();
+    bytes[..4].copy_from_slice(&6u32.to_le_bytes());
+    assert!(
+        bincode::deserialize::<TypeEnv>(&bytes).is_err(),
+        "scalar-only builtin snapshots must be regenerated"
+    );
+}
+
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_str(source).expect("fixture parses");
     let deep = desugar_program(&decls).expect("fixture desugars");

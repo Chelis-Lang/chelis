@@ -63,6 +63,34 @@ pub(crate) fn decide_collection_constraint(
         return Ok(None);
     }
     match &applied {
+        CollectionConstraint::KeyFromSeed { operand, .. } => {
+            key_operation_surface(operand, Prim::Int64).map(Some)
+        }
+        CollectionConstraint::SplitKey { operand, .. } => {
+            let half = key_operation_surface(operand, Prim::Key)?;
+            Ok(Some(Type::Tuple(vec![half.clone(), half])))
+        }
+        CollectionConstraint::SplitKeys { operand, count, .. } => {
+            let key = key_operation_surface(operand, Prim::Key)?;
+            unify(count, &Type::Prim(Prim::Int64), subst).map_err(|e| e.message)?;
+            let mut dims = match key {
+                Type::Tensor(dims, _) => dims,
+                _ => vec![],
+            };
+            dims.push(Dim::Wildcard);
+            Ok(Some(Type::Tensor(dims, TensorPrec::Concrete(Prim::Key))))
+        }
+        CollectionConstraint::FoldIn { operand, index, .. } => {
+            let key = key_operation_surface(operand, Prim::Key)?;
+            let expected = match &key {
+                Type::Tensor(dims, _) => {
+                    Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Int64))
+                }
+                _ => Type::Prim(Prim::Int64),
+            };
+            unify(index, &expected, subst).map_err(|e| format!("fold_in requires exactly equal shapes and scalar/tensor surfaces ([05-OP-72]): {}", e.message))?;
+            Ok(Some(subst.apply(&key)))
+        }
         CollectionConstraint::Len { operand, .. } => match operand {
             Type::Adt(name, _) if name == "List" || name == "Dict" => {
                 Ok(Some(Type::Prim(Prim::Int64)))
@@ -133,6 +161,20 @@ pub(crate) fn decide_collection_constraint(
                 "concat expects matching List inputs, got {lhs} and {rhs}"
             )),
         },
+    }
+}
+
+fn key_operation_surface(operand: &Type, input: Prim) -> Result<Type, String> {
+    match operand {
+        Type::Prim(p) if *p == input => Ok(Type::Prim(Prim::Key)),
+        Type::Tensor(dims, TensorPrec::Concrete(p)) if *p == input => {
+            Ok(Type::Tensor(dims.clone(), TensorPrec::Concrete(Prim::Key)))
+        }
+        other => Err(format!(
+            "key operation expects {} or a tensor of {}, got {other}",
+            input.name(),
+            input.name()
+        )),
     }
 }
 

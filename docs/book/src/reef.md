@@ -192,7 +192,8 @@ active-float precision appears as
 and unknown versions are rejected explicitly.
 
 CHB format 5 adds a `collection_obligations` ledger to each function symbol.
-An already-checked `len`, `index`, `append`, or `concat` value retains its
+An already-checked `len`, `index`, `append`, `concat`, `key_from_seed`, `split_key`,
+`split_keys`, or `fold_in` value retains its
 operand/result relation, written in canonical Deep form under the printed
 type's alpha-canonical variables. Hidden relation variables are rejected;
 newly authored wrappers must state a sufficient public type contract. Two
