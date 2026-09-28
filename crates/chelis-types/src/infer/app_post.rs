@@ -201,6 +201,7 @@ pub(super) fn finish_unified_app(
                         &kids[1],
                         &arg_tys[0],
                         &[arg_tys[1].clone(), element],
+                        None,
                         vg,
                         subst,
                         errors,

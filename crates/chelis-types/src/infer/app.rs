@@ -800,11 +800,26 @@ fn infer_app_inner(
         func_name.as_deref(),
         Some("len" | "index" | "append" | "concat")
     );
-    let mut ret_tv =
-        match unify_checked_call_contract(expr, &func_ty, &arg_tys, vg, subst, errors, product) {
-            Ok(ret_ty) => ret_ty,
-            Err(rejected) => return_with_collection_cleanup!(rejected),
-        };
+    let aggregate_call_context = match func_name.as_deref() {
+        Some(operation @ ("fold" | "scan")) => Some((
+            operation,
+            "expects a callback whose accumulator/result type matches the initial accumulator",
+        )),
+        _ => None,
+    };
+    let mut ret_tv = match unify_checked_call_contract(
+        expr,
+        &func_ty,
+        &arg_tys,
+        aggregate_call_context,
+        vg,
+        subst,
+        errors,
+        product,
+    ) {
+        Ok(ret_ty) => ret_ty,
+        Err(rejected) => return_with_collection_cleanup!(rejected),
+    };
     product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     if direct_collection_builtin {
         subst.discard_collection_contracts(&callee_collection_contracts);

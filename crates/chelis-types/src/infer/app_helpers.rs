@@ -40,6 +40,7 @@ pub(super) fn unify_checked_call_contract(
     site: &deep::Expr,
     func_ty: &Type,
     arg_tys: &[Type],
+    diagnostic_context: Option<(&str, &str)>,
     vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
@@ -68,6 +69,9 @@ pub(super) fn unify_checked_call_contract(
                 return Err(rejected);
             }
             let mut error: CheckError = te.into();
+            if let Some((operation, contract)) = diagnostic_context {
+                error.message = format!("{operation} {contract}; {}", error.message);
+            }
             if let Some(id) = site.span_id() {
                 error.span_offset = parse_span_offset(id);
                 error.span_id = Some(id.to_string());
