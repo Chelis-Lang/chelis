@@ -282,19 +282,19 @@ fn bitwise_grad_runtime_parameter_coefficients_execute() {
 }
 
 #[test]
-fn bitwise_grad_rejects_a_selected_discrete_path() {
+fn bitwise_grad_selected_discrete_path_preserves_cast_rejection() {
     for op in ["bitand", "bitor", "bitxor", "shl", "shr"] {
         let source = format!(
             "def loss(x: tensor[f32]) -> tensor[f32] = scalar_to_tensor(cast({op}(cast(tensor_to_scalar(x), i32), 1i32), f32))\nout = print((grad(loss))(scalar_to_tensor(2.0f32)))\n"
         );
         let error = eval_first_line(&source).expect_err("selected discrete path must reject");
         assert!(
-            error.contains("non-differentiable") && error.contains(op),
+            error.contains("cast is non-differentiable (piecewise constant)"),
             "{error}"
         );
         let (built, error, _) = c_build_outcome(&source, &format!("selected_discrete_{op}"));
         assert!(
-            !built && error.contains("non-differentiable") && error.contains(op),
+            !built && error.contains("cast is non-differentiable (piecewise constant)"),
             "{error}"
         );
     }

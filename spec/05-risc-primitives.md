@@ -214,8 +214,10 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > the other operand; this is the internal `ExtremaAdjoint` contract.
 > `relu` is a distinct Tier-2 identity whose adjoint is
 > [05-OP-43]'s zero-at-zero rule, not this selection rule's tie behavior.
-> Signed-integer forms are forward-only and `grad`
-> rejects them. Both operations have no accumulator. `min_elem` is a direct
+> Signed-integer forms are forward-only: `grad` rejects a path that reaches
+> their result outside an exact-zero control path. An exact zero cotangent
+> from a control operation stays zero through them. Both operations have no
+> accumulator. `min_elem` is a direct
 > selection identity and never lowers through arithmetic negation. `bool`,
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.

@@ -4220,14 +4220,13 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
             if exempt_to_tensor_literal && static_to_tensor_literal(expr).is_some() {
                 return false;
             }
+            // Tuple projections can resolve to DAG nodes when their carrier
+            // is statically known; classify the carrier through the children.
             if tag == DeepTag::If {
                 if !if_expr_is_dag_lowerable(expr) {
                     return true;
                 }
-            } else if matches!(
-                tag,
-                DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet
-            ) {
+            } else if matches!(tag, DeepTag::Match | DeepTag::Record | DeepTag::Access) {
                 return true;
             }
             if tag == DeepTag::Var
@@ -4473,15 +4472,13 @@ fn fn_body_qualifies_for_to_tensor_exemption(body: &Expr) -> bool {
 /// construct that the IR DAG cannot represent as a single tensor
 /// node. These are the same tags that `expr_requires_host_runtime`
 /// already classifies as host (e.g. `tuple`, `match`, `record`,
-/// `access`, `tuple-get`), but checked only at the **outer**
+/// `access`), but checked only at the **outer**
 /// position of a fn body — the strict-classification host check
 /// still walks children when the flag is false.
 fn expr_is_multi_root_construct(expr: &Expr) -> bool {
     matches!(
         expr.tag(),
-        Some(
-            DeepTag::Tuple | DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet
-        )
+        Some(DeepTag::Tuple | DeepTag::Match | DeepTag::Record | DeepTag::Access)
     )
 }
 
@@ -20122,7 +20119,8 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// `(tuple-get {} tuple_expr index)` -- not representable in the Phase 0 RISC DAG.
+    /// `(tuple-get {} tuple_expr index)` -- project a statically known tuple
+    /// component; the component can itself be a DAG tensor node.
     fn lower_tuple_get(&mut self, kids: &[Expr]) -> LoweredValue {
         let tuple = self.lower_expr(&kids[0]);
         // chelis#730 Phase 1 (#782-flagged structural-index site): a

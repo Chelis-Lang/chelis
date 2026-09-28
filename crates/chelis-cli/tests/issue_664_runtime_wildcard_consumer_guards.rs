@@ -198,6 +198,61 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     );
 }
 
+/// The same wildcard disagreement inside a differentiated body reaches the
+/// IR evaluator. It must use the elementwise diagnostic rather than panic
+/// while constructing or evaluating the gradient (chelis#667).
+#[test]
+fn issue_667_grad_stride_operand_mismatch_is_a_diagnostic() {
+    let source = format!(
+        "module Repro.GradElemStride\nsig loss[n]: tensor[n, f32] -> f32\ndef loss(x) = {{\n  s = stride(x, cast(2, i64))\n  tensor_to_scalar(sum(add(s, x), cast(0, i32)))\n}}\nout = grad(loss)(to_tensor([{}]))\n",
+        six()
+    );
+    let eval = run_eval(&source, "grad_elemstride_mismatch");
+    assert!(!eval.status.success(), "mismatched grad unexpectedly ran");
+    let stderr = String::from_utf8_lossy(&eval.stderr);
+    assert!(
+        stderr.contains("tensor shapes must match for elementwise op, got [3] vs [6]"),
+        "gradient mismatch must report the elementwise guard: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "user-supplied shape mismatch must not panic: {stderr}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("grad_elemstride_mismatch.ch");
+    fs::write(&path, &source).expect("write source");
+    let build = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            dir.path().join("build").to_str().unwrap(),
+        ])
+        .output()
+        .expect("build should run");
+    assert!(!build.status.success(), "C build must refuse the mismatch");
+    assert!(
+        String::from_utf8_lossy(&build.stderr).contains("mismatched dimension"),
+        "C build must name its shape invariant: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+}
+
+/// Matching runtime extents remain valid through the same gradient path.
+#[test]
+fn issue_667_grad_matching_stride_retains_eval_c_parity() {
+    let source = format!(
+        "module Repro.GradElemStrideControl\nsig loss[n]: tensor[n, f32] -> f32\ndef loss(x) = {{\n  s = stride(x, cast(1, i64))\n  tensor_to_scalar(sum(add(s, x), cast(0, i32)))\n}}\nout = grad(loss)(to_tensor([{}]))\n",
+        six()
+    );
+    assert_value_parity(&source, "grad_elemstride_control", &[2.0; 6]);
+}
+
 /// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
 ///
