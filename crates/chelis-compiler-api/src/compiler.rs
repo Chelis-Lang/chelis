@@ -7154,6 +7154,38 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    #[test]
+    fn wire_producer_preserves_resolved_global_load_origin_at_v21() {
+        let mut dag = Dag::new();
+        let declaration = dag.declare("entry");
+        let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
+        let root = dag.add_node(
+            declaration,
+            RiscOp::Load {
+                name: global.clone(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: chelis_types::types::Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(root);
+        let wire = wire_dag(&dag).expect("IR producer has a wire form");
+        assert_eq!(wire.schema_version, 21);
+        assert!(
+            matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
+            if name == global.as_str())
+        );
+        let bytes = serde_json::to_string(&wire).expect("v21 encoding");
+        let decoded = crate::schema::WireDag::from_validated_json(&bytes).expect("v21 decoding");
+        assert!(
+            matches!(&decoded.nodes[0].op, crate::schema::WireRiscOp::Load { name }
+            if name == global.as_str())
+        );
+    }
+
     /// chelis#2413: the wire decoder's key rules read each input slot as the
     /// IR's do. For every operation that reads an extent through a slot,
     /// with its bounds read by value and by axis, the encoded operation
@@ -7454,7 +7486,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 20);
+        assert_eq!(json["schema_version"], 21);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()

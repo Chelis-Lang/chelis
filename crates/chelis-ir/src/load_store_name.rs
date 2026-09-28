@@ -78,7 +78,11 @@ pub enum LoadBinding<'a> {
     TopLevel(&'a str),
 }
 
-const GLOBAL_PREFIX: &str = "__chelis_global_";
+// `@` is forbidden by the ordinary name grammar and by Surf identifiers.
+// A C-friendly reserved prefix cannot be private: Surf accepts leading `__`
+// and linked names can contain the same bytes. C emission maps this label to
+// its own private C symbol after decoding the origin.
+const GLOBAL_PREFIX: &str = "@chelis_global_";
 
 /// Reasons the constructor may reject a candidate name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,8 +91,6 @@ pub enum LoadStoreNameError {
     /// the parser or by lowering, and would emit as malformed identifier
     /// text in every backend.
     Empty,
-    /// Reserved for a compiler-created top-level binding identity.
-    ReservedGlobalLabel,
     /// The candidate contained a byte outside the allowed grammar at
     /// `byte_offset`. `character` is the first character starting at that
     /// byte; `code_point` is its Unicode scalar value (`u32`).
@@ -104,12 +106,6 @@ impl fmt::Display for LoadStoreNameError {
         match self {
             LoadStoreNameError::Empty => {
                 write!(f, "Load/Store name must not be empty")
-            }
-            LoadStoreNameError::ReservedGlobalLabel => {
-                write!(
-                    f,
-                    "Load/Store name uses the compiler's top-level binding namespace"
-                )
             }
             LoadStoreNameError::InvalidCharacter {
                 byte_offset,
@@ -146,9 +142,6 @@ impl LoadStoreName {
     pub fn new(s: impl Into<String>) -> Result<Self, LoadStoreNameError> {
         let owned = s.into();
         Self::validate(&owned)?;
-        if owned.starts_with(GLOBAL_PREFIX) {
-            return Err(LoadStoreNameError::ReservedGlobalLabel);
-        }
         Ok(Self {
             label: owned,
             origin: LoadOrigin::Ordinary,
@@ -174,8 +167,8 @@ impl LoadStoreName {
 
     /// Create the graph identity of a read of a top-level value declaration.
     /// The source name is held explicitly for host/evaluator resolution. The
-    /// label uses only C-identifier bytes and a source-unspellable `__`
-    /// namespace; hex encoding is injective for qualified names too.
+    /// label uses a source-unspellable `@` namespace; hex encoding is
+    /// injective for qualified names too. C emission maps it to a legal name.
     pub fn top_level(source: &str) -> Self {
         Self::validate(source).expect("top-level declaration name is parser validated");
         let mut label = String::from(GLOBAL_PREFIX);
@@ -404,9 +397,10 @@ mod tests {
         assert_eq!(formal.binding(), LoadBinding::GraphInput);
         assert_eq!(global.binding(), LoadBinding::TopLevel("y"));
         assert!(global.as_str().starts_with(GLOBAL_PREFIX));
+        assert!(LoadStoreName::new(global.as_str()).is_err());
         assert_eq!(
-            LoadStoreName::new(global.as_str()),
-            Err(LoadStoreNameError::ReservedGlobalLabel)
+            LoadStoreName::new("__chelis_global_aa").unwrap().binding(),
+            LoadBinding::GraphInput
         );
         assert_eq!(
             serde_json::from_str::<LoadStoreName>(&serde_json::to_string(&global).unwrap())
@@ -421,8 +415,29 @@ mod tests {
 
     #[test]
     fn malformed_top_level_encoding_cannot_become_an_ordinary_load() {
-        assert!(serde_json::from_str::<LoadStoreName>("\"__chelis_global_0g\"").is_err());
-        assert!(serde_json::from_str::<LoadStoreName>("\"__chelis_global_6D\"").is_err());
+        assert!(serde_json::from_str::<LoadStoreName>("\"@chelis_global_0g\"").is_err());
+        assert!(serde_json::from_str::<LoadStoreName>("\"@chelis_global_6D\"").is_err());
+    }
+
+    #[test]
+    fn qualified_source_name_cannot_spell_its_encoded_origin() {
+        let source = "Lib.weights";
+        let ordinary = LoadStoreName::new(source).unwrap();
+        let global = LoadStoreName::top_level(source);
+        assert_ne!(ordinary, global);
+        assert_eq!(global.binding(), LoadBinding::TopLevel(source));
+        assert_eq!(
+            LoadStoreName::top_level_source_for_label(global.as_str()).unwrap(),
+            Some(source.to_string())
+        );
+        assert_eq!(
+            LoadStoreName::new(global.as_str()),
+            Err(LoadStoreNameError::InvalidCharacter {
+                byte_offset: 0,
+                character: '@',
+                code_point: '@' as u32,
+            })
+        );
     }
 
     // ------------------------------------------------------------------

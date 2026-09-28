@@ -9853,11 +9853,8 @@ impl<'a> HostEmitter<'a> {
 /// `ty` held in `var` owns, or `None` for non-owning types. Called only
 /// while formatting a verified `Drop` or `RootConsume` action.
 fn release_call(var: &str, ty: &HostType) -> Option<String> {
-    // #379: the var may be a user binding/let name spelled like a C keyword;
-    // route through `c_ident` so the free call names the same (possibly
-    // mangled) identifier the declaration used. Compiler temps
-    // (`__binding_N_value`, `__let_N`) pass through unchanged.
-    let var = c_ident(var);
+    // Ownership sites carry the already-emitted C variable. Mangling again
+    // can turn an escaped source binding into a different, undeclared name.
     match ty {
         HostType::Tensor(_) => Some(format!("chelis_tensor_release({var});")),
         HostType::List(_) => Some(format!("chelis_list_release({var});")),
@@ -9875,9 +9872,7 @@ fn release_call(var: &str, ty: &HostType) -> Option<String> {
 
 /// The runtime retain call that formats one verified `Clone` action.
 fn retain_call(var: &str, ty: &HostType) -> Option<String> {
-    // #379: mirror `release_call` — a user name spelled like a C keyword
-    // routes through `c_ident`; compiler temps pass through unchanged.
-    let var = c_ident(var);
+    // The caller supplies the already-emitted C variable (as above).
     match ty {
         HostType::Tensor(_) => Some(format!("chelis_tensor_retain({var});")),
         HostType::List(_) => Some(format!("chelis_list_retain({var});")),
@@ -10141,61 +10136,68 @@ const C_RESERVED_WORDS: &[&str] = &[
     "uint_fast64_t",
 ];
 
-/// Prefix applied to a user identifier that would otherwise be illegal or
-/// colliding in emitted C. The double underscore keeps it out of the
-/// runtime's `chelis_*` symbol space, but the mapping is not
-/// collision-free: a user name that literally spells `chelis_user__<kw>`
-/// lands on the same emitted symbol as a mangled `<kw>`. Def-level
-/// duplicates are detected and rejected loudly before emission
-/// (chelis#840); parameter/binding-level duplicates remain a documented
-/// #379 limit.
+/// Namespace for escaped authored C names. Escaping occupants of the
+/// namespace as well keeps it disjoint from private global aliases.
 const C_USER_IDENT_PREFIX: &str = "chelis_user__";
 
 fn result_origin_name(value: &str) -> String {
     format!("__chelis_result_origin_{}", c_ident(value))
 }
 
-/// Map a Chelis identifier to a legal, collision-free C identifier (#379).
+/// Map a Chelis identifier or resolved global label to a legal C identifier.
 ///
 /// Most names pass through byte-identical so the existing C/HIP corpus is
 /// unchanged. A name is rewritten only when emitting it verbatim would
 /// break compilation:
 ///   * it is a C/C++ reserved word (`register`, `static`, `main`, ...), or
-///   * it collides with the compiler's emitted-helper naming scheme
-///     (`{fn}__tensor_{n}`, `{prog}__global__...`), which a user binding
-///     can only hit by literally containing `__tensor_` / `__global__`.
+///   * it collides with the compiler's emitted-helper or resolved-global
+///     namespace, or occupies the escaped-user namespace itself.
 ///
 /// The emitter's OWN temporaries (`__binding_N_value`, `__arg...`,
 /// `__result`, `__call_...`, `__let_...`) are generated internally, are
 /// already legal C, and are NOT user-controlled, so they must pass through
 /// untouched — `c_decl` is called with both user names and these temps.
-/// They neither appear in `C_RESERVED_WORDS` nor contain `__tensor_` /
-/// `__global__`, so the rules below leave them alone.
+/// They do not occupy either escaped namespace, so the rules below leave
+/// them alone. Existing #379 temporary-name limits are outside this fix.
 ///
 /// The same mapping must be applied at every site that turns a user name
 /// into a C identifier (declaration AND reference) so the two stay
 /// consistent; `c_decl` and the `Var`/binding/hoist emit paths all route
 /// through here.
 fn c_ident(name: &str) -> std::borrow::Cow<'_, str> {
-    // Every emitter temporary (`__binding_N_value`, `__arg...`, `__result`,
-    // `__call_...`, `__let_...`, `__tensor_argN_M`, `__host_tensor_arg_N`)
-    // begins with `__`. A user identifier from Chelis source never does
-    // (Surf/Deep identifiers cannot start with `__`), so a leading `__`
-    // marks a name as compiler-internal and already-legal: leave it alone.
-    // This is what keeps the helper-scheme check below from rewriting the
-    // `__tensor_arg*` argument temps (which contain `__tensor_`).
-    if name.starts_with("__") {
-        return std::borrow::Cow::Borrowed(name);
+    // The `@` label cannot be authored in Surf. In emitted C it occupies a
+    // namespace from which authored lookalikes are escaped below.
+    if let Some(source) = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+        .expect("compiler-created global labels are canonical")
+    {
+        return std::borrow::Cow::Owned(format!(
+            "__chelis_global_{}",
+            source
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
     }
-    // A user binding can only collide with the emitted-helper FUNCTION
-    // naming scheme (`{fn}__tensor_{n}`, `{prog}__global__...`) by literally
-    // containing those infixes; such names do not start with `__`.
     let collides_with_helper_scheme = name.contains("__tensor_") || name.contains("__global__");
-    if C_RESERVED_WORDS.contains(&name) || collides_with_helper_scheme {
-        std::borrow::Cow::Owned(format!("{C_USER_IDENT_PREFIX}{name}"))
-    } else {
-        std::borrow::Cow::Borrowed(name)
+    if name.starts_with("__chelis_global_")
+        || name.starts_with(C_USER_IDENT_PREFIX)
+        || C_RESERVED_WORDS.contains(&name)
+        || collides_with_helper_scheme && !name.starts_with("__")
+    {
+        // Escaping this namespace's occupants makes the mapping injective
+        // across ordinary names and compiler-created global aliases.
+        return std::borrow::Cow::Owned(format!(
+            "{C_USER_IDENT_PREFIX}{}",
+            name.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
     }
+    // The other `__` names are the emitter's existing temporaries. Keep
+    // their spellings so helper declarations and references still agree.
+    std::borrow::Cow::Borrowed(name)
 }
 
 fn c_decl(ty: &HostType, name: &str) -> Result<String, Unsupported> {
@@ -10956,6 +10958,19 @@ fn sparse_symbol_expr(
 #[cfg(test)]
 mod expression_dispatch_tests {
     use super::*;
+
+    #[test]
+    fn resolved_global_c_symbol_cannot_alias_authored_lookalikes() {
+        let global = chelis_ir::LoadStoreName::top_level("x");
+        let alias = c_ident(global.as_str());
+        assert_eq!(alias, "__chelis_global_78");
+        assert_ne!(alias, c_ident("__chelis_global_78"));
+        assert_ne!(
+            c_ident("__chelis_global_78"),
+            c_ident("chelis_user__5f5fchelis_global_78")
+        );
+        assert_eq!(c_ident("ordinary"), "ordinary");
+    }
 
     // chelis#2408: the standalone kernel prelude and the host translation unit
     // each carry the C port of the Random stream. They must be one port.

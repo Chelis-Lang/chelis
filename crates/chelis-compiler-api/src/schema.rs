@@ -2142,7 +2142,10 @@ pub struct WireRecordPatternField {
 /// - `20`: the five signed integer bitwise identities share one tagged
 ///   `Bitwise` operation. A version-19 reader does not know that operation,
 ///   so the complete graph is rejected before node decoding.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;
+/// - `21`: a Load of a resolved top-level value uses an unspellable encoded
+///   origin label, distinct from every ordinary graph input. A version-20
+///   reader has no such identity and cannot interpret that label.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 21;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2311,6 +2314,31 @@ impl WireDag {
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
+                WireRiscOp::Load { name } => {
+                    let resolved = chelis_ir::LoadStoreName::top_level_source_for_label(name)
+                        .map_err(|reason| {
+                            WireDagContractError::new(format!(
+                                "WireDag Load node {} has invalid binding origin: {reason}",
+                                node.id
+                            ))
+                        })?;
+                    if resolved.is_none() {
+                        chelis_ir::LoadStoreName::new(name.clone()).map_err(|reason| {
+                            WireDagContractError::new(format!(
+                                "WireDag Load node {} has invalid graph input name: {reason}",
+                                node.id
+                            ))
+                        })?;
+                    }
+                }
+                WireRiscOp::Store { name } => {
+                    chelis_ir::LoadStoreName::new(name.clone()).map_err(|reason| {
+                        WireDagContractError::new(format!(
+                            "WireDag Store node {} requires an ordinary name: {reason}",
+                            node.id
+                        ))
+                    })?;
+                }
                 WireRiscOp::Compare { comparison } => {
                     let inputs = node
                         .inputs

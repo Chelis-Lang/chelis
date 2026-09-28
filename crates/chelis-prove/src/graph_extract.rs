@@ -591,7 +591,7 @@ const _: () = {
     // `Expand` size is, so they join the same group.
     // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
     // it adds no operation.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 20);
+    assert!(WIRE_DAG_SCHEMA_VERSION == 21);
 };
 
 #[cfg(test)]

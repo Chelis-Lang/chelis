@@ -166,6 +166,22 @@ out = loss(to_tensor([1.0f32, 1.0f32]))\n";
 }
 
 #[test]
+fn authored_name_resembling_a_private_global_label_remains_ordinary() {
+    let source = "def main(__chelis_global_aa: tensor[1, f32]) -> tensor[1, f32] = add(__chelis_global_aa, to_tensor([1.0f32]))\n\
+out = main(to_tensor([2.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[3.0])");
+}
+
+#[test]
+fn private_global_identity_is_distinct_from_an_authored_lookalike() {
+    let source = "__chelis_global_aa = to_tensor([2.0f32])\n\
+def capture(x: tensor[1, f32]) -> tensor[1, f32] = add(x, __chelis_global_aa)\n\
+def main(__chelis_global_aa: tensor[1, f32]) -> tensor[1, f32] = capture(__chelis_global_aa)\n\
+out = main(to_tensor([10.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
+#[test]
 fn transform_in_global_block_reads_global_beside_a_same_named_local() {
     let source = "w = to_tensor([3.0f32, 5.0f32])\n\
 def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\

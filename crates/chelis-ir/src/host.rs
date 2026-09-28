@@ -274,7 +274,9 @@ fn inlining_would_capture(
 }
 
 fn callable_origin_key(name: &str) -> String {
-    let mut key = String::from("__chelis_host_callable_");
+    // Scope metadata must never alias an authored binder. `@` is not a Surf
+    // identifier byte, including after linking/qualification.
+    let mut key = String::from("@chelis_host_callable_");
     for byte in name.as_bytes() {
         use std::fmt::Write;
         write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
@@ -4605,11 +4607,14 @@ impl UncarriableWalk<'_> {
                 {
                     return None;
                 }
-                match self.defs.get(name) {
+                let resolved = LoadStoreName::top_level_source_for_label(name)
+                    .expect("qualified source name is compiler-created");
+                let declaration = resolved.as_deref().unwrap_or(name);
+                match self.defs.get(declaration) {
                     // A callee inlines into the kernel, so its body is walked
                     // under its own parameters; a value binding becomes a
                     // `Load` and carries nothing.
-                    Some(def_body) => self.def(name, def_body, None),
+                    Some(def_body) => self.def(declaration, def_body, None),
                     None => Some(format!(
                         "the name `{name}`, which is neither a parameter nor a definition \
                          of this program (a library definition under a compiled context)"
@@ -17332,15 +17337,15 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 
 /// The tensor inputs a helper over `scope` takes.
 ///
-/// Include every lexical binder the helper can read. Resolved top-level
-/// value reads use private labels, so they never collide with a same-spelled
+/// Include every lexical binder: a name absent from runtime reads can still
+/// supply a symbolic ascription or claim extent. Resolved top-level value
+/// reads use private labels, so they never collide with a same-spelled
 /// formal or local input. Dead inputs are removed after lowering.
 fn collect_tensor_scope(
     _program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
-    site: Option<&Expr>,
+    _site: Option<&Expr>,
 ) -> UnordMap<String, TensorType> {
-    let reads = site.map(chelis_types::linearity::free_runtime_variables);
     scope
         .to_sorted()
         .into_iter()
@@ -17350,7 +17355,6 @@ fn collect_tensor_scope(
                 .flatten()
                 .is_none()
         })
-        .filter(|(name, _)| reads.as_ref().is_none_or(|reads| reads.contains(name)))
         .filter_map(|(name, ty)| {
             tensor_type_from_host_input(ty).map(|tensor| (name.clone(), tensor))
         })
@@ -20820,6 +20824,43 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn tensor_helper_scope_keeps_shape_only_binders_and_excludes_global_aliases() {
+        let checked = surf_check("w = to_tensor([1.0f32])\n");
+        let session = HostLoweringSession::new(&checked);
+        let (_, site) = session.def_named("w").expect("checked declaration");
+        let scope = UnordMap::from([
+            (
+                "n".to_string(),
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+            ),
+            (
+                "x".to_string(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Named("n".to_string(), None)],
+                    precision: Prim::F32,
+                }),
+            ),
+            (
+                LoadStoreName::top_level("w").as_str().to_string(),
+                HostTypeTerm::Tensor(TensorType {
+                    dims: vec![DimInfo::Lit(1)],
+                    precision: Prim::F32,
+                }),
+            ),
+        ]);
+        let inputs = collect_tensor_scope(&session, &scope, Some(site));
+        assert!(
+            inputs.contains_key("n"),
+            "a shape witness need not be a runtime read"
+        );
+        assert!(
+            inputs.contains_key("x"),
+            "a claim witness need not be a runtime read"
+        );
+        assert_eq!(inputs.len(), 2, "resolved global is not a lexical input");
+    }
 
     #[test]
     fn kernel_builtin_load_rejection_requires_a_typed_lexical_input() {

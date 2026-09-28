@@ -23,11 +23,20 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 20 is explicitly
+WireDag JSON is an exact-version contract. Schema version 21 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 19, and every future version are decode errors before any IR
+versions 1 through 20, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
+
+`WireRiscOp::Load.name` distinguishes a graph input from a resolved top-level
+value read. An ordinary name obeys `[A-Za-z_][A-Za-z0-9_.-]*`. A resolved read
+uses `@chelis_global_` followed by the lowercase hexadecimal UTF-8 bytes of
+its nonempty validated declaration name. This encoding is injective and cannot
+be authored as an ordinary identifier, including a linked qualified name.
+`WireRiscOp::Store.name` is always ordinary. An empty, malformed, noncanonical,
+or wrong-kind name is an encoding and decoding error. Version 20 has no
+resolved-origin label contract and is rejected before node decoding.
 
 `WireRiscOp::ExtentWitness { site, parameter, axis, requirements, claims }`
 preserves a

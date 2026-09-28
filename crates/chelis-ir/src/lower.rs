@@ -8610,6 +8610,16 @@ impl<'program> LowerCtx<'program> {
         name: &str,
         bound: Option<&LoweredValue>,
     ) -> Option<LoweredValue> {
+        if let Some(source) = LoadStoreName::top_level_source_for_label(name)
+            .expect("qualified source name is compiler-created")
+        {
+            // Qualification pins the declaration even inside a caller that
+            // binds the source spelling. Its trapping initializer still has
+            // to run under the current owner, not become an inert Load.
+            return self
+                .inline_trapping_value(&source, None)
+                .or_else(|| self.inline_program_value(&source));
+        }
         self.inline_trapping_value(name, bound).or_else(|| {
             bound
                 .is_none()
@@ -21133,7 +21143,8 @@ mod declaration_attribution_tests {
                         .nodes()
                         .iter()
                         .filter(|node| {
-                            matches!(&node.op, RiscOp::Load { name } if name.as_str() == "h0")
+                            matches!(&node.op, RiscOp::Load { name }
+                                if name.binding() == crate::load_store_name::LoadBinding::TopLevel("h0"))
                         })
                         .count();
                     assert_eq!(h0, 4, "scalar chain of depth {depth}");
@@ -21186,14 +21197,24 @@ mod declaration_attribution_tests {
             dag.nodes()
                 .iter()
                 .filter_map(|node| match &node.op {
-                    RiscOp::Load { name } => Some(name.as_str().to_owned()),
+                    RiscOp::Load { name } => Some(match name.binding() {
+                        crate::load_store_name::LoadBinding::TopLevel(source) => {
+                            ("top-level", source.to_owned())
+                        }
+                        crate::load_store_name::LoadBinding::GraphInput => {
+                            ("graph-input", name.as_str().to_owned())
+                        }
+                    }),
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
         };
         assert_eq!(
             loads(helper("out")),
-            BTreeSet::from(["table".to_owned(), "tokens".to_owned()])
+            BTreeSet::from([
+                ("top-level", "table".to_owned()),
+                ("top-level", "tokens".to_owned()),
+            ])
         );
         let shifted = helper("shifted");
         assert!(loads(shifted).is_empty(), "{:?}", loads(shifted));

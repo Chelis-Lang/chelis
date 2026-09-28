@@ -1,0 +1,1 @@
+WireDag now uses an exact new schema version for resolved top-level Load origins. Older WireDag payloads are rejected, and a compiled reader can distinguish a captured global from a same-spelled graph input. See [#2604](https://github.com/Chelis-Lang/chelis/issues/2604).
