@@ -194,7 +194,7 @@ Authoritative Phase 1a oracle:
 cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Current implementation:
+HIP kernel execution:
 
 - kernel source strings for the Phase 1a execution surface:
   elementwise ops, reductions, fill, and cast
@@ -238,7 +238,7 @@ Authoritative Phase 1c oracle:
 cargo test -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1
 ```
 
-Current implementation:
+Executable grammar validation:
 
 - greedy slot reuse for non-overlapping storage lifetimes in `chelis-backend-hip/src/memory.rs`
 - unique input copies transferred once, with repeated `Load(name)` nodes aliasing the first copy
@@ -288,9 +288,7 @@ Current implementation:
   `SKILL.md`, curated positive spec fixtures, and curated negative fixtures
 
 GPU execution and executable grammar validation have dedicated tests and manual gates.
-The former Phase 1e fixed-workload benchmark is retired; its dated capture is
-[archived](../docs/archive/perf/phase1e/RESULTS.md), not a current backend oracle.
-Known carried-forward limitations remain explicit:
+Backend limitations:
 
 - symbolic dimensions are implemented on the stable tensor ABI for both backends:
   generated functions bind symbolic names from input tensor metadata at runtime and

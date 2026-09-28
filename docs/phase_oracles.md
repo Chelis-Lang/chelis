@@ -47,11 +47,6 @@ Status legend:
 | 1f | `cargo test -p chelis-e2e --test example_corpus_validate` | `spec/design/phase1f_executable_grammar.md` §Authoritative oracle | default gate |
 | 1 (symbolic dims carry-forward) | `cargo test --workspace` plus 1a HIP gate | `spec/design/phase1_symbolic_dims.md` | default gate + manual gate |
 
-The former Phase 1e fixed-workload benchmark was retired; its
-[plan](../spec/design/archive/phase1e_benchmarks.md) and
-[dated results](archive/perf/phase1e/RESULTS.md) are historical, not a current
-completion oracle. GPU correctness gates remain above.
-
 ## Phase 2
 
 | Phase | Oracle command | Owning spec doc | Status |

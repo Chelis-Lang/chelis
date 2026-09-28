@@ -189,18 +189,6 @@ and Tide tooling.
 - specialize contiguous rank ≥ 2 `f32` matmul patterns to hipBLAS-backed helpers
 - keep irregular flattening/autotuning out of Phase 1d
 
-### 1e: Benchmarks and Real Models
-
-- benchmark fixed executable workloads already supported by the shipped surface
-- current benchmark set: MNIST MLP, linear regression, transformer-block-style forward pass
-- compare against the reference C backend for correctness
-- keep PyTorch as a local/manual comparison dependency through the repo `py/` env, not a CI requirement
-- target credibility, not premature parity with PyTorch
-
-The former Phase 1e benchmark plan and its capture are archived. The executable
-examples remain in `examples/`; active backend validation is indexed in
-[`docs/phase_oracles.md`](../../docs/phase_oracles.md).
-
 ### 1f: Executable Grammar
 
 - `chelis validate --surf file.ch`
