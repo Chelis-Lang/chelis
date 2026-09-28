@@ -1200,6 +1200,99 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "scripts/runtime_bundle_oracle.py",
+        "archive-name",
+        lines=(
+            'ARCHIVE_FILE_NAME = "libchelis_runtime.a"',
+            '"older": f"libchelis_runtime-{older_digest[:16]}-oracle.a",',
+            '"newer": f"libchelis_runtime-{newer_digest[:16]}-oracle.a",',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the oracle validates the exact archive named by a staging receipt and plants build-tree decoys only for negative execution; it never selects a link input"
+        ),
+    ),
+    Row(
+        "scripts/runtime_bundle_oracle.py",
+        "bundle-constant",
+        lines=(
+            'ARCHIVE_FILE_NAME = "libchelis_runtime.a"',
+            'RUNTIME_DIR_VARIABLE = "CHELIS_RUNTIME_DIR"',
+            "archive = artifacts / ARCHIVE_FILE_NAME",
+            'good = context["run_dir"] / "exports" / "cli-development" / ARCHIVE_FILE_NAME',
+            '"baseline": ARCHIVE_FILE_NAME,',
+            'archive = package / "lib" / ARCHIVE_FILE_NAME',
+            'if not (runtime_package / "lib" / ARCHIVE_FILE_NAME).is_file():',
+            'crossed = copied_lib / ARCHIVE_FILE_NAME',
+            "env.pop(RUNTIME_DIR_VARIABLE, None)",
+            "env=command_env(additions={RUNTIME_DIR_VARIABLE: str(override_dir)}),",
+            "env=command_env(additions={RUNTIME_DIR_VARIABLE: str(override_dir)}),",
+            "if RUNTIME_DIR_VARIABLE not in export_stderr or any(rejected_export.iterdir()):",
+            "if RUNTIME_DIR_VARIABLE not in stderr:",
+            "path.name == ARCHIVE_FILE_NAME for path in rejected_output.iterdir()",
+            "contains=RUNTIME_DIR_VARIABLE,",
+            "additions={RUNTIME_DIR_VARIABLE: str(override_dir)},",
+            'if (no_rebuild_dir / RECEIPT_FILE_NAME).exists() or (no_rebuild_dir / ARCHIVE_FILE_NAME).exists():',
+            'f\'let candidate = build_dir.join("{ARCHIVE_FILE_NAME}");\\n\',',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "names the staged archive and forbidden runtime-location variable only to verify receipts/packages and execute rejection or planted-scan controls"
+        ),
+    ),
+    Row(
+        "scripts/runtime_bundle_oracle.py",
+        "library-name",
+        lines=(
+            '(arg.startswith("-l") and "chelis_runtime" in arg)',
+            'or (arg == "-l" and index + 1 < len(argv) and "chelis_runtime" in argv[index + 1])',
+        ),
+        disposition="not-lookup",
+        reason="the oracle rejects any printed link command that searches for the runtime by library name",
+    ),
+    Row(
+        "scripts/runtime_bundle_oracle.py",
+        "runtime-variable",
+        lines=(
+            'RUNTIME_DIR_VARIABLE = "CHELIS_RUNTIME_DIR"',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "the oracle sets the forbidden variable only for the rejection witness and removes inherited values from positive runs"
+        ),
+    ),
+    Row(
+        "scripts/test_runtime_bundle_oracle.py",
+        "bundle-constant",
+        lines=(
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            '"archive": oracle.ARCHIVE_FILE_NAME,',
+            '"archive": oracle.ARCHIVE_FILE_NAME,',
+            'f\'let candidate = build_dir.join("{oracle.ARCHIVE_FILE_NAME}");\\n\',',
+            '(package / "lib" / oracle.ARCHIVE_FILE_NAME).write_bytes(b"runtime-A")',
+            'archive = package / "lib" / oracle.ARCHIVE_FILE_NAME',
+            'baseline = lib_dir / oracle.ARCHIVE_FILE_NAME',
+        ),
+        disposition="not-lookup",
+        reason=(
+            "uses the oracle's receipt-name constant in byte-integrity, receipt-replay tamper, and planted guard fixtures"
+        ),
+    ),
+    Row(
+        "scripts/test_runtime_bundle_oracle.py",
+        "linker-search",
+        lines=(
+            """('cmd.arg("-lchelis_runtime");',),""",
+            'build["stdout"] = f"Compile: {command} -lchelis_runtime\\n".encode()',
+        ),
+        disposition="not-lookup",
+        reason="a synthetic guard row proves that even a reviewed manual linker search blocks oracle completion",
+    ),
+    Row(
         "scripts/test_capacity_census_native_execution.py",
         "archive-name",
         lines=(
