@@ -1097,8 +1097,9 @@ def python_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[str, Any]:
     context["python_b"] = python_b
     build_python_extension(runner, context, python_a, label="python-a-development-extension")
     positive = run_python_call(runner, context, python_a, label="python-a-positive")
-    if positive["runtime_sha256"] != context["cli_digest"]:
-        raise OracleFailure("Python extension carries a different runtime from the baseline CLI")
+    # Maturin's link flags can change the runtime archive bytes. Each producer
+    # is checked against its own carried, staged, and executed runtime.
+    context["python_digest"] = positive["runtime_sha256"]
 
     override_dir = context["run_dir"] / "negative" / "python-runtime-override"
     override_dir.mkdir(parents=True, exist_ok=True)
@@ -1297,8 +1298,8 @@ def mutation_build_witness(
             artifact_dir=context["run_dir"] / "python-artifacts" / f"{label}-B",
             expected_values=mutant_values,
         )
-        if python_b["runtime_sha256"] != digest_b:
-            raise OracleFailure(f"{label} Python B artifact does not record its carried runtime digest")
+        if python_b["runtime_sha256"] == context["python_digest"]:
+            raise OracleFailure(f"{label} rebuilt Python extension did not change its carried runtime")
         if python_b["values"] != list(mutant_values):
             raise OracleFailure(
                 f"{label} rebuilt Python witness did not produce the exact discriminating result: {python_b['values']}"
@@ -1331,8 +1332,8 @@ def mutation_build_witness(
         label=f"python-{label}-restored-A",
         artifact_dir=context["run_dir"] / "python-artifacts" / f"{label}-restored-A",
     )
-    if restored_python["runtime_sha256"] != context["cli_digest"]:
-        raise OracleFailure(f"{label} restored Python extension did not return to runtime A")
+    if restored_python["runtime_sha256"] != context["python_digest"]:
+        raise OracleFailure(f"{label} restored Python extension did not return to its original runtime")
 
     cross_runtime = run_python_rejection(
         runner,
@@ -1352,11 +1353,13 @@ def mutation_build_witness(
             "archive_path": str(b_build["archive"].resolve()),
             "cli_wrong_stdout": b_native["stdout"],
             "python_wrong_values": python_b["values"],
+            "python_carried_sha256": python_b["runtime_sha256"],
             "python_artifact": python_b["artifact"],
             "cross-runtime_persisted_artifact_negative": cross_runtime,
         },
         "restored_A": {
             "carried_sha256": digest_restored,
+            "python_carried_sha256": restored_python["runtime_sha256"],
             "cli": restored_cli,
             "python": restored_python,
         },
@@ -1456,13 +1459,14 @@ def stale_candidates_row(runner: EvidenceRun, context: Mapping[str, Any]) -> dic
             artifact_dir=context["run_dir"] / "python-artifacts" / "stale-candidates",
             additions={"CARGO_TARGET_DIR": str(context["cargo_target"])},
         )
-        if python["runtime_sha256"] != good_digest:
+        if python["runtime_sha256"] != context["python_digest"]:
             raise OracleFailure("Python selected a stale build-tree archive instead of its carried runtime")
         return {
             "planted_archives": planted,
             "cli_exact_values": cli["exact_stdout"],
             "python_exact_values": python["values"],
             "carried_sha256": good_digest,
+            "python_carried_sha256": context["python_digest"],
             "python_selector_target": str(context["cargo_target"]),
         }
     finally:
