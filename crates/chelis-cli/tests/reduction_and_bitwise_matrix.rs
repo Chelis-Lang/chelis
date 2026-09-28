@@ -244,6 +244,36 @@ fn bitwise_results_supply_computed_reshape_extents_in_eval_and_c() {
 }
 
 #[test]
+fn bitwise_runtime_scalar_operands_and_aliases_keep_reshape_extents() {
+    if !c_toolchain_available() {
+        return;
+    }
+    for (op, rhs) in [
+        ("bitand", 3),
+        ("bitor", 0),
+        ("bitxor", 0),
+        ("shl", 0),
+        ("shr", 0),
+    ] {
+        let program = format!(
+            "def shaped(x: tensor[4, f32], count: i64) -> tensor[2, 2, f32] = reshape(x, [{op}(count, {rhs}i64), 2i64])\n\
+             out = print(shaped(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), 2i64))\n"
+        );
+        let evaluated = eval_first_line(&program).expect("runtime parameter extent");
+        assert!(evaluated.contains("shape=[2, 2]"), "{op}: {evaluated}");
+        assert_eq!(
+            c_first_line(&program, &format!("bitwise_param_{op}")),
+            evaluated
+        );
+    }
+
+    let aliased = "def main() = {\n source = to_tensor([1.0f32, 2.0f32])\n x = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n count = bitand(shape(source, 0i32), 3i64)\n reshape(x, [bitor(count, 0i64), 2i64])\n}\nout = print(main())\n";
+    let evaluated = eval_first_line(aliased).expect("computed alias extent");
+    assert!(evaluated.contains("shape=[2, 2]"), "{evaluated}");
+    assert_eq!(c_first_line(aliased, "bitwise_alias_extent"), evaluated);
+}
+
+#[test]
 fn bitwise_computed_extent_traps_before_reshape_in_eval_and_c() {
     if !c_toolchain_available() {
         return;

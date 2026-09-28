@@ -17144,12 +17144,11 @@ impl<'program> LowerCtx<'program> {
     /// Returns true only when `expr` (cast-stripped) is an integer app of
     /// the supported runtime vocabulary (`neg`/`add`/`sub`/`mul`/
     /// `floor_div`/`trunc_div`/`mod` or any [05-OP-47] bitwise kind, with
-    /// matching arity) and EVERY leaf is a recognized static or shape-derived
-    /// form. The bitwise family intentionally uses the runtime scalar node
+    /// matching arity) and EVERY leaf is a recognized static, shape-derived,
+    /// or already-lowered rank-zero integer producer. The bitwise family intentionally uses the runtime scalar node
     /// even with static operands: its shift traps and signed-width behavior
     /// are owned by the typed operation, not a second extent-only evaluator.
-    /// A leaf outside the language (e.g. a
-    /// runtime scalar parameter) returns false and keeps the pre-existing
+    /// A leaf outside the language returns false and keeps the pre-existing
     /// wildcard fallback for forms this pass never claimed to understand.
     fn is_shape_derived_arith_dim(&self, expr: &Expr) -> bool {
         let Some((tag, _, kids)) = stamped_parts(expr) else {
@@ -17185,11 +17184,13 @@ impl<'program> LowerCtx<'program> {
 
     /// Leaf recognizer for [`Self::is_shape_derived_arith_dim`]: a static
     /// int (literal / `(lit ...)` / cast-wrapped), a `shape(operand, axis)`
-    /// read (direct or a `shape_bindings` alias), a `let`-bound static var,
-    /// or a nested arithmetic app of the same language.
+    /// read (direct or a `shape_bindings` alias), a bound runtime rank-zero
+    /// integer node (parameter, helper result, or local computed alias),
+    /// a `let`-bound static var, or a nested app of the same language.
     fn is_shape_derived_arith_leaf(&self, expr: &Expr) -> bool {
         if extract_int_for_dim(expr).is_some()
             || self.shape_app_operand_axis_resolved(expr).is_some()
+            || self.is_runtime_scalar_var(expr)
         {
             return true;
         }
