@@ -20326,6 +20326,7 @@ impl<'program> LowerCtx<'program> {
             fields,
         } = scrutinee
         else {
+            self.retain_host_match_control(span);
             self.reject_static_adt(
                 span,
                 "`match` on a runtime scrutinee is not supported by IR evaluation yet; \
@@ -20362,6 +20363,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 StaticPatternMatch::Match(binds) => {
                     if !guard_is_absent(guard) {
+                        self.retain_host_match_control(span);
                         self.reject_static_adt(
                             span,
                             "`match` arm guards are not supported by static arm \
@@ -20410,6 +20412,24 @@ impl<'program> LowerCtx<'program> {
                  form outside the supported static slice (chelis#520 D1)"
             ),
         )
+    }
+
+    /// [04-PAT-2]: when selection needs a host value or guard, the staged
+    /// tensor plan must retain the entire match in host control. In particular,
+    /// an initializer's ADT result is an opaque host carrier, not a static
+    /// constructor. Decline this plan explicitly before visiting any arm;
+    /// retrying DAG lowering after a generic failure would lose source claims.
+    /// Transform lowerers have no host program and keep their own rejection.
+    fn retain_host_match_control(&self, span: Span) {
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            raise_lowering_error(
+                "dynamic matches retain host control flow; scalar source stages cannot be hoisted out of an arm",
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
     }
 
     /// Rejection helper for the static-ADT lowering slice (chelis#520).

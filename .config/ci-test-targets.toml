@@ -1255,6 +1255,12 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# Forward staged ADT selection is checked through public Eval/C and parity.
+[[path_rule]]
+prefix = "examples/staged_adt_control.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
 # chelis-cli::parity, and enters the executable and formatter corpora.
 [[path_rule]]

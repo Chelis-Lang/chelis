@@ -916,3 +916,8 @@ fn parity_grad_host_results() {
 fn parity_keyed_state_wrapper() {
     drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
 }
+
+#[test]
+fn parity_staged_adt_control() {
+    drive_parity(&examples_root().join("staged_adt_control.ch"), true);
+}
