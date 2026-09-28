@@ -2062,7 +2062,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary",
-      "sample": "({et})chelis_int_checked_add((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
+      "sample": "({et})chelis_int_{op}((int64_t)({lhs}), (int64_t)({rhs}), {bits})"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_func",
