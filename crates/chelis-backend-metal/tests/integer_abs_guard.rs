@@ -192,6 +192,17 @@ fn run_metal(dag: &Dag, inputs: &[(&str, Prim, &[i64])]) -> std::process::Output
             _ => panic!("static fixture"),
         })
         .product();
+    body += &format!(
+        "if (view.count != {count} || chelis_tensor_rank(outputs[0]) != {}) return 90; if (view.dtype != {}) return 91;",
+        root.output_type.dims.len(),
+        chelis_backend_metal::dtype::runtime_dtype_tag(root.output_type.precision)
+    );
+    for (axis, dim) in root.output_type.dims.iter().enumerate() {
+        let DimInfo::Lit(extent) = dim else {
+            unreachable!()
+        };
+        body += &format!("if (chelis_tensor_shape(outputs[0], {axis}) != {extent}) return 92;");
+    }
     let bytes = count * chelis_backend_metal::dtype::metal_elem_size(root.output_type.precision);
     body += &format!(
         "for (size_t i=0; i<{bytes}; ++i) printf(\"%02x\", ((const unsigned char*)view.data)[i]); printf(\"\\n\"); chelis_tensor_release(outputs[0]);"
@@ -478,4 +489,160 @@ fn exact_integer_constants_and_abs_cover_scalar_empty_and_rank_two_shapes() {
         assert!(result.mm_source.contains("-9007199254740993LL"));
         assert!(!result.mm_source.contains("-9007199254740992"));
     }
+}
+
+fn constant_operation(shape: &[usize], value: i64, op: RiscOp) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let input_type = TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision: Prim::Int64,
+    };
+    let input = dag.add_node(
+        decl,
+        RiscOp::Const {
+            value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
+        },
+        vec![],
+        input_type.clone(),
+        None,
+    );
+    let mut output_type = input_type;
+    match &op {
+        RiscOp::Cast { new_precision } => output_type.precision = *new_precision,
+        RiscOp::Expand {
+            axis,
+            size: chelis_ir::dag::RtDim::Lit(size),
+        } => {
+            output_type.dims.insert(*axis, DimInfo::Lit(*size));
+        }
+        RiscOp::Abs => {}
+        _ => panic!("unexpected fixture operation"),
+    }
+    let output = dag.add_node(decl, op, vec![input], output_type, None);
+    dag.set_roots(vec![output]);
+    dag
+}
+
+#[test]
+fn empty_pointwise_dispatches_are_omitted_without_omitting_output_allocations() {
+    for op in [
+        RiscOp::Abs,
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        RiscOp::Expand {
+            axis: 0,
+            size: chelis_ir::dag::RtDim::Lit(2),
+        },
+    ] {
+        let empty =
+            try_codegen_metal(&constant_operation(&[0], i64::MIN, op.clone()), "empty").unwrap();
+        assert!(!empty.mm_source.contains("chelis_metal_launch("), "{op:?}");
+        assert!(
+            empty.mm_source.contains("buf_1 = chelis_metal_alloc(0u *"),
+            "{op:?}"
+        );
+        let nonempty =
+            try_codegen_metal(&constant_operation(&[1], 1, op.clone()), "nonempty").unwrap();
+        assert!(
+            nonempty.mm_source.contains("chelis_metal_launch("),
+            "{op:?}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn assert_metal_bytes(dag: &Dag, expected: &[u8]) {
+    let result = run_metal(dag, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let expected = expected
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), expected);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "manual gate: Apple Silicon Metal device and Xcode command-line tools"]
+fn metal_empty_abs_preserves_shape_without_trapping_and_nonempty_min_traps() {
+    for shape in [&[0][..], &[2, 0][..]] {
+        // MIN is not an element of an empty constant; there is no numeric trap.
+        assert_metal_bytes(&constant_operation(shape, i64::MIN, RiscOp::Abs), &[]);
+    }
+    assert_metal_bytes(
+        &constant_operation(&[], -9_007_199_254_740_993, RiscOp::Abs),
+        &9_007_199_254_740_993i64.to_le_bytes(),
+    );
+    let trap = run_metal(&constant_operation(&[1], i64::MIN, RiscOp::Abs), &[]);
+    assert!(!trap.status.success());
+    assert_eq!(
+        String::from_utf8(trap.stderr).unwrap().trim(),
+        "numeric trap: overflow in abs at i64"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "manual gate: Apple Silicon Metal device and Xcode command-line tools"]
+fn metal_empty_integer_float_cast_preserves_shape_and_nonempty_conversion_executes() {
+    let op = RiscOp::Cast {
+        new_precision: Prim::F32,
+    };
+    for shape in [&[0][..], &[0, 2][..]] {
+        assert_metal_bytes(&constant_operation(shape, i64::MIN, op.clone()), &[]);
+    }
+    // Empty input still requires a reduction dispatch to produce its scalar
+    // identity. Launch planning uses kernel work, not the input element count.
+    let mut reduction = constant_operation(&[0], i64::MIN, op.clone());
+    let input = reduction.roots()[0];
+    let decl = reduction.declare("reduction");
+    let output = reduction.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![input],
+        TensorType::scalar_f32(),
+        None,
+    );
+    reduction.set_roots(vec![output]);
+    assert_metal_bytes(&reduction, &0f32.to_le_bytes());
+    assert_metal_bytes(
+        &constant_operation(&[1], -123, op),
+        &(-123f32).to_le_bytes(),
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "manual gate: Apple Silicon Metal device and Xcode command-line tools"]
+fn metal_empty_expand_preserves_inserted_axis_and_nonempty_replication_executes() {
+    let op = RiscOp::Expand {
+        axis: 0,
+        size: chelis_ir::dag::RtDim::Lit(2),
+    };
+    assert_metal_bytes(&constant_operation(&[0], 1, op.clone()), &[]);
+    // A zero inserted axis also produces empty work from a nonempty source.
+    assert_metal_bytes(
+        &constant_operation(
+            &[2],
+            1,
+            RiscOp::Expand {
+                axis: 1,
+                size: chelis_ir::dag::RtDim::Lit(0),
+            },
+        ),
+        &[],
+    );
+    assert_metal_bytes(
+        &constant_operation(&[1], -9_007_199_254_740_993, op),
+        &(-9_007_199_254_740_993i64).to_le_bytes().repeat(2),
+    );
 }

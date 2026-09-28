@@ -564,6 +564,38 @@ fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
     Ok(())
 }
 
+/// Plan the shared one-dimensional dispatch boundary. `grid` counts work
+/// items, not input elements: reductions still launch when their input is
+/// empty. Empty work has no dispatch, while allocation, shape, and any zeroed
+/// numeric status remain owned by the caller's tensor plan.
+fn launch_1d(
+    pso: &str,
+    grid: usize,
+    threadgroup: usize,
+    buffers: &[&str],
+    uniforms: &[(&str, &str)],
+) -> Option<String> {
+    if grid == 0 {
+        return None;
+    }
+    assert!(threadgroup > 0, "nonempty Metal launch needs a threadgroup");
+    let launch = match uniforms.len() {
+        1 => "chelis_metal_launch",
+        2 => "chelis_metal_launch_two_uniforms",
+        _ => panic!("Metal launch requires one or two uniform bindings"),
+    };
+    let count = buffers.len();
+    let buffers = buffers.join(", ");
+    let uniforms = uniforms
+        .iter()
+        .map(|(address, bytes)| format!(", {address}, {bytes}"))
+        .collect::<String>();
+    Some(format!(
+        "{{ __unsafe_unretained id<MTLBuffer> bufs[{count}] = {{ {buffers} }}; \
+         {launch}({pso}, {grid}u, {threadgroup}u, bufs, {count}{uniforms}); }}"
+    ))
+}
+
 /// Per-tensor metadata emitted alongside the host program.
 #[derive(Clone)]
 struct TensorPlan {
@@ -1291,7 +1323,13 @@ impl<'plan> Emitter<'plan> {
             "id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{name}\");"
         ));
         self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
-        self.body.push(format!("{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {buf} }}; chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}", source.buf, node.id.0));
+        self.body.extend(launch_1d(
+            &pso,
+            n,
+            n.min(256),
+            &[&source.buf, &buf],
+            &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
+        ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
             prec,
@@ -1347,7 +1385,13 @@ impl<'plan> Emitter<'plan> {
             "id<MTLComputePipelineState> {pso} = chelis_metal_get_pipeline({pso}_src, @\"{name}\");"
         ));
         self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
-        self.body.push(format!("{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {buf} }}; chelis_metal_launch({pso}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}", source.buf, node.id.0));
+        self.body.extend(launch_1d(
+            &pso,
+            n,
+            n.min(256),
+            &[&source.buf, &buf],
+            &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
+        ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf,
             prec: precision,
@@ -1463,9 +1507,12 @@ impl<'plan> Emitter<'plan> {
                 .extra_peak_device_bytes
                 .checked_add(dtype::metal_elem_size(Prim::Int32))
                 .expect("numeric status-byte accounting overflow");
-            self.body.push(format!(
-                "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {out_buf}, {status} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 3, &n_{}, sizeof(uint32_t)); }}",
-                in_plan.buf, node.id.0
+            self.body.extend(launch_1d(
+                &pso_var,
+                n,
+                n.min(256),
+                &[&in_plan.buf, &out_buf, &status],
+                &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
             ));
             let trap = NumericTrap::Overflow {
                 op: "abs",
@@ -1476,9 +1523,12 @@ impl<'plan> Emitter<'plan> {
                 "if (*((uint32_t*)[{status} contents]) != 0) chelis_numeric_trap({trap:?});"
             ));
         } else {
-            self.body.push(format!(
-                "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 2, &n_{}, sizeof(uint32_t)); }}",
-                in_plan.buf, node.id.0
+            self.body.extend(launch_1d(
+                &pso_var,
+                n,
+                n.min(256),
+                &[&in_plan.buf, &out_buf],
+                &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
             ));
         }
         self.plans[node.id.0] = Some(TensorPlan {
@@ -1565,11 +1615,12 @@ impl<'plan> Emitter<'plan> {
             "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
         ));
         self.body.push(format!("uint32_t n_{} = {n}u;", node.id.0));
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {}, {out_buf} }}; chelis_metal_launch({pso_var}, {n}u, MIN((NSUInteger){n}u, 256u), bufs, 3, &n_{}, sizeof(uint32_t)); }}",
-            a_plan.buf,
-            b_plan.buf,
-            node.id.0
+        self.body.extend(launch_1d(
+            &pso_var,
+            n,
+            n.min(256),
+            &[&a_plan.buf, &b_plan.buf, &out_buf],
+            &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
@@ -1685,10 +1736,12 @@ impl<'plan> Emitter<'plan> {
         // of a critical non-power-of-2 miscompile that the previous fix
         // (clamping tg = n.min(256)) shipped; fixed here by decoupling.
         let tg = kernels::REDUCE_TG_SIZE;
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}, {tg}u, {tg}u, bufs, 2, &n_{}, sizeof(uint32_t)); }}",
-            in_plan.buf,
-            node.id.0
+        self.body.extend(launch_1d(
+            &pso_var,
+            tg,
+            tg,
+            &[&in_plan.buf, &out_buf],
+            &[(&format!("&n_{}", node.id.0), "sizeof(uint32_t)")],
         ));
         // Reduction returns a rank-0 scalar in IR semantics. Reflect
         // that in the plan so emit_root_writeback emits chelis_alloc(0,
@@ -1865,11 +1918,15 @@ impl<'plan> Emitter<'plan> {
             output_ndim = out_shape.len(),
             output_size = out_n,
         ));
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {out_buf}, {status_buf} }}; \
-             chelis_metal_launch({pso_var}, {grid}u, MIN((NSUInteger){grid}u, 256u), bufs, 3, \
-             &count_dims_{}, sizeof(count_dims_{})); }}",
-            in_plan.buf, node.id.0, node.id.0
+        self.body.extend(launch_1d(
+            &pso_var,
+            grid,
+            grid.min(256),
+            &[&in_plan.buf, &out_buf, &status_buf],
+            &[(
+                &format!("&count_dims_{}", node.id.0),
+                &format!("sizeof(count_dims_{})", node.id.0),
+            )],
         ));
         self.body.push(format!(
             "int count_status_{} = *((int*)[{status_buf} contents]);",
@@ -2194,10 +2251,21 @@ impl<'plan> Emitter<'plan> {
             node.id.0,
             Self::host_scalar_literal(prec, fill)?
         ));
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; \
-             chelis_metal_launch_two_uniforms({pso_var}, {out_n}u, MIN((NSUInteger){out_n}u, 256u), bufs, 2, &mv_dims_{}, sizeof(mv_dims_{}), &pad_fill_{}, sizeof({msl_ty})); }}",
-            in_plan.buf, node.id.0, node.id.0, node.id.0,
+        self.body.extend(launch_1d(
+            &pso_var,
+            out_n,
+            out_n.min(256),
+            &[&in_plan.buf, &out_buf],
+            &[
+                (
+                    &format!("&mv_dims_{}", node.id.0),
+                    &format!("sizeof(mv_dims_{})", node.id.0),
+                ),
+                (
+                    &format!("&pad_fill_{}", node.id.0),
+                    &format!("sizeof({msl_ty})"),
+                ),
+            ],
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
@@ -2267,10 +2335,15 @@ impl<'plan> Emitter<'plan> {
             "{};",
             Self::movement_dims_initializer(node.id.0, &in_plan.shape, &out_shape, &start, out_n)
         ));
-        self.body.push(format!(
-            "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; \
-             chelis_metal_launch({pso_var}, {out_n}u, MIN((NSUInteger){out_n}u, 256u), bufs, 2, &mv_dims_{}, sizeof(mv_dims_{})); }}",
-            in_plan.buf, node.id.0, node.id.0,
+        self.body.extend(launch_1d(
+            &pso_var,
+            out_n,
+            out_n.min(256),
+            &[&in_plan.buf, &out_buf],
+            &[(
+                &format!("&mv_dims_{}", node.id.0),
+                &format!("sizeof(mv_dims_{})", node.id.0),
+            )],
         ));
         self.plans[node.id.0] = Some(TensorPlan {
             buf: out_buf,
