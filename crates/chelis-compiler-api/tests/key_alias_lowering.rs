@@ -116,7 +116,11 @@ fn typed_tensor_key_builtin_aliases_execute_in_eval_and_c() {
 fn typed_key_builtin_alias_survives_higher_order_passage() {
     let source = "def apply(f: i64 -> key, seed: i64) -> key = f(seed)\ndef main() = {\n  make: i64 -> key = key_from_seed\n  apply(make, -1i64)\n}\n";
     let expected = format!("key({:016x})", u64::MAX);
-    assert_eq!(eval_main(source).unwrap(), [expected.clone()], "Eval");
+    assert_eq!(
+        eval_main(source).unwrap().as_slice(),
+        std::slice::from_ref(&expected),
+        "Eval"
+    );
     let generated = ownership_support::emit(source, "key alias callback");
     let (ledger, stdout) = ownership_support::run_program(&generated);
     ownership_support::balanced(&ledger);
@@ -127,7 +131,11 @@ fn typed_key_builtin_alias_survives_higher_order_passage() {
 fn typed_key_builtin_alias_chain_retains_original_identity() {
     let source = "def main() = {\n  first: i64 -> key = key_from_seed\n  second: i64 -> key = first\n  second(-1i64)\n}\n";
     let expected = format!("key({:016x})", u64::MAX);
-    assert_eq!(eval_main(source).unwrap(), [expected.clone()], "Eval");
+    assert_eq!(
+        eval_main(source).unwrap().as_slice(),
+        std::slice::from_ref(&expected),
+        "Eval"
+    );
     let generated = ownership_support::emit(source, "key alias chain");
     let (ledger, stdout) = ownership_support::run_program(&generated);
     ownership_support::balanced(&ledger);
