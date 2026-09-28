@@ -33,7 +33,7 @@
     "integration": {
       "repository": ".work/toolchain/charon-src",
       "base": "546078ea5da1376d7fca8b9773f4be97a36a0248",
-      "commit": "5a716176a006c2234cde9fe2b45ef55e5b39f3f6"
+      "commit": "5b825fa64e1610cef599fccca91de555b9f846f9"
     },
     "series": [
       {

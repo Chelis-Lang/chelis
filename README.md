@@ -391,17 +391,23 @@ These changes are not checker/host-lowering extraction or wrapper correspondence
 proofs.
 
 Whole `chelis_pipeline_core` extraction has not passed the eight-crate
-acceptance gate. The former Charon/Hax closure-region failure is addressed in
-the pinned Charon integration (`5a71617`); the earlier round-32, 52-chunk
-diagnostic run reached only 38 chunks and is not acceptance evidence. The
-round-36 Aeneas integration (`5cd0e4a`) is reproducible from
-`verification/toolchain/`: the series check matches the integration source,
-and the four pinned Charon, charon-ml, Aeneas, and Aeneas-source Nix outputs
-build. Its local gate compiled 258 Lean libraries (637 modules), regenerated
-270/270 fixtures without strict stale drift, passed 78/78 model cases and a
-23/23 canary. This is toolchain and fragment evidence, not a fresh strict
-default/lowering-trace extraction, whole-core proof, or native hook/unwind
-correspondence. The AD slice is not the full core.
+acceptance gate. The former Charon/Hax closure-region failure was addressed in
+Charon `5a71617`; the new source integration `5b825fa` also retains imported
+closure bodies from promoted MIR and rejects stale or missing metadata. Its
+isolated Charon regression and strict two-crate native/Lean closure smoke pass.
+An independent `verification/toolchain/series.py check` reconstructs the new
+Charon, charon-ml, and round-36 Aeneas (`5cd0e4a`) integration sources exactly
+(47, 9, and 165 patches). This is a checked source pin, **not** a rebuilt Nix
+toolchain: the guarded new `.#charon` build stopped with exit 3 as shared APFS
+fell to 8.24 GiB free (7.01 GiB afterward). The four previously built pinned
+Nix outputs belong to the older Charon `5a71617` integration.
+
+The earlier round-32, 52-chunk diagnostic run reached only 38 chunks and is
+not acceptance evidence. The round-36 Aeneas local gate compiled 258 Lean
+libraries (637 modules), regenerated 270/270 fixtures without strict stale
+drift, passed 78/78 model cases and a 23/23 canary. Fresh strict default and
+lowering-trace extraction, full-core proof, new-pin Nix builds, and native
+hook/unwind correspondence remain open. The AD slice is not the full core.
 
 There is a checked **fragment** correspondence theorem, not a whole-core acceptance
 claim. On actual Aeneas-extracted `grad_dag_checked`, `lower_dag_ownership`, and

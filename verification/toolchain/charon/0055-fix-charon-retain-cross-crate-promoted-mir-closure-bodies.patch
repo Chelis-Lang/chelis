@@ -1,0 +1,534 @@
+# charon integration step 55 after 546078ea5d: commit 5b825fa64e1610cef599fccca91de555b9f846f9
+# first parent 5a716176a006c2234cde9fe2b45ef55e5b39f3f6
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# fix(charon): retain cross-crate promoted MIR closure bodies
+
+diff --git a/src/bin/charon-driver/promoted_mir.rs b/src/bin/charon-driver/promoted_mir.rs
+index c772c35..f2d0469 100644
+--- a/src/bin/charon-driver/promoted_mir.rs
++++ b/src/bin/charon-driver/promoted_mir.rs
+@@ -24,7 +24,7 @@ use rustc_hir::def::DefKind;
+ use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LOCAL_CRATE, LocalDefId, StableCrateId};
+ use rustc_index::IndexVec;
+ use rustc_middle::mir::interpret::{AllocDecodingState, AllocId, specialized_encode_alloc_id};
+-use rustc_middle::mir::{Body, Promoted};
++use rustc_middle::mir::{Body, FakeReadCause, Promoted, StatementKind};
+ use rustc_middle::ty::codec::{TyDecoder, TyEncoder};
+ use rustc_middle::ty::{self, Ty, TyCtxt};
+ use rustc_serialize::opaque::{MAGIC_END_BYTES, MemDecoder};
+@@ -45,7 +45,7 @@ pub type PromotedMir<'tcx> = (Body<'tcx>, IndexVec<Promoted, Body<'tcx>>);
+ const TABLE_EXTENSION: &str = "charon-mir";
+ /// First bytes of a table. Bump the version whenever the encoding or the set of exported bodies
+ /// changes, so that tables written by older drivers are rejected.
+-const TABLE_HEADER: &[u8] = b"charon-promoted-mir v1\n";
++const TABLE_HEADER: &[u8] = b"charon-promoted-mir v2\n";
+ 
+ /// Encoded promoted MIR of the crate being compiled, captured when rustc computes it.
+ static CAPTURED: LazyLock<Mutex<FxHashMap<LocalDefId, Vec<u8>>>> =
+@@ -76,7 +76,26 @@ pub fn install(providers: &mut rustc_middle::util::Providers) {
+             .expect("promoted-MIR cache poisoned")
+             .expect("missing mir_promoted provider");
+         let result = original(tcx, def);
+-        let encoded = encode(tcx, &result.0.borrow(), &result.1.borrow());
++        let original_body = result.0.borrow();
++        let original_promoted = result.1.borrow();
++        let body = has_non_portable_fake_reads(&original_body).then(|| {
++            let mut body = (*original_body).clone();
++            strip_non_portable_fake_reads(&mut body);
++            body
++        });
++        let mut promoted = None;
++        for (index, promoted_body) in original_promoted.iter_enumerated() {
++            if has_non_portable_fake_reads(promoted_body) {
++                let promoted = promoted
++                    .get_or_insert_with(|| (*original_promoted).clone());
++                strip_non_portable_fake_reads(&mut promoted[index]);
++            }
++        }
++        let encoded = encode(
++            tcx,
++            body.as_ref().unwrap_or(&original_body),
++            promoted.as_ref().unwrap_or(&original_promoted),
++        );
+         CAPTURED
+             .lock()
+             .expect("promoted-MIR cache poisoned")
+@@ -85,6 +104,36 @@ pub fn install(providers: &mut rustc_middle::util::Providers) {
+     };
+ }
+ 
++/// Closure-hoisted fake reads encode a crate-local `LocalDefId` in their cause. These markers are
++/// borrow-check-only and are discarded by LLBC translation, so strip only the non-portable forms
++/// before cross-crate encoding; retain portable fake reads and all operational MIR.
++fn has_non_portable_fake_reads(body: &Body<'_>) -> bool {
++    body.basic_blocks.iter().any(|basic_block| {
++        basic_block
++            .statements
++            .iter()
++            .any(|statement| is_non_portable_fake_read(&statement.kind))
++    })
++}
++
++fn is_non_portable_fake_read(kind: &StatementKind<'_>) -> bool {
++    matches!(
++        kind,
++        StatementKind::FakeRead(box (
++            FakeReadCause::ForLet(Some(_)) | FakeReadCause::ForMatchedPlace(Some(_)),
++            _
++        ))
++    )
++}
++
++fn strip_non_portable_fake_reads(body: &mut Body<'_>) {
++    for basic_block in body.basic_blocks_mut() {
++        basic_block
++            .statements
++            .retain(|statement| !is_non_portable_fake_read(&statement.kind));
++    }
++}
++
+ /// Whether `mir_promoted` exists for this MIR-carrying definition. Constructors get their MIR
+ /// from a shim, and trivial constants are evaluated without building MIR past `mir_built`; the
+ /// runtime MIR of both is what `--mir=promoted` translates locally too.
+diff --git a/tests/promoted_mir_cross_crate.rs b/tests/promoted_mir_cross_crate.rs
+new file mode 100644
+index 0000000..f7a42ff
+--- /dev/null
++++ b/tests/promoted_mir_cross_crate.rs
+@@ -0,0 +1,435 @@
++//! Cross-crate promoted MIR must retain foreign closure bodies and reject obsolete metadata.
++use anyhow::{Context, Result, ensure};
++use assert_cmd::prelude::CommandCargoExt;
++use charon_lib::ast::{
++    AggregateKind, FnOperand, FnPtrKind, FunDecl, FunId, ItemSource, LiteralTy, Name, PathElem,
++    RefKind, Rvalue, TranslatedCrate, Ty, TyKind, TypeId, UIntTy, llbc_ast,
++};
++use charon_lib::export::CrateData;
++use std::fs::{self, File};
++use std::path::{Path, PathBuf};
++use std::process::{Command, Output};
++use walkdir::WalkDir;
++
++const DEP: &str = r#"
++pub struct Foreign<'a> {
++    value: &'a mut usize,
++    auxiliary: &'a mut usize,
++}
++
++impl Foreign<'_> {
++    fn transact<R>(&mut self, body: impl FnOnce(&mut Foreign<'_>) -> R) -> R {
++        let body = std::panic::AssertUnwindSafe(body);
++        let value = &mut *self.value;
++        let auxiliary = &mut *self.auxiliary;
++        (move |(value, auxiliary)| {
++            let body = body;
++            (body.0)(&mut Foreign { value, auxiliary })
++        })((value, auxiliary))
++    }
++}
++
++pub fn apply(value: &mut usize, auxiliary: &mut usize) -> usize {
++    let mut context = Foreign { value, auxiliary };
++    context.transact(|context| {
++        *context.value += 1;
++        *context.auxiliary += 2;
++        *context.value + *context.auxiliary
++    })
++}
++"#;
++
++const CONSUMER: &str = r#"
++pub fn root(value: &mut usize, auxiliary: &mut usize) -> usize {
++    foreign_closure_dep::apply(value, auxiliary)
++}
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn returned_value_and_both_givebacks() {
++        for (mut value, mut auxiliary, expected) in [
++            (3, 5, (11, 4, 7)),
++            (0, 0, (3, 1, 2)),
++            (20, 40, (63, 21, 42)),
++        ] {
++            let result = super::root(&mut value, &mut auxiliary);
++            assert_eq!((result, value, auxiliary), expected);
++        }
++    }
++}
++"#;
++
++fn write_fixture(path: &Path, content: &str) -> Result<()> {
++    fs::create_dir_all(path.parent().context("fixture path has no parent")?)?;
++    fs::write(path, content)?;
++    Ok(())
++}
++
++fn source_workspace(root: &Path) -> Result<()> {
++    write_fixture(
++        &root.join("Cargo.toml"),
++        "[workspace]\nmembers = [\"dep\", \"consumer\"]\nresolver = \"2\"\n",
++    )?;
++    write_fixture(
++        &root.join("dep/Cargo.toml"),
++        "[package]\nname = \"foreign_closure_dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
++    )?;
++    write_fixture(&root.join("dep/src/lib.rs"), DEP)?;
++    write_fixture(
++        &root.join("consumer/Cargo.toml"),
++        "[package]\nname = \"foreign_closure_consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nforeign_closure_dep = { path = \"../dep\" }\n",
++    )?;
++    write_fixture(&root.join("consumer/src/lib.rs"), CONSUMER)
++}
++
++fn run_charon(root: &Path, target: &Path, dest: &Path) -> Result<Output> {
++    Ok(Command::cargo_bin("charon")?
++        .current_dir(root)
++        .env("RUSTC_WRAPPER", "")
++        .env("CARGO_INCREMENTAL", "0")
++        .args([
++            "cargo",
++            "--preset=aeneas",
++            "--monomorphize-mut=except-types",
++            "--remove-adt-clauses",
++            "--lift-associated-types=*",
++            "--mir=promoted",
++            "--error-on-warnings",
++            "--abort-on-error",
++            "--include",
++            "foreign_closure_dep",
++            "--start-from",
++            "foreign_closure_consumer::root",
++            "--dest-file",
++        ])
++        .arg(dest)
++        .args([
++            "--",
++            "--package",
++            "foreign_closure_consumer",
++            "--lib",
++            "--jobs",
++            "2",
++            "--offline",
++            "--target-dir",
++        ])
++        .arg(target)
++        .output()?)
++}
++
++fn clean_consumer(root: &Path, target: &Path) -> Result<()> {
++    let output = Command::new("cargo")
++        .current_dir(root)
++        .env("RUSTC_WRAPPER", "")
++        .arg("clean")
++        .args(["--package", "foreign_closure_consumer", "--target-dir"])
++        .arg(target)
++        .output()?;
++    ensure!(
++        output.status.success(),
++        "consumer-only clean failed: {}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    Ok(())
++}
++
++fn name_key(name: &Name) -> String {
++    name.name
++        .iter()
++        .map(|part| match part {
++            PathElem::Ident(value, _) => value.as_str(),
++            PathElem::Impl(_) => "impl",
++            PathElem::Instantiated(_) => "mono",
++            PathElem::Target(_) => "target",
++        })
++        .collect::<Vec<_>>()
++        .join("::")
++}
++
++fn unique_function<'a>(
++    krate: &'a TranslatedCrate,
++    condition: impl Fn(&str) -> bool,
++) -> Result<&'a FunDecl> {
++    let mut found = krate
++        .fun_decls
++        .iter()
++        .filter(|decl| condition(&name_key(&decl.item_meta.name)));
++    let decl = found
++        .next()
++        .context("required function declaration missing")?;
++    ensure!(found.next().is_none(), "ambiguous function declaration");
++    ensure!(
++        decl.body.as_structured().is_some(),
++        "required function is opaque or has no structured body"
++    );
++    Ok(decl)
++}
++
++fn body(decl: &FunDecl) -> &llbc_ast::Block {
++    &decl
++        .body
++        .as_structured()
++        .expect("checked structured body")
++        .body
++}
++
++fn is_mut_usize(ty: &Ty) -> bool {
++    matches!(
++        ty.kind(),
++        TyKind::Ref(_, pointee, RefKind::Mut)
++            if matches!(pointee.kind(), TyKind::Literal(LiteralTy::UInt(UIntTy::Usize)))
++    )
++}
++
++fn closure_constructor(
++    krate: &TranslatedCrate,
++    block: &llbc_ast::Block,
++    suffix: &str,
++    captures: usize,
++) -> Result<()> {
++    let mut matched = false;
++    for statement in &block.statements {
++        let llbc_ast::StatementKind::Assign(
++            _,
++            Rvalue::Aggregate(AggregateKind::Adt(ty, None, None), args),
++        ) = &statement.kind
++        else {
++            continue;
++        };
++        let TypeId::Adt(id) = ty.id else { continue };
++        let decl = &krate.type_decls[id];
++        let name = name_key(&decl.item_meta.name);
++        if name.ends_with(suffix) {
++            ensure!(!matched, "duplicate constructor for {suffix}");
++            ensure!(
++                matches!(&decl.src, ItemSource::Closure { .. }),
++                "{name} is not a closure type"
++            );
++            ensure!(args.len() == captures, "{name} lost its capture state");
++            matched = true;
++        }
++    }
++    ensure!(
++        matched,
++        "constructor for {suffix} missing from imported body"
++    );
++    Ok(())
++}
++
++fn direct_call(
++    krate: &TranslatedCrate,
++    block: &llbc_ast::Block,
++    target_suffix: &str,
++) -> Result<()> {
++    let mut matched = false;
++    for statement in &block.statements {
++        let llbc_ast::StatementKind::Call(call) = &statement.kind else {
++            continue;
++        };
++        let FnOperand::Regular(ptr) = &call.func else {
++            continue;
++        };
++        let FnPtrKind::Fun(FunId::Regular(id)) = ptr.kind.as_ref() else {
++            continue;
++        };
++        let target = &krate.fun_decls[*id];
++        if name_key(&target.item_meta.name).ends_with(target_suffix) {
++            ensure!(!matched, "duplicate call to {target_suffix}");
++            ensure!(
++                target.body.as_structured().is_some(),
++                "call to {target_suffix} lost its body"
++            );
++            matched = true;
++        }
++    }
++    ensure!(
++        matched,
++        "call to {target_suffix} missing from imported body"
++    );
++    Ok(())
++}
++
++fn sidecar_path(target: &Path) -> Result<PathBuf> {
++    let mut paths = WalkDir::new(target)
++        .into_iter()
++        .filter_map(|entry| entry.ok())
++        .filter(|entry| entry.file_type().is_file())
++        .map(|entry| entry.into_path())
++        .filter(|path| {
++            let Some(name) = path.file_name() else {
++                return false;
++            };
++            let name = name.to_string_lossy();
++            name.starts_with("libforeign_closure_dep-") && name.ends_with(".charon-mir")
++        });
++    let path = paths
++        .next()
++        .context("dependency promoted-MIR sidecar missing after successful extraction")?;
++    ensure!(
++        paths.next().is_none(),
++        "multiple dependency promoted-MIR sidecars; test target was not isolated"
++    );
++    Ok(path)
++}
++
++fn rejects_metadata(
++    root: &Path,
++    target: &Path,
++    out: &Path,
++    label: &str,
++    reason: &str,
++) -> Result<()> {
++    clean_consumer(root, target)?;
++    let dest = out.join(format!("{label}.llbc"));
++    let result = run_charon(root, target, &dest)?;
++    ensure!(
++        !result.status.success(),
++        "{label} metadata was accepted as a translated foreign body"
++    );
++    ensure!(
++        !dest.exists(),
++        "{label} failure left a translated LLBC artifact"
++    );
++    let stderr = String::from_utf8_lossy(&result.stderr);
++    ensure!(
++        stderr.contains("promoted-MIR table")
++            && stderr.contains("foreign_closure_dep")
++            && stderr.contains(reason),
++        "{label} rejected for the wrong reason: {stderr}"
++    );
++    Ok(())
++}
++
++#[test]
++fn foreign_closure_promoted_mir_preserves_body_and_rejects_stale_tables() -> Result<()> {
++    let workspace = tempfile::tempdir()?;
++    let root = workspace.path();
++    source_workspace(root)?;
++    let native_target = root.join("native-target");
++    let native = Command::new("cargo")
++        .current_dir(root)
++        .env("RUSTC_WRAPPER", "")
++        .args([
++            "test",
++            "--package",
++            "foreign_closure_consumer",
++            "--lib",
++            "--offline",
++            "--target-dir",
++        ])
++        .arg(&native_target)
++        .output()?;
++    ensure!(
++        native.status.success(),
++        "native returned-value/giveback matrix failed: {}",
++        String::from_utf8_lossy(&native.stderr)
++    );
++
++    let target = root.join("charon-target");
++    let out = root.join("output");
++    fs::create_dir_all(&out)?;
++    let dest = out.join("valid.llbc");
++    let valid = run_charon(root, &target, &dest)?;
++    ensure!(
++        valid.status.success(),
++        "strict foreign closure extraction failed: {}",
++        String::from_utf8_lossy(&valid.stderr)
++    );
++    let data: CrateData = serde_json::from_reader(File::open(&dest)?)?;
++    let krate = &data.translated;
++    let root_fn = unique_function(krate, |name| name == "foreign_closure_consumer::root")?;
++    let apply = unique_function(krate, |name| name == "foreign_closure_dep::apply")?;
++    let transact = unique_function(krate, |name| {
++        name.starts_with("foreign_closure_dep::") && name.ends_with("::transact")
++    })?;
++    let _outer_call = unique_function(krate, |name| {
++        name.starts_with("foreign_closure_dep::")
++            && name.contains("::transact::")
++            && name.ends_with("::call_once")
++    })?;
++    let _inner_call = unique_function(krate, |name| {
++        name.starts_with("foreign_closure_dep::apply::") && name.ends_with("::call_once")
++    })?;
++    direct_call(krate, body(root_fn), "foreign_closure_dep::apply")?;
++    direct_call(krate, body(apply), "::transact")?;
++    direct_call(krate, body(transact), "::call_once")?;
++    closure_constructor(krate, body(apply), "apply::closure", 0)?;
++    closure_constructor(krate, body(transact), "transact::closure", 1)?;
++    let mut foreign_types = krate
++        .type_decls
++        .iter()
++        .filter(|decl| name_key(&decl.item_meta.name) == "foreign_closure_dep::Foreign");
++    let foreign = foreign_types
++        .next()
++        .context("foreign mutable-state type missing")?;
++    ensure!(
++        foreign_types.next().is_none(),
++        "ambiguous foreign mutable-state type"
++    );
++    let fields = foreign
++        .kind
++        .as_struct()
++        .context("foreign mutable state is opaque")?;
++    ensure!(
++        fields.len() == 2,
++        "foreign state lost one of its mutable captures"
++    );
++    ensure!(
++        fields[0].name.as_deref() == Some("value") && is_mut_usize(&fields[0].ty),
++        "foreign value capture lost its &mut usize type"
++    );
++    ensure!(
++        fields[1].name.as_deref() == Some("auxiliary") && is_mut_usize(&fields[1].ty),
++        "foreign auxiliary capture lost its &mut usize type"
++    );
++    ensure!(
++        root_fn.signature.inputs.len() == 2 && root_fn.signature.inputs.iter().all(is_mut_usize),
++        "consumer call lost its two mutable input borrows"
++    );
++    ensure!(
++        matches!(
++            root_fn.signature.output.kind(),
++            TyKind::Literal(LiteralTy::UInt(UIntTy::Usize))
++        ),
++        "consumer call lost its returned result"
++    );
++
++    let sidecar = sidecar_path(&target)?;
++    let v2 = fs::read(&sidecar)?;
++    const HEADER_V2: &[u8] = b"charon-promoted-mir v2\n";
++    ensure!(
++        v2.starts_with(HEADER_V2),
++        "new metadata did not use codec v2"
++    );
++    let mut v1 = v2.clone();
++    v1[..HEADER_V2.len()].copy_from_slice(b"charon-promoted-mir v1\n");
++    fs::write(&sidecar, &v1)?;
++    rejects_metadata(root, &target, &out, "stale-v1", "was not written")?;
++    ensure!(
++        fs::read(&sidecar)? == v1,
++        "dependency was rebuilt over stale v1 metadata"
++    );
++
++    fs::remove_file(&sidecar)?;
++    rejects_metadata(root, &target, &out, "missing", "missing promoted-MIR table")?;
++    ensure!(
++        !sidecar.exists(),
++        "dependency was rebuilt over missing metadata"
++    );
++
++    fs::write(&sidecar, HEADER_V2)?;
++    rejects_metadata(
++        root,
++        &target,
++        &out,
++        "corrupt",
++        "malformed promoted-MIR table",
++    )?;
++    ensure!(
++        fs::read(&sidecar)?.as_slice() == HEADER_V2,
++        "dependency was rebuilt over corrupt metadata"
++    );
++    fs::write(&sidecar, v2)?;
++    Ok(())
++}

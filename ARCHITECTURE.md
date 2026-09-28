@@ -485,18 +485,25 @@ observations. Production AD generation and Lean acceptance are recorded in
 checks nor compilation supply a Rust/Lean/LaCaDiLE correspondence theorem.
 
 The previous Charon/Hax closure-region failure for
-`chelis_ir::lower::try_lower_program_to_library::{closure#0}` is addressed
-in the pinned Charon integration (`5a71617`), but this does not establish
-whole-core extraction. The earlier round-32 diagnostic 52-chunk run reached
-only 38 chunks; its incomplete manifests and error-tolerant settings cannot
-serve as acceptance. Round-36 Aeneas (`5cd0e4a`) now has a checked patch series
-and built pinned Charon, charon-ml, Aeneas, and Aeneas-source outputs. Its
-local gate compiled 258/258 Lean libraries (637 modules), regenerated
-270/270 fixtures with no strict stale drift, passed 78/78 model cases and
-23/23 canary roots. Fresh strict default and lowering-trace eight-crate
-extraction, full Lean coverage/correspondence, and native TLS hook, unwind,
-and stack semantics remain open. An accepted AD slice is not whole-core
-extraction.
+`chelis_ir::lower::try_lower_program_to_library::{closure#0}` was addressed
+in Charon `5a71617`. The new `5b825fa` source integration additionally retains
+foreign closure bodies in promoted MIR, rejects stale or missing sidecars, and
+passes its isolated Charon regression plus strict two-crate native/Lean smoke.
+The independently checked patch series reconstructs the new Charon and
+charon-ml sources and round-36 Aeneas (`5cd0e4a`) exactly (47, 9, and 165
+patches); it does not establish a rebuilt pinned toolchain. The four previously
+built Nix outputs used Charon `5a71617`. The guarded new `.#charon` build stopped
+with exit 3 at the shared APFS 8.24 GiB floor (7.01 GiB free afterward);
+the four new outputs, fresh strict default and lowering-trace eight-crate
+extraction, and round-36 proof/model/Audit have not run to acceptance.
+
+The earlier round-32 diagnostic 52-chunk run reached only 38 chunks; its
+incomplete manifests and error-tolerant settings cannot serve as acceptance.
+The round-36 Aeneas local gate compiled 258/258 Lean libraries (637 modules),
+regenerated 270/270 fixtures with no strict stale drift, passed 78/78 model
+cases and 23/23 canary roots. Full Lean coverage/correspondence and native
+TLS hook, unwind, and stack semantics remain open. An accepted AD slice is
+not whole-core extraction.
 
 The patched formatter has explicit arguments and callback state, including partial
 output on writer failure; it no longer uses the upstream erased formatter model.
