@@ -258,6 +258,89 @@ fn central_coral_guard_tracks_changed_reef_package_and_dependency_versions() {
 }
 
 #[test]
+fn historical_coral_guard_requires_readable_raw_reef_pins() {
+    for (before, after, source) in [
+        (
+            "nautilus = { version = \"4.5.6\" }",
+            "[dependencies.nautilus]\nversion = \"4.5.6\"",
+            "nautilus inline version",
+        ),
+        (
+            "version = \"0.1.0\"",
+            " version = \"0.1.0\"",
+            "package version",
+        ),
+        (
+            "schema = \"3\"\n\n[package]",
+            "schema = \"3\"\n\n[metadata]\nversion = \"9.9.9\"\n\n[package]",
+            "package version",
+        ),
+        (
+            &format!("compiler = \"={VER}\""),
+            &format!(" compiler = \"={VER}\""),
+            "compiler pin",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "coral");
+        std::fs::write(
+            root.join(".github/workflows/ci.yml"),
+            central_ci_wrapper("coral", VER),
+        )
+        .unwrap();
+        let manifest = root.join("reef.toml");
+        let reef = std::fs::read_to_string(&manifest).unwrap();
+        assert!(reef.contains(before), "{source}: fixture source missing");
+        std::fs::write(manifest, reef.replace(before, after)).unwrap();
+
+        let report = audit::audit(&root);
+        for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+            assert_eq!(
+                verdict_of(&report, row),
+                Verdict::Fail,
+                "{source}: historical guard cannot certify {row} from a TOML-only equivalent"
+            );
+        }
+        assert!(
+            diagnostic_of(&report, "workflow-env-pins").contains(source),
+            "{source}: failure must identify the raw guard source"
+        );
+    }
+}
+
+#[test]
+fn historical_nautilus_guard_requires_anchored_compiler_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nautilus");
+    std::fs::write(
+        root.join(".github/workflows/ci.yml"),
+        central_ci_wrapper("nautilus", VER),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("tests_blocked/example")).unwrap();
+    std::fs::write(root.join("tests_blocked/example/case.ch"), "1\n").unwrap();
+    let manifest = root.join("reef.toml");
+    let reef = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        manifest,
+        reef.replace(
+            &format!("compiler = \"={VER}\""),
+            &format!(" compiler = \"={VER}\""),
+        ),
+    )
+    .unwrap();
+    let report = audit::audit(&root);
+    for row in [
+        "workflow-env-pins",
+        "pin-consistency-guard",
+        "tests-neg",
+        "tests-blocked",
+    ] {
+        assert_eq!(verdict_of(&report, row), Verdict::Fail, "{row}");
+    }
+}
+
+#[test]
 fn central_ci_digests_must_match_the_committed_lock_for_both_platforms() {
     let other_digest = format!("sha256:{}", "b".repeat(64));
     for package in ["coral", "nautilus"] {
@@ -463,6 +546,49 @@ fn central_ci_must_run_for_pull_requests_and_main_pushes() {
             report.ok(),
             "{package}: legitimate change triggers must audit green"
         );
+    }
+}
+
+#[test]
+fn quoted_yaml_event_keys_share_the_structural_job_authority() {
+    let events = "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:";
+    for package in ["coral", "nautilus"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), package);
+        let wrapper = central_ci_wrapper(package, VER).replace(
+            events,
+            "\"on\":\n  \"push\":\n    branches: [main]\n  'pull_request':\n  workflow_dispatch:",
+        );
+        std::fs::write(root.join(".github/workflows/ci.yml"), &wrapper).unwrap();
+        let report = audit::audit(&root);
+        for row in ["workflow-env-pins", "pin-consistency-guard", "tests-neg"] {
+            assert_eq!(verdict_of(&report, row), Verdict::Pass, "{package}: {row}");
+        }
+        assert!(
+            report.ok(),
+            "{package}: quoted event mapping is a live gate"
+        );
+
+        for invalid in [
+            "\"on\":\n  \"push\":\n    branches: [main]\n    paths: [src/**]\n  'pull_request':",
+            "\"on\":\n  \"push\":\n    branches: [main, '!main']\n  'pull_request':",
+            "\"on\":\n  \"push\":\n    branches: [main]\n  'pull_request':\n    types: [closed]",
+            "\"on\":\n  \"push\":\n    branches: [main]\n  'pull_request':\non: workflow_dispatch",
+        ] {
+            std::fs::write(
+                root.join(".github/workflows/ci.yml"),
+                central_ci_wrapper(package, VER).replace(events, invalid),
+            )
+            .unwrap();
+            let report = audit::audit(&root);
+            for row in ["pin-consistency-guard", "tests-neg"] {
+                assert_eq!(
+                    verdict_of(&report, row),
+                    Verdict::Fail,
+                    "{package}: {invalid:?} cannot certify {row}"
+                );
+            }
+        }
     }
 }
 

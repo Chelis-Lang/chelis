@@ -1407,6 +1407,15 @@ struct CentralProfileSources {
     nautilus_version: Option<String>,
     linux_digest: String,
     darwin_digest: String,
+    historical: HistoricalGuardSources,
+}
+
+/// The narrow raw-text source shapes the pinned 439 guard can actually read.
+/// TOML values alone cannot certify that guard: it greps lines, not tables.
+struct HistoricalGuardSources {
+    compiler_matches: bool,
+    package_matches: bool,
+    nautilus_matches: bool,
 }
 
 #[derive(Debug)]
@@ -1418,6 +1427,72 @@ struct CentralWorkflowCall {
     nautilus_tag: Option<String>,
     linux_digest: String,
     darwin_digest: Option<String>,
+    change_triggers: bool,
+}
+
+fn historical_quoted_version<'a>(line: &'a str, key: &str, compiler: bool) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?;
+    let rest = rest
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('=')?
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('"')?;
+    let rest = if compiler {
+        rest.strip_prefix('=')?
+    } else {
+        rest
+    };
+    let (version, suffix) = rest.split_once('"')?;
+    (numeric_version(version) && (suffix.trim().is_empty() || suffix.trim_start().starts_with('#')))
+        .then_some(version)
+}
+
+fn historical_nautilus_version(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("nautilus")?;
+    let inline = rest
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('=')?
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('{')?
+        .trim_end();
+    let body = inline.strip_suffix('}')?.trim();
+    historical_quoted_version(body, "version", false)
+}
+
+fn historical_guard_sources(
+    reef: &str,
+    compiler: &str,
+    package: Option<&str>,
+    nautilus: Option<&str>,
+) -> HistoricalGuardSources {
+    // The pinned guard uses anchored raw grep lines, not TOML table lookups.
+    // A single compiler/nautilus source is a safe readable subset; for Coral
+    // package version the guard explicitly takes the first anchored match.
+    fn unique<'a>(
+        mut lines: impl Iterator<Item = &'a str>,
+        parse: impl Fn(&'a str) -> Option<&'a str>,
+    ) -> Option<&'a str> {
+        let line = lines.next()?;
+        if lines.next().is_some() {
+            return None;
+        }
+        parse(line)
+    }
+    HistoricalGuardSources {
+        compiler_matches: unique(
+            reef.lines().filter(|line| line.starts_with("compiler")),
+            |line| historical_quoted_version(line, "compiler", true),
+        ) == Some(compiler),
+        package_matches: reef
+            .lines()
+            .find(|line| line.starts_with("version"))
+            .and_then(|line| historical_quoted_version(line, "version", false))
+            == package,
+        nautilus_matches: unique(
+            reef.lines().filter(|line| line.starts_with("nautilus")),
+            historical_nautilus_version,
+        ) == nautilus,
+    }
 }
 
 fn numeric_version(value: &str) -> bool {
@@ -1500,11 +1575,18 @@ fn load_central_sources(ctx: &Ctx) -> Result<CentralProfileSources, String> {
         .ok_or_else(|| {
             format!(".github/chelis-toolchains.json has no compiler version {version}")
         })?;
+    let historical = historical_guard_sources(
+        reef,
+        version,
+        package_version.as_deref(),
+        nautilus_version.as_deref(),
+    );
     Ok(CentralProfileSources {
         package_version,
         nautilus_version,
         linux_digest: selected["linux-x86_64"].as_str().unwrap().to_string(),
         darwin_digest: selected["darwin-arm64"].as_str().unwrap().to_string(),
+        historical,
     })
 }
 
@@ -1527,6 +1609,11 @@ fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), Str
         return Err(format!("central chelis-tag={actual} != v{version}"));
     }
     let sources = ctx.central_sources().map_err(str::to_string)?;
+    if (call.chelis_version.is_some() || call.chelis_tag.is_some())
+        && !sources.historical.compiler_matches
+    {
+        return Err("historical central guard cannot read the reef.toml compiler pin".to_string());
+    }
     if call.profile == "coral-ci" {
         let package = sources
             .package_version
@@ -1536,6 +1623,9 @@ fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), Str
             return Err(format!(
                 "central package-version != reef.toml [package].version {package}"
             ));
+        }
+        if !sources.historical.package_matches {
+            return Err("historical Coral guard cannot read reef.toml package version".to_string());
         }
         let nautilus = sources
             .nautilus_version
@@ -1550,6 +1640,11 @@ fn central_source_check(ctx: &Ctx, call: &CentralWorkflowCall) -> Result<(), Str
             return Err(format!(
                 "central nautilus-tag != v{nautilus} from reef.toml"
             ));
+        }
+        if !sources.historical.nautilus_matches {
+            return Err(
+                "historical Coral guard cannot read reef.toml nautilus inline version".to_string(),
+            );
         }
     }
     if call.linux_digest != sources.linux_digest {
@@ -1675,136 +1770,56 @@ fn central_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
 /// central wrapper validator; this is the offline minimum for a running gate.
 fn central_ci_workflow_call(ctx: &Ctx, body: &str) -> Option<CentralWorkflowCall> {
     let call = central_workflow_call(ctx, body)?;
-    (matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") && ci_runs_on_changes(body))
+    (matches!(call.profile.as_str(), "coral-ci" | "nautilus-ci") && call.change_triggers)
         .then_some(call)
 }
 
 /// Only explicit top-level event mappings can establish change coverage.
 /// The accepted push/PR filters are unfiltered events or branch lists
 /// containing literal `main` with no negations or other restricting filters.
-fn ci_runs_on_changes(body: &str) -> bool {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut on_start = None;
-    for (index, line) in lines.iter().enumerate() {
-        if let Some((key, value)) = mapping_at(line, 0)
-            && key == "on"
-        {
-            if on_start.is_some() || !value.is_empty() {
-                return false;
-            }
-            on_start = Some(index + 1);
-        }
-    }
-    let Some(start) = on_start else {
+fn ci_runs_on_changes(workflow: &serde_json::Value) -> bool {
+    // The same strict YAML parse already used for job `uses` owns event keys,
+    // including quoted keys, aliases, and duplicate-key rejection.
+    let Some(events) = workflow.get("on").and_then(serde_json::Value::as_object) else {
         return false;
     };
-    let end = lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find(|(_, line)| !line.trim().is_empty() && leading_spaces(line) == Some(0))
-        .map(|(index, _)| index)
-        .unwrap_or(lines.len());
-    let mut push = false;
-    let mut pull_request = false;
-    let mut index = start;
-    while index < end {
-        let line = lines[index];
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            index += 1;
-            continue;
-        }
-        let Some((event, value)) = mapping_at(line, 2) else {
-            return false;
-        };
-        let next = lines
-            .iter()
-            .enumerate()
-            .take(end)
-            .skip(index + 1)
-            .find(|(_, child)| {
-                !child.trim().is_empty()
-                    && !child.trim_start().starts_with('#')
-                    && leading_spaces(child).is_some_and(|indent| indent <= 2)
-            })
-            .map(|(next, _)| next)
-            .unwrap_or(end);
-        if event == "push" {
-            if push || !ci_event_includes_main(&value, &lines[index + 1..next]) {
-                return false;
-            }
-            push = true;
-        } else if event == "pull_request" {
-            if pull_request || !ci_event_includes_main(&value, &lines[index + 1..next]) {
-                return false;
-            }
-            pull_request = true;
-        }
-        index = next;
-    }
-    push && pull_request
+    ["push", "pull_request"]
+        .into_iter()
+        .all(|event| events.get(event).is_some_and(ci_event_includes_main))
 }
 
-fn ci_event_includes_main(value: &str, lines: &[&str]) -> bool {
-    if value == "{}" {
-        return lines
-            .iter()
-            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'));
+fn ci_event_includes_main(value: &serde_json::Value) -> bool {
+    if value.is_null() {
+        return true;
     }
-    if !value.is_empty() {
+    let Some(filters) = value.as_object() else {
+        return false;
+    };
+    if filters.is_empty() {
+        return true;
+    }
+    // Paths, event types, exclusions and broad/mutable patterns cannot stand
+    // in for an ordinary main change gate.
+    let Some(branches) = filters
+        .get("branches")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if filters.len() != 1 {
         return false;
     }
-    let mut branches = None;
-    let mut multiline = false;
-    for line in lines {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        match leading_spaces(line) {
-            Some(4) => {
-                let Some((key, filter)) = mapping_at(line, 4) else {
-                    return false;
-                };
-                if key != "branches" || branches.is_some() {
-                    return false;
-                }
-                multiline = filter.is_empty();
-                branches = Some(if multiline {
-                    false
-                } else {
-                    let Some(inline) = main_in_branch_list(&filter) else {
-                        return false;
-                    };
-                    inline
-                });
-            }
-            Some(6) if multiline => {
-                let Some(branch) = line[6..].strip_prefix("- ") else {
-                    return false;
-                };
-                let branch = yaml_scalar(branch);
-                if branch.is_empty() || branch.starts_with('!') {
-                    return false;
-                }
-                branches = Some(branches.unwrap_or(false) || branch == "main");
-            }
-            _ => return false,
-        }
-    }
-    branches.unwrap_or(true)
-}
-
-fn main_in_branch_list(value: &str) -> Option<bool> {
-    let entries = value.strip_prefix('[')?.strip_suffix(']')?;
     let mut main = false;
-    for entry in entries.split(',') {
-        let branch = yaml_scalar(entry);
+    for entry in branches {
+        let Some(branch) = entry.as_str() else {
+            return false;
+        };
         if branch.is_empty() || branch.starts_with('!') {
-            return None;
+            return false;
         }
         main |= branch == "main";
     }
-    Some(main)
+    main
 }
 
 fn parse_central_workflow_call(workflow: &serde_json::Value) -> Option<CentralWorkflowCall> {
@@ -1898,6 +1913,7 @@ fn parse_central_workflow_call(workflow: &serde_json::Value) -> Option<CentralWo
             .get("chelis-darwin-sha256")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        change_triggers: ci_runs_on_changes(workflow),
     })
 }
 

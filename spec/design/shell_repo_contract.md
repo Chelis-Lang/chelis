@@ -129,6 +129,17 @@ extra or missing `v` prefixes do not count. The historical Coral CI guard
 also requires `package-version` to equal `[package].version` and
 `nautilus-tag` to equal `v` plus `[dependencies].nautilus.version` in that
 same `reef.toml`; missing or non-numeric versions cannot establish the guard.
+For that exact historical revision, the audit also checks the raw `reef.toml`
+shape the 439 profile's grep-based guards can read, not merely equivalent TOML
+values: its compiler pin is an unindented `compiler = "=X.Y.Z"` line; Coral's
+package version is the unindented `version = "X.Y.Z"` source, and its Nautilus
+dependency is an unindented same-line `nautilus = { version = "X.Y.Z" }`.
+The auditor requires one unambiguous readable compiler and Nautilus source,
+and uses the first unindented package-version source like the historical guard;
+each value must agree with parsed TOML and caller inputs. Other valid TOML
+spellings, such as `[dependencies.nautilus]` with `version` on a following
+line, do not certify the *historical* central guard; this does not constrain
+newer central profiles or the shell's own TOML interpretation.
 For each recognized historical Coral/Nautilus profile, the supplied Linux
 digest (and Darwin digest when that profile supplies one) must equal the
 matching platform value under the compiler version in the committed
@@ -142,6 +153,9 @@ comparison is for the accepted historical revision only, not newer `ci/main`.
 To certify the CI pin guard and negative or blocked suites, the thin caller
 must also have explicit top-level `on` events covering both pull requests
 targeting `main` and pushes to `main`.
+The event policy reads the same structurally parsed YAML root as job `uses`,
+so quoted `on`, `push`, and `pull_request` keys have the same meaning as their
+unquoted spellings; duplicate keys and malformed YAML cannot certify a gate.
 The offline audit accepts unfiltered events or literal `main` branch filters
 without negations or other restricting filters; manual-only, absent, or
 inert source markers do not establish a blocking change gate. This is only
