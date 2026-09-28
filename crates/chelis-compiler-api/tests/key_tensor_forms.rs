@@ -185,3 +185,184 @@ fn tensor_fold_rejects_runtime_shape_mismatch_without_broadcasting() {
         );
     }
 }
+
+/// #2709: expectations come from [05-RNG-2], independently of the alias
+/// lowering and the implementations that both executable lanes call.
+fn alias_expected(shape: &[usize], seeds: &[i64]) -> Vec<String> {
+    let keys = seeds
+        .iter()
+        .map(|seed| key_reference::key_from_seed(*seed))
+        .collect::<Vec<_>>();
+    let left = keys
+        .iter()
+        .map(|key| key_reference::split(*key).0)
+        .collect::<Vec<_>>();
+    let right = keys
+        .iter()
+        .map(|key| key_reference::split(*key).1)
+        .collect::<Vec<_>>();
+    let folded = keys
+        .iter()
+        .zip(seeds)
+        .map(|(key, seed)| key_reference::fold_in(*key, *seed))
+        .collect::<Vec<_>>();
+    let children = keys
+        .iter()
+        .flat_map(|key| (0..2).map(move |index| key_reference::fold_in(*key, index)))
+        .collect::<Vec<_>>();
+    let mut child_shape = shape.to_vec();
+    child_shape.push(2);
+    [
+        tensor(shape, &keys),
+        tensor(shape, &left),
+        tensor(shape, &right),
+        tensor(shape, &folded),
+        tensor(&child_shape, &children),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, value)| format!("main.{index} = {value}"))
+    .collect()
+}
+
+fn assert_alias_eval_c(source: &str, expected: &[String]) {
+    let result = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings: BTreeMap::new(),
+        },
+        &["main".into()],
+    )
+    .unwrap_or_else(|error| panic!("alias Eval failed: {source}\n{error:?}"));
+    let actual = result
+        .roots
+        .iter()
+        .map(|root| {
+            format!(
+                "{} = {}",
+                root.name.as_deref().unwrap(),
+                root.display.as_deref().unwrap()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "alias Eval: {source}");
+    // Exercise ordinary entry selection as well as the authored-host route.
+    // A host-only fix must not conceal the DAG builtin-as-value rejection.
+    for generated in [
+        ownership_support::emit_selected(source, "key-alias-selected"),
+        ownership_support::emit(source, "key-alias-host"),
+    ] {
+        let (ledger, stdout) = ownership_support::run_program(&generated);
+        ownership_support::balanced(&ledger);
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "alias C: {source}"
+        );
+    }
+}
+
+fn alias_program(seeds: &str, declarations: &str) -> String {
+    format!(
+        "def main() = {{\n{declarations}\n  seeds = {seeds}\n  (left, right) = halves(seed(seeds))\n  (seed(seeds), left, right, folded(seed(seeds), seeds), children(seed(seeds), 2i64))\n}}\n"
+    )
+}
+
+/// [04-INF-9], [05-OP-69]..[05-OP-72]: usable aliases need executable
+/// parity, not merely checker acceptance. These are pre-implementation stubs.
+#[test]
+fn unannotated_key_builtin_aliases_execute_in_eval_and_c() {
+    let declarations =
+        "  seed = key_from_seed\n  halves = split_key\n  folded = fold_in\n  children = split_keys";
+    for (seeds, shape, values) in [
+        ("-1i64", vec![], vec![-1i64]),
+        ("scalar_to_tensor(-1i64)", vec![], vec![-1i64]),
+        ("to_tensor([1i64, -1i64])", vec![2], vec![1, -1]),
+        (
+            "to_tensor([[9007199254740993i64, -1i64], [9223372036854775807i64, -9223372036854775808i64]])",
+            vec![2, 2],
+            vec![9007199254740993, -1, i64::MAX, i64::MIN],
+        ),
+        ("to_tensor(range(0i64, 0i64))", vec![0], vec![]),
+    ] {
+        assert_alias_eval_c(
+            &alias_program(seeds, declarations),
+            &alias_expected(&shape, &values),
+        );
+    }
+}
+
+/// Typed controls isolate the existing builtin-as-value lowering gap from
+/// the unannotated alias's independent checker/generalization failure.
+#[test]
+fn concretely_typed_key_builtin_aliases_execute_in_eval_and_c() {
+    for (seeds, shape, values, seed_ty, key_ty, children_ty) in [
+        ("-1i64", vec![], vec![-1i64], "i64", "key", "tensor[2, key]"),
+        (
+            "to_tensor([1i64, -1i64])",
+            vec![2],
+            vec![1, -1],
+            "tensor[2, i64]",
+            "tensor[2, key]",
+            "tensor[2, 2, key]",
+        ),
+    ] {
+        let declarations = format!(
+            "  seed: {seed_ty} -> {key_ty} = key_from_seed\n  halves: {key_ty} -> ({key_ty}, {key_ty}) = split_key\n  folded: {key_ty} -> {seed_ty} -> {key_ty} = fold_in\n  children: {key_ty} -> i64 -> {children_ty} = split_keys"
+        );
+        assert_alias_eval_c(
+            &alias_program(seeds, &declarations),
+            &alias_expected(&shape, &values),
+        );
+    }
+}
+
+/// [04-INF-9]: preserve the resolved builtin through a chain, aggregate,
+/// function result, and concrete higher-order parameter in executable lanes.
+#[test]
+fn transported_key_builtin_aliases_execute_in_eval_and_c() {
+    let (left, right) = key_reference::split(key_reference::key_from_seed(-1));
+    let expected = [
+        format!("main.0 = key({left:016x})"),
+        format!("main.1 = key({right:016x})"),
+    ];
+    for source in [
+        "def main() = {\n  first = split_key\n  derive = first\n  derive(key_from_seed(-1i64))\n}\n",
+        "def main() = {\n  ops = (split_key, fold_in)\n  derive = ops.0\n  derive(key_from_seed(-1i64))\n}\n",
+        "def exported() = split_key\ndef main() = {\n  derive = exported()\n  derive(key_from_seed(-1i64))\n}\n",
+        "def invoke(f: key -> (key, key), k: key) -> (key, key) = f(k)\ndef main() = {\n  derive = split_key\n  invoke(derive, key_from_seed(-1i64))\n}\n",
+    ] {
+        assert_alias_eval_c(source, &expected);
+    }
+}
+
+/// Negative runtime twins: alias transport must not erase dynamic domain
+/// checks once the checker admits the operand types.
+#[test]
+fn key_builtin_aliases_preserve_runtime_domain_rejections() {
+    for (source, trap) in [
+        (
+            "def run(k: tensor[2, key], n: i64) -> (tensor[2, *, key], unit) = {\n  derive = split_keys\n  (derive(k, n), ())\n}\ndef main() = run(key_from_seed(to_tensor([1i64, 2i64])), -1i64)\n",
+            "numeric trap: domain in split_keys at i64",
+        ),
+        (
+            "def run(k: tensor[*, key], n: tensor[*, i64]) -> (tensor[*, key], unit) = {\n  derive = fold_in\n  (derive(k, n), ())\n}\ndef main() = run(key_from_seed(to_tensor([1i64, 2i64])), to_tensor([3i64]))\n",
+            "numeric trap: domain in fold_in at i64",
+        ),
+    ] {
+        let error = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.into(),
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        )
+        .expect_err("the aliased operation must trap at runtime");
+        assert!(format!("{error:?}").contains(trap), "{source}\n{error:?}");
+        let generated = ownership_support::emit(source, "key-alias-domain");
+        let stderr = ownership_support::run_failure_stderr(&generated, "");
+        assert!(stderr.contains(trap), "{source}\n{stderr}");
+    }
+}
