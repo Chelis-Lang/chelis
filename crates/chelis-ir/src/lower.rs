@@ -8943,7 +8943,7 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn stage_host_value(&mut self, expr: &Expr, target: bool) -> Option<LoweredValue> {
-        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host::staged::StageValue;
         use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         let program = self.host_program?;
         if !matches!(
@@ -9044,6 +9044,25 @@ impl<'program> LowerCtx<'program> {
                 ));
             }
         }
+        Some(self.append_host_source(expr, ty, captures))
+    }
+
+    /// Publish a typed host producer once, bridging exact i64 leaves into
+    /// the tensor graph when an extent consumer needs them.
+    fn append_host_source(
+        &mut self,
+        expr: &Expr,
+        ty: crate::host_type_state::HostTypeTerm,
+        captures: Vec<(
+            String,
+            crate::host::staged::StageValue,
+            crate::host_type_state::HostTypeTerm,
+        )>,
+    ) -> LoweredValue {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+        self.host_stage_status
+            .set(crate::host::staged::StagingStatus::HasSources);
         let before = self.dag.nodes().len();
         let (value, lowered) =
             if ty == HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)) {
@@ -9080,7 +9099,7 @@ impl<'program> LowerCtx<'program> {
             expression: expr.clone(),
             captures,
         });
-        Some(lowered)
+        lowered
     }
 
     /// A declaration supplies obligations to its returned expression before
@@ -20120,8 +20139,8 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// `(tuple-get {} tuple_expr index)` -- project a statically known tuple
-    /// component; the component can itself be a DAG tensor node.
+    /// `(tuple-get {} tuple_expr index)` -- project a statically indexed
+    /// component from a native tuple or an already evaluated host carrier.
     fn lower_tuple_get(&mut self, kids: &[Expr]) -> LoweredValue {
         let tuple = self.lower_expr(&kids[0]);
         // chelis#730 Phase 1 (#782-flagged structural-index site): a
@@ -20137,6 +20156,40 @@ impl<'program> LowerCtx<'program> {
                 kids[1].span_id().map(ToOwned::to_owned),
             )
         });
+        if let LoweredValue::Host {
+            id,
+            ty: crate::host_type_state::HostTypeTerm::Tuple(items),
+        } = &tuple
+            && let Some(ty) = items.get(index)
+        {
+            // Read the already evaluated carrier. Replaying its expression
+            // here would duplicate selection, effects, or ownership transfer.
+            let span = kids[0].span();
+            let name = "__projected_tuple".to_owned();
+            let expression = Expr::node(
+                DeepTag::TupleGet,
+                Metadata::default(),
+                vec![
+                    Expr::node(
+                        DeepTag::Var,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name(name.clone()), span)],
+                        span,
+                    ),
+                    kids[1].clone(),
+                ],
+                span,
+            );
+            return self.append_host_source(
+                &expression,
+                ty.clone(),
+                vec![(
+                    name,
+                    crate::host::staged::StageValue::Host(*id),
+                    crate::host_type_state::HostTypeTerm::Tuple(items.clone()),
+                )],
+            );
+        }
         tuple.tuple_get(index).unwrap_or_else(|| {
             raise_lowering_error(
                 format!("tuple-get index {index} out of bounds during lowering"),

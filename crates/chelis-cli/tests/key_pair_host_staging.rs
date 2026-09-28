@@ -62,6 +62,15 @@ fn eval_and_c(stem: &str, source: &str) -> (String, String) {
     let file = dir.path().join(format!("{stem}.ch"));
     std::fs::write(&file, source).unwrap();
     let path = file.to_str().unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["check", path])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert!(checked.status.success(), "{report}");
+    assert_eq!(report["score"], 1.0, "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
     let eval = Command::cargo_bin("chelis")
         .unwrap()
         .args(["eval", "--file", path])
@@ -192,4 +201,180 @@ fn a_projection_past_the_state_tuple_end_is_a_type_error() {
             .any(|error| error["kind"] == "TupleIndexOutOfBounds"),
         "{report}"
     );
+}
+
+// [04-PAT-2] selects the tuple once; projections preserve its scalar values.
+const SCALAR_STATE: &str = r#"type State =
+  | State { size: i64 }
+def sizes(state: State) -> (i64, i64) =
+  match state with {
+    | State { size } => (size, 1i64)
+  }
+def main() -> tensor[2, 1, f32] = {
+  (a, b) = sizes(State { size: 2i64 })
+  reshape(to_tensor([1.0f32, 2.0f32]), [a, b])
+}
+"#;
+
+#[test]
+fn scalar_state_tuple_projections_feed_reshape_in_eval_and_c() {
+    let (eval, native) = eval_and_c("scalar_state", SCALAR_STATE);
+    assert_eq!(
+        eval,
+        f32_line("main", "[2, 1]", &[0x3f80_0000, 0x4000_0000])
+    );
+    assert_eq!(native, eval);
+}
+
+#[test]
+fn scalar_state_tuple_at_host_root_in_eval_and_c() {
+    let source = SCALAR_STATE.split("def main()").next().unwrap().to_owned()
+        + "def main() = sizes(State { size: 2i64 })\n";
+    let (eval, native) = eval_and_c("scalar_host", &source);
+    assert_eq!(eval, "main.0 = 2\nmain.1 = 1\n");
+    assert_eq!(native, eval);
+}
+
+#[test]
+fn scalar_state_tuple_invalid_projection_is_rejected() {
+    let source = SCALAR_STATE.replace("(a, b) =", "(a, b, extra) =");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("scalar_invalid.ch");
+    std::fs::write(&file, source).unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert!(
+        report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "TupleIndexOutOfBounds"),
+        "{report}"
+    );
+}
+
+#[test]
+fn runtime_selected_nested_host_tuple_preserves_both_branches() {
+    for size in [1, 2] {
+        let source = format!(
+            r#"type State =
+  | State {{ size: i64 }}
+def sizes(state: State) -> ((i64, i64), string) =
+  match state with {{
+    | State {{ size }} => if eq(size, 2i64) then ((2i64, 1i64), "two") else ((1i64, 2i64), "one")
+  }}
+def main() = {{
+  x = to_tensor([{values}])
+  (dims, label) = sizes(State {{ size: numel(x) }})
+  (a, b) = dims
+  (reshape(to_tensor([1.0f32, 2.0f32]), [a, b]), label)
+}}
+"#,
+            values = if size == 2 {
+                "1.0f32, 2.0f32"
+            } else {
+                "1.0f32"
+            }
+        );
+        let (eval, native) = eval_and_c("runtime_host_tuple", &source);
+        let shape = if size == 2 { "[2, 1]" } else { "[1, 2]" };
+        assert!(
+            eval.contains(&f32_line("main.0", shape, &[0x3f80_0000, 0x4000_0000])),
+            "{eval}"
+        );
+        assert_eq!(native, eval);
+    }
+}
+
+fn state_wrapper_with_dynamic_extents(dims: [usize; 4]) -> String {
+    let values = vec!["1.0f32"; dims.iter().product()].join(", ");
+    let extents = dims.map(|dim| format!("extent({dim}i64)")).join(", ");
+    let source = "def extent(n: i64) -> i64 = bitand(n, 7i64)\n".to_owned()
+        + &STATE_WRAPPER.replace(
+            "to_tensor([1.0f32, 2.0f32]) |> reshape([2i64, 1i64, 1i64, 1i64])",
+            &format!("to_tensor([{values}])\n    |> reshape([{extents}])"),
+        );
+    assert!(source.contains("reshape([extent("));
+    source
+}
+
+#[test]
+fn state_tuple_result_claim_accepts_matching_dynamic_extents_in_both_lanes() {
+    let (eval, native) = eval_and_c(
+        "state_dynamic",
+        &state_wrapper_with_dynamic_extents([2, 1, 1, 1]),
+    );
+    assert_eq!(eval, f32_line("main", "[2, 1, 1, 1]", &[0x4000_0000, 0]));
+    assert_eq!(native, eval);
+}
+
+// The executable example's four host result claims retain the `mul`
+// producer through the tuple. Each claim must reject in Eval and native C.
+#[test]
+fn state_tuple_result_claim_rejects_each_wrong_axis_in_both_lanes() {
+    for axis in 0..4 {
+        let mut dims = [2, 1, 1, 1];
+        let claimed = dims[axis];
+        dims[axis] += 1;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wrong_axis.ch");
+        std::fs::write(&file, state_wrapper_with_dynamic_extents(dims)).unwrap();
+        let checked = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("check")
+            .arg(&file)
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(checked.status.success(), "{report}");
+        assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["eval", "--file"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let out = dir.path().join("out");
+        let build = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("build")
+            .arg(&file)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(common::link_generated(&out, "wrong_axis.c", "wrong_axis").success());
+        let native = std::process::Command::new(out.join("wrong_axis"))
+            .current_dir(&out)
+            .output()
+            .unwrap();
+        for (lane, output) in [("eval", eval), ("C", native)] {
+            assert!(
+                !output.status.success(),
+                "{lane} accepted wrong axis {axis}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!(
+                    "claimed = {claimed}, mul axis {axis} = {}",
+                    dims[axis]
+                )),
+                "{lane}: {stderr}"
+            );
+            assert!(
+                stderr.contains("numeric trap: domain in mul at i64"),
+                "{lane}: {stderr}"
+            );
+        }
+    }
 }
