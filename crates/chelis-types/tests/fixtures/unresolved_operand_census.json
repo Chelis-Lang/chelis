@@ -835,6 +835,14 @@
     },
     {
       "file": "checked/result_origin.rs",
+      "function": "walk_corresponding_types",
+      "ordinal": 1,
+      "pattern": "(Type::Tensor(_ , TensorPrec::Var(from)) , Type::Tensor(_ , to))",
+      "disposition": "not_a_route",
+      "reason": "structural correspondence walk has no diagnostic sink and derives no operation result; maps a tensor precision variable to the opposing field while result-origin replay retains producer readiness and required equality"
+    },
+    {
+      "file": "checked/result_origin.rs",
       "function": "common_result_structure",
       "ordinal": 1,
       "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",

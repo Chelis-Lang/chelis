@@ -28,7 +28,11 @@ impl InferenceProduct {
             // unchanged substitution, just as for the full compatibility check.
             return false;
         };
-        *subst = ready_parts;
+        // A speculative substitution deliberately clears transient refinement
+        // receipts. Commit the checked equalities to the live substitution,
+        // retaining its receipts for the surrounding expression/contract walk.
+        self.unify_ready_result_parts(actual, declared, subst)
+            .expect("ready annotation parts were checked against this substitution");
         if ready {
             return false;
         }
@@ -311,8 +315,23 @@ impl InferenceProduct {
         let mut variables = crate::env::free_tvars(&resolved(actual, subst));
         variables.sort_unstable();
         variables.dedup();
+        // A transported operation's result is still produced at application.
+        // Its signature may expose ordinary input annotations, but annotating
+        // that result (especially with runtime extents) must not replace the
+        // fresh result on which the eventual operation publishes its facts.
+        let contract_results: Vec<_> = subst
+            .pending_collection_contracts()
+            .iter()
+            .flat_map(|(_, _, constraint)| crate::env::free_tvars(constraint.result()))
+            .collect();
         loop {
             let before = variables.len();
+            if variables
+                .iter()
+                .any(|variable| contract_results.contains(variable))
+            {
+                return true;
+            }
             for check in &self.deferred_shape_checks {
                 if !crate::env::free_tvars(&resolved(&check.result_ty, subst))
                     .iter()
@@ -338,11 +357,12 @@ impl InferenceProduct {
                     let mut corresponding = Vec::new();
                     for variable in variables.clone() {
                         for input in &check.arg_tys {
-                            corresponding_types(
+                            walk_corresponding_types(
                                 &Type::Var(variable),
                                 &published,
                                 &resolved(input, subst),
                                 &mut corresponding,
+                                true,
                             );
                         }
                     }
@@ -601,11 +621,25 @@ impl InferenceProduct {
 }
 
 fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Type>) {
+    walk_corresponding_types(needle, from, to, found, false);
+}
+
+/// Callable alternatives require exact structural correspondence. Dependency
+/// traversal also follows a whole-value hole that owns a projected field.
+fn walk_corresponding_types(
+    needle: &Type,
+    from: &Type,
+    to: &Type,
+    found: &mut Vec<Type>,
+    variable_dependencies: bool,
+) {
     if from == needle {
         found.push(to.clone());
         return;
     }
-    if matches!(to, Type::Var(_))
+    if variable_dependencies
+        && matches!(needle, Type::Var(_))
+        && matches!(to, Type::Var(_))
         && crate::env::free_tvars(needle)
             .iter()
             .any(|var| crate::env::free_tvars(from).contains(var))
@@ -618,20 +652,20 @@ fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Ty
             if args.len() == other_args.len() =>
         {
             for (from, to) in args.iter().zip(other_args) {
-                corresponding_types(needle, from, to, found);
+                walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
-            corresponding_types(needle, result, other_result, found);
+            walk_corresponding_types(needle, result, other_result, found, variable_dependencies);
         }
         (Type::Tuple(items), Type::Tuple(other)) if items.len() == other.len() => {
             for (from, to) in items.iter().zip(other) {
-                corresponding_types(needle, from, to, found);
+                walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
         }
         (Type::Adt(name, items), Type::Adt(other_name, other))
             if name == other_name && items.len() == other.len() =>
         {
             for (from, to) in items.iter().zip(other) {
-                corresponding_types(needle, from, to, found);
+                walk_corresponding_types(needle, from, to, found, variable_dependencies);
             }
         }
         (Type::KindedAdt(name, items), Type::KindedAdt(other_name, other))
@@ -639,18 +673,26 @@ fn corresponding_types(needle: &Type, from: &Type, to: &Type, found: &mut Vec<Ty
         {
             for (from, to) in items.iter().zip(other) {
                 if let (NominalArg::Type(from), NominalArg::Type(to)) = (from, to) {
-                    corresponding_types(needle, from, to, found);
+                    walk_corresponding_types(needle, from, to, found, variable_dependencies);
                 }
             }
         }
-        (Type::Tensor(_, TensorPrec::Var(from)), Type::Tensor(_, to)) => {
+        (Type::Tensor(_, TensorPrec::Var(from)), Type::Tensor(_, to)) if variable_dependencies => {
             let target = match to {
                 TensorPrec::Var(var) => Type::Var(*var),
                 TensorPrec::Concrete(prim) => Type::Prim(*prim),
             };
-            corresponding_types(needle, &Type::Var(*from), &target, found);
+            walk_corresponding_types(
+                needle,
+                &Type::Var(*from),
+                &target,
+                found,
+                variable_dependencies,
+            );
         }
-        (Type::Ref(from), Type::Ref(to)) => corresponding_types(needle, from, to, found),
+        (Type::Ref(from), Type::Ref(to)) => {
+            walk_corresponding_types(needle, from, to, found, variable_dependencies)
+        }
         _ => {}
     }
 }
