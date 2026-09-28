@@ -174,6 +174,17 @@ out = {\n  w = to_tensor([7.0f32, 11.0f32])\n  grad(loss)(to_tensor([1.0f32, 2.0
     assert_both_lanes(source, "out", "tensor(shape=[2], data=[3.0, 5.0])");
 }
 
+/// A local in an argument's function literal is not in scope at the outer
+/// substitution site. Host scope must carry binding origin explicitly.
+#[test]
+fn unrelated_literal_local_does_not_block_outer_callee_substitution() {
+    let source = "n = to_tensor([2.0f32])\n\
+def apply(h: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = h(mul(x, n))\n\
+def outer(k: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = apply(k, x)\n\
+out = outer(fn (v: tensor[1, f32]) -> {\n  n = to_tensor([10.0f32])\n  add(v, n)\n}, to_tensor([1.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
 /// A transform in a top-level value's block runs through the host
 /// interpreter's transform route on the evaluator. On the compiled lane these
 /// have no lowering that can name the top-level value beside the shadowing
