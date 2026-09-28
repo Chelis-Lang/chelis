@@ -178,11 +178,14 @@ target directory are never read.
   directory's archive.
 - A test or oracle that needs an instrumented runtime builds its consumer with
   that runtime feature, or links an exact instrumented Cargo artifact itself.
-- `scripts/check_runtime_archive_lookups.py` fails on a runtime-archive lookup
-  outside the two bundle crates: a `-lchelis_runtime` search, a
-  `CHELIS_RUNTIME_DIR` or `CHELIS_RUNTIME_LIB` read, a hashed-name or
-  build-tree archive path, or a Cargo artifact report. Each remaining match
-  needs a reviewed row, and a lookup row names the issue that removes it.
+- `scripts/check_runtime_archive_lookups.py` matches the runtime's names
+  outside the two bundle crates: any mention of `CHELIS_RUNTIME_DIR` or
+  `CHELIS_RUNTIME_LIB`, the library or Cargo target name as a string literal, a
+  library search for it, `libchelis_runtime` other than the exact staged file
+  name, that file name in a glob or `find` scan, under a build-tree directory
+  or where it is probed for, and a Cargo package id of the runtime. Each
+  reviewed row pins the exact lines it allows, `CHELIS_RUNTIME_LIB` admits none,
+  and a lookup row names the issue that removes it.
 - The Python extension stages its carried runtime into the artifact directory
   and rejects a set `CHELIS_RUNTIME_DIR` (chelis#1354).
 - A development build checks its runtime's sources before staging.
