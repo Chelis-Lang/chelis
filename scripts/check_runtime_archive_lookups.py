@@ -17,11 +17,11 @@ crates, one line at a time, and matches:
 - a runtime variable, `CHELIS_RUNTIME_` followed by a name (C header guards
   ending in `_H` are not variables); `CHELIS_RUNTIME_LIB` admits no row;
 - the library or Cargo target name as a string literal, `"chelis_runtime"` or
-  `"static=chelis_runtime"`, which a Cargo artifact read, a `#[link]` attribute
-  or a split `-l` argument contains;
+  with a link kind, `"static:+whole-archive=chelis_runtime"`, which a Cargo
+  artifact read, a `#[link]` attribute or a split `-l` argument contains;
 - a library search: `-lchelis_runtime`, `-l chelis_runtime`, `-l
-  static=chelis_runtime`, `rustc-link-lib=...chelis_runtime` or
-  `--library=chelis_runtime`;
+  static=chelis_runtime` with or without link modifiers,
+  `rustc-link-lib=...chelis_runtime` or `--library chelis_runtime`;
 - the bundle's exported names for the archive and the variable,
   `ARCHIVE_FILE_NAME` and `RUNTIME_DIR_VARIABLE`;
 - a Cargo package id of the runtime (`"chelis-runtime 0.1.0 (...)"`,
@@ -34,7 +34,11 @@ removes it; a `not-lookup` row says why the line is not one.
 
 The guard follows no values. A lookup that reaches the runtime only through a
 reviewed line, such as a constant naming the archive or a directory computed on
-another line, is visible only as that reviewed line.
+another line, is visible only as that reviewed line. A name assembled from
+fragments or held in an unquoted shell variable, a Cargo read keyed only on the
+package name `"chelis-runtime"` (the literal every `-p chelis-runtime` argument
+shares), the `staticlib` kind or the manifest path, and files outside the
+scanned suffixes are not matched either.
 """
 from __future__ import annotations
 
@@ -101,18 +105,24 @@ PATTERNS = (
     ),
     Pattern(
         "library-name",
-        (r"[\"'](?:[a-z]+=)?chelis_runtime[\"']",),
+        (r"[\"'](?:[a-z]+(?::[-+a-z,]+)?=)?chelis_runtime[\"']",),
         (
             "if row.get('target', {}).get('name') != 'chelis_runtime':",
             'rustflags = ["-l", "static=chelis_runtime"]',
+            '.arg("-l").arg("static:+whole-archive=chelis_runtime")',
         ),
     ),
     Pattern(
         "linker-search",
-        (r"-l[ \t]*(?:[a-z]+=)*:?(?:lib)?chelis_runtime\b",),
+        (
+            r"-l[ \t]*(?:[a-z]+(?::[-+a-z,]+)?=)*:?(?:lib)?chelis_runtime\b",
+            r"--library[ \t,]+:?(?:lib)?chelis_runtime\b",
+        ),
         (
             'cmd.args(["-L.", "-lchelis_runtime"]);',
             'println!("cargo:rustc-link-lib=static=chelis_runtime");',
+            'println!("cargo:rustc-link-lib=static:+whole-archive=chelis_runtime");',
+            "cc main.c -Wl,--library,chelis_runtime",
         ),
     ),
     Pattern(
@@ -125,10 +135,12 @@ PATTERNS = (
     ),
     Pattern(
         "runtime-package",
-        (r"[\"']chelis-runtime[ @]", r"[#/]chelis-runtime[@#]"),
+        (r"[\"']chelis-runtime[ @]", r"[#/]chelis-runtime(?:@|#(?![a-z]))"),
         (
             'if message["package_id"].startswith("chelis-runtime "):',
+            'spec = "chelis-runtime@0.18.11"',
             'if package_id.endswith("/crates/chelis-runtime#" + version):',
+            'spec = f"path+file://{root}#chelis-runtime@{version}"',
         ),
     ),
 )
@@ -561,7 +573,8 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "documents and links the archive `chelis build` staged in the output directory it compiles in"
+            "documents and links the archive `chelis build` staged in the output directory it "
+            "compiles in, and names it in the link assertion's failure message"
         ),
     ),
     Row(
@@ -1087,7 +1100,7 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "installs the archive `chelis runtime export` wrote into the Nix runtime package and records its digest, and copies that package's archive into the toolchain"
+            "installs the archive `chelis runtime export` wrote into the Nix runtime package and checks its digest against the export's receipt, and copies that package's archive into the toolchain"
         ),
     ),
     Row(
@@ -1184,7 +1197,7 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "the archive an installed release must ship, checked against the release inventory and the export's receipt, and linked by exact path into the canary's callable"
+            "the archive an installed release must ship: checked against the release inventory, against the archive and staging receipt `chelis build` wrote, and linked by exact path into the canary's callable"
         ),
     ),
     Row(
@@ -1244,7 +1257,7 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "fixture receipts and staged archives beside a compiled library, which the census checks and must reject when changed"
+            "fixture receipts and staged archives beside a compiled library: the census must reject changed bytes and accept a consistently restaged runtime"
         ),
     ),
     Row(
@@ -1322,7 +1335,7 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "fixture release inventories and a swapped staged archive the canary must reject"
+            "fixture installed and staged files, including swapped installed files and a swapped staged archive the canary must reject"
         ),
     ),
     Row(
@@ -1471,9 +1484,11 @@ def check(
         reviewed = Counter(row.lines if row is not None else ())
         unreviewed = observed - reviewed
         if unreviewed:
-            listed = [
-                f"{name}:{line}: {text}" for line, text in locations if text in unreviewed
-            ]
+            listed = []
+            for text, count in unreviewed.items():
+                places = [str(line) for line, seen in locations if seen == text]
+                share = "" if count == len(places) else f" ({count} of these {len(places)} identical lines)"
+                listed.append(f"{name}:{', '.join(places)}: {text}{share}")
             errors.append(
                 f"{pattern}: {sum(unreviewed.values())} unreviewed line(s) in {name}. Every "
                 "line that names the runtime outside its bundle needs a reviewed row. A lookup "

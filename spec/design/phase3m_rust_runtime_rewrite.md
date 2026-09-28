@@ -185,7 +185,10 @@ target directory are never read.
   names, and a Cargo package id of the runtime. Each reviewed row pins the exact
   lines it allows, `CHELIS_RUNTIME_LIB` admits none, and a lookup row names the
   issue that removes it. The check follows no values, so a lookup that reaches
-  the runtime only through a reviewed line is visible only as that line.
+  the runtime only through a reviewed line is visible only as that line. It
+  also misses a name assembled from fragments or held in an unquoted shell
+  variable, a Cargo read keyed only on the package name, the `staticlib` kind
+  or the manifest path, and files of other types.
 - The Python extension stages its carried runtime into the artifact directory
   and rejects a set `CHELIS_RUNTIME_DIR` (chelis#1354).
 - A development build checks its runtime's sources before staging.

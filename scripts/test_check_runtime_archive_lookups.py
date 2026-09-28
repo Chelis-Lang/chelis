@@ -86,6 +86,8 @@ IDIOMS = (
     'if package_id.endswith("/crates/chelis-runtime#" + version):',
     'RUSTFLAGS="-l static=chelis_runtime" cargo build',
     'cmd.args(["-l", "static=chelis_runtime"]);',
+    'RUSTFLAGS="-l static:+whole-archive=chelis_runtime" cargo build',
+    "cc main.c -Wl,--library chelis_runtime",
     "cc main.c -Wl,--library=chelis_runtime",
     'archive = os.environ["CHELIS_RUNTIME_ARCHIVE"]',
     "let candidate = dir.join(chelis_runtime_bundle::ARCHIVE_FILE_NAME);",
@@ -220,8 +222,21 @@ class PatternTests(unittest.TestCase):
                 'ledger = ["chelis-runtime/ownership-ledger"]\n'
             ),
             "nix/packages.nix": '-I${packages.chelis-runtime}/include \\\n',
+            "scripts/links.py": (
+                "# https://github.com/Chelis-Lang/chelis/tree/main/crates/chelis-runtime#readme\n"
+            ),
         }
         self.assertEqual(PlantedTree(self, corpus).check(), [])
+
+    def test_every_scanned_suffix_is_scanned_and_no_other(self) -> None:
+        line = 'CHELIS_RUNTIME_DIR = { value = "target/debug", relative = true }\n'
+        for suffix in (".rs", ".py", ".nix", ".sh", ".toml", ".yml", ".yaml"):
+            with self.subTest(suffix=suffix):
+                failures = PlantedTree(self, {f"tools/config{suffix}": line}).check()
+                self.assertEqual(matched_patterns(failures), {"runtime-variable"}, failures)
+        for suffix in (".md", ".c", ".json", ".txt"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(PlantedTree(self, {f"tools/config{suffix}": line}).check(), [])
 
     def test_every_mention_of_a_runtime_variable_needs_a_row(self) -> None:
         name = "crates/c/tests/reject.rs"
