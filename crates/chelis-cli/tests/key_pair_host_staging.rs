@@ -378,3 +378,84 @@ fn state_tuple_result_claim_rejects_each_wrong_axis_in_both_lanes() {
         }
     }
 }
+
+// [04] §4.7.3-.4 admits scalar helper results as reshape targets. The
+// generated C must have each target extent before its preallocation check.
+const SCALAR_HELPER_RESHAPE: &str = r#"def extent(n: i64) -> i64 = add(n, 0i64)
+def main() -> tensor[2, 1, f32] = reshape(to_tensor([1.0f32, 2.0f32]), [extent(2i64), extent(1i64)])
+"#;
+
+#[test]
+fn scalar_helper_reshape_extents_execute_in_eval_and_c() {
+    let (eval, native) = eval_and_c("helper_reshape", SCALAR_HELPER_RESHAPE);
+    assert_eq!(
+        eval,
+        f32_line("main", "[2, 1]", &[0x3f80_0000, 0x4000_0000])
+    );
+    assert_eq!(native, eval);
+}
+
+// chelis#2635: tensor_to_scalar(k) is another checked scalar source for
+// the target list; its runtime value must survive the same lowering path.
+const TENSOR_SCALAR_RESHAPE: &str = r#"def selected[n](y: tensor[n, f32], k: tensor[i64]) -> tensor[f32] = sum(sum(reshape(y, [tensor_to_scalar(k), 2i64]), 0i32), 0i32)
+out = selected(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]), scalar_to_tensor(3i64))
+"#;
+
+#[test]
+fn tensor_scalar_reshape_target_executes_in_eval_and_c() {
+    let (eval, native) = eval_and_c("tensor_scalar_reshape", TENSOR_SCALAR_RESHAPE);
+    assert_eq!(eval, "out = 21.0\n");
+    assert_eq!(native, eval);
+}
+
+#[test]
+fn invalid_computed_scalar_helper_reshape_extent_traps_in_eval_and_c() {
+    let source = r#"def extent(n: i64) -> i64 = add(n, 0i64)
+def main() -> tensor[*, f32] = reshape(to_tensor([1.0f32, 2.0f32]), [extent(tensor_to_scalar(sum(to_tensor([1i64, 2i64]), 0i32)))])
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("bad_helper_reshape.ch");
+    std::fs::write(&file, source).unwrap();
+    let checked = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert!(checked.status.success(), "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    let eval = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let out = dir.path().join("out");
+    let build = Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("build")
+        .arg(&file)
+        .args(["--target", "c", "--output"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(common::link_generated(&out, "bad_helper_reshape.c", "bad_helper_reshape").success());
+    let native = std::process::Command::new(out.join("bad_helper_reshape"))
+        .current_dir(&out)
+        .output()
+        .unwrap();
+    for (lane, result) in [("eval", eval), ("C", native)] {
+        assert!(!result.status.success(), "{lane} accepted invalid reshape");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("reshape"),
+            "{lane} did not report a reshape failure: {stderr}"
+        );
+    }
+}

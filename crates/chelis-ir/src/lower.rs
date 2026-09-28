@@ -19547,10 +19547,30 @@ impl<'program> LowerCtx<'program> {
                 }
                 op_dims.push(RtDim::Lit(value as usize));
                 ty_dims.push(DimInfo::Lit(value as usize));
-            } else {
-                let name = symbolic_dim_var_name(elem)?;
+            } else if let Some(name) = symbolic_dim_var_name(elem) {
                 op_dims.push(RtDim::Sym(name.clone()));
                 ty_dims.push(DimInfo::Named(name, None));
+            } else {
+                // A checked List<i64> target can contain any runtime scalar
+                // expression, including a user helper result. The earlier
+                // arms preserve literal and proven input-axis identities;
+                // every remaining expression still needs its value edge.
+                // Falling back to the checker's wildcard result type loses
+                // that edge and leaves C sizing an anonymous axis after use.
+                let actual = self.lower_expr_node(elem, "computed reshape target");
+                let actual_type = &self.dag.get(actual).expect("computed target").output_type;
+                if !actual_type.dims.is_empty() || actual_type.precision != Prim::Int64 {
+                    raise_lowering_error(
+                        "computed reshape target must lower to a rank-zero i64",
+                        Some(elem.span()),
+                        elem.span_id().map(ToOwned::to_owned),
+                    );
+                }
+                let slot = inputs.len();
+                inputs.push(actual);
+                computed_targets.push((axis, slot));
+                op_dims.push(RtDim::Node(slot));
+                ty_dims.push(DimInfo::Named(format!("_rt_dim_{}_{axis}", actual.0), None));
             }
         }
         if op_dims.is_empty() {
