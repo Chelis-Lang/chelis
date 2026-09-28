@@ -3440,3 +3440,8 @@ packages = ["tree-sitter-chelis"]
 prefix = "examples/grad_host_results.ch"
 disposition = "packages"
 packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_host_selectors.ch"
+disposition = "packages"
+packages = ["chelis-cli"]

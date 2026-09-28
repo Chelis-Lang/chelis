@@ -1358,7 +1358,7 @@ fn lower_program_with_context_inner(
 
 fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<String, NodeId>) {
     match value {
-        LoweredValue::Host { .. } => raise_lowering_error(
+        LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => raise_lowering_error(
             "a host value cannot be exported as a tensor binding",
             None,
             None,
@@ -5569,6 +5569,7 @@ fn rebuild_runtime_list_view(
 fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
     fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
         match value {
+            LoweredValue::HostConstant(_) => {}
             LoweredValue::Host { .. } => {
                 raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
             }
@@ -5602,8 +5603,16 @@ fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
 fn rebuild_recursive_list_like(
     template: &LoweredValue,
     leaves: &mut impl Iterator<Item = LoweredValue>,
+    cotangent: bool,
 ) -> LoweredValue {
     match template {
+        LoweredValue::HostConstant(_) => {
+            if cotangent {
+                LoweredValue::Tuple(Vec::new())
+            } else {
+                template.clone()
+            }
+        }
         LoweredValue::Host { .. } => raise_lowering_error(
             "a host value cannot be rebuilt from tensor cotangent leaves",
             None,
@@ -5614,14 +5623,14 @@ fn rebuild_recursive_list_like(
             let items = adt_cons_chain_values(template)
                 .expect("guarded above")
                 .into_iter()
-                .map(|item| rebuild_recursive_list_like(&item, leaves))
+                .map(|item| rebuild_recursive_list_like(&item, leaves, cotangent))
                 .collect();
             rebuild_cons_chain(items)
         }
         LoweredValue::Tuple(items) => LoweredValue::Tuple(
             items
                 .iter()
-                .map(|item| rebuild_recursive_list_like(item, leaves))
+                .map(|item| rebuild_recursive_list_like(item, leaves, cotangent))
                 .collect(),
         ),
         LoweredValue::Adt {
@@ -5635,7 +5644,7 @@ fn rebuild_recursive_list_like(
             field_names: field_names.clone(),
             fields: fields
                 .iter()
-                .map(|field| rebuild_recursive_list_like(field, leaves))
+                .map(|field| rebuild_recursive_list_like(field, leaves, cotangent))
                 .collect(),
         },
     }
@@ -6426,8 +6435,17 @@ struct HostAggregateType {
     metadata: Metadata,
 }
 
+/// Exact host data retained during specialization, outside the numeric DAG.
+/// These values have no graph identity or cotangent. Bindings and aggregate
+/// structure carry them until a host operation consumes them.
+#[derive(Clone, PartialEq, Eq)]
+enum HostConstant {
+    String(String),
+}
+
 #[derive(Clone)]
 enum LoweredValue {
+    HostConstant(HostConstant),
     Node(NodeId),
     Host {
         id: crate::host::staged::HostValueId,
@@ -6599,7 +6617,7 @@ impl LoweredValue {
     fn trace_value(&self) -> crate::lowering_trace::Value {
         use crate::lowering_trace::Value;
         match self {
-            Self::Host { .. } => {
+            Self::HostConstant(_) | Self::Host { .. } => {
                 raise_lowering_error("a host value is not a tensor AD result", None, None)
             }
             Self::Node(id) => Value::Node(*id),
@@ -6624,7 +6642,7 @@ impl LoweredValue {
     ) -> crate::lowering_trace::Value {
         use crate::lowering_trace::Value;
         match self {
-            Self::Host { .. } => {
+            Self::HostConstant(_) | Self::Host { .. } => {
                 raise_lowering_error("a host value is not a tensor helper result", None, None)
             }
             Self::Node(_) => Value::Node(roots.next().expect("packed tensor result root")),
@@ -6662,7 +6680,7 @@ impl LoweredValue {
     /// that question while genuinely owning a root.
     fn contributes_no_root(&self) -> bool {
         match self {
-            Self::Host { .. } => true,
+            Self::HostConstant(_) | Self::Host { .. } => true,
             Self::Node(_) => false,
             Self::Tuple(items) => items.iter().all(Self::contributes_no_root),
             Self::Adt { fields, .. } => fields.iter().all(Self::contributes_no_root),
@@ -6671,6 +6689,13 @@ impl LoweredValue {
 
     fn expect_node(&self, context: &str) -> NodeId {
         match self {
+            Self::HostConstant(_) => raise_lowering_error(
+                format!(
+                    "{context}: a string literal has no numeric IR constant; host constants remain outside the RISC DAG (spec/05-risc-primitives.md section 3.6)"
+                ),
+                None,
+                None,
+            ),
             Self::Host { .. } => raise_lowering_error(
                 format!(
                     "{context} requires a tensor; a staged host value has no tensor representation"
@@ -6697,7 +6722,7 @@ impl LoweredValue {
 
     fn flatten_nodes(&self) -> Vec<NodeId> {
         match self {
-            Self::Host { .. } => Vec::new(),
+            Self::HostConstant(_) | Self::Host { .. } => Vec::new(),
             Self::Node(id) => vec![*id],
             Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
             Self::Adt { fields, .. } => fields.iter().flat_map(Self::flatten_nodes).collect(),
@@ -6715,6 +6740,7 @@ impl LoweredValue {
                     .all(|(left, right)| left.is_same_value(right))
         };
         match (self, other) {
+            (Self::HostConstant(left), Self::HostConstant(right)) => left == right,
             (Self::Node(left), Self::Node(right)) => left == right,
             (Self::Host { id: left, .. }, Self::Host { id: right, .. }) => left == right,
             (Self::Tuple(left), Self::Tuple(right)) => same_items(left, right),
@@ -6739,20 +6765,20 @@ impl LoweredValue {
     fn as_single_node(&self) -> Option<NodeId> {
         match self {
             Self::Node(id) => Some(*id),
-            Self::Tuple(_) | Self::Adt { .. } | Self::Host { .. } => None,
+            Self::Tuple(_) | Self::Adt { .. } | Self::HostConstant(_) | Self::Host { .. } => None,
         }
     }
 
     fn tuple_get(&self, index: usize) -> Option<LoweredValue> {
         match self {
             Self::Tuple(items) => items.get(index).cloned(),
-            Self::Node(_) | Self::Adt { .. } | Self::Host { .. } => None,
+            Self::Node(_) | Self::Adt { .. } | Self::HostConstant(_) | Self::Host { .. } => None,
         }
     }
 
     fn from_flat(template: &LoweredValue, nodes: &mut dyn Iterator<Item = NodeId>) -> LoweredValue {
         match template {
-            Self::Host { .. } => template.clone(),
+            Self::HostConstant(_) | Self::Host { .. } => template.clone(),
             Self::Node(_) => Self::Node(nodes.next().expect("flattened lowered value mismatch")),
             Self::Tuple(items) => Self::Tuple(
                 items
@@ -7963,8 +7989,34 @@ impl<'program> LowerCtx<'program> {
         value: &LoweredValue,
         rebase: &mut ScopeRebase,
     ) -> Option<LoweredValue> {
-        let LoweredValue::Node(node_id) = value else {
-            return None;
+        let node_id = match value {
+            LoweredValue::HostConstant(_) => return Some(value.clone()),
+            LoweredValue::Host { .. } => return None,
+            LoweredValue::Tuple(items) => {
+                return Some(LoweredValue::Tuple(
+                    items
+                        .iter()
+                        .map(|item| self.rebase_binding(subctx, item, rebase))
+                        .collect::<Option<_>>()?,
+                ));
+            }
+            LoweredValue::Adt {
+                host,
+                ctor,
+                field_names,
+                fields,
+            } => {
+                return Some(LoweredValue::Adt {
+                    host: host.clone(),
+                    ctor: ctor.clone(),
+                    field_names: field_names.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|field| self.rebase_binding(subctx, field, rebase))
+                        .collect::<Option<_>>()?,
+                });
+            }
+            LoweredValue::Node(node_id) => node_id,
         };
         if let Some(load) = rebase.loads.get(node_id) {
             return Some(LoweredValue::Node(*load));
@@ -8640,11 +8692,11 @@ impl<'program> LowerCtx<'program> {
         // enclosing lowering that set it keeps it.
         let suppressed = SUPPRESS_LOWERING_PANIC_OUTPUT.with(Cell::get);
         let lowered = catch_lowering(std::panic::AssertUnwindSafe(|| {
-            scratch.lower_initializer(&initializer);
-            (scratch.dag, scratch.program_value_verdicts)
+            let value = scratch.lower_initializer(&initializer);
+            (value, scratch.dag, scratch.program_value_verdicts)
         }));
         SUPPRESS_LOWERING_PANIC_OUTPUT.with(|cell| cell.set(suppressed));
-        let Ok((lowered, reached)) = lowered else {
+        let Ok((value, lowered, reached)) = lowered else {
             return (None, UnordMap::new());
         };
         // A form that reads a host builtin as a free input is the lowerer's
@@ -8656,11 +8708,14 @@ impl<'program> LowerCtx<'program> {
             return (None, reached);
         }
         let seeds = lowered.trap_seeds();
-        let verdict = lowered
-            .nodes()
-            .iter()
-            .any(|node| seeds.is_observable_root(node))
-            .then_some(initializer);
+        // Exact host constants cannot be served by tensor Loads. Keep their
+        // declaring initializer and the same lexical/once-per-site rules.
+        let verdict = (matches!(value, LoweredValue::HostConstant(_))
+            || lowered
+                .nodes()
+                .iter()
+                .any(|node| seeds.is_observable_root(node)))
+        .then_some(initializer);
         (verdict, reached)
     }
 
@@ -8774,6 +8829,9 @@ impl<'program> LowerCtx<'program> {
                     .get(*id)
                     .map(|node| HostTypeTerm::Tensor(node.output_type.clone()))
             }),
+            LoweredValue::HostConstant(HostConstant::String(_)) => Some(HostTypeTerm::Scalar(
+                crate::host_type_state::HostPrecisionTerm::Concrete(Prim::String),
+            )),
             LoweredValue::Host { ty, .. } => Some(ty.clone()),
             LoweredValue::Tuple(items) => items
                 .iter()
@@ -8827,6 +8885,24 @@ impl<'program> LowerCtx<'program> {
             captures: &mut Vec<(String, StageValue, HostTypeTerm)>,
             span: Span,
         ) -> Expr {
+            if let LoweredValue::HostConstant(HostConstant::String(value)) = value {
+                let mut metadata = Metadata::default();
+                metadata.replace(chelis_deep::annotations::MetadataValue::Type(
+                    chelis_deep::annotations::TypeSyntax::try_new(Expr::node(
+                        DeepTag::TPrim,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Name("string".into()), span)],
+                        span,
+                    ))
+                    .expect("string type"),
+                ));
+                return Expr::node(
+                    DeepTag::Lit,
+                    metadata,
+                    vec![Expr::Atom(Atom::Str(value.clone()), span)],
+                    span,
+                );
+            }
             let (tag, metadata, children) = if let LoweredValue::Tuple(items) = value {
                 (
                     DeepTag::Tuple,
@@ -9007,9 +9083,9 @@ impl<'program> LowerCtx<'program> {
                 let captured = match &value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
                     LoweredValue::Host { id, .. } => StageValue::Host(*id),
-                    LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
-                        self.stage_host_aggregate_capture(&value, expr)
-                    }
+                    LoweredValue::HostConstant(_)
+                    | LoweredValue::Tuple(_)
+                    | LoweredValue::Adt { .. } => self.stage_host_aggregate_capture(&value, expr),
                 };
                 captures.push((
                     name.clone(),
@@ -9482,7 +9558,7 @@ impl<'program> LowerCtx<'program> {
     /// lowering collapses that must still record the parent expr's span.
     fn append_current_span_to_lowered_value(&mut self, value: &LoweredValue) {
         match value {
-            LoweredValue::Host { .. } => {}
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => {}
             LoweredValue::Node(id) => self.append_current_span_to_existing_node(*id),
             LoweredValue::Tuple(items) => {
                 for item in items {
@@ -9499,7 +9575,7 @@ impl<'program> LowerCtx<'program> {
 
     fn add_named_roots(&mut self, prefix: &str, value: &mut LoweredValue) {
         match value {
-            LoweredValue::Host { .. } => {
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => {
                 raise_lowering_error("a host value cannot become a tensor root", None, None)
             }
             LoweredValue::Node(id) if !prefix.contains('.') && !self.dag.roots().contains(id) => {
@@ -10394,6 +10470,27 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
+    /// Materialize only the boolean result of an exact host comparison.
+    fn bool_constant(&mut self, value: bool) -> NodeId {
+        self.dag.add_node(
+            self.owner(),
+            RiscOp::Const {
+                value: chelis_types::finalize_scalar(
+                    "eq",
+                    Prim::Bool,
+                    chelis_types::RawScalar::Int(i64::from(value)),
+                )
+                .expect("exact boolean"),
+            },
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            self.current_span_id.clone(),
+        )
+    }
+
     /// `(lit {type: T} value)`
     fn lower_lit(&mut self, meta: &Metadata, kids: &[Expr], span: Span) -> LoweredValue {
         let ty = self.type_from_meta(meta);
@@ -10421,21 +10518,15 @@ impl<'program> LowerCtx<'program> {
         // width. The exact metadata carrier makes this value-independent.
         let prim = binder_float_literal_source_default(meta, raw, &self.prec_substitutions)
             .unwrap_or(ty.precision);
-        // A string literal is not a numeric constant and has no sealed
-        // payload to finalize: `finalize_scalar`'s `Prim::String` arm is
-        // an unreachable-by-construction PANIC, so reaching it here would
-        // surface as a bare panic-string diagnostic instead of a cited
-        // one. The DAG has no string vocabulary at all, so this is a
-        // lowering rejection, not a value. The one reachable path was
-        // `fail`'s message argument, closed at its own arm below.
         if prim == Prim::String {
-            raise_lowering_error(
-                "a string literal has no numeric IR constant and cannot be lowered \
-                 into the RISC DAG; strings are host-lane values \
-                 (spec/05-risc-primitives.md; chelis#856)",
-                Some(span),
-                self.current_span_id.clone(),
-            )
+            let Some(Expr::Atom(Atom::Str(value), _)) = kids.first() else {
+                raise_malformed_deep(
+                    "a string literal without a string payload",
+                    Some(span),
+                    self.current_span_id.clone(),
+                );
+            };
+            return LoweredValue::HostConstant(HostConstant::String(value.clone()));
         }
         let value = match chelis_types::finalize_scalar("const", prim, raw) {
             Ok(value) => value,
@@ -10753,7 +10844,7 @@ impl<'program> LowerCtx<'program> {
 
     fn mark_unresolved_callable_value(&mut self, value: LoweredValue) -> LoweredValue {
         match value {
-            LoweredValue::Host { .. } => raise_lowering_error(
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => raise_lowering_error(
                 "an unresolved callable has no staged host producer",
                 None,
                 None,
@@ -11043,6 +11134,7 @@ impl<'program> LowerCtx<'program> {
         // scalar/tensor lane. Tuples and ADTs are recursively flattened to
         // typed leaf nodes while retaining a template for exact repacking.
         enum GradArgPlan {
+            HostConstant(LoweredValue),
             Tensor(NodeId),
             Structured {
                 template: LoweredValue,
@@ -11055,6 +11147,7 @@ impl<'program> LowerCtx<'program> {
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
             .map(|arg| match arg {
+                LoweredValue::HostConstant(_) => GradArgPlan::HostConstant(arg.clone()),
                 LoweredValue::Host { .. } => raise_lowering_error(
                     "an opaque host value has no tensor gradient input",
                     None,
@@ -11258,6 +11351,16 @@ impl<'program> LowerCtx<'program> {
             .enumerate()
         {
             match plans.get(index) {
+                Some(GradArgPlan::HostConstant(value)) => {
+                    if wrt_indices.is_some_and(|indices| indices.contains(&index)) {
+                        raise_lowering_error(
+                            "a host constant is not a differentiable target (spec/06 section 2.1)",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        );
+                    }
+                    subctx.bindings.insert(name.clone(), value.clone());
+                }
                 Some(GradArgPlan::Structured {
                     template,
                     leaf_nodes,
@@ -11312,7 +11415,7 @@ impl<'program> LowerCtx<'program> {
                     let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        rebuild_recursive_list_like(template, &mut leaf_values),
+                        rebuild_recursive_list_like(template, &mut leaf_values, false),
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
@@ -11462,7 +11565,7 @@ impl<'program> LowerCtx<'program> {
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
                 // Structured params are served by their per-leaf entries.
-                GradArgPlan::Structured { .. } => None,
+                GradArgPlan::Structured { .. } | GradArgPlan::HostConstant(_) => None,
             })
             .chain(adt_arg_map_entries)
             .chain(captured_bindings.into_sorted())
@@ -11601,7 +11704,7 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     let mut leaves = leaves.into_iter();
-                    packed.push(rebuild_recursive_list_like(template, &mut leaves));
+                    packed.push(rebuild_recursive_list_like(template, &mut leaves, true));
                 }
             }
         }
@@ -11650,7 +11753,7 @@ impl<'program> LowerCtx<'program> {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Structured { .. } => None,
+                        GradArgPlan::Structured { .. } | GradArgPlan::HostConstant(_) => None,
                     })
                     .collect();
                 if candidate_inputs.len() == plans.len() {
@@ -14119,8 +14222,15 @@ impl<'program> LowerCtx<'program> {
                 )
             }
             "eq" if args.len() == 2 => {
-                let a = self.lower_expr_node(&args[0], "eq lhs");
-                let b = self.lower_expr_node(&args[1], "eq rhs");
+                let left = self.lower_expr(&args[0]);
+                let right = self.lower_expr(&args[1]);
+                if let (LoweredValue::HostConstant(a), LoweredValue::HostConstant(b)) =
+                    (&left, &right)
+                {
+                    return self.bool_constant(a == b);
+                }
+                let a = left.expect_node("eq lhs");
+                let b = right.expect_node("eq rhs");
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_eq(
                     self.owner(),
@@ -14132,8 +14242,15 @@ impl<'program> LowerCtx<'program> {
                 )
             }
             "neq" if args.len() == 2 => {
-                let a = self.lower_expr_node(&args[0], "neq lhs");
-                let b = self.lower_expr_node(&args[1], "neq rhs");
+                let left = self.lower_expr(&args[0]);
+                let right = self.lower_expr(&args[1]);
+                if let (LoweredValue::HostConstant(a), LoweredValue::HostConstant(b)) =
+                    (&left, &right)
+                {
+                    return self.bool_constant(a != b);
+                }
+                let a = left.expect_node("neq lhs");
+                let b = right.expect_node("neq rhs");
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_neq(
                     self.owner(),
@@ -15841,7 +15958,7 @@ impl<'program> LowerCtx<'program> {
             ));
         }
         match first {
-            LoweredValue::Host { .. } => None,
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => None,
             LoweredValue::Node(first_node) => {
                 let out_ty = self.dag.get(*first_node)?.output_type.clone();
                 if items.iter().any(|item| {
@@ -19463,7 +19580,7 @@ impl<'program> LowerCtx<'program> {
     /// keep it stable.
     fn expect_runtime_if_branch(&self, branch: LoweredValue, which: &str, span: Span) -> NodeId {
         match branch {
-            LoweredValue::Host { .. } => raise_lowering_error(
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => raise_lowering_error(
                 "host control flow must execute in its source stage",
                 None,
                 None,
@@ -20080,7 +20197,7 @@ impl<'program> LowerCtx<'program> {
     /// `expect_node("copy input")` -- the issue's Blocker 2).
     fn copy_lowered_value(&mut self, value: &LoweredValue) -> LoweredValue {
         match value {
-            LoweredValue::Host { .. } => value.clone(),
+            LoweredValue::HostConstant(_) | LoweredValue::Host { .. } => value.clone(),
             LoweredValue::Node(id) => {
                 let output_type = self
                     .dag
@@ -24966,7 +25083,8 @@ mod tests {
     /// string arm is an unreachable-by-construction `panic!`, so a string
     /// literal that reached `lower_lit` surfaced as a bare panic string
     /// rather than a cited diagnostic. The DAG has no string vocabulary;
-    /// a string literal is a lowering rejection, and it says so.
+    /// the host constant remains valid during lowering, but crossing the
+    /// numeric boundary is a cited rejection and allocates no DAG node.
     #[test]
     fn lower_lit_rejects_a_string_literal_with_a_cited_diagnostic() {
         let expr = chelis_deep::parser::parse_str("(lit {type: (t-prim {} string)} \"hi\")")
@@ -24982,7 +25100,12 @@ mod tests {
                 LinearityInfo::default(),
             )
             .declared_for_test();
-            let _ = ctx.lower_expr(&expr);
+            let value = ctx.lower_expr(&expr);
+            assert!(
+                ctx.dag.nodes().is_empty(),
+                "host constants allocate no numeric node"
+            );
+            value.expect_node("numeric boundary");
         });
         let Err(diagnostic) = outcome else {
             panic!("a string literal has no numeric IR constant and must not lower");
