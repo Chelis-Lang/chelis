@@ -541,9 +541,6 @@ amplify the cost dramatically when their matmuls miss specialization.
 Rank-2, symbolic, and batched BLAS-hit matmuls no longer pay the
 dead-`Mul` tax.
 
-**Tracked in:**
-`spec/upstream-bugs/dead-mul-after-blas-specialization.md`.
-
 ## Adjacent finding (not in the six) — closed by M2b
 
 **Surf-source spans now reach the IR.** The Surf desugarer threads

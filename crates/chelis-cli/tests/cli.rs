@@ -8364,9 +8364,7 @@ fn check_single_file_keeps_legacy_report_shape() {
 // evaluator (the same machinery the C backend uses) so the two lanes
 // agree on programs that pass `chelis check`.
 //
-// See `crates/chelis-compiler-api/src/runtime/transforms.rs::apply_transform` for
-// the implementation, and `spec/upstream-bugs/grad-eval-host-runtime.md`
-// for the canonical repro / closure reference.
+// Implementation: `crates/chelis-compiler-api/src/runtime/transforms.rs::apply_transform`.
 
 /// Positive: `realize(...)` is identity in the host runtime; `chelis
 /// eval` now produces the inner tensor's value instead of erroring.

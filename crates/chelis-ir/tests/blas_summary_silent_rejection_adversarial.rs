@@ -1,38 +1,7 @@
-//! Wave 5 red-team — Locks the §5 Remaining Work Register's
-//! "BLAS summary recognizer is still silent on near-eligible rejections"
-//! gap, recorded in `docs/archive/reports/gap_synthesis.md` §5 / M5-follow-up entry:
-//!
-//! > **Sibling sweep / new follow-up:** the BLAS summary recognizer
-//! > (`summarize_blas_helper_from_parts`) is still silent on near-eligible
-//! > rejections — it returns `Option<HostBlasMatmulSummary>` and discards
-//! > the structural reason. A future workstream should mirror the W4-A
-//! > structured-rejection surface for BLAS callsites so user-`def` matmul
-//! > helpers that just miss the recognizer (non-F32 precision, non-rank-2
-//! > shape, non-Load operand) emit the same enum-matchable diagnostic
-//! > class. Tracked here, not opened in this batch.
-//!
-//! This file PROVES the gap by exercising the public test surface for
-//! the sparse recognizer (`try_summarize_sparse_helper_for_test`) on a
-//! BLAS-shaped helper that is structurally near-eligible but not exact —
-//! and showing that the BLAS-only path returns `None` with no
-//! diagnostic. The negative-test parity here is what locks the gap so
-//! the follow-up workstream cannot silently land without removing this
-//! test or replacing it with the structured-rejection contract.
-//!
-//! Concretely:
-//!
-//! 1. **Near-eligible BLAS helper — F64 output**: `summarize_blas_helper_from_parts`
-//!    returns `None` (silent). The sparse path's `try_summarize_sparse_helper`
-//!    correctly reports `NotEligible` because the helper has no sparse op.
-//!    Net effect at the host-program lowering layer: no diagnostic.
-//! 2. **Near-eligible BLAS helper — rank-3 shape (not rank-2 helper-body)**:
-//!    same silent miss.
-//! 3. **Near-eligible BLAS helper — operand is a Mul, not a Load**:
-//!    same silent miss.
-//!
-//! If a future commit closes this follow-up by mirroring the
-//! `SparseSummaryAttempt` enum for BLAS, these assertions will need to
-//! be updated (and the §5 register entry can be marked closed).
+//! BLAS specialization controls for f32, integer, and non-matmul
+//! helper DAGs. The sparse recognizer reports `NotEligible` for these
+//! non-sparse shapes. Structured BLAS rejection coverage lives in
+//! `host_blas_summary_diagnostics.rs`.
 
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::host::{
@@ -118,39 +87,6 @@ fn build_matmul_helper(prim: Prim) -> (Dag, Vec<HostTensorInput>, TensorType) {
         },
     ];
     (dag, inputs, mat(prim, 8, 4))
-}
-
-/// Regression lock for the P0 fix: F64 matmul must NOT be replaced
-/// with `RiscOp::BlasMatmul`.
-///
-/// The IR-level specializer (`chelis_ir::specialize::specialize_for_blas`)
-/// gained a precision filter in `detect_matmul_pattern` so a non-F32
-/// matmul subgraph stays on the generic `expand+mul+sum` path. Defense-
-/// in-depth: both `emit_blas_matmul` sites (C and HIP) panic on non-F32.
-/// This test locks the canonical-site filter so a regression that drops
-/// the precision check is visible immediately.
-#[test]
-#[ignore = "WS-A2: F64 matmul subgraphs now route through cblas_dgemm; the W5 P0 fail-closed assumption no longer holds."]
-fn f64_matmul_helper_specializer_stays_off_blas_path() {
-    let (dag, inputs, output) = build_matmul_helper(Prim::F64);
-    let sparse_result = try_summarize_sparse_helper_for_test(&dag, &inputs, &output);
-    // The sparse path correctly says NotEligible: no sparse op in the body.
-    assert!(
-        matches!(sparse_result, Err(SparseSummaryAttempt::NotEligible)),
-        "sparse summarizer should report NotEligible for a BLAS-shaped helper; \
-         got {sparse_result:?}"
-    );
-
-    let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
-    let blas_node = specialized
-        .nodes()
-        .iter()
-        .find(|n| matches!(n.op, RiscOp::BlasMatmul { .. }));
-    assert!(
-        blas_node.is_none(),
-        "F64 matmul must not produce RiscOp::BlasMatmul (cblas_sgemm is F32-only); \
-         the precision filter at specialize.rs::detect_matmul_pattern has regressed",
-    );
 }
 
 /// Regression lock — Int32 matmul stays off the BLAS path.
@@ -258,19 +194,10 @@ fn non_matmul_shape_helper_silently_misses_blas_summary() {
         !has_blas,
         "Add-rooted helper must NOT be recognized as matmul; got BlasMatmul"
     );
-    // The silent-rejection observable today: no SummaryRejection is
-    // produced for this case (no enum-matchable diagnostic). The fix
-    // is the M5-follow-up workstream.
 }
 
-/// Test 3: A BLAS-shaped helper whose operand is a constant (not a Load),
-/// e.g. `matmul(a, const_3x4)`. The summarizer requires
-/// `helper_load_input_index` to resolve both operands to helper inputs;
-/// a `Const` operand returns `None` from that helper, silently
-/// disqualifying the BLAS summary.
-///
-/// This exercises a real near-eligible miss: simple wrappers that
-/// embed a constant matrix lose BLAS specialization silently.
+/// A constant operand is not a direct helper input, so this DAG does
+/// not qualify for the direct-input BLAS summary.
 #[test]
 fn const_operand_helper_silently_misses_blas_summary() {
     let mut dag = Dag::new();
@@ -357,6 +284,4 @@ fn const_operand_helper_silently_misses_blas_summary() {
         "sparse summarizer should report NotEligible for a BLAS-shaped const-operand helper; \
          got {sparse_result:?}"
     );
-    // The BLAS summary is silently None today. There is no `Err(BlasSummaryAttempt::Rejected{
-    // class: NonLoadOperand, ... })` analog. THAT is the §5 follow-up gap.
 }

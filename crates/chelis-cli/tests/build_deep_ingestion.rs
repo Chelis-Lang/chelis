@@ -116,13 +116,8 @@ fn build_dp_with_deep_flag_is_a_noop_relative_to_auto_detect() {
 
     // Both invocations took the Deep path. Byte equality is the
     // strongest correct assertion for "flag is a no-op": same input,
-    // same path, same output. Previously a UnordMap-iteration-order
-    // non-determinism bug in `emit_input_shape_preamble` forced this
-    // test to drop down to span-set equality; that bug was fixed by
-    // sorting the iteration over input labels (see
-    // spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md
-    // and crates/chelis-backend-c/tests/codegen_determinism.rs for the
-    // dedicated regression test).
+    // same path, same output. Entry validation uses stable ABI slot
+    // order, so generated source is byte-identical.
     assert_eq!(
         auto_src, flag_src,
         "`--deep` on a `.dp` file must produce byte-identical C as auto-detect"

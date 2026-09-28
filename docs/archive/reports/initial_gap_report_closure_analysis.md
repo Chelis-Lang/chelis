@@ -112,7 +112,3 @@ the subject of M1→W7 closure:
 - Per-gap detail with code citations: [`identified_gaps.md`](identified_gaps.md)
 - Root-cause taxonomy + cost picture: [`gap_synthesis.md`](gap_synthesis.md)
 - HIP environment runbook (used by `scripts/hip_test.py`): [`docs/local_hip_environment.md`](../../local_hip_environment.md)
-- Filed upstream bugs:
-  - [`spec/upstream-bugs/phase3h-gather-ad-incomplete.md`](../../../spec/upstream-bugs/phase3h-gather-ad-incomplete.md) (Gap 3)
-  - [`spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md`](../../../spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md) (Gap 4)
-  - [`spec/upstream-bugs/dead-mul-after-blas-specialization.md`](../../../spec/upstream-bugs/dead-mul-after-blas-specialization.md) (Gap 6)

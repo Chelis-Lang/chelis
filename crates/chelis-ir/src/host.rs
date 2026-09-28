@@ -1384,7 +1384,7 @@ pub struct HostSparseOpSummary {
 }
 
 // =========================================================================
-// W4-A — M5(c) structured rejection diagnostics
+// Structured helper-summary rejection diagnostics
 // =========================================================================
 //
 // `SummaryRejection` is the public diagnostic shape emitted when a
@@ -1396,9 +1396,7 @@ pub struct HostSparseOpSummary {
 // string. The acceptance oracle for this contract is
 // `crates/chelis-cli/tests/cross_library_semantic_gap_diagnostics.rs`.
 //
-// Variant naming mirrors W3-B's seven enumerated rejection categories
-// (see `crates/chelis-ir/tests/host_sparse_summary.rs` and the cli
-// counterparts in `crates/chelis-cli/tests/cross_library_sparse_summaries.rs`):
+// Sparse helper rejections have seven specific categories:
 //
 //   1. `MultipleRoots`               — helper body has multiple DAG roots
 //   2. `MultipleReturnPaths`         — helper body branches via if/then/else
@@ -1408,10 +1406,8 @@ pub struct HostSparseOpSummary {
 //   6. `PayloadDTypeMismatch`        — values/target/updates/output disagree
 //   7. `WildcardDim`                 — `Named("*", None)` placeholder in input/output
 //
-// Three additional variants (`UnrecognizedShape`, `NonContiguousLayout`,
-// `RankMismatch`) are reserved for future helper-shape categories that
-// the current summarizer does not check today but the plan's pinned
-// shape names explicitly.
+// `UnrecognizedShape`, `NonContiguousLayout`, and `RankMismatch`
+// reserve more specific categories for helper-shape failures.
 
 /// Identifies the rejected helper for diagnostic attribution.
 ///
@@ -1569,32 +1565,14 @@ pub enum SummaryRejectionClass {
     /// mismatches through `NonLoadOperand` (the type-equality check on
     /// the Load op fails); reserved for future explicit rank checks.
     RankMismatch,
-    // ---------------------------------------------------------------
-    // W6 Task A — BLAS-recognizer rejection classes.
-    //
-    // The BLAS recognizer (`try_summarize_blas_helper` in
-    // `crates/chelis-ir/src/host.rs`) exposes six structural failure
-    // points where a helper-DAG that *almost* matched
-    // `RiscOp::BlasMatmul` was rejected. Each is a distinct
-    // BLAS-prefixed variant: the source recognizer is encoded in the
-    // variant name so tooling pattern-matching on the enum sees both
-    // "what shape failed" and "which recognizer rejected it" without
-    // needing to inspect an out-of-band recognizer-identity tag.
-    //
-    // The variant names are NOT collapsed with the sparse-named
-    // equivalents (`MultipleRoots`, `NonLoadOperand`) even though the
-    // detail payload shapes coincide today; future divergence is
-    // cheap to absorb when each path owns its own variant.
-    // ---------------------------------------------------------------
+    // BLAS-prefixed classes identify the recognizer as well as the
+    // rejected shape without a separate recognizer tag.
     /// BLAS helper DAG (post-specialize) has more than one root.
     /// Mirrors `MultipleRoots` for sparse helpers but identifies the
     /// BLAS recognizer as the source.
     BlasMultipleRoots,
-    /// BLAS helper's declared output precision is not `f32`. Today
-    /// the recognizer requires `f32` output for the BlasMatmul
-    /// path; non-`f32` outputs (e.g. an `f64` matmul helper) silently
-    /// skipped through `Option::None` before W6 — now they are
-    /// diagnosed.
+    /// BLAS helper's declared output precision is not supported by
+    /// the matmul summary.
     BlasOutputPrecisionMismatch,
     /// The helper's specialized DAG root is not `RiscOp::BlasMatmul`,
     /// so the recognizer could not extract `batch_dims`, `m`, `n`,
@@ -1606,10 +1584,8 @@ pub enum SummaryRejectionClass {
     /// helper input. Mirrors `NonLoadOperand` for sparse helpers but
     /// identifies the BLAS recognizer as the source.
     BlasNonLoadOperand,
-    /// At least one of the helper's input tensors has precision other
-    /// than `f32`. Today the recognizer requires every helper input to
-    /// be `f32`; mixed-precision inputs (e.g. an `f32 @ i8` quantized
-    /// matmul helper) silently skipped before W6.
+    /// At least one helper input has a precision unsupported by the
+    /// matmul summary.
     BlasInputPrecisionMismatch,
     /// One of `batch_dims`, `m`, `n`, `k` could not be bound to any
     /// helper input dim by name. The recognizer requires every
@@ -1700,14 +1676,8 @@ pub enum SummaryRejectionDetail {
     /// NonContiguousLayout, RankMismatch). Carries no structured
     /// information today.
     Reserved,
-    // ---------------------------------------------------------------
-    // W6 Task A — BLAS-recognizer detail payloads.
-    //
-    // Each variant mirrors a `SummaryRejectionClass::Blas*` variant.
-    // The payloads name the observed-precision / failing-dim values
-    // so tooling can distinguish e.g. "f64 helper rejected" from
-    // "i32 helper rejected" without re-running the recognizer.
-    // ---------------------------------------------------------------
+    // Each BLAS payload mirrors a `SummaryRejectionClass::Blas*`
+    // variant and carries the observed precision or failing dimension.
     BlasMultipleRoots {
         /// Number of DAG roots observed in the helper's
         /// post-specialize body.
@@ -1835,11 +1805,8 @@ impl fmt::Display for SummaryRejectionDetail {
     }
 }
 
-/// Public diagnostic shape for a rejected summary callsite. This is
-/// the central correctness contract of W4-A. Downstream consumers
-/// (CLI diagnostic reporter, red-team tests, future tooling) MUST
-/// pattern-match on the enum variants and struct fields rather than
-/// parsing the `Display` rendering.
+/// Public diagnostic shape for a rejected summary callsite. Downstream
+/// consumers match the enum variants and fields, not `Display` text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryRejection {
     pub rejection_class: SummaryRejectionClass,
@@ -6603,10 +6570,7 @@ fn finish_tensor_helper_product(
             None | Some(Err(SparseSummaryAttempt::NotEligible)) => (None, None),
             Some(Err(SparseSummaryAttempt::Rejected(rejection))) => (None, Some(rejection)),
         };
-    // W6 Task A — drive the BLAS recognizer through the structured
-    // entry point so a BLAS-near rejection threads through to
-    // `summary_rejection` as a `Blas*` `SummaryRejection` (rather
-    // than the prior silent `Option::None` drop).
+    // A BLAS-near rejection becomes a structured `summary_rejection`.
     let (blas_specialization, blas_rejection) =
         match summarizable.then(|| try_summarize_blas_helper(&dag, &inputs, &output)) {
             Some(Ok(spec)) => (Some(HostTensorSpecialization::BlasMatmul(spec)), None),
@@ -6845,7 +6809,7 @@ fn lower_staged_host_plan(
     Ok(result)
 }
 
-/// Outcome of the structured BLAS-helper recognizer (W6 Task A).
+/// Outcome of the structured BLAS-helper recognizer.
 /// Mirrors `SparseSummaryAttempt`: distinguishes "not even a BLAS
 /// helper" (silent skip) from "near-eligible but rejected for a
 /// specific structural reason" (emit a diagnostic).
@@ -6890,22 +6854,19 @@ pub fn try_summarize_blas_helper_for_test(
 /// `RiscOp::Load`s referencing helper inputs.
 ///
 /// Rejection cases — each maps to a `SummaryRejectionClass::Blas*`
-/// variant (the six W6 Task A variants):
+/// variant:
 ///
-///   * `BlasOutputPrecisionMismatch` — helper output precision is not `f32`
+///   * `BlasOutputPrecisionMismatch` — helper output precision is unsupported
 ///   * `BlasMultipleRoots` — specialized DAG has more than one root
 ///   * `BlasNotMatmulPattern` — root op is not `BlasMatmul`, or its
 ///     operand count / output precision doesn't match the BlasMatmul
 ///     shape
 ///   * `BlasNonLoadOperand` — a matmul operand is not a direct `Load`
-///   * `BlasInputPrecisionMismatch` — a helper input has precision
-///     other than `f32`
+///   * `BlasInputPrecisionMismatch` — a helper input precision is unsupported
 ///   * `BlasDimensionBindingFailure` — a matmul dim (batch/M/N/K)
 ///     cannot be bound to any helper input
 ///
-/// The pre-eligibility check that produces `NotEligible` (silent skip,
-/// not a diagnostic) fires when the specialized DAG has zero roots —
-/// the body had nothing for the BLAS recognizer to look at.
+/// `NotEligible` means the helper has no BLAS-near shape to diagnose.
 fn try_summarize_blas_helper(
     dag: &crate::Dag,
     inputs: &[HostTensorInput],
@@ -6968,9 +6929,8 @@ fn try_summarize_blas_helper(
     }
     // From here we are committed: the specialized DAG is BLAS-near
     // and has exactly one root. Output-precision is the next gate.
-    // WS-A1/A2/A3 lift: f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
-    // with f32 accumulator) are all admitted; integer matmul is rejected
-    // upstream at the type checker per spec §5.7.2.
+    // The summary admits f32, f64, bf16, and f16. Integer matmul is
+    // rejected by the type checker (spec §5.7.2).
     if !matches!(
         output.precision,
         Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
@@ -7050,9 +7010,7 @@ fn try_summarize_blas_helper(
         .iter()
         .map(|input| input.ty.clone())
         .collect::<Vec<_>>();
-    // WS-A1/A2/A3: admit f32 (sgemm), f64 (dgemm), bf16/f16 (hipblasGemmEx
-    // with f32 accumulator). Integer matmul is rejected upstream at the
-    // type checker per spec §5.7.2 so it never reaches here.
+    // Helper inputs use the same supported precision set as outputs.
     if let Some((input_index, ty)) = input_tys
         .iter()
         .enumerate()

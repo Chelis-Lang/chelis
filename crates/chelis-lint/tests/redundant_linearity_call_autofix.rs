@@ -1,24 +1,12 @@
-//! Integration tests for `redundant-linearity-call` autofix re-enablement.
-//!
-//! The autofix was disabled by 477bd0d because the source-only lint walker
-//! could not prove that stripping an explicit `copy()` preserved semantics.
-//! After Item 1 of the 0.7.6 toolchain hygiene workstream landed (PR #29),
-//! implicit linearity handles both within-call fan-out and cross-statement
-//! var-RHS aliasing, which is the broad class the lint targets.
-//!
-//! These fixtures pin the re-enablement scope:
+//! `redundant-linearity-call` autofixes preserve the typed program's
+//! behavior across direct calls, fan-out, aliases, and higher-order
+//! operations. These fixtures cover:
 //!
 //! - F1 trivial strip: `realize(copy(w))` -> `realize(w)`
 //! - F2 within-call fan-out: `mul(copy(w), copy(w))` -> `mul(w, w)`
 //! - F3 cross-statement var-RHS aliasing:
 //!   `let alias = copy(x); mul(x, alias)` -> `let alias = x; mul(x, alias)`
-//! - F4 architectural invariant: every flagged program survives the typed
-//!   pipeline after autofix.
-//!
-//! After implicit-copy fan-out v3 landed (PR #91), the typed-pipeline gate
-//! also accepts two additional shapes that previously left the warning
-//! without a `[fix]` marker:
-//!
+//! - F4 every flagged program survives the typed pipeline after autofix
 //! - F5 Shape A borrow-to-owned at return position: `def f[a](x: &T) -> T = copy(x)`
 //! - F6 Shape A with use-site driver
 //! - F7 Shape B grad fan-out: `grad(f, wrt=p)(copy(args)...)` followed by
@@ -31,8 +19,6 @@
 //!   (b) `chelis lint --fix` strips it
 //!   (c) the stripped output parses, type-checks, and evaluates identically
 //!
-//! See `docs/investigations/redundant_linearity_autofix_recoverage_diagnosis.md`
-//! for the Wave 5 / Item 6 follow-on diagnosis.
 
 use assert_cmd::Command;
 use std::fs;
@@ -162,12 +148,8 @@ result = f(to_tensor([1.0, 2.0]))
 
 #[test]
 fn f3_cross_statement_var_rhs_aliasing() {
-    // After PR #29 (Item 1), implicit linearity allows reads through a
-    // var-RHS let alias. The lint flags the explicit `copy()` on the RHS
-    // of an alias binding because implicit linearity now inserts the
-    // equivalent IR. Surf uses block binding syntax `x = expr` (not
-    // `let x = expr;`) per `spec/02-surf-syntax.md` §P5. Avoid
-    // tuple/record destructure (Linearity-F2 silent false-negative).
+    // A var-RHS alias permits later borrows, so an explicit copy on
+    // the binding RHS is redundant.
     let source = "\
 def f(x: tensor[2, f32]) -> tensor[2, f32] = {
   alias = copy(x)
@@ -179,15 +161,8 @@ result = f(to_tensor([1.0, 2.0]))
     assert_autofix_strips_and_preserves("f3_cross_statement_var_rhs_aliasing", source);
 }
 
-/// Architectural invariant: enumerate a small adversarial corpus and assert
-/// that, for every program in which (a) the pre-fix source type-checks and
-/// evaluates, and (b) the lint flags any `copy()`, the autofix output
-/// passes `chelis check` and evaluates identically.
-///
-/// Excludes tuple/record destructure programs per the Linearity-F2 silent
-/// false-negative (see `docs/archive/reports/gap_synthesis.md` §5). Programs whose pre-fix
-/// form does not type-check are skipped — they aren't a legitimate target
-/// for the autofix invariant.
+/// For every checked, evaluable corpus program whose copy is flagged
+/// as redundant, the autofix remains checked and evaluates identically.
 #[test]
 fn f4_architectural_invariant_corpus() {
     let corpus: &[(&str, &str)] = &[
@@ -313,11 +288,8 @@ result = f(to_tensor([1.0, 2.0]))
     );
 }
 
-/// F5: Shape A borrow-to-owned at return position. Pre-W4-A, the
-/// typecheck phase rejected the bare-`x` candidate so the typed-pipeline
-/// gate dropped the strip. PR #91 (commit 80f6cf1) added a return-position
-/// implicit-copy coercion that makes the stripped form type-check, which
-/// allows the autofix to accept the candidate.
+/// F5: A return-position implicit copy permits a borrowed input to
+/// satisfy an owned result after redundant source `copy()` is stripped.
 #[test]
 fn f5_shape_a_borrow_return_position() {
     let source = "\
@@ -347,11 +319,8 @@ result = driver(input)
     assert_autofix_strips_and_preserves("f6_shape_a_with_use_site_driver", source);
 }
 
-/// F7: Shape B grad fan-out. Two grad calls of the same loss with a
-/// trailing borrow-read of the arg. Pre-W4-A, the linearity checker
-/// rejected the stripped candidate because grad-app was treated as a
-/// Structural consume. PR #91 promoted grad-app args to borrows, so
-/// the stripped candidate now passes linearity.
+/// F7: Gradient applications borrow their arguments, so a trailing
+/// borrow remains valid after redundant copies are stripped.
 #[test]
 fn f7_shape_b_grad_fanout() {
     let source = "\
@@ -404,10 +373,8 @@ result = sgd_step(x, y, w, b)
     assert_autofix_strips_and_preserves("f8_shape_b_grad_fanout_four_arg_mse", source);
 }
 
-/// F9: Shape B vmap fan-out. PR #91 extended the observational
-/// higher-order callee classification to vmap, so vmap-app args are also
-/// promoted to borrows. The redundant `copy()` around the vmap input is
-/// now safely strippable.
+/// F9: A vmap application borrows its input, so the surrounding
+/// redundant copy can be stripped.
 #[test]
 fn f9_shape_b_vmap_observational() {
     let source = "\
@@ -425,20 +392,9 @@ result = step(ws)
     assert_autofix_strips_and_preserves("f9_shape_b_vmap_observational", source);
 }
 
-/// F10 (Lint-RedundantLinearityCopyOnBorrowWarn-F1, 0.7.9 cleanup):
-/// the rule must not emit its advisory warning when stripping `copy()`
-/// would leave the program with a borrow-to-owned type mismatch the
-/// implicit-copy inserter cannot bridge. Nautilus reports 137+ such
-/// false positives in `src/linalg.ch` against 0.7.8.
-///
-/// Shape: `consume_owned(copy(y))` where `y: &tensor[n, f32]` and
-/// `consume_owned` takes an owned tensor. Today (pre-fix): the warning
-/// fires without a `[fix]` marker because the CLI driver's
-/// typed-pipeline gate correctly drops the rewrite, but the warning is
-/// emitted before that gate runs. After fix: opting the rule into
-/// `check_mirrors_fix=true` makes the CLI driver mirror the gate at
-/// the warning-emit path, so the warning is suppressed when no safe
-/// rewrite is available.
+/// F10: No warning is emitted when stripping `copy()` would leave
+/// a borrow-to-owned type mismatch. The typed-pipeline gate rejects
+/// that rewrite, and the warning mirrors the gate.
 #[test]
 fn f10_warning_suppressed_when_typed_pipeline_rejects_strip_on_borrow() {
     let dir = tempdir().expect("tempdir");

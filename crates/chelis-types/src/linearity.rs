@@ -58,15 +58,8 @@ enum BindingState {
     Consumed(ConsumeSite),
 }
 
-/// Discrimination axis on a consume site (Linearity-F1).
-///
-/// Replaces the string-prefix check on `ConsumeSite::description`
-/// (formerly at `read_or_error`) with a typed field. Phase 0 spec
-/// lock (`spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract 1)
-/// pins this as two variants; tuple-destructure tmp bindings are
-/// handled as `Aliasing` (for the `let __chelis_tmp = (var ...)`
-/// shape) or `Structural` (for the `(tuple-get ...)` reads) by the
-/// same rules as any other consume.
+/// Whether a binding shares a value or consumes it. This classification
+/// is independent of the site description used in diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsumeKind {
     /// `let alias = x` and similar var-RHS bindings.  At the IR
@@ -487,11 +480,6 @@ struct Checker {
 
 impl Checker {
     fn push_diagnostic(&mut self, error: CheckError) {
-        // Linearity-F2 / F3 W2 cascade close: every linearity
-        // violation is an error.  W1 PR 1's destructure-cascade
-        // warning channel closed once the corpus survey confirmed
-        // zero surfaced warnings (see
-        // `docs/investigations/linearity_destructure_cleanup_survey.md`).
         self.errors.push(error);
     }
 }
@@ -870,23 +858,10 @@ impl Checker {
                     if function_declaration_body(children).is_some() {
                         return;
                     }
-                    // V2-F4: top-level `def name() = x` where the body is a
-                    // bare `(var x)` of an owned-linear type is an
-                    // aliasing binding consume; at the IR level
-                    // `lower_var` returns the cached `bindings["x"]` node
-                    // for both `(var x)` and the new top-level `name`, so
-                    // the value is structurally shared, not destroyed.
-                    // Mirror the `check_let` path
-                    // (`linearity.rs:397-407`) by tagging the consume
-                    // with a `"binding `name` at <site>"` description and
-                    // `ConsumeKind::Aliasing`. The kind feeds the PR #29
-                    // `read_or_error` tolerance (typed via `ConsumeKind`
-                    // since Linearity-F1), letting subsequent borrow
-                    // reads of the original variable succeed. Without
-                    // this branch the body would fall through to
-                    // `check_expr -> consume_var_expr(generic_site)` and
-                    // record a `Structural` consume, which the tolerance
-                    // does not match.
+                    // A top-level `def name = x` shares the same lowered
+                    // node as `x`. Classify its var body as an aliasing
+                    // binding, as `check_let` does, so a later borrow of
+                    // `x` remains valid.
                     if is_var_expr(body) && self.expr_holds_key(body, scope) {
                         // [04-LIN-9]: `def a = b` of a key holder moves the
                         // key into `a`; it is not an aliasing share.
@@ -2118,12 +2093,9 @@ impl Checker {
     }
 
     fn read_or_error(&mut self, name: &str, expr: &Expr, scope: &LinearScope) {
-        // Linearity-AliasedConsume-F1: when `name` is an alias, the
-        // structural consume on it would have forwarded to the
-        // underlying source (see `consume_var_expr`).  Check the
-        // alias chain's terminal generation first so borrows of either
-        // the alias or the source surface the violation symmetrically.
-        // An unbound name matches the old missing-entry no-op.
+        // A structural consume of an alias is recorded on its source
+        // generation. Check that generation so reads through either
+        // name observe the same consumed state.
         let Some(use_id) = scope.top_id(name) else {
             return;
         };
@@ -2131,25 +2103,9 @@ impl Checker {
         let Some(BindingState::Consumed(site)) = scope.state(resolved) else {
             return;
         };
-        // Var-RHS let-bindings (`alias = x`) are `ConsumeKind::Aliasing`
-        // consumes: at the IR level `lower_let` maps `alias` to the
-        // same NodeId as `x` (the `Load { name: "x" }` node), so the
-        // value is structurally shared, not destroyed.  Per
-        // `spec/design/implicit_linearity.md` §"Copy Insertion" and
-        // "Borrows do not count as fan-out", later borrow-reads
-        // (`mul`, `add`, `matmul`, ...) of `x` must succeed: the DAG
-        // keeps `x` and `alias` pointing to the same source and the
-        // Copy-insertion pass at `crates/chelis-ir/src/lower.rs:364`
-        // only forks values reached by multiple `Realize | Drop |
-        // Store` consumers.  Real consumes (realize / drop / store,
-        // app-arg, pipe-stage, closure capture, match scrutinee)
-        // remain hard errors here: once a value is truly gone,
-        // borrow-reads of it would alias freed storage at runtime.
-        //
-        // Linearity-F1 (PR #83) replaced the prior
-        // string-prefix check on the description with this typed
-        // discrimination via `ConsumeKind`.  The description text
-        // stays for diagnostic rendering only.
+        // Binding an alias shares the value and permits later borrows.
+        // A structural consume invalidates later borrows. The site
+        // description below is used only to explain the error.
         if matches!(site.kind, ConsumeKind::Aliasing) {
             return;
         }
@@ -3555,11 +3511,6 @@ fn tuple_get_element_type<'a>(
 /// regular bindings (where implicit Copy insertion covers consuming
 /// fan-out).
 ///
-/// chelis#1200: this marker previously drove a block-scoped depth
-/// counter, which made the F2 error fire for every variable in the
-/// remainder of an enclosing block.  The marker itself was never the
-/// defect and is unchanged; only its consumer moved to per-binding
-/// marks.
 fn bind_introduces_destructure_tmp(bind_expr: &Expr) -> bool {
     match bind_expr.carrier() {
         ExprCarrier::DecodedNode(DeepTag::Bind, metadata, _) => metadata.destructure().is_some(),
@@ -3858,9 +3809,7 @@ where
 /// Walk top-level declarations and return the set of ADT names whose
 /// definitions (transitively) carry a tensor field. Used by the
 /// linearity checker to recognize `&MyParams` as a valid borrow when
-/// `MyParams` is a record with a `tensor[...]` field — previously the
-/// `t-adt` arm of the tensor-evidence classifier only inspected the ADT's
-/// type *arguments*, missing tensor fields declared in the variant.
+/// `MyParams` is a record with a `tensor[...]` field.
 ///
 /// # Caller contract
 ///

@@ -1200,8 +1200,7 @@ impl<'plan> Emitter<'plan> {
         // comment context. Even though LoadStoreName's constructor enforces
         // identifier-grammar (so newlines / NUL / DEL cannot reach here),
         // route through the shared comment-context sanitizer to lock the
-        // architectural pattern from
-        // spec/upstream-bugs/producer-string-sanitization.md: every
+        // architectural pattern: every
         // producer-supplied string into a comment context goes through
         // `sanitize_for_comment`.
         let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);

@@ -888,12 +888,8 @@ pub(crate) fn build_type_env_from_library_in_session(
 /// `check_ir_with_context(&TypeEnv::empty(), library_exprs)` would
 /// return.
 ///
-/// This avoids the duplicated work that occurs when callers run
-/// [`build_type_env_from_library`] followed by
-/// `check_ir_with_context(empty, library)` — both paths separately
-/// run a full HM inference + annotation pass over the same library
-/// exprs. Per `docs/archive/perf/perf_baseline_investigation.md`, the unified path
-/// saves ~16s of duplicated inference + annotation on Coral.
+/// This avoids running full HM inference and annotation twice when
+/// callers need both the type environment and checked library.
 ///
 /// Behavior contract:
 /// - The returned `TypeEnv` is identical (modulo non-determinism in

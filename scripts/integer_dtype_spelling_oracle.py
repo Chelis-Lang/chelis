@@ -382,12 +382,6 @@ def boundary_contract_errors() -> list[str]:
     )
     errors.extend(
         _forbid(
-            "docs/archive/reports/gap_synthesis.md",
-            ("signed `int32` / `int64`",),
-        )
-    )
-    errors.extend(
-        _forbid(
             "spec/design/remediation_roadmap.md",
             ("`JsonInt(int64)`", "`cast(3.5, int32)`"),
         )

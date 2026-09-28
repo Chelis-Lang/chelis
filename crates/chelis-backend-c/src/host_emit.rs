@@ -6973,12 +6973,8 @@ impl<'a> HostEmitter<'a> {
                         "chelis_string_from_scalar",
                         [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
                     ),
-                    // to_string is an observation exit: the f32 scalar
-                    // renders at ITS width through the runtime's own-width
-                    // formatter ([05-OBS-2]; the former promote-to-double
-                    // funnel carried f64-image digits and split this exit
-                    // from `print` of the same stored value - PR #863
-                    // round-1 F1).
+                    // to_string renders the f32 scalar at its own width
+                    // through the tagged formatter ([05-OBS-2]).
                     HostType::Float32 => EmittedExpr::call(
                         "chelis_string_from_scalar",
                         [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
@@ -7413,43 +7409,6 @@ impl<'a> HostEmitter<'a> {
         Ok(())
     }
 
-    // W2 PR 3 of the 0.7.8 compiler cleanup workstream
-    // (`CRuntime-F32Coupling`).  The four `*_elementwise` helpers
-    // below previously wrote `t->data[i]` directly.  `chelis_tensor`
-    // declares `data` as `float *` in the public runtime header so
-    // every such access decoded the buffer at the f32 4-byte stride
-    // regardless of `(*t).dtype` -- the same bug class closed by
-    // PR #64 (CastMemcpy), PR #67 (ReshapeMemcpy), and PR #72
-    // (PrintTensorF64) on the storage side, and by PR #84/#86 on the
-    // Rust runtime side.  These helpers now emit an outer
-    // `switch (target->dtype)` and read/write through typed pointer
-    // casts in every arm.
-    //
-    // The original 0.7.8 workstream's supported precisions were f32,
-    // f64, i32, i64, and bool (see
-    // `spec/design/archive/compiler_cleanup_0_7_8_spec_lock.md` Contract 2).
-    // Each arm selects an element type that matches its representation.
-    // CHELIS_DTYPE_BOOL uses the canonical one-byte `uint8_t` payload.
-    // CHELIS_DTYPE_F32 uses `(float*)`, CHELIS_DTYPE_I32 uses `(int32_t*)`,
-    // CHELIS_DTYPE_F64 uses `(double*)`, and CHELIS_DTYPE_I64 uses `(int64_t*)`.
-    //
-    // The four helpers split into two pairs:
-    //
-    //   * `assign_tensor_binary_elementwise` /
-    //     `assign_tensor_unary_elementwise` take a raw C operator
-    //     (`+`, `-`, `*`, `/`, `!`, unary `-`) and emit the operator
-    //     for every supported dtype arm.  All arms are semantically
-    //     well-defined for the supported operators.
-    //
-    //   * `assign_tensor_binary_func_elementwise` emits direct operand
-    //     selection for every represented dtype. Float arms preserve the
-    //     first NaN and every lhs equality bit-pattern; integer and Bool arms
-    //     select the lhs on equality.
-    //
-    //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
-    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32.
-    //     I32, F64, I64, and Bool abort rather than convert through
-    //     binary32 or treat bool storage as a float payload.
     fn assign_checked_tensor_cast(&mut self, target: &str, input: &str, plan: CheckedCastPlan) {
         if plan.kind() == CheckedCastKind::Identity {
             self.lines
@@ -9872,8 +9831,7 @@ impl<'a> HostEmitter<'a> {
         // SURROUNDING C string literal must lex correctly. Rust's `{:?}`
         // emits `\u{XX}` for forbidden bytes, which is NOT valid C —
         // route through the format-string sanitizer (which emits
-        // C-compatible `\xNN`/`\\`/`\"` escapes) per
-        // spec/upstream-bugs/producer-string-sanitization.md.
+        // C-compatible `\xNN`/`\\`/`\"` escapes).
         let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
         self.lines.push(format!(
             "{}printf(\"%s = \", \"{safe_name}\");",

@@ -643,8 +643,7 @@ impl HipEmitter {
         e.indent = 1;
 
         // Producer-supplied `func_name` flows into the format-string
-        // context of the fprintf below; sanitize per
-        // spec/upstream-bugs/producer-string-sanitization.md so a
+        // context of the fprintf below; sanitize it so a
         // forbidden byte cannot break the C string literal or be misread
         // as a `%`-specifier.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
@@ -825,8 +824,7 @@ impl HipEmitter {
         ));
         self.indent = 1;
 
-        // Format-string-context sanitization for `func_name` per
-        // spec/upstream-bugs/producer-string-sanitization.md.
+        // Escape `func_name` before emitting it in a format string.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
 
         self.line(&format!("if (n_in != {expected_inputs}) {{"));
@@ -1064,12 +1062,10 @@ impl HipEmitter {
         // deterministic so the emitted host code is byte-identical
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
-        // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
-        // Producer-supplied `func_name` flows into format-string context;
-        // sanitize per spec/upstream-bugs/producer-string-sanitization.md.
+        // Producer-supplied `func_name` flows into a format string.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         for (label, _) in sorted_labels {
             let ty = &input_types[label];
@@ -1290,12 +1286,11 @@ impl HipEmitter {
         // deterministic so the emitted device-side code is byte-
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
-        // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
         self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
-        // Format-string-context sanitization for producer-supplied
-        // strings per spec/upstream-bugs/producer-string-sanitization.md.
+        // Escape producer-supplied strings before emitting them in a
+        // format string.
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
         for (label, _) in sorted_labels {
             let ty = &input_types[label];
@@ -4792,7 +4787,7 @@ impl HipEmitter {
         // concern but is out of scope for the comment-control-byte
         // sanitizer (which targets the line-comment context). The
         // control-byte sanitizer below still applies as defense in
-        // depth per spec/upstream-bugs/producer-string-sanitization.md.
+        // depth.
         let safe_name = chelis_ir::span_sanitize::sanitize_for_comment(name);
         self.line(&format!("/* store: {safe_name} */"));
     }

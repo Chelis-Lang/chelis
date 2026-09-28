@@ -496,10 +496,6 @@ remains intact.
 ## 7. Cross-references
 
 - Per-gap detail: [`identified_gaps.md`](identified_gaps.md)
-- Filed upstream bugs:
-  - [`spec/upstream-bugs/phase3h-gather-ad-incomplete.md`](../../../spec/upstream-bugs/phase3h-gather-ad-incomplete.md) (Gap 3)
-  - [`spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md`](../../../spec/upstream-bugs/matmul-rank2-rule-vs-einsum-shipped.md) (Gap 4)
-  - [`spec/upstream-bugs/dead-mul-after-blas-specialization.md`](../../../spec/upstream-bugs/dead-mul-after-blas-specialization.md) (Gap 6)
 - Locked regression tests:
   - `crates/chelis-cli/tests/copy_elision.rs` (Gap 1)
   - `crates/chelis-backend-c/tests/pattern_matcher_brittleness.rs` (Gap 2)
