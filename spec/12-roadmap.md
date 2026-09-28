@@ -104,9 +104,7 @@ design in `spec/design/differentiable_language.md`.
 | **D6** | Documentation, examples, `chelis-diff` shell library, on-ramp for PyTorch/JAX users. | Planned |
 
 Phases D1–D5 are sequential because each builds on the prior; D6 can
-develop in parallel with D5 once D4 lands. Committing to D1 reclassifies
-IR-SelectOp-F1, IR-MatchLowering-F1, and IR-FirstClassFn-F1 from
-"surface-when-forced" to required prerequisites.
+develop in parallel with D5 once D4 lands.
 
 ## Hydronnx — ONNX shell (committed scope)
 
