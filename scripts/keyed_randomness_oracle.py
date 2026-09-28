@@ -191,7 +191,11 @@ def nextest_command(action: str, suites: tuple[Suite, ...]) -> list[str]:
         f"(binary_id(={suite.binary}) & (" + " | ".join(f"test(={name})" for name in suite.tests) + "))"
         for suite in suites
     )
-    command = ["cargo", "nextest", action, "-p", next(iter(packages))]
+    package = next(iter(packages))
+    command = ["cargo", "nextest", action, "--locked", "-p", package]
+    if package == "chelis-compiler-api":
+        # Native execution targets require the instrumented carried runtime.
+        command.extend(["--features", "chelis-compiler-api/ownership-ledger"])
     for suite in suites:
         command.extend(["--test", suite.target])
     command.extend(["--profile", "ci-full", "--ignore-default-filter", "-E", expression])
@@ -322,7 +326,7 @@ def execute(root: Path, output: Path, environment: dict[str, str], timeout: int,
         receipt["candidate_sha"] = candidate_sha(root)
         check_retirement(root)
         receipt["retirement"] = {"status": "pass", "forbidden_markers": list(RETIRED)}
-        run_command(["cargo", "build", "-p", "chelis-cli", "-p", "chelis-runtime"],
+        run_command(["cargo", "build", "--locked", "-p", "chelis-cli", "-p", "chelis-runtime"],
                     root, environment, output, "build", timeout)
         target = Path(environment["CARGO_TARGET_DIR"])
         junit = target / "nextest/ci-full/junit.xml"

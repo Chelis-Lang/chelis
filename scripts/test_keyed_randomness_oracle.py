@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -142,11 +143,40 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(failed["status"], "fail")
         self.assertIn("changed", failed["error"])
 
+    def test_real_catalog_commands_enable_required_target_features(self):
+        for package in dict.fromkeys(suite.package for suite in oracle.SUITES):
+            suites = tuple(suite for suite in oracle.SUITES if suite.package == package)
+            manifest = tomllib.loads((oracle.ROOT / "crates" / package / "Cargo.toml").read_text())
+            targets = {target["name"]: target for target in manifest.get("test", [])}
+            for action in ("list", "run"):
+                with self.subTest(package=package, action=action):
+                    command = oracle.nextest_command(action, suites)
+                    if package == "chelis-compiler-api":
+                        self.assertIn("--features", command)
+                        self.assertEqual(command[command.index("--features") + 1],
+                                         "chelis-compiler-api/ownership-ledger")
+                        enabled = {"ownership-ledger"}
+                    else:
+                        self.assertNotIn("--features", command)
+                        enabled = set()
+                    for suite in suites:
+                        required = set(targets.get(suite.target, {}).get("required-features", []))
+                        self.assertLessEqual(required, enabled, suite.binary)
+
+    def test_build_list_and_run_lock_the_dependency_graph(self):
+        self.execute()
+        self.assertEqual(len(self.last_commands), 3)
+        for command in self.last_commands:
+            with self.subTest(command=command):
+                self.assertIn("--locked", command)
+
     def execute(self, *, end_sha="a" * 40, failure=None, missing_junit=False, failed_case=False):
         evidence = self.root / f"evidence-{len(list(self.root.glob('evidence-*')))}"
         evidence.mkdir()
         env = {"CARGO_TARGET_DIR": str(self.target)}
+        self.last_commands = []
         def command(argv, root, environment, output, label, timeout):
+            self.last_commands.append(argv)
             if failure == label and not failed_case:
                 raise oracle.OracleFailure("command failed")
             if "list" in argv:
