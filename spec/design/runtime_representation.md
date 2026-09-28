@@ -1741,6 +1741,19 @@ existing command is an addition: it executes and is reported without changing
 the required floor. Neither a previous receipt nor a regenerated selection is an
 acceptance input.
 
+The integer-unary typed-lane amendment retains both inherited Phase 0 execution
+legs in the Phase 1 manifest: integer-to-float finalization freezes its two
+native C/UBSan positive and invalid-target controls; integer device lowering
+freezes four HIP and seven Metal admission, exact-storage, shape, and rejection
+controls. The initial floors come from freshly built nextest listings in the
+Phase 1 profile. The manifest digest changes with these two added commands and
+13 required identities; every prior command, identity floor, Python floor,
+native control, and planner mutation remains unchanged. Removing either leg or
+losing any selected required identity rejects; altered manifest bytes require a
+reviewed digest. Hardware-only HIP and Metal execution remains registered
+separately and cannot be counted by these active-test receipts. This amendment
+does not change the Phase 0 foundation, mutation contract, or digest.
+
 The host/C consumer audit follows the representation owners and submissions:
 
 | Consumer mechanism | Checked authority | Executed boundary and negative controls |
