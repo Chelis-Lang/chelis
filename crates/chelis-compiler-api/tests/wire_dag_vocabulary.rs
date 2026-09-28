@@ -128,7 +128,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 21,
+        WIRE_DAG_SCHEMA_VERSION, 22,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 77);
@@ -174,6 +174,69 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
     }
     encoded.as_object_mut().unwrap().remove("schema_version");
     assert!(WireDag::from_validated_json(&encoded.to_string()).is_err());
+}
+
+#[test]
+fn resolved_global_load_has_a_v22_wire_identity() {
+    let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
+    let dag = WireDag {
+        schema_version: 22,
+        declarations: vec!["entry".to_string()],
+        nodes: vec![WireDagNode {
+            declaration: 0,
+            activation: None,
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
+            id: 0,
+            op: WireRiscOp::Load {
+                name: global.as_str().to_string(),
+            },
+            inputs: vec![],
+            output_type: WireTensorType {
+                dims: vec![],
+                precision: "f32".to_string(),
+            },
+        }],
+        roots: vec![0],
+    };
+    let encoded = serde_json::to_string(&dag).expect("v22 producer carries resolved origin");
+    let decoded = WireDag::from_validated_json(&encoded).expect("v22 consumer retains origin");
+    assert!(matches!(&decoded.nodes[0].op, WireRiscOp::Load { name } if name == global.as_str()));
+    let old = encoded.replace("\"schema_version\":22", "\"schema_version\":21");
+    assert!(
+        WireDag::from_validated_json(&old).is_err(),
+        "v21 is rejected before label decode"
+    );
+    for malformed in ["@chelis_global_0g", "@chelis_global_6D"] {
+        let wrong = encoded.replace(global.as_str(), malformed);
+        assert!(WireDag::from_validated_json(&wrong).is_err(), "{malformed}");
+    }
+    let ordinary = encoded.replace(global.as_str(), "__chelis_global_aa");
+    WireDag::from_validated_json(&ordinary).expect("authored lookalike is an ordinary input");
+    let mut wrong_store = decoded.clone();
+    wrong_store.nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
+        shape_deps: vec![],
+        span_id: None,
+        merged_spans: vec![],
+        id: 1,
+        op: WireRiscOp::Store {
+            name: global.as_str().to_string(),
+        },
+        inputs: vec![0],
+        output_type: wrong_store.nodes[0].output_type.clone(),
+    });
+    wrong_store.roots = vec![1];
+    assert!(
+        wrong_store
+            .validate_wire_contract()
+            .unwrap_err()
+            .to_string()
+            .contains("ordinary name"),
+        "Store cannot carry a resolved Load origin"
+    );
 }
 
 #[test]

@@ -30,20 +30,44 @@
 use std::borrow::Borrow;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A `RiscOp::Load`/`RiscOp::Store` `name`, validated against the Deep
 /// parser's identifier grammar (extended with `.` for synthesized
 /// tuple-flatten names).
 ///
 /// Construct with [`LoadStoreName::new`]; the constructor enforces the
-/// grammar described at the module level. The newtype is
-/// `#[serde(transparent)]` so its serialized shape is identical to the
-/// previous `String` field — bincode round-trip and JSON wire formats are
-/// preserved.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LoadStoreName(String);
+/// grammar described at the module level. Ordinary names remain plain
+/// strings on the wire. A top-level read carries
+/// its declaring binding separately from its graph-input label; its reserved
+/// encoded label is also a string on the wire, so existing Load/Store payload
+/// shape and the cache's positional encoding do not change.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LoadStoreName {
+    label: String,
+    origin: LoadOrigin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum LoadOrigin {
+    Ordinary,
+    TopLevel(String),
+}
+
+/// The resolved binding an IR Load names. A top-level read has an identity
+/// disjoint from every authored formal/local spelling, even when its source
+/// spelling is identical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadBinding<'a> {
+    GraphInput,
+    TopLevel(&'a str),
+}
+
+// `@` is forbidden by the ordinary name grammar and by Surf identifiers.
+// A C-friendly reserved prefix cannot be private: Surf accepts leading `__`
+// and linked names can contain the same bytes. C emission maps this label to
+// its own private C symbol after decoding the origin.
+const GLOBAL_PREFIX: &str = "@chelis_global_";
 
 /// Reasons the constructor may reject a candidate name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +126,10 @@ impl LoadStoreName {
     pub fn new(s: impl Into<String>) -> Result<Self, LoadStoreNameError> {
         let owned = s.into();
         Self::validate(&owned)?;
-        Ok(Self(owned))
+        Ok(Self {
+            label: owned,
+            origin: LoadOrigin::Ordinary,
+        })
     }
 
     /// Convenience for sites where the name is statically known to be a
@@ -116,10 +143,66 @@ impl LoadStoreName {
     /// for those, propagate the `Result` from [`LoadStoreName::new`].
     pub fn must(s: impl Into<String>) -> Self {
         let owned = s.into();
-        match Self::validate(&owned) {
-            Ok(()) => Self(owned),
+        match Self::new(owned.clone()) {
+            Ok(name) => name,
             Err(e) => panic!("invalid LoadStoreName {owned:?}: {e}"),
         }
+    }
+
+    /// Create the graph identity of a read of a top-level value declaration.
+    /// The source name is held explicitly for host/evaluator resolution. The
+    /// label uses a source-unspellable `@` namespace; hex encoding is
+    /// injective for qualified names too. C emission maps it to a legal name.
+    pub fn top_level(source: &str) -> Self {
+        Self::validate(source).expect("top-level declaration name is parser validated");
+        let mut label = String::from(GLOBAL_PREFIX);
+        for byte in source.as_bytes() {
+            use std::fmt::Write;
+            write!(&mut label, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Self {
+            label,
+            origin: LoadOrigin::TopLevel(source.to_string()),
+        }
+    }
+
+    pub fn binding(&self) -> LoadBinding<'_> {
+        match &self.origin {
+            LoadOrigin::Ordinary => LoadBinding::GraphInput,
+            LoadOrigin::TopLevel(source) => LoadBinding::TopLevel(source),
+        }
+    }
+
+    /// Recover a top-level declaration identity from a serialized/helper
+    /// input label. Consumers with only a string (rather than a DAG node)
+    /// use this instead of parsing compiler-private spelling themselves.
+    pub fn top_level_source_for_label(label: &str) -> Result<Option<String>, String> {
+        let Some(hex) = label.strip_prefix(GLOBAL_PREFIX) else {
+            return Ok(None);
+        };
+        if hex.is_empty() || hex.len() % 2 != 0 {
+            return Err("malformed top-level Load label".to_string());
+        }
+        let bytes = hex
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let digit = |byte: u8| (byte as char).to_digit(16);
+                digit(pair[0])
+                    .zip(digit(pair[1]))
+                    .map(|(high, low)| (high * 16 + low) as u8)
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "malformed top-level Load label".to_string())?;
+        let source = String::from_utf8(bytes)
+            .map_err(|_| "top-level Load label is not UTF-8".to_string())?;
+        Self::validate(&source).map_err(|error| error.to_string())?;
+        if Self::top_level(&source).label != label {
+            return Err("noncanonical top-level Load label".to_string());
+        }
+        Ok(Some(source))
     }
 
     fn validate(s: &str) -> Result<(), LoadStoreNameError> {
@@ -178,13 +261,30 @@ impl LoadStoreName {
     /// Borrow the validated name as `&str`.
     #[inline]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.label
     }
 
     /// Consume the newtype, returning the underlying validated `String`.
     #[inline]
     pub fn into_string(self) -> String {
-        self.0
+        self.label
+    }
+}
+
+impl Serialize for LoadStoreName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.label.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LoadStoreName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let label = String::deserialize(deserializer)?;
+        let source = Self::top_level_source_for_label(&label).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            label,
+            origin: source.map_or(LoadOrigin::Ordinary, LoadOrigin::TopLevel),
+        })
     }
 }
 
@@ -210,68 +310,119 @@ impl From<String> for LoadStoreName {
 impl AsRef<str> for LoadStoreName {
     #[inline]
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.label
     }
 }
 
 impl Borrow<str> for LoadStoreName {
     #[inline]
     fn borrow(&self) -> &str {
-        &self.0
+        &self.label
     }
 }
 
 impl fmt::Display for LoadStoreName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.label)
     }
 }
 
 impl PartialEq<str> for LoadStoreName {
     #[inline]
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.label == other
     }
 }
 
 impl PartialEq<&str> for LoadStoreName {
     #[inline]
     fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
+        self.label == *other
     }
 }
 
 impl PartialEq<String> for LoadStoreName {
     #[inline]
     fn eq(&self, other: &String) -> bool {
-        &self.0 == other
+        &self.label == other
     }
 }
 
 impl PartialEq<LoadStoreName> for str {
     #[inline]
     fn eq(&self, other: &LoadStoreName) -> bool {
-        self == other.0
+        self == other.label
     }
 }
 
 impl PartialEq<LoadStoreName> for &str {
     #[inline]
     fn eq(&self, other: &LoadStoreName) -> bool {
-        *self == other.0
+        *self == other.label
     }
 }
 
 impl PartialEq<LoadStoreName> for String {
     #[inline]
     fn eq(&self, other: &LoadStoreName) -> bool {
-        self == &other.0
+        self == &other.label
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_level_read_has_a_distinct_reversible_binding_identity() {
+        let formal = LoadStoreName::new("y").unwrap();
+        let global = LoadStoreName::top_level("y");
+        assert_ne!(formal, global);
+        assert_eq!(formal.binding(), LoadBinding::GraphInput);
+        assert_eq!(global.binding(), LoadBinding::TopLevel("y"));
+        assert!(global.as_str().starts_with(GLOBAL_PREFIX));
+        assert!(LoadStoreName::new(global.as_str()).is_err());
+        assert_eq!(
+            LoadStoreName::new("__chelis_global_aa").unwrap().binding(),
+            LoadBinding::GraphInput
+        );
+        assert_eq!(
+            serde_json::from_str::<LoadStoreName>(&serde_json::to_string(&global).unwrap())
+                .unwrap(),
+            global
+        );
+        assert_eq!(
+            bincode::deserialize::<LoadStoreName>(&bincode::serialize(&global).unwrap()).unwrap(),
+            global
+        );
+    }
+
+    #[test]
+    fn malformed_top_level_encoding_cannot_become_an_ordinary_load() {
+        assert!(serde_json::from_str::<LoadStoreName>("\"@chelis_global_0g\"").is_err());
+        assert!(serde_json::from_str::<LoadStoreName>("\"@chelis_global_6D\"").is_err());
+    }
+
+    #[test]
+    fn qualified_source_name_cannot_spell_its_encoded_origin() {
+        let source = "Lib.weights";
+        let ordinary = LoadStoreName::new(source).unwrap();
+        let global = LoadStoreName::top_level(source);
+        assert_ne!(ordinary, global);
+        assert_eq!(global.binding(), LoadBinding::TopLevel(source));
+        assert_eq!(
+            LoadStoreName::top_level_source_for_label(global.as_str()).unwrap(),
+            Some(source.to_string())
+        );
+        assert_eq!(
+            LoadStoreName::new(global.as_str()),
+            Err(LoadStoreNameError::InvalidCharacter {
+                byte_offset: 0,
+                character: '@',
+                code_point: '@' as u32,
+            })
+        );
+    }
 
     // ------------------------------------------------------------------
     // Positive cases — every legitimate IR-name shape constructs.

@@ -1181,12 +1181,13 @@ impl<'a> VerifiedHostFunctionView<'a> {
                         .names
                         .iter()
                         .filter(|name| {
-                            self.emission
-                                .payload
-                                .program
-                                .globals
-                                .iter()
-                                .any(|binding| binding.name == name.as_str())
+                            self.emission.payload.program.globals.iter().any(|binding| {
+                                binding.name == name.as_str()
+                                    || crate::LoadStoreName::top_level_source_for_label(name)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|source| source == binding.name)
+                            })
                         })
                         .collect::<Vec<_>>();
                     let [name] = captured.as_slice() else {

@@ -1160,8 +1160,8 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 21 is explicitly\npresent", "wire v21 presence"),
-            ("versions 1 through 20", "wire old-version rejection"),
+            ("Schema version 22 is explicitly\npresent", "wire v22 presence"),
+            ("versions 1 through 21", "wire old-version rejection"),
             (
                 "and every future version are decode errors before any IR\n"
                 "node is consumed",

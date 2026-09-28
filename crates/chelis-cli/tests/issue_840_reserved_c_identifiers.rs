@@ -134,7 +134,7 @@ fn a_param_named_long_builds_consistently() {
     )
     .expect("a C-keyword parameter name must build via the #379 mapping");
     assert!(
-        source.contains("chelis_user__long"),
+        source.contains("chelis_user__6c6f6e67"),
         "the parameter must declare and reference through the mangled name:\n{source}"
     );
     assert!(
@@ -205,7 +205,7 @@ fn a_reserved_callback_parameter_name_stays_consistent_at_the_call_site() {
     )
     .expect("a reserved-word callback parameter must build via the #379 mapping");
     assert!(
-        source.contains("(*chelis_user__double)"),
+        source.contains("(*chelis_user__646f75626c65)"),
         "the parameter declarator must be mangled:\n{source}"
     );
     assert!(

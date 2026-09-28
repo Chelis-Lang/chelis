@@ -415,16 +415,19 @@ impl<'a> EvalContext<'a> {
         demand: TensorInputDemand,
         staged_inputs: &UnordMap<String, IrTensorValue>,
     ) -> Result<Option<IrTensorValue>, String> {
-        if let Some(value) = staged_inputs.get(name) {
-            return Ok(Some(value.clone()));
+        let top_level_source = chelis_ir::LoadStoreName::top_level_source_for_label(name)?;
+        if top_level_source.is_none() {
+            if let Some(value) = staged_inputs.get(name) {
+                return Ok(Some(value.clone()));
+            }
+            if let Some(value) = self.tensor_bindings.get(name) {
+                return Ok(Some(value.value.clone()));
+            }
+            if let Some(RuntimeValue::Tensor(value)) = self.bindings.get(name) {
+                return Ok(Some(value.value.clone()));
+            }
         }
-        if let Some(value) = self.tensor_bindings.get(name) {
-            return Ok(Some(value.value.clone()));
-        }
-        if let Some(RuntimeValue::Tensor(value)) = self.bindings.get(name) {
-            return Ok(Some(value.value.clone()));
-        }
-        let declaration = self.lookup_top_level_def(name);
+        let declaration = self.lookup_top_level_def(top_level_source.as_deref().unwrap_or(name));
         if let Some((resolved, _)) = &declaration
             && let Some(RuntimeValue::Tensor(value)) = self.declaration_values.get(resolved)
         {

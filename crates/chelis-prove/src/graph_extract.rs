@@ -598,7 +598,9 @@ const _: () = {
     // floating numeric payload. Version 21 adds the discrete Iota source,
     // List capture carriers and contribution-group counts. None embeds a
     // floating numeric payload or is a float-envelope transformer.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 21);
+    // Version 22 distinguishes resolved-origin Load labels from graph inputs;
+    // labels carry no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 22);
 };
 
 #[cfg(test)]

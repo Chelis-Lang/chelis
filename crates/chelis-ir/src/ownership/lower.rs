@@ -375,7 +375,14 @@ pub(super) fn lower(
         global_names: host
             .globals
             .iter()
-            .map(|binding| binding.name.clone())
+            .flat_map(|binding| {
+                [
+                    binding.name.clone(),
+                    crate::LoadStoreName::top_level(&binding.name)
+                        .as_str()
+                        .to_string(),
+                ]
+            })
             .collect(),
         function_names: host
             .functions
@@ -1442,12 +1449,18 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         if let Some(owner) = self.captures.get(name) {
             return Ok(Value::Named(*owner));
         }
+        let source = crate::LoadStoreName::top_level_source_for_label(name)
+            .map_err(|_| OwnershipError::UnboundName {
+                unit: self.unit_name.clone(),
+                name: name.to_string(),
+            })?
+            .unwrap_or_else(|| name.to_string());
         let ty = self
             .ctx
             .host
             .globals
             .iter()
-            .find(|binding| binding.name == name)
+            .find(|binding| binding.name == source)
             .map(|binding| binding.ty.clone())
             .ok_or_else(|| OwnershipError::UnboundName {
                 unit: self.unit_name.clone(),
@@ -1511,13 +1524,17 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 };
                 return Ok(self.info(owner)?.ty.clone());
             }
+            let source = crate::LoadStoreName::top_level_source_for_label(name)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| name.clone());
             if self.unit_name != ROOTS_UNIT
                 && let Some(binding) = self
                     .ctx
                     .host
                     .globals
                     .iter()
-                    .find(|binding| binding.name == *name)
+                    .find(|binding| binding.name == source)
             {
                 return Ok(binding.ty.clone());
             }
@@ -2755,7 +2772,16 @@ fn lower_roots(
     for binding in &ctx.host.globals {
         lowerer.with_site(HostSiteKind::Binding, |lowerer| {
             let value = lowerer.lower_expr(&binding.value, None)?;
-            lowerer.bind(&binding.name, value)
+            lowerer.bind(&binding.name, value)?;
+            if let Some(place) = lowerer.lookup(&binding.name) {
+                lowerer.scope_mut()?.names.insert(
+                    crate::LoadStoreName::top_level(&binding.name)
+                        .as_str()
+                        .to_string(),
+                    place,
+                );
+            }
+            Ok(())
         })?;
     }
     let mut sinks = Vec::new();

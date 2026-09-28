@@ -145,12 +145,64 @@ def main() -> tensor[1, f32] = {\n  y = to_tensor([10.0f32])\n  grad(f)(add(to_t
     assert_both_lanes(source, "main", "tensor(shape=[1], data=[2.0])");
 }
 
-/// A transform in a top-level value's block runs through the host
-/// interpreter's transform route on the evaluator. On the compiled lane these
-/// have no lowering that can name the top-level value beside the shadowing
-/// local (chelis#2604, and an unrelated host-site failure for the last), so
-/// only the evaluator value is pinned and the compiled lane must not build a
-/// value.
+/// A formal and a callee's top-level read may have the same source spelling.
+/// The two values have distinct lexical origins through AD and native code.
+#[test]
+fn grad_formal_does_not_replace_a_callee_global_with_the_same_name() {
+    let source = "y = to_tensor([2.0f32, 3.0f32])\n\
+def h(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, y)\n\
+def loss(y: tensor[2, f32]) -> tensor[f32] = sum(h(y), 0i32)\n\
+def main() -> tensor[2, f32] = grad(loss)(to_tensor([1.0f32, 1.0f32]))\n";
+    assert_both_lanes(source, "main", "tensor(shape=[2], data=[2.0, 3.0])");
+}
+
+#[test]
+fn ordinary_formal_does_not_replace_a_callee_global_with_the_same_name() {
+    let source = "y = to_tensor([2.0f32, 3.0f32])\n\
+def h(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, y)\n\
+def loss(y: tensor[2, f32]) -> tensor[f32] = sum(h(y), 0i32)\n\
+out = loss(to_tensor([1.0f32, 1.0f32]))\n";
+    assert_both_lanes(source, "out", "5.0");
+}
+
+#[test]
+fn authored_name_resembling_a_private_global_label_remains_ordinary() {
+    let source = "def main(__chelis_global_aa: tensor[1, f32]) -> tensor[1, f32] = add(__chelis_global_aa, to_tensor([1.0f32]))\n\
+out = main(to_tensor([2.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[3.0])");
+}
+
+#[test]
+fn private_global_identity_is_distinct_from_an_authored_lookalike() {
+    let source = "__chelis_global_aa = to_tensor([2.0f32])\n\
+def capture(x: tensor[1, f32]) -> tensor[1, f32] = add(x, __chelis_global_aa)\n\
+def main(__chelis_global_aa: tensor[1, f32]) -> tensor[1, f32] = capture(__chelis_global_aa)\n\
+out = main(to_tensor([10.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
+#[test]
+fn transform_in_global_block_reads_global_beside_a_same_named_local() {
+    let source = "w = to_tensor([3.0f32, 5.0f32])\n\
+def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
+def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
+out = {\n  w = to_tensor([7.0f32, 11.0f32])\n  grad(loss)(to_tensor([1.0f32, 2.0f32]))\n}\n";
+    assert_both_lanes(source, "out", "tensor(shape=[2], data=[3.0, 5.0])");
+}
+
+/// A local in an argument's function literal is not in scope at the outer
+/// substitution site. Host scope must carry binding origin explicitly.
+#[test]
+fn unrelated_literal_local_does_not_block_outer_callee_substitution() {
+    let source = "n = to_tensor([2.0f32])\n\
+def apply(h: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = h(mul(x, n))\n\
+def outer(k: (tensor[1, f32]) -> tensor[1, f32], x: tensor[1, f32]) -> tensor[1, f32] = apply(k, x)\n\
+out = outer(fn (v: tensor[1, f32]) -> {\n  n = to_tensor([10.0f32])\n  add(v, n)\n}, to_tensor([1.0f32]))\n";
+    assert_both_lanes(source, "out", "tensor(shape=[1], data=[12.0])");
+}
+
+/// Callable target identity has a separate residual (#2062). The evaluator
+/// resolves this local function name; the C lane still rejects it explicitly.
 fn assert_evaluator_only(source: &str, expected: &str) {
     assert_eq!(printed(&eval(source), "out"), expected, "eval\n{source}");
     let dir = tempdir().expect("tempdir");
@@ -168,21 +220,23 @@ fn assert_evaluator_only(source: &str, expected: &str) {
 
 #[test]
 fn transform_route_vmap_of_a_declaration_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes(
         "y = to_tensor([2.0f32])\n\
 def f(x: tensor[1, f32]) -> tensor[1, f32] = add(x, y)\n\
 out = {\n  y = to_tensor([10.0f32])\n  vmap(f)(to_tensor([[1.0f32], [3.0f32]]))\n}\n",
+        "out",
         "tensor(shape=[2, 1], data=[3.0, 5.0])",
     );
 }
 
 #[test]
 fn transform_route_grad_through_a_callee_is_not_captured() {
-    assert_evaluator_only(
+    assert_both_lanes(
         "w = to_tensor([3.0f32, 5.0f32])\n\
 def inner(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, w)\n\
 def loss(x: tensor[2, f32]) -> tensor[f32] = sum(inner(x), 0i32)\n\
 out = {\n  w = to_tensor([7.0f32, 11.0f32])\n  grad(loss)(to_tensor([1.0f32, 2.0f32]))\n}\n",
+        "out",
         "tensor(shape=[2], data=[3.0, 5.0])",
     );
 }
