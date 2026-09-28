@@ -1,0 +1,3511 @@
+# aeneas integration step 147 after cba11f3beb: commit 9389a5605f76b8c7e4f6d2b994ed5bc2304fda51
+# first parent d5127677a497a33572ea08c6241ce2cddf1ca4d4, merged c8a2ab1b917511bcb3c90b79ec784e8df2749ca1
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'models/std-12' (serde: Serializer::collect_seq/collect_map; Serialize of the collections and primitives; Deserialize of the primitives and of Vec, BTreeSet, BTreeMap, Box, Arc)
+
+diff --git a/backends/lean/Aeneas/Std/Serde/Impls.lean b/backends/lean/Aeneas/Std/Serde/Impls.lean
+index 7e27727..a28a37d 100644
+--- a/backends/lean/Aeneas/Std/Serde/Impls.lean
++++ b/backends/lean/Aeneas/Std/Serde/Impls.lean
+@@ -1,5 +1,8 @@
+ import Aeneas.Std.Serde.Ser
+ import Aeneas.Std.Serde.De
++import Aeneas.Std.VecIter
++import Aeneas.Std.BTreeSet
++import Aeneas.Std.Sync
+ 
+ /-!
+ # serde's own implementations reached by the core (serde_core 1.0.228)
+@@ -74,6 +77,219 @@ def SerializeString.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
+ def SerializeString : serde_core.ser.Serialize String :=
+   { serialize := fun inst self serializer => SerializeString.serialize inst self serializer }
+ 
++/-! ### Collections: `Serializer::collect_seq` / `collect_map` over the shared iterator -/
++
++/-- `seq_impl!(Vec<T>)` (ser/impls.rs): `serializer.collect_seq(self)`, with `I = &Vec<T>` (items
++    `&T`, serialized through `impl Serialize for &T`). -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::vec::Vec<@T>>}::serialize"]
++def SerializeVec.serialize {T S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (i : serde_core.ser.Serialize T)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : alloc.vec.Vec T) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.collect_seq (core.iter.traits.collect.IntoIteratorSharedVec T)
++    (Serialize.wrap (SerializeShared i)) serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<alloc::vec::Vec<@T>>"]
++def SerializeVec {T : Type} (i : serde_core.ser.Serialize T) :
++    serde_core.ser.Serialize (alloc.vec.Vec T) :=
++  { serialize := fun inst self serializer => SerializeVec.serialize i inst self serializer }
++
++/-- `seq_impl!(BTreeSet<T>)`: `serializer.collect_seq(self)`, with `I = &BTreeSet<T>` (items `&T`
++    in ascending order). -/
++@[rust_fun
++  "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>}::serialize"]
++def SerializeBTreeSet.serialize {T S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (i : serde_core.ser.Serialize T)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : alloc.collections.btree.set.BTreeSet T) (serializer : S) :
++    Result (core.result.Result Ok Error) :=
++  inst.collect_seq (core.iter.traits.collect.IntoIteratorSharedBTreeSet T)
++    (Serialize.wrap (SerializeShared i)) serializer self
++
++@[reducible, rust_trait_impl
++  "serde_core::ser::Serialize<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>"]
++def SerializeBTreeSet {T : Type} (i : serde_core.ser.Serialize T) :
++    serde_core.ser.Serialize (alloc.collections.btree.set.BTreeSet T) :=
++  { serialize := fun inst self serializer => SerializeBTreeSet.serialize i inst self serializer }
++
++/-- `map_impl!(BTreeMap<K: Ord, V>)`: `serializer.collect_map(self)`, with `I = &BTreeMap<K, V>`
++    (entries `(&K, &V)` in ascending key order). -/
++@[rust_fun
++  "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::serialize"]
++def SerializeBTreeMap.serialize {K V S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (ki : serde_core.ser.Serialize K) (vi : serde_core.ser.Serialize V)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : alloc.collections.btree.map.BTreeMap K V) (serializer : S) :
++    Result (core.result.Result Ok Error) :=
++  inst.collect_map (Serialize.wrap (SerializeShared ki)) (Serialize.wrap (SerializeShared vi))
++    (core.iter.traits.collect.IntoIteratorSharedBTreeMap K V) serializer self
++
++@[reducible, rust_trait_impl
++  "serde_core::ser::Serialize<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>"]
++def SerializeBTreeMap {K V : Type} (ki : serde_core.ser.Serialize K)
++    (vi : serde_core.ser.Serialize V) :
++    serde_core.ser.Serialize (alloc.collections.btree.map.BTreeMap K V) :=
++  { serialize := fun inst self serializer => SerializeBTreeMap.serialize ki vi inst self serializer }
++
++/-! ### Primitives (`primitive_impl!`: `serializer.serialize_<ty>(*self)`), `str`, `()` -/
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<bool>}::serialize"]
++def SerializeBool.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : Bool) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_bool serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<bool>"]
++def SerializeBool : serde_core.ser.Serialize Bool :=
++  { serialize := fun inst self serializer => SerializeBool.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i8>}::serialize"]
++def SerializeI8.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : I8) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_i8 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<i8>"]
++def SerializeI8 : serde_core.ser.Serialize I8 :=
++  { serialize := fun inst self serializer => SerializeI8.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i16>}::serialize"]
++def SerializeI16.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : I16) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_i16 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<i16>"]
++def SerializeI16 : serde_core.ser.Serialize I16 :=
++  { serialize := fun inst self serializer => SerializeI16.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i32>}::serialize"]
++def SerializeI32.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : I32) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_i32 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<i32>"]
++def SerializeI32 : serde_core.ser.Serialize I32 :=
++  { serialize := fun inst self serializer => SerializeI32.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i64>}::serialize"]
++def SerializeI64.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : I64) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_i64 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<i64>"]
++def SerializeI64 : serde_core.ser.Serialize I64 :=
++  { serialize := fun inst self serializer => SerializeI64.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<u8>}::serialize"]
++def SerializeU8.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : U8) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_u8 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<u8>"]
++def SerializeU8 : serde_core.ser.Serialize U8 :=
++  { serialize := fun inst self serializer => SerializeU8.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<u64>}::serialize"]
++def SerializeU64.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : U64) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_u64 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<u64>"]
++def SerializeU64 : serde_core.ser.Serialize U64 :=
++  { serialize := fun inst self serializer => SerializeU64.serialize inst self serializer }
++
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<f64>}::serialize"]
++def SerializeF64.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : F64) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_f64 serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<f64>"]
++def SerializeF64 : serde_core.ser.Serialize F64 :=
++  { serialize := fun inst self serializer => SerializeF64.serialize inst self serializer }
++
++/-- `primitive_impl!(usize, serialize_u64 as u64)`: `serializer.serialize_u64(*self as u64)`. -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<usize>}::serialize"]
++def SerializeUsize.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : Usize) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_u64 serializer (self.cast .U64)
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<usize>"]
++def SerializeUsize : serde_core.ser.Serialize Usize :=
++  { serialize := fun inst self serializer => SerializeUsize.serialize inst self serializer }
++
++/-- `impl Serialize for str`: `serializer.serialize_str(self)`. -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<str>}::serialize"]
++def SerializeStr.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : Str) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_str serializer self
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<str>"]
++def SerializeStr : serde_core.ser.Serialize Str :=
++  { serialize := fun inst self serializer => SerializeStr.serialize inst self serializer }
++
++/-- `impl Serialize for ()`: `serializer.serialize_unit()`. -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<()>}::serialize"]
++def SerializeUnit.serialize {S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (_ : Unit) (serializer : S) : Result (core.result.Result Ok Error) :=
++  inst.serialize_unit serializer
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<()>"]
++def SerializeUnit : serde_core.ser.Serialize Unit :=
++  { serialize := fun inst self serializer => SerializeUnit.serialize inst self serializer }
++
++/-! ### `Option<T>`, `Box<T>`, `Arc<T>` -/
++
++/-- `impl<T: Serialize> Serialize for Option<T>`: `Some(ref value) => serializer.serialize_some(value)`,
++    `None => serializer.serialize_none()`. -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<core::option::Option<@T>>}::serialize"]
++def SerializeOption.serialize {T S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (i : serde_core.ser.Serialize T)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : Option T) (serializer : S) : Result (core.result.Result Ok Error) :=
++  match self with
++  | some value => inst.serialize_some (Serialize.wrap i) serializer value
++  | none => inst.serialize_none serializer
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<core::option::Option<@T>>"]
++def SerializeOption {T : Type} (i : serde_core.ser.Serialize T) :
++    serde_core.ser.Serialize (Option T) :=
++  { serialize := fun inst self serializer => SerializeOption.serialize i inst self serializer }
++
++/-- `deref_impl!(<T> Serialize for Box<T>)`: `(**self).serialize(serializer)` (`Box<T>` is `T`). -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<Box<@T>>}::serialize"]
++def SerializeBox.serialize {T S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (i : serde_core.ser.Serialize T)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : T) (serializer : S) : Result (core.result.Result Ok Error) :=
++  i.serialize inst self serializer
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<Box<@T>>"]
++def SerializeBox {T : Type} (i : serde_core.ser.Serialize T) : serde_core.ser.Serialize T :=
++  { serialize := fun inst self serializer => SerializeBox.serialize i inst self serializer }
++
++/-- `deref_impl!(<T> Serialize for Arc<T>)` (feature `rc`): `(**self).serialize(serializer)`
++    (`Arc<T>` is `T`). -/
++@[rust_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::sync::Arc<@T>>}::serialize"]
++def SerializeArc.serialize {T S Ok Error SS ST STS STV SM SSt SSV : Type}
++    (i : serde_core.ser.Serialize T)
++    (inst : serde_core.ser.Serializer S Ok Error SS ST STS STV SM SSt SSV)
++    (self : alloc.sync.Arc T) (serializer : S) : Result (core.result.Result Ok Error) :=
++  i.serialize inst self serializer
++
++@[reducible, rust_trait_impl "serde_core::ser::Serialize<alloc::sync::Arc<@T>>"]
++def SerializeArc {T : Type} (i : serde_core.ser.Serialize T) :
++    serde_core.ser.Serialize (alloc.sync.Arc T) :=
++  { serialize := fun inst self serializer => SerializeArc.serialize i inst self serializer }
++
+ end serde_core.ser.impls
+ 
+ namespace serde_core.de.impls
+@@ -210,6 +426,327 @@ def DeserializeOption {T : Type} (i : serde_core.de.Deserialize T) :
+     serde_core.de.Deserialize (Option T) :=
+   { deserialize := fun inst deserializer => DeserializeOption.deserialize i inst deserializer }
+ 
++/-! ### Primitives (`impl_deserialize_num!`, `bool`, `()`) -/
++
++/-- An integer from a visited value `v` given as a signed (`Signed(v as i64)`) or an unsigned
++    (`Unsigned(v as u64)`) one: the value when it is within `[lo, hi]`, else
++    `Err(Error::invalid_value(unexp, &self))`. -/
++def intWithin {Value E : Type} (errInst : serde_core.de.Error E) (name : String) (lo hi : Int)
++    (mk : Int → Value) (v : Int) (unexp : serde_core.de.Unexpected) :
++    Result (core.result.Result Value E) :=
++  if lo ≤ v ∧ v ≤ hi then .ok (.Ok (mk v)) else invalidValue errInst name unexp
++
++/-- `PrimitiveVisitor` of `impl_deserialize_num!` for the integers `i8`, `i16`, `i32`, `i64`, `u8`,
++    `u64` and `usize` (de/impls.rs): `expecting` is `stringify!(ty)`, and every `visit_i8` ...
++    `visit_i64`, `visit_u8` ... `visit_u64` is one of `num_self!` (`Ok(v)`), `num_as_self!`
++    (`Ok(v as ty)`, a widening), `int_to_int!` (`ty::try_from(v as i64)`, else
++    `invalid_value(Signed(v as i64))`), `int_to_uint!` (`0 <= v` and `ty::try_from(v as u64)`, else
++    `invalid_value(Signed(v as i64))`) or `uint_to_self!` (`ty::try_from(v as u64)`, else
++    `invalid_value(Unsigned(v as u64))`): the value when it is within the bounds of `ty` (always
++    for the first two), else the error of its sign. The other `visit_*` are the provided ones. -/
++def intVisitor {T : Type} (name : String) (lo hi : Int) (mk : Int → T) :
++    serde_core.de.Visitor Unit T :=
++  let signed := fun {E : Type} (e : serde_core.de.Error E) (v : Int) =>
++    intWithin e name lo hi mk v (.Signed ⟨BitVec.ofInt 64 v⟩)
++  let unsigned := fun {E : Type} (e : serde_core.de.Error E) (v : Nat) =>
++    intWithin e name lo hi mk v (.Unsigned ⟨BitVec.ofNat 64 v⟩)
++  { expecting := fun _ f => f.append name
++    visit_i8 := fun e _ v => signed e v.val
++    visit_i16 := fun e _ v => signed e v.val
++    visit_i32 := fun e _ v => signed e v.val
++    visit_i64 := fun e _ v => signed e v.val
++    visit_u8 := fun e _ v => unsigned e v.val
++    visit_u16 := fun e _ v => unsigned e v.val
++    visit_u32 := fun e _ v => unsigned e v.val
++    visit_u64 := fun e _ v => unsigned e v.val }
++
++def I8Visitor : serde_core.de.Visitor Unit I8 :=
++  intVisitor "i8" I8.min I8.max fun v => ⟨BitVec.ofInt _ v⟩
++def I16Visitor : serde_core.de.Visitor Unit I16 :=
++  intVisitor "i16" I16.min I16.max fun v => ⟨BitVec.ofInt _ v⟩
++def I32Visitor : serde_core.de.Visitor Unit I32 :=
++  intVisitor "i32" I32.min I32.max fun v => ⟨BitVec.ofInt _ v⟩
++def I64Visitor : serde_core.de.Visitor Unit I64 :=
++  intVisitor "i64" I64.min I64.max fun v => ⟨BitVec.ofInt _ v⟩
++def U8Visitor : serde_core.de.Visitor Unit U8 :=
++  intVisitor "u8" 0 U8.max fun v => ⟨BitVec.ofNat _ v.toNat⟩
++def U64Visitor : serde_core.de.Visitor Unit U64 :=
++  intVisitor "u64" 0 U64.max fun v => ⟨BitVec.ofNat _ v.toNat⟩
++def UsizeVisitor : serde_core.de.Visitor Unit Usize :=
++  intVisitor "usize" 0 Usize.max fun v => ⟨BitVec.ofNat _ v.toNat⟩
++
++/-- `impl Deserialize for i8`: `deserializer.deserialize_i8(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i8>}::deserialize"]
++def DeserializeI8.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result I8 Error) :=
++  inst.deserialize_i8 (Visitor.wrap I8Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, i8>"]
++def DeserializeI8 : serde_core.de.Deserialize I8 :=
++  { deserialize := fun inst deserializer => DeserializeI8.deserialize inst deserializer }
++
++/-- `impl Deserialize for i16`: `deserializer.deserialize_i16(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i16>}::deserialize"]
++def DeserializeI16.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result I16 Error) :=
++  inst.deserialize_i16 (Visitor.wrap I16Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, i16>"]
++def DeserializeI16 : serde_core.de.Deserialize I16 :=
++  { deserialize := fun inst deserializer => DeserializeI16.deserialize inst deserializer }
++
++/-- `impl Deserialize for i32`: `deserializer.deserialize_i32(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i32>}::deserialize"]
++def DeserializeI32.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result I32 Error) :=
++  inst.deserialize_i32 (Visitor.wrap I32Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, i32>"]
++def DeserializeI32 : serde_core.de.Deserialize I32 :=
++  { deserialize := fun inst deserializer => DeserializeI32.deserialize inst deserializer }
++
++/-- `impl Deserialize for i64`: `deserializer.deserialize_i64(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i64>}::deserialize"]
++def DeserializeI64.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result I64 Error) :=
++  inst.deserialize_i64 (Visitor.wrap I64Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, i64>"]
++def DeserializeI64 : serde_core.de.Deserialize I64 :=
++  { deserialize := fun inst deserializer => DeserializeI64.deserialize inst deserializer }
++
++/-- `impl Deserialize for u8`: `deserializer.deserialize_u8(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u8>}::deserialize"]
++def DeserializeU8.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result U8 Error) :=
++  inst.deserialize_u8 (Visitor.wrap U8Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, u8>"]
++def DeserializeU8 : serde_core.de.Deserialize U8 :=
++  { deserialize := fun inst deserializer => DeserializeU8.deserialize inst deserializer }
++
++/-- `impl Deserialize for u64`: `deserializer.deserialize_u64(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u64>}::deserialize"]
++def DeserializeU64.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result U64 Error) :=
++  inst.deserialize_u64 (Visitor.wrap U64Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, u64>"]
++def DeserializeU64 : serde_core.de.Deserialize U64 :=
++  { deserialize := fun inst deserializer => DeserializeU64.deserialize inst deserializer }
++
++/-- `impl Deserialize for usize`: `deserializer.deserialize_u64(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, usize>}::deserialize"]
++def DeserializeUsize.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result Usize Error) :=
++  inst.deserialize_u64 (Visitor.wrap UsizeVisitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, usize>"]
++def DeserializeUsize : serde_core.de.Deserialize Usize :=
++  { deserialize := fun inst deserializer => DeserializeUsize.deserialize inst deserializer }
++
++/-- `(v as f64).copysign(sign)` of `num_as_copysign_self!(f32:visit_f32)` (feature `std`): the
++    conversion with the sign bit of `v`. A NaN converts to the preferred NaN (`F32.toF64`), one of
++    the payloads Rust's `as` may give (the other is the input's payload, quieted). -/
++def f64OfF32CopySign (v : F32) : F64 :=
++  let signBit : BitVec BinaryFormat.binary64.width := BitVec.ofNat _ (2 ^ 63)
++  let magnitude := (F32.toF64 v).bits &&& ~~~signBit
++  ⟨if BinaryFloat.sign v then magnitude ||| signBit else magnitude⟩
++
++/-- `PrimitiveVisitor` of `impl_deserialize_num!(f64, deserialize_f64 ..)`: `num_self!(f64)`,
++    `num_as_copysign_self!(f32)`, `num_as_self!(i8 i16 i32 i64 u8 u16 u32 u64)` (`v as f64`, rounded
++    to nearest). -/
++def F64Visitor : serde_core.de.Visitor Unit F64 :=
++  { expecting := fun _ f => f.append "f64"
++    visit_f64 := fun _ _ v => .ok (.Ok v)
++    visit_f32 := fun _ _ v => .ok (.Ok (f64OfF32CopySign v))
++    visit_i8 := fun _ _ v => .ok (.Ok (F64.ofIScalar v))
++    visit_i16 := fun _ _ v => .ok (.Ok (F64.ofIScalar v))
++    visit_i32 := fun _ _ v => .ok (.Ok (F64.ofIScalar v))
++    visit_i64 := fun _ _ v => .ok (.Ok (F64.ofIScalar v))
++    visit_u8 := fun _ _ v => .ok (.Ok (F64.ofUScalar v))
++    visit_u16 := fun _ _ v => .ok (.Ok (F64.ofUScalar v))
++    visit_u32 := fun _ _ v => .ok (.Ok (F64.ofUScalar v))
++    visit_u64 := fun _ _ v => .ok (.Ok (F64.ofUScalar v)) }
++
++/-- `impl Deserialize for f64`: `deserializer.deserialize_f64(PrimitiveVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, f64>}::deserialize"]
++def DeserializeF64.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result F64 Error) :=
++  inst.deserialize_f64 (Visitor.wrap F64Visitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, f64>"]
++def DeserializeF64 : serde_core.de.Deserialize F64 :=
++  { deserialize := fun inst deserializer => DeserializeF64.deserialize inst deserializer }
++
++/-- `BoolVisitor`: `expecting` is "a boolean", `visit_bool` is `Ok(v)`. -/
++def BoolVisitor : serde_core.de.Visitor Unit Bool :=
++  { expecting := fun _ f => f.append "a boolean"
++    visit_bool := fun _ _ v => .ok (.Ok v) }
++
++/-- `impl Deserialize for bool`: `deserializer.deserialize_bool(BoolVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, bool>}::deserialize"]
++def DeserializeBool.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result Bool Error) :=
++  inst.deserialize_bool (Visitor.wrap BoolVisitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, bool>"]
++def DeserializeBool : serde_core.de.Deserialize Bool :=
++  { deserialize := fun inst deserializer => DeserializeBool.deserialize inst deserializer }
++
++/-- `UnitVisitor`: `expecting` is "unit", `visit_unit` is `Ok(())`. -/
++def UnitVisitor : serde_core.de.Visitor Unit Unit :=
++  { expecting := fun _ f => f.append "unit"
++    visit_unit := fun _ _ => .ok (.Ok ()) }
++
++/-- `impl Deserialize for ()`: `deserializer.deserialize_unit(UnitVisitor)`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, ()>}::deserialize"]
++def DeserializeUnit.deserialize {D Error : Type} (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) : Result (core.result.Result Unit Error) :=
++  inst.deserialize_unit (Visitor.wrap UnitVisitor) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, ()>"]
++def DeserializeUnit : serde_core.de.Deserialize Unit :=
++  { deserialize := fun inst deserializer => DeserializeUnit.deserialize inst deserializer }
++
++/-! ### Collections (`seq_impl!`, `map_impl!`, `forwarded_impl!`, `box_forwarded_impl!`) -/
++
++/-- `while let Some(value) = tri!(seq.next_element()) { insert(&mut values, value); }` then
++    `Ok(values)`: the elements in order through `insert`, until the first error or the end. -/
++def collectElements {A Error T C : Type} (seq : serde_core.de.SeqAccess A Error)
++    (d : serde_core.de.DeserializeΩ T) (insert : C → T → Result C) (values : C) (access : A) :
++    Result (core.result.Result C Error) := do
++  let (r, access) ← seq.next_element d access
++  match r with
++  | .Err e => ok (.Err e)
++  | .Ok none => ok (.Ok values)
++  | .Ok (some value) => collectElements seq d insert (← insert values value) access
++partial_fixpoint
++
++/-- `while let Some((key, value)) = tri!(map.next_entry()) { values.insert(key, value); }` then
++    `Ok(values)`. -/
++def collectEntries {A Error K V C : Type} (map : serde_core.de.MapAccess A Error)
++    (dk : serde_core.de.DeserializeΩ K) (dv : serde_core.de.DeserializeΩ V)
++    (insert : C → K → V → Result C) (values : C) (access : A) :
++    Result (core.result.Result C Error) := do
++  let (r, access) ← map.next_entry dk dv access
++  match r with
++  | .Err e => ok (.Err e)
++  | .Ok none => ok (.Ok values)
++  | .Ok (some (key, value)) => collectEntries map dk dv insert (← insert values key value) access
++partial_fixpoint
++
++/-- `VecVisitor<T>` of `impl Deserialize for Vec<T>` (de/impls.rs): `expecting` is "a sequence";
++    `visit_seq` reads `seq.size_hint()` (for the capacity only: `size_hint::cautious` caps it, the
++    allocation has no other effect), then pushes every element. -/
++def VecVisitor {T : Type} (i : serde_core.de.Deserialize T) :
++    serde_core.de.Visitor Unit (alloc.vec.Vec T) :=
++  { expecting := fun _ f => f.append "a sequence"
++    visit_seq := fun {A Error} (seq : serde_core.de.SeqAccess A Error) _ access => do
++      let _ ← seq.size_hint access
++      collectElements seq (Deserialize.wrap i) (fun values value => alloc.vec.Vec.push values value)
++        (alloc.vec.Vec.new T) access }
++
++/-- `impl<'de, T: Deserialize<'de>> Deserialize<'de> for Vec<T>`:
++    `deserializer.deserialize_seq(VecVisitor { marker: PhantomData })`. -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::vec::Vec<@T>>}::deserialize"]
++def DeserializeVec.deserialize {T D Error : Type} (i : serde_core.de.Deserialize T)
++    (inst : serde_core.de.Deserializer D Error) (deserializer : D) :
++    Result (core.result.Result (alloc.vec.Vec T) Error) :=
++  inst.deserialize_seq (Visitor.wrap (VecVisitor i)) deserializer ()
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, alloc::vec::Vec<@T>>"]
++def DeserializeVec {T : Type} (i : serde_core.de.Deserialize T) :
++    serde_core.de.Deserialize (alloc.vec.Vec T) :=
++  { deserialize := fun inst deserializer => DeserializeVec.deserialize i inst deserializer }
++
++/-- `SeqVisitor` of `seq_impl!(BTreeSet<T: Eq + Ord>, seq, BTreeSet::clear, BTreeSet::new(),
++    nop_reserve, BTreeSet::insert)`: `expecting` is "a sequence"; `visit_seq` inserts every
++    element (an element equal to a stored one keeps the stored one). -/
++def BTreeSetVisitor {T : Type} (i : serde_core.de.Deserialize T) (ord : core.cmp.Ord T) :
++    serde_core.de.Visitor Unit (alloc.collections.btree.set.BTreeSet T) :=
++  { expecting := fun _ f => f.append "a sequence"
++    visit_seq := fun {A Error} (seq : serde_core.de.SeqAccess A Error) _ access => do
++      collectElements seq (Deserialize.wrap i)
++        (fun values value => do
++          let (_, values) ← alloc.collections.btree.set.BTreeSet.insert ord values value
++          ok values)
++        (← alloc.collections.btree.set.BTreeSet.new T) access }
++
++/-- `impl<'de, T: Deserialize<'de> + Eq + Ord> Deserialize<'de> for BTreeSet<T>` (`seq_impl!`):
++    `deserializer.deserialize_seq(SeqVisitor { marker: PhantomData })`. -/
++@[rust_fun
++  "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>}::deserialize"]
++def DeserializeBTreeSet.deserialize {T D Error : Type} (i : serde_core.de.Deserialize T)
++    (_ : core.cmp.Eq T) (ord : core.cmp.Ord T) (inst : serde_core.de.Deserializer D Error)
++    (deserializer : D) :
++    Result (core.result.Result (alloc.collections.btree.set.BTreeSet T) Error) :=
++  inst.deserialize_seq (Visitor.wrap (BTreeSetVisitor i ord)) deserializer ()
++
++@[reducible, rust_trait_impl
++  "serde_core::de::Deserialize<'de, alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>"]
++def DeserializeBTreeSet {T : Type} (i : serde_core.de.Deserialize T) (eq : core.cmp.Eq T)
++    (ord : core.cmp.Ord T) : serde_core.de.Deserialize (alloc.collections.btree.set.BTreeSet T) :=
++  { deserialize := fun inst deserializer =>
++      DeserializeBTreeSet.deserialize i eq ord inst deserializer }
++
++/-- `MapVisitor` of `map_impl!(BTreeMap<K: Ord, V>, map, BTreeMap::new())`: `expecting` is "a map";
++    `visit_map` inserts every entry (`values.insert(key, value)`: a later value of an equal key
++    replaces the earlier one, the stored key stays). -/
++def BTreeMapVisitor {K V : Type} (ki : serde_core.de.Deserialize K) (ord : core.cmp.Ord K)
++    (vi : serde_core.de.Deserialize V) :
++    serde_core.de.Visitor Unit (alloc.collections.btree.map.BTreeMap K V) :=
++  { expecting := fun _ f => f.append "a map"
++    visit_map := fun {A Error} (map : serde_core.de.MapAccess A Error) _ access => do
++      collectEntries map (Deserialize.wrap ki) (Deserialize.wrap vi)
++        (fun values key value => do
++          let (_, values) ← alloc.collections.btree.map.BTreeMap.insert ord values key value
++          ok values)
++        (← alloc.collections.btree.map.BTreeMap.new K V) access }
++
++/-- `impl<'de, K: Deserialize<'de> + Ord, V: Deserialize<'de>> Deserialize<'de> for BTreeMap<K, V>`
++    (`map_impl!`): `deserializer.deserialize_map(MapVisitor { marker: PhantomData })`. -/
++@[rust_fun
++  "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::deserialize"]
++def DeserializeBTreeMap.deserialize {K V D Error : Type} (ki : serde_core.de.Deserialize K)
++    (ord : core.cmp.Ord K) (vi : serde_core.de.Deserialize V)
++    (inst : serde_core.de.Deserializer D Error) (deserializer : D) :
++    Result (core.result.Result (alloc.collections.btree.map.BTreeMap K V) Error) :=
++  inst.deserialize_map (Visitor.wrap (BTreeMapVisitor ki ord vi)) deserializer ()
++
++@[reducible, rust_trait_impl
++  "serde_core::de::Deserialize<'de, alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>"]
++def DeserializeBTreeMap {K V : Type} (ki : serde_core.de.Deserialize K) (ord : core.cmp.Ord K)
++    (vi : serde_core.de.Deserialize V) :
++    serde_core.de.Deserialize (alloc.collections.btree.map.BTreeMap K V) :=
++  { deserialize := fun inst deserializer =>
++      DeserializeBTreeMap.deserialize ki ord vi inst deserializer }
++
++/-- `forwarded_impl!((T), Box<T>, Box::new)`: `Deserialize::deserialize(deserializer).map(Box::new)`
++    (`Box<T>` is `T`). -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, Box<@T>>}::deserialize"]
++def DeserializeBox.deserialize {T D Error : Type} (i : serde_core.de.Deserialize T)
++    (inst : serde_core.de.Deserializer D Error) (deserializer : D) :
++    Result (core.result.Result T Error) :=
++  i.deserialize inst deserializer
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, Box<@T>>"]
++def DeserializeBox {T : Type} (i : serde_core.de.Deserialize T) : serde_core.de.Deserialize T :=
++  { deserialize := fun inst deserializer => DeserializeBox.deserialize i inst deserializer }
++
++/-- `box_forwarded_impl!(Arc)` (feature `rc`), with the clause `Box<T>: Deserialize<'de>`:
++    `Box::deserialize(deserializer).map(Into::into)` (`Box<T>` and `Arc<T>` are `T`). -/
++@[rust_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::sync::Arc<@T>>}::deserialize"]
++def DeserializeArc.deserialize {T D Error : Type} (boxInst : serde_core.de.Deserialize T)
++    (inst : serde_core.de.Deserializer D Error) (deserializer : D) :
++    Result (core.result.Result (alloc.sync.Arc T) Error) :=
++  boxInst.deserialize inst deserializer
++
++@[reducible, rust_trait_impl "serde_core::de::Deserialize<'de, alloc::sync::Arc<@T>>"]
++def DeserializeArc {T : Type} (boxInst : serde_core.de.Deserialize T) :
++    serde_core.de.Deserialize (alloc.sync.Arc T) :=
++  { deserialize := fun inst deserializer => DeserializeArc.deserialize boxInst inst deserializer }
++
+ end serde_core.de.impls
+ 
+ end Aeneas.Std
+diff --git a/backends/lean/Aeneas/Std/Serde/Ser.lean b/backends/lean/Aeneas/Std/Serde/Ser.lean
+index 74e40bf..154d282 100644
+--- a/backends/lean/Aeneas/Std/Serde/Ser.lean
++++ b/backends/lean/Aeneas/Std/Serde/Ser.lean
+@@ -4,6 +4,7 @@ import Aeneas.Std.Core.Error
+ import Aeneas.Std.Core.Result
+ import Aeneas.Std.Float
+ import Aeneas.Std.String
++import Aeneas.Std.Core.Iter
+ 
+ /-!
+ # `serde_core::ser` (serde 1.0.228)
+@@ -118,6 +119,65 @@ structure SerializeStructVariantF (Self Ok Error : Type) : Type 1 where
+     fun self _ => ok (.Ok (), self)
+   «end» : Self → Result (core.result.Result Ok Error)
+ 
++/-- `iterator_len_hint` (ser/mod.rs): `Some(lo)` when `iter.size_hint()` is `(lo, Some(hi))` with
++    `lo == hi`, else `None`. -/
++def iteratorLenHint {I Item : Type} (iterInst : core.iter.traits.iterator.Iterator I Item)
++    (iter : I) : Result (Option Usize) := do
++  let (lo, hi) ← iterInst.size_hint iter
++  match hi with
++  | some hi => ok (if lo = hi then some lo else none)
++  | none => ok none
++
++/-- `iter.try_for_each(f)` (the provided `Iterator::try_for_each`: `self.try_fold((), call(f))`,
++    `call(f) = move |(), x| f(x)`) for a closure `f` whose state is `state` and whose call is
++    `call`, returning `Result<(), E>`: the `try_fold` of the iterator's dictionary, the closure
++    state threaded through the calls. -/
++def tryForEachResult {I Item St E : Type} (iterInst : core.iter.traits.iterator.Iterator I Item)
++    (call : St → Item → Result (core.result.Result Unit E × St)) (iter : I) (state : St) :
++    Result (core.result.Result Unit E × I × St) :=
++  let fnInst : core.ops.function.FnMut St (Unit × Item) (core.result.Result Unit E) :=
++    { FnOnceInst := { call_once := fun s args => call s args.2 },
++      call_mut := fun s args => call s args.2 }
++  iterInst.try_fold fnInst (core.result.TryResult Unit E) iter () state
++
++/-- The provided `Serializer::collect_seq` (ser/mod.rs):
++    `let mut iter = iter.into_iter();
++     let mut serializer = tri!(self.serialize_seq(iterator_len_hint(&iter)));
++     tri!(iter.try_for_each(|item| serializer.serialize_element(&item)));
++     serializer.end()`. -/
++def collectSeq {S Ok Error SS I Item IntoIter : Type} (seqInst : SerializeSeqF X SS Ok Error)
++    (serialize_seq : S → Option Usize → Result (core.result.Result SS Error))
++    (intoIterInst : core.iter.traits.collect.IntoIterator I Item IntoIter) (itemInst : X Item)
++    (self : S) (iter : I) : Result (core.result.Result Ok Error) := do
++  let (iter, _) ← intoIterInst.into_iter iter
++  match ← serialize_seq self (← iteratorLenHint intoIterInst.iteratorInst iter) with
++  | .Err e => ok (.Err e)
++  | .Ok serializer =>
++    let (r, _, serializer) ← tryForEachResult intoIterInst.iteratorInst
++      (fun s item => seqInst.serialize_element itemInst s item) iter serializer
++    match r with
++    | .Err e => ok (.Err e)
++    | .Ok () => seqInst.«end» serializer
++
++/-- The provided `Serializer::collect_map` (ser/mod.rs):
++    `let mut iter = iter.into_iter();
++     let mut serializer = tri!(self.serialize_map(iterator_len_hint(&iter)));
++     tri!(iter.try_for_each(|(key, value)| serializer.serialize_entry(&key, &value)));
++     serializer.end()`. -/
++def collectMap {S Ok Error SM K V I IntoIter : Type} (mapInst : SerializeMapF X SM Ok Error)
++    (serialize_map : S → Option Usize → Result (core.result.Result SM Error))
++    (kInst : X K) (vInst : X V) (intoIterInst : core.iter.traits.collect.IntoIterator I (K × V) IntoIter)
++    (self : S) (iter : I) : Result (core.result.Result Ok Error) := do
++  let (iter, _) ← intoIterInst.into_iter iter
++  match ← serialize_map self (← iteratorLenHint intoIterInst.iteratorInst iter) with
++  | .Err e => ok (.Err e)
++  | .Ok serializer =>
++    let (r, _, serializer) ← tryForEachResult intoIterInst.iteratorInst
++      (fun s entry => mapInst.serialize_entry kInst vInst s entry.1 entry.2) iter serializer
++    match r with
++    | .Err e => ok (.Err e)
++    | .Ok () => mapInst.«end» serializer
++
+ /-- The message of the provided `serialize_i128`/`serialize_u128`:
+     `Err(Error::custom("i128 is not supported"))`. -/
+ def unsupported {Ok Error : Type} (errInst : serde_core.ser.Error Error) (msg : String) :
+@@ -175,6 +235,17 @@ structure SerializerF (Self Ok Error SerializeSeq SerializeTuple SerializeTupleS
+     Result (core.result.Result SerializeStructVariant Error)
+   /-- Provided: `true`. -/
+   is_human_readable : Self → Result Bool := fun _ => ok true
++  /-- Provided: `collectSeq`. -/
++  collect_seq : {I Item IntoIter : Type} → core.iter.traits.collect.IntoIterator I Item IntoIter →
++    X Item → Self → I → Result (core.result.Result Ok Error) :=
++    fun intoIterInst itemInst self iter =>
++      collectSeq X SerializeSeqInst serialize_seq intoIterInst itemInst self iter
++  /-- Provided: `collectMap`. -/
++  collect_map : {K V I IntoIter : Type} → X K → X V →
++    core.iter.traits.collect.IntoIterator I (K × V) IntoIter → Self → I →
++    Result (core.result.Result Ok Error) :=
++    fun kInst vInst intoIterInst self iter =>
++      collectMap X SerializeMapInst serialize_map kInst vInst intoIterInst self iter
+ 
+ /-- The data side (`Serialize`) relative to the knot family. -/
+ structure SerializeStep (Self : Type) : Type 1 where
+@@ -277,7 +348,9 @@ def SerializerF.map {Self Ok Error SS ST STS STV SM SSt SSV : Type}
+     serialize_map := d.serialize_map
+     serialize_struct := d.serialize_struct
+     serialize_struct_variant := d.serialize_struct_variant
+-    is_human_readable := d.is_human_readable }
++    is_human_readable := d.is_human_readable
++    collect_seq := fun intoIterInst x => d.collect_seq intoIterInst (g x)
++    collect_map := fun k v => d.collect_map (g k) (g v) }
+ end map
+ 
+ /-! ## Levels and the limit -/
+@@ -341,8 +414,9 @@ def serde_core.ser.SerializeStructVariant :=
+     "serialize_unit_struct", "serialize_unit_variant", "serialize_newtype_struct",
+     "serialize_newtype_variant", "serialize_seq", "serialize_tuple", "serialize_tuple_struct",
+     "serialize_tuple_variant", "serialize_map", "serialize_struct", "serialize_struct_variant",
+-    "is_human_readable"])
+-  (defaultMethods := ["serialize_i128", "serialize_u128", "is_human_readable"])]
++    "is_human_readable", "collect_seq", "collect_map"])
++  (defaultMethods := ["serialize_i128", "serialize_u128", "is_human_readable", "collect_seq",
++    "collect_map"])]
+ def serde_core.ser.Serializer := serde_core.ser.SerializerF serde_core.ser.SerializeΩ
+ 
+ @[reducible, rust_trait "serde_core::ser::Serialize" (methods := ["serialize"])
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index 268213d..d5a5f14 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -2444,26 +2444,90 @@ let lean_builtin_funs = [
+   mk_fun "num_bigint::biguint::{core::hash::Hash<num_bigint::biguint::BigUint>}::hash" "_root_.Aeneas.Std.num_bigint.BigUint.HashBigUint.hash";
+   (* file: "Aeneas/Std/Serde/Private.lean", line: 86 *)
+   mk_fun "serde::private::de::missing_field" "_root_.Aeneas.Std.serde.private.de.missing_field";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 106 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 603 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, ()>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeUnit.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 322 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, (@T0, @T1)>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializePair.deserialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 176 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 727 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, Box<@T>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBox.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 709 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeMap.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 678 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeSet.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 392 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::string::String>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeString.deserialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 201 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 739 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::sync::Arc<@T>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeArc.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 652 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, alloc::vec::Vec<@T>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeVec.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 588 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, bool>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBool.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 417 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, core::option::Option<@T>>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption.deserialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 148 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 573 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, f64>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeF64.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 489 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i16>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI16.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 499 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i32>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI32.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 509 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i64>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI64.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 479 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, i8>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI8.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 364 *)
+   mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u32>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU32.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 529 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u64>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU64.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 519 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, u8>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU8.deserialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 539 *)
++  mk_fun "serde_core::de::impls::{serde_core::de::Deserialize<'de, usize>}::deserialize" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeUsize.deserialize";
+   (* file: "Aeneas/Std/Serde/De.lean", line: 102 *)
+   mk_fun "serde_core::de::{serde_core::de::Expected<&'0 str>}::fmt" "_root_.Aeneas.Std.serde_core.de.ExpectedSharedStr.fmt";
+   (* file: "Aeneas/Std/Serde/Private.lean", line: 93 *)
+   mk_fun "serde_core::private::string::from_utf8_lossy" "_root_.Aeneas.Std.serde_core.private.string.from_utf8_lossy";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 44 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 47 *)
+   mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<&'a @T>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeShared.serialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 21 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 239 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<()>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeUnit.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 24 *)
+   mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<(@T0, @T1)>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializePair.serialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 67 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 268 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<Box<@T>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBox.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 117 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeMap.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 99 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeSet.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 70 *)
+   mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::string::String>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeString.serialize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 56 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 281 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::sync::Arc<@T>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeArc.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 84 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<alloc::vec::Vec<@T>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 136 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<bool>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBool.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 253 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<core::option::Option<@T>>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeOption.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 206 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<f64>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeF64.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 156 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i16>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI16.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 166 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i32>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI32.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 176 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i64>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI64.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 146 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<i8>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI8.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 228 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<str>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeStr.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 59 *)
+   mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<u32>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU32.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 196 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<u64>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU64.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 186 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<u8>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU8.serialize";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 217 *)
++  mk_fun "serde_core::ser::impls::{serde_core::ser::Serialize<usize>}::serialize" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeUsize.serialize";
+   (* file: "Aeneas/Std/Float.lean", line: 408 *)
+   mk_fun "std::f32::{f32}::atan" "_root_.Aeneas.Std.F32.atan";
+   (* file: "Aeneas/Std/Float.lean", line: 373 *)
+@@ -2677,26 +2741,26 @@ let lean_builtin_trait_decls = [
+   mk_trait_decl "serde_core::de::VariantAccess" "_root_.Aeneas.Std.serde_core.de.VariantAccess" ~parent_clauses:["serde_coredeErrorInst"] ~methods:[("unit_variant", "unit_variant"); ("newtype_variant_seed", "newtype_variant_seed"); ("newtype_variant", "newtype_variant"); ("tuple_variant", "tuple_variant"); ("struct_variant", "struct_variant")] ~default_methods:["newtype_variant"];
+   (* file: "Aeneas/Std/Serde/De.lean", line: 658 *)
+   mk_trait_decl "serde_core::de::Visitor" "_root_.Aeneas.Std.serde_core.de.Visitor" ~methods:[("expecting", "expecting"); ("visit_bool", "visit_bool"); ("visit_i8", "visit_i8"); ("visit_i16", "visit_i16"); ("visit_i32", "visit_i32"); ("visit_i64", "visit_i64"); ("visit_i128", "visit_i128"); ("visit_u8", "visit_u8"); ("visit_u16", "visit_u16"); ("visit_u32", "visit_u32"); ("visit_u64", "visit_u64"); ("visit_u128", "visit_u128"); ("visit_f32", "visit_f32"); ("visit_f64", "visit_f64"); ("visit_char", "visit_char"); ("visit_str", "visit_str"); ("visit_borrowed_str", "visit_borrowed_str"); ("visit_string", "visit_string"); ("visit_bytes", "visit_bytes"); ("visit_borrowed_bytes", "visit_borrowed_bytes"); ("visit_byte_buf", "visit_byte_buf"); ("visit_none", "visit_none"); ("visit_some", "visit_some"); ("visit_unit", "visit_unit"); ("visit_newtype_struct", "visit_newtype_struct"); ("visit_seq", "visit_seq"); ("visit_map", "visit_map"); ("visit_enum", "visit_enum")] ~default_methods:["visit_bool"; "visit_i8"; "visit_i16"; "visit_i32"; "visit_i64"; "visit_i128"; "visit_u8"; "visit_u16"; "visit_u32"; "visit_u64"; "visit_u128"; "visit_f32"; "visit_f64"; "visit_char"; "visit_str"; "visit_borrowed_str"; "visit_string"; "visit_bytes"; "visit_borrowed_bytes"; "visit_byte_buf"; "visit_none"; "visit_some"; "visit_unit"; "visit_newtype_struct"; "visit_seq"; "visit_map"; "visit_enum"] ~knot:"_root_.Aeneas.Std.serde_core.de.Visitor.wrap";
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 51 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 52 *)
+   mk_trait_decl "serde_core::ser::Error" "_root_.Aeneas.Std.serde_core.ser.Error" ~parent_clauses:["coreerrorErrorInst"] ~methods:[("custom", "custom")];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 348 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 422 *)
+   mk_trait_decl "serde_core::ser::Serialize" "_root_.Aeneas.Std.serde_core.ser.Serialize" ~methods:[("serialize", "serialize")] ~knot:"_root_.Aeneas.Std.serde_core.ser.Serialize.wrap";
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 316 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 389 *)
+   mk_trait_decl "serde_core::ser::SerializeMap" "_root_.Aeneas.Std.serde_core.ser.SerializeMap" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_key", "serialize_key"); ("serialize_value", "serialize_value"); ("serialize_entry", "serialize_entry"); ("end", "end")] ~default_methods:["serialize_entry"];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 298 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 371 *)
+   mk_trait_decl "serde_core::ser::SerializeSeq" "_root_.Aeneas.Std.serde_core.ser.SerializeSeq" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_element", "serialize_element"); ("end", "end")];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 322 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 395 *)
+   mk_trait_decl "serde_core::ser::SerializeStruct" "_root_.Aeneas.Std.serde_core.ser.SerializeStruct" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_field", "serialize_field"); ("skip_field", "skip_field"); ("end", "end")] ~default_methods:["skip_field"];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 327 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 400 *)
+   mk_trait_decl "serde_core::ser::SerializeStructVariant" "_root_.Aeneas.Std.serde_core.ser.SerializeStructVariant" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_field", "serialize_field"); ("skip_field", "skip_field"); ("end", "end")] ~default_methods:["skip_field"];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 302 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 375 *)
+   mk_trait_decl "serde_core::ser::SerializeTuple" "_root_.Aeneas.Std.serde_core.ser.SerializeTuple" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_element", "serialize_element"); ("end", "end")];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 306 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 379 *)
+   mk_trait_decl "serde_core::ser::SerializeTupleStruct" "_root_.Aeneas.Std.serde_core.ser.SerializeTupleStruct" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_field", "serialize_field"); ("end", "end")];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 311 *)
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 384 *)
+   mk_trait_decl "serde_core::ser::SerializeTupleVariant" "_root_.Aeneas.Std.serde_core.ser.SerializeTupleVariant" ~parent_clauses:["serde_coreserErrorInst"] ~methods:[("serialize_field", "serialize_field"); ("end", "end")];
+-  (* file: "Aeneas/Std/Serde/Ser.lean", line: 333 *)
+-  mk_trait_decl "serde_core::ser::Serializer" "_root_.Aeneas.Std.serde_core.ser.Serializer" ~parent_clauses:["serde_coreserErrorInst"; "SerializeSeqInst"; "SerializeTupleInst"; "SerializeTupleStructInst"; "SerializeTupleVariantInst"; "SerializeMapInst"; "SerializeStructInst"; "SerializeStructVariantInst"] ~methods:[("serialize_bool", "serialize_bool"); ("serialize_i8", "serialize_i8"); ("serialize_i16", "serialize_i16"); ("serialize_i32", "serialize_i32"); ("serialize_i64", "serialize_i64"); ("serialize_i128", "serialize_i128"); ("serialize_u8", "serialize_u8"); ("serialize_u16", "serialize_u16"); ("serialize_u32", "serialize_u32"); ("serialize_u64", "serialize_u64"); ("serialize_u128", "serialize_u128"); ("serialize_f32", "serialize_f32"); ("serialize_f64", "serialize_f64"); ("serialize_char", "serialize_char"); ("serialize_str", "serialize_str"); ("serialize_bytes", "serialize_bytes"); ("serialize_none", "serialize_none"); ("serialize_some", "serialize_some"); ("serialize_unit", "serialize_unit"); ("serialize_unit_struct", "serialize_unit_struct"); ("serialize_unit_variant", "serialize_unit_variant"); ("serialize_newtype_struct", "serialize_newtype_struct"); ("serialize_newtype_variant", "serialize_newtype_variant"); ("serialize_seq", "serialize_seq"); ("serialize_tuple", "serialize_tuple"); ("serialize_tuple_struct", "serialize_tuple_struct"); ("serialize_tuple_variant", "serialize_tuple_variant"); ("serialize_map", "serialize_map"); ("serialize_struct", "serialize_struct"); ("serialize_struct_variant", "serialize_struct_variant"); ("is_human_readable", "is_human_readable")] ~default_methods:["serialize_i128"; "serialize_u128"; "is_human_readable"];
++  (* file: "Aeneas/Std/Serde/Ser.lean", line: 406 *)
++  mk_trait_decl "serde_core::ser::Serializer" "_root_.Aeneas.Std.serde_core.ser.Serializer" ~parent_clauses:["serde_coreserErrorInst"; "SerializeSeqInst"; "SerializeTupleInst"; "SerializeTupleStructInst"; "SerializeTupleVariantInst"; "SerializeMapInst"; "SerializeStructInst"; "SerializeStructVariantInst"] ~methods:[("serialize_bool", "serialize_bool"); ("serialize_i8", "serialize_i8"); ("serialize_i16", "serialize_i16"); ("serialize_i32", "serialize_i32"); ("serialize_i64", "serialize_i64"); ("serialize_i128", "serialize_i128"); ("serialize_u8", "serialize_u8"); ("serialize_u16", "serialize_u16"); ("serialize_u32", "serialize_u32"); ("serialize_u64", "serialize_u64"); ("serialize_u128", "serialize_u128"); ("serialize_f32", "serialize_f32"); ("serialize_f64", "serialize_f64"); ("serialize_char", "serialize_char"); ("serialize_str", "serialize_str"); ("serialize_bytes", "serialize_bytes"); ("serialize_none", "serialize_none"); ("serialize_some", "serialize_some"); ("serialize_unit", "serialize_unit"); ("serialize_unit_struct", "serialize_unit_struct"); ("serialize_unit_variant", "serialize_unit_variant"); ("serialize_newtype_struct", "serialize_newtype_struct"); ("serialize_newtype_variant", "serialize_newtype_variant"); ("serialize_seq", "serialize_seq"); ("serialize_tuple", "serialize_tuple"); ("serialize_tuple_struct", "serialize_tuple_struct"); ("serialize_tuple_variant", "serialize_tuple_variant"); ("serialize_map", "serialize_map"); ("serialize_struct", "serialize_struct"); ("serialize_struct_variant", "serialize_struct_variant"); ("is_human_readable", "is_human_readable"); ("collect_seq", "collect_seq"); ("collect_map", "collect_map")] ~default_methods:["serialize_i128"; "serialize_u128"; "is_human_readable"; "collect_seq"; "collect_map"];
+ ]
+ 
+ let lean_builtin_trait_impls = [
+@@ -3522,23 +3586,87 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::str::traits::FromStr<u64, core::num::error::ParseIntError>" "_root_.Aeneas.Std.core.str.traits.FromStrU64";
+   (* file: "Aeneas/Std/Parse.lean", line: 102 *)
+   mk_trait_impl "core::str::traits::FromStr<usize, core::num::error::ParseIntError>" "_root_.Aeneas.Std.core.str.traits.FromStrUsize";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 112 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 608 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, ()>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeUnit";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 328 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, (@T0, @T1)>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializePair";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 182 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 733 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, Box<@T>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBox";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 717 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeMap";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 686 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeSet";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 398 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, alloc::string::String>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeString";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 208 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 745 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeArc";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 658 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeVec";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 593 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, bool>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeBool";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 424 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, core::option::Option<@T>>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 153 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 578 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, f64>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeF64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 494 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, i16>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI16";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 504 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, i32>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI32";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 514 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, i64>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 484 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, i8>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeI8";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 369 *)
+   mk_trait_impl "serde_core::de::Deserialize<'de, u32>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU32";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 534 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, u64>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 524 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, u8>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeU8";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 544 *)
++  mk_trait_impl "serde_core::de::Deserialize<'de, usize>" "_root_.Aeneas.Std.serde_core.de.impls.DeserializeUsize";
+   (* file: "Aeneas/Std/Serde/De.lean", line: 106 *)
+   mk_trait_impl "serde_core::de::Expected<&'0 str>" "_root_.Aeneas.Std.serde_core.de.ExpectedSharedStr";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 51 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 54 *)
+   mk_trait_impl "serde_core::ser::Serialize<&'a @T>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeShared";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 38 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 245 *)
++  mk_trait_impl "serde_core::ser::Serialize<()>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeUnit";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 41 *)
+   mk_trait_impl "serde_core::ser::Serialize<(@T0, @T1)>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializePair";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 73 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 275 *)
++  mk_trait_impl "serde_core::ser::Serialize<Box<@T>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBox";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 127 *)
++  mk_trait_impl "serde_core::ser::Serialize<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeMap";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 109 *)
++  mk_trait_impl "serde_core::ser::Serialize<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeSet";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 76 *)
+   mk_trait_impl "serde_core::ser::Serialize<alloc::string::String>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeString";
+-  (* file: "Aeneas/Std/Serde/Impls.lean", line: 62 *)
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 288 *)
++  mk_trait_impl "serde_core::ser::Serialize<alloc::sync::Arc<@T>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeArc";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 92 *)
++  mk_trait_impl "serde_core::ser::Serialize<alloc::vec::Vec<@T>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 142 *)
++  mk_trait_impl "serde_core::ser::Serialize<bool>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeBool";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 262 *)
++  mk_trait_impl "serde_core::ser::Serialize<core::option::Option<@T>>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeOption";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 212 *)
++  mk_trait_impl "serde_core::ser::Serialize<f64>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeF64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 162 *)
++  mk_trait_impl "serde_core::ser::Serialize<i16>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI16";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 172 *)
++  mk_trait_impl "serde_core::ser::Serialize<i32>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI32";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 182 *)
++  mk_trait_impl "serde_core::ser::Serialize<i64>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 152 *)
++  mk_trait_impl "serde_core::ser::Serialize<i8>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeI8";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 234 *)
++  mk_trait_impl "serde_core::ser::Serialize<str>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeStr";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 65 *)
+   mk_trait_impl "serde_core::ser::Serialize<u32>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU32";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 202 *)
++  mk_trait_impl "serde_core::ser::Serialize<u64>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU64";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 192 *)
++  mk_trait_impl "serde_core::ser::Serialize<u8>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeU8";
++  (* file: "Aeneas/Std/Serde/Impls.lean", line: 223 *)
++  mk_trait_impl "serde_core::ser::Serialize<usize>" "_root_.Aeneas.Std.serde_core.ser.impls.SerializeUsize";
+ ]
+ 
+diff --git a/tests/lean/SerdeCollections.lean b/tests/lean/SerdeCollections.lean
+new file mode 100644
+index 0000000..c648fda
+--- /dev/null
++++ b/tests/lean/SerdeCollections.lean
+@@ -0,0 +1 @@
++import SerdeCollections.Checks
+diff --git a/tests/lean/SerdeCollections/Checks.lean b/tests/lean/SerdeCollections/Checks.lean
+new file mode 100644
+index 0000000..a631b15
+--- /dev/null
++++ b/tests/lean/SerdeCollections/Checks.lean
+@@ -0,0 +1,637 @@
++import SerdeCollections.SerdeCollections
++
++/-! Run the extracted implementations of `tests/src/serde-collections` (`Record`, `Holes`,
++    `Numbers`, `de_i8` ... `de_unit`, `de_point`, `de_ids` ... `de_shared`), and through them
++    serde's `Serialize` impls of the collections and the primitives, the provided
++    `Serializer::collect_seq`/`collect_map` and the `Deserialize` impls of the primitives and the
++    collections (`Aeneas/Std/Serde/Impls.lean`, `Ser.lean`), against the in-test formats of its
++    `native` test module (`ValueSer` and its compound states, `ValueDe`/`SeqDe`/`MapDe`), encoded as
++    `FormatProgram`s, and compare with the native results. -/
++
++namespace serde_collections.checks
++open Aeneas Aeneas.Std Result
++
++/-- `native::Value`; a float is `num "f64" bits` (`v.to_bits() as i128`). -/
++inductive TValue where
++  | unit
++  | bool (b : Bool)
++  | num (kind : String) (v : Int)
++  | str (s : String)
++  | none
++  | some (v : TValue)
++  | seq (len : Option Nat) (xs : List TValue)
++  | tuple (len : Nat) (xs : List TValue)
++  | map (len : Option Nat) (kvs : List (TValue × TValue))
++  | struct_ (typeName : String) (fields : List (String × TValue))
++deriving Repr, BEq, Inhabited
++
++/-! ## `native::TestError(String)` -/
++
++/-- `impl Display for TestError`: `f.write_str(&self.0)`. -/
++def errDisplay : core.fmt.Display String := ⟨fun s f => f.append s⟩
++
++/-- `#[derive(Debug)]`: `TestError("..")`. -/
++def errDebug : core.fmt.Debug String :=
++  ⟨fun s f => f.debugTuple "TestError" [⟨String, core.fmt.DebugString, s⟩]⟩
++
++/-- `ToString::to_string` (a `Display` returning an error panics). -/
++def toString' {T : Type} (d : core.fmt.Display T) (x : T) : Result String := do
++  let (status, f) ← d.fmt x {}
++  match status with
++  | .Ok () => ok f.output
++  | .Err _ => fail .panic
++
++/-- `impl ser::Error for TestError` / `impl de::Error for TestError`:
++    `TestError(msg.to_string())`. -/
++def serErr : serde_core.ser.Error String :=
++  { coreerrorErrorInst := ⟨errDebug, errDisplay⟩, custom := fun d msg => toString' d msg }
++
++def deErr : serde_core.de.Error String :=
++  { coreerrorErrorInst := ⟨errDebug, errDisplay⟩, custom := fun d msg => toString' d msg }
++
++/-- `fn fail(msg)`: `Err(TestError(msg.to_string()))`. -/
++def failWith {T : Type} (msg : String) : Result (core.result.Result T String) := ok (.Err msg)
++
++/-! ## `ValueSer` and its compound states, as a format program -/
++
++open serde_core.ser in
++/-- `SeqState(Option<usize>, Vec<Value>)`, `TupleState(usize, Vec<Value>)`,
++    `MapState { len, entries, key }`, `StructState { name, fields }`; the `Impossible` states of the
++    tuple-struct/variant and struct-variant serializers are empty. -/
++@[reducible] def serTypes : FormatTypes Unit where
++  S := fun _ => Unit
++  Ok := fun _ => TValue
++  Error := fun _ => String
++  SerializeSeq := fun _ => Option Nat × List TValue
++  SerializeTuple := fun _ => Nat × List TValue
++  SerializeTupleStruct := fun _ => Empty
++  SerializeTupleVariant := fun _ => Empty
++  SerializeMap := fun _ => Option Nat × List (TValue × TValue) × Option TValue
++  SerializeStruct := fun _ => String × List (String × TValue)
++  SerializeStructVariant := fun _ => Empty
++
++open serde_core.ser in
++def serStep (X : Type → Type 1) (sub : serTypes.Dicts X) : serTypes.Dicts (SerializeStep X) :=
++  fun _ =>
++  { serde_coreserErrorInst := serErr
++    SerializeSeqInst :=
++      { serde_coreserErrorInst := serErr
++        -- `match v.serialize(ValueSer)? { None => fail("none"), x => { self.1.push(x); Ok(()) } }`
++        serialize_element := fun d st v =>
++          d.serialize (sub ()) v () >>= fun r =>
++          match r with
++          | .Ok .none => ok (.Err "none", st)
++          | .Ok x => ok (.Ok (), (st.1, st.2 ++ [x]))
++          | .Err e => ok (.Err e, st)
++        «end» := fun st => ok (.Ok (.seq st.1 st.2)) }
++    SerializeTupleInst :=
++      { serde_coreserErrorInst := serErr
++        serialize_element := fun d st v =>
++          d.serialize (sub ()) v () >>= fun r =>
++          match r with
++          | .Ok x => ok (.Ok (), (st.1, st.2 ++ [x]))
++          | .Err e => ok (.Err e, st)
++        «end» := fun st => ok (.Ok (.tuple st.1 st.2)) }
++    SerializeTupleStructInst := { serde_coreserErrorInst := serErr,
++                                  serialize_field := fun _ st _ => (nomatch st),
++                                  «end» := fun st => nomatch st }
++    SerializeTupleVariantInst := { serde_coreserErrorInst := serErr,
++                                   serialize_field := fun _ st _ => (nomatch st),
++                                   «end» := fun st => nomatch st }
++    SerializeMapInst :=
++      { serde_coreserErrorInst := serErr
++        -- `self.key = Some(key.serialize(ValueSer)?)`
++        serialize_key := fun d st key =>
++          d.serialize (sub ()) key () >>= fun r =>
++          match r with
++          | .Ok x => ok (.Ok (), (st.1, st.2.1, .some x))
++          | .Err e => ok (.Err e, st)
++        -- `match self.key.take() { Some(key) => { let v = v.serialize(ValueSer)?;
++        --   self.entries.push((key, v)); Ok(()) } None => fail("value without key") }`
++        serialize_value := fun d st v =>
++          match st.2.2 with
++          | .none => ok (.Err "value without key", st)
++          | .some key =>
++            d.serialize (sub ()) v () >>= fun r =>
++            match r with
++            | .Ok x => ok (.Ok (), (st.1, st.2.1 ++ [(key, x)], .none))
++            | .Err e => ok (.Err e, (st.1, st.2.1, .none))
++        «end» := fun st => ok (.Ok (.map st.1 st.2.1)) }
++    SerializeStructInst :=
++      { serde_coreserErrorInst := serErr
++        serialize_field := fun d st key v =>
++          d.serialize (sub ()) v () >>= fun r =>
++          match r with
++          | .Ok x => Str.toString key >>= fun k => ok (.Ok (), (st.1, st.2 ++ [(k, x)]))
++          | .Err e => ok (.Err e, st)
++        «end» := fun st => ok (.Ok (.struct_ st.1 st.2)) }
++    SerializeStructVariantInst := { serde_coreserErrorInst := serErr,
++                                    serialize_field := fun _ st _ _ => (nomatch st),
++                                    «end» := fun st => nomatch st }
++    serialize_bool := fun _ v => ok (.Ok (.bool v))
++    serialize_i8 := fun _ v => ok (.Ok (.num "i8" v.val))
++    serialize_i16 := fun _ v => ok (.Ok (.num "i16" v.val))
++    serialize_i32 := fun _ v => ok (.Ok (.num "i32" v.val))
++    serialize_i64 := fun _ v => ok (.Ok (.num "i64" v.val))
++    serialize_u8 := fun _ v => ok (.Ok (.num "u8" v.val))
++    serialize_u16 := fun _ _ => failWith "u16"
++    serialize_u32 := fun _ v => if v.val > 100 then failWith "big" else ok (.Ok (.num "u32" v.val))
++    serialize_u64 := fun _ v => ok (.Ok (.num "u64" v.val))
++    serialize_f32 := fun _ _ => failWith "f32"
++    serialize_f64 := fun _ v => ok (.Ok (.num "f64" v.bits.toNat))
++    serialize_char := fun _ _ => failWith "char"
++    serialize_str := fun _ s => do
++      let s ← Str.toString s
++      ok (.Ok (.str s))
++    serialize_bytes := fun _ _ => failWith "bytes"
++    serialize_none := fun _ => ok (.Ok .none)
++    -- `Ok(Some(Box::new(v.serialize(ValueSer)?)))`
++    serialize_some := fun d _ v =>
++      d.serialize (sub ()) v () >>= fun r =>
++      match r with
++      | .Ok x => ok (.Ok (.some x))
++      | .Err e => ok (.Err e)
++    serialize_unit := fun _ => ok (.Ok .unit)
++    serialize_unit_struct := fun _ _ => failWith "unit struct"
++    serialize_unit_variant := fun _ _ _ _ => failWith "unit variant"
++    serialize_newtype_struct := fun _ _ _ _ => failWith "newtype struct"
++    serialize_newtype_variant := fun _ _ _ _ _ _ => failWith "newtype variant"
++    serialize_seq := fun _ len => ok (.Ok (len.map (·.val), []))
++    serialize_tuple := fun _ len => ok (.Ok (len.val, []))
++    serialize_tuple_struct := fun _ _ _ => failWith "tuple struct"
++    serialize_tuple_variant := fun _ _ _ _ _ => failWith "tuple variant"
++    serialize_map := fun _ len => ok (.Ok (len.map (·.val), [], .none))
++    serialize_struct := fun _ typeName _ => do
++      let n ← Str.toString typeName
++      ok (.Ok (n, []))
++    serialize_struct_variant := fun _ _ _ _ _ => failWith "struct variant" }
++
++open serde_core.ser in
++def serFormat : FormatProgram serTypes where
++  base := fun _ => bottom (SerializeAt 0)
++  step := serStep
++
++/-- `ValueSer` with nesting bound `n`. -/
++def valueSer (n : Nat) := serFormat.encode n ()
++
++/-! ## `ValueDe`, `SeqDe` and `MapDe`, as a format program -/
++
++open serde_core.de in
++def deTypes : FormatTypes where
++  ιD := Unit
++  D := fun _ => TValue
++  DError := fun _ => String
++  ιS := Unit
++  S := fun _ => List TValue
++  SError := fun _ => String
++  ιM := Unit
++  M := fun _ => List (TValue × TValue) × Option TValue
++  MError := fun _ => String
++  ιE := Empty
++  E := fun _ => Unit
++  EError := fun _ => String
++  EVariant := fun _ => Unit
++  ιV := Empty
++  V := fun _ => Unit
++  VError := fun _ => String
++
++open serde_core.de in
++/-- `ValueDe::deserialize_any`: a number with its kind's `visit_*` (`v as i8`, ..., a float from its
++    bits), a sequence or a tuple with `visit_seq(SeqDe(..))`, a map or a struct (its field names as
++    strings) with `visit_map(MapDe { .. })`. -/
++def deserializeAny {X : Fam} (sub : deTypes.Dicts X) {V Value : Type} (vis : VisitorStep X V Value)
++    (d : TValue) (v : V) : Result (core.result.Result Value String) :=
++  match d with
++  | .unit => vis.visit_unit deErr v
++  | .bool b => vis.visit_bool deErr v b
++  | .num kind n =>
++    match kind with
++    | "i8" => vis.visit_i8 deErr v ⟨BitVec.ofInt _ n⟩
++    | "i16" => vis.visit_i16 deErr v ⟨BitVec.ofInt _ n⟩
++    | "i32" => vis.visit_i32 deErr v ⟨BitVec.ofInt _ n⟩
++    | "i64" => vis.visit_i64 deErr v ⟨BitVec.ofInt _ n⟩
++    | "u8" => vis.visit_u8 deErr v ⟨BitVec.ofInt _ n⟩
++    | "u16" => vis.visit_u16 deErr v ⟨BitVec.ofInt _ n⟩
++    | "u32" => vis.visit_u32 deErr v ⟨BitVec.ofInt _ n⟩
++    | "u64" => vis.visit_u64 deErr v ⟨BitVec.ofInt _ n⟩
++    | "f32" => vis.visit_f32 deErr v ⟨BitVec.ofInt _ n⟩
++    | "f64" => vis.visit_f64 deErr v ⟨BitVec.ofInt _ n⟩
++    | _ => failWith "kind"
++  | .str s => do
++    let s ← Str.ofString s
++    vis.visit_str deErr v s
++  | .none => vis.visit_none deErr v
++  | .some x => vis.visit_some (sub.des ()) v x
++  | .seq _ xs => vis.visit_seq (sub.seqs ()) v xs
++  | .tuple _ xs => vis.visit_seq (sub.seqs ()) v xs
++  | .map _ kvs => vis.visit_map (sub.maps ()) v (kvs, .none)
++  | .struct_ _ fields => vis.visit_map (sub.maps ()) v (fields.map fun (k, x) => (.str k, x), .none)
++
++open serde_core.de in
++def deStep (X : Fam) (sub : deTypes.Dicts X) : deTypes.Dicts (Step X) where
++  des := fun _ =>
++    let any := @deserializeAny X sub
++    { serde_coredeErrorInst := deErr
++      deserialize_any := any
++      deserialize_bool := any, deserialize_i8 := any, deserialize_i16 := any
++      deserialize_i32 := any, deserialize_i64 := any, deserialize_i128 := any
++      deserialize_u8 := any, deserialize_u16 := any, deserialize_u32 := any
++      deserialize_u64 := any, deserialize_u128 := any, deserialize_f32 := any
++      deserialize_f64 := any, deserialize_char := any, deserialize_str := any
++      deserialize_string := any, deserialize_bytes := any, deserialize_byte_buf := any
++      deserialize_option := any, deserialize_unit := any
++      deserialize_unit_struct := fun vis d _ v => any vis d v
++      deserialize_newtype_struct := fun vis d _ v => any vis d v
++      deserialize_seq := any
++      deserialize_tuple := fun vis d _ v => any vis d v
++      deserialize_tuple_struct := fun vis d _ _ v => any vis d v
++      deserialize_map := any
++      deserialize_struct := fun vis d _ _ v => any vis d v
++      deserialize_enum := fun vis d _ _ v => any vis d v
++      deserialize_identifier := any
++      deserialize_ignored_any := any }
++  seqs := fun _ =>
++    { serde_coredeErrorInst := deErr
++      next_element_seed := fun seed xs t =>
++        match xs with
++        | [] => ok (.Ok .none, [])
++        | x :: rest =>
++          seed.deserialize (sub.des ()) t x >>= fun r =>
++          match r with
++          | .Ok v => ok (.Ok (.some v), rest)
++          | .Err e => ok (.Err e, rest) }
++  maps := fun _ =>
++    { serde_coredeErrorInst := deErr
++      next_key_seed := fun seed st k =>
++        match st.1 with
++        | [] => ok (.Ok .none, st)
++        | (key, value) :: rest =>
++          seed.deserialize (sub.des ()) k key >>= fun r =>
++          match r with
++          | .Ok v => ok (.Ok (.some v), (rest, .some value))
++          | .Err e => ok (.Err e, (rest, .some value))
++      next_value_seed := fun seed st v =>
++        match st.2 with
++        | .none => ok (.Err "value missing", st)
++        | .some value => do
++          let r ← seed.deserialize (sub.des ()) v value
++          ok (r, (st.1, .none)) }
++  enums := fun i => nomatch i
++  variants := fun i => nomatch i
++
++open serde_core.de in
++def deFormat : FormatProgram deTypes where
++  base := bottom (DeAt 0) deTypes
++  step := deStep
++
++/-- `ValueDe` with nesting bound `n`. -/
++def valueDe (n : Nat) := deFormat.encode n ()
++
++/-! ## The extracted implementations against the in-test formats (the asserts of `native`) -/
++
++/-- A result of the native test helpers: `Ok`, `Err(TestError(..))`, or no result (a panic or
++    divergence of the model, or the nesting bound reached). -/
++inductive Out (α : Type) where
++  | ok (a : α)
++  | err (e : String)
++  | none
++deriving BEq, Repr
++
++def out {α : Type} : Result (core.result.Result α String) → Out α
++  | ok (.Ok a) => .ok a
++  | ok (.Err e) => .err e
++  | _ => .none
++
++def Out.map {α β : Type} (f : α → β) : Out α → Out β
++  | .ok a => .ok (f a)
++  | .err e => .err e
++  | .none => .none
++
++/-- The nesting bound of the encoded formats (the tests nest at most four data-side calls). -/
++def bound : Nat := 8
++
++/-- `fn ser<T: Serialize>(v: &T)`: `v.serialize(ValueSer)`. -/
++def ser {T : Type} (d : serde_core.ser.Serialize T) (x : T) : Out TValue :=
++  out (d.serialize (valueSer bound) x ())
++
++/-- `f(ValueDe(v))` for an extracted `f<'de, D: Deserializer<'de>>(D)`. -/
++def de {T : Type}
++    (f : serde_core.de.Deserializer TValue String → TValue → Result (core.result.Result T String))
++    (v : TValue) : Out T :=
++  out (f (valueDe bound) v)
++
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++def u8 (n : Nat) : U8 := ⟨BitVec.ofNat _ n⟩
++def u32 (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++def f64 (bits : Nat) : F64 := BinaryFloat.ofNat _ bits
++
++/-- `Num("u32", n)` for each `n`. -/
++def u32s (ns : List Nat) : List TValue := ns.map fun n => .num "u32" n
++
++/-- `f64v(v)`: `Num("f64", v.to_bits() as i128)`. -/
++def f64v (bits : Nat) : TValue := .num "f64" bits
++def f32v (bits : Nat) : TValue := .num "f32" bits
++
++/-! Float bits. -/
++def nan : Nat := 0x7ff8000000000000
++def negNan : Nat := 0xfff8000000000000
++def inf : Nat := 0x7ff0000000000000
++def negInf : Nat := 0xfff0000000000000
++def negZero : Nat := 0x8000000000000000
++def minPositive : Nat := 0x0010000000000000
++def maxF64 : Nat := 0x7fefffffffffffff
++
++/-! ### `serialize_record`, `record_errors`, `holes` -/
++
++/-- `ser(&record(..))`. -/
++def serRecord (ids : List Nat) (names : List (String × Nat)) (tags : List Nat)
++    (nested : List (List Nat)) (maybe : Option Nat) (shared : String) (small : Int) (count : Nat)
++    (ratio : Nat) : Out TValue :=
++  match serde_collections.record (vec (ids.map u32)) (vec (names.map fun (s, n) => (s, u32 n)))
++      (vec (tags.map u32)) (vec (nested.map fun xs => vec (xs.map u8))) (maybe.map fun n => ⟨BitVec.ofNat _ n⟩)
++      shared ⟨BitVec.ofInt _ small⟩ ⟨BitVec.ofNat _ count⟩ (f64 ratio) with
++  | ok r => ser serde_collections.Record.Insts.Serde_coreSerSerialize r
++  | _ => .none
++
++/-- `sample()`. -/
++def sample : Out TValue :=
++  serRecord [3, 1, 2] [("b", 2), ("a", 1), ("b", 5)] [9, 4, 9, 7] [[1, 2], []] (some (2 ^ 40))
++    "shared" (-3) 12 0x3fe0000000000000
++
++/-- `sample_value()`. -/
++def sampleValue : TValue :=
++  .struct_ "Record" [
++    ("ids", .seq (some 3) (u32s [3, 1, 2])),
++    ("names", .map (some 2) [(.str "a", .num "u32" 1), (.str "b", .num "u32" 5)]),
++    ("tags", .seq (some 3) (u32s [4, 7, 9])),
++    ("nested", .seq (some 2) [.seq (some 2) [.num "u8" 1, .num "u8" 2], .seq (some 0) []]),
++    ("maybe", .some (.num "u64" (2 ^ 40))),
++    ("shared", .str "shared"),
++    ("flag", .bool true),
++    ("small", .num "i8" (-3)),
++    ("mid", .num "i16" 900),
++    ("word", .num "i32" (-210000)),
++    ("delta", .num "i64" 15000000000),
++    ("count", .num "u64" 12),
++    ("ratio", .num "f64" 0x3fe0000000000000),
++    ("unit", .unit),
++    ("label", .str "rec")]
++
++#guard sample == .ok sampleValue
++
++/-- `record(vec![], vec![], vec![], vec![], None, String::new(), 5, 0, -0.0)`, its fields. -/
++def emptyFields : List (String × TValue) :=
++  match serRecord [] [] [] [] none "" 5 0 negZero with
++  | .ok (.struct_ _ fields) => fields
++  | _ => []
++
++#guard emptyFields[0]? == some ("ids", .seq (some 0) [])
++#guard emptyFields[1]? == some ("names", .map (some 0) [])
++#guard emptyFields[4]? == some ("maybe", .none)
++#guard emptyFields[6]? == some ("flag", .bool false)
++#guard emptyFields[12]? == some ("ratio", .num "f64" negZero)
++
++/-! `record_errors`: the first failing element of `ids` stops the record; a failing element of
++    the set, and a failing value of the map. -/
++#guard serRecord [1, 200, 300] [] [] [] none "" 0 0 0 == .err "big"
++#guard serRecord [] [] [101] [] none "" 0 0 0 == .err "big"
++#guard serRecord [] [("a", 101)] [] [] none "" 0 0 0 == .err "big"
++
++/-- `ser(&Holes(..))`. -/
++def holes (xs : List (Option Nat)) : Out TValue :=
++  ser serde_collections.Holes.Insts.Serde_coreSerSerialize (vec (xs.map (·.map u32)))
++
++#guard holes [some 1, some 2] ==
++  .ok (.seq (some 2) [.some (.num "u32" 1), .some (.num "u32" 2)])
++#guard holes [some 1, none, some 200] == .err "none"
++#guard holes [some 200, none] == .err "big"
++#guard holes [] == .ok (.seq (some 0) [])
++
++/-! ### `serialize_numbers` -/
++
++def numbers (small wide word mid : Int) (byte big size : Nat) (floats : List Nat) :
++    serde_collections.Numbers :=
++  { small := ⟨BitVec.ofInt _ small⟩, mid := ⟨BitVec.ofInt _ mid⟩, word := ⟨BitVec.ofInt _ word⟩,
++    wide := ⟨BitVec.ofInt _ wide⟩, byte := u8 byte, big := ⟨BitVec.ofNat _ big⟩,
++    size := ⟨BitVec.ofNat _ size⟩, floats := vec (floats.map f64) }
++
++def serNumbers (n : serde_collections.Numbers) : Out TValue :=
++  ser serde_collections.Numbers.Insts.Serde_coreSerSerialize n
++
++/-- `Numbers { i8::MIN, ..., u8::MAX, u64::MAX, usize::MAX, floats }`. -/
++def low : serde_collections.Numbers :=
++  numbers (-128) (-9223372036854775808) (-2147483648) (-32768) 255 18446744073709551615
++    18446744073709551615 [nan, negNan, inf, negInf, negZero, minPositive, 1, maxF64]
++
++#guard serNumbers low == .ok (.struct_ "Numbers" [
++  ("small", .num "i8" (-128)),
++  ("mid", .num "i16" (-32768)),
++  ("word", .num "i32" (-2147483648)),
++  ("wide", .num "i64" (-9223372036854775808)),
++  ("byte", .num "u8" 255),
++  ("big", .num "u64" 18446744073709551615),
++  ("size", .num "u64" 18446744073709551615),
++  ("floats", .seq (some 8)
++    [f64v nan, f64v negNan, f64v inf, f64v negInf, f64v negZero, f64v minPositive, f64v 1,
++     f64v maxF64])])
++
++def highFields : List (String × TValue) :=
++  match serNumbers (numbers 127 9223372036854775807 2147483647 32767 0 0 0 []) with
++  | .ok (.struct_ _ fields) => fields
++  | _ => []
++
++#guard highFields[0]? == some ("small", .num "i8" 127)
++#guard highFields[1]? == some ("mid", .num "i16" 32767)
++#guard highFields[2]? == some ("word", .num "i32" 2147483647)
++#guard highFields[3]? == some ("wide", .num "i64" 9223372036854775807)
++#guard highFields[6]? == some ("size", .num "u64" 0)
++#guard highFields[7]? == some ("floats", .seq (some 0) [])
++
++/-! ### `deserialize_integers` -/
++
++def deI8 (v : TValue) : Out Int := (de serde_collections.de_i8 v).map (·.val)
++def deI16 (v : TValue) : Out Int := (de serde_collections.de_i16 v).map (·.val)
++def deI32 (v : TValue) : Out Int := (de serde_collections.de_i32 v).map (·.val)
++def deI64 (v : TValue) : Out Int := (de serde_collections.de_i64 v).map (·.val)
++def deU8 (v : TValue) : Out Nat := (de serde_collections.de_u8 v).map (·.val)
++def deU64 (v : TValue) : Out Nat := (de serde_collections.de_u64 v).map (·.val)
++def deUsize (v : TValue) : Out Nat := (de serde_collections.de_usize v).map (·.val)
++
++#guard deI8 (.num "i8" (-128)) == .ok (-128)
++#guard deI8 (.num "u8" 127) == .ok 127
++#guard deI8 (.num "u8" 128) == .err "invalid value: integer `128`, expected i8"
++#guard deI8 (.num "i16" (-129)) == .err "invalid value: integer `-129`, expected i8"
++#guard deI8 (.num "u64" 18446744073709551615) ==
++  .err "invalid value: integer `18446744073709551615`, expected i8"
++#guard deI16 (.num "i8" (-128)) == .ok (-128)
++#guard deI16 (.num "i32" 32767) == .ok 32767
++#guard deI16 (.num "i32" 32768) == .err "invalid value: integer `32768`, expected i16"
++#guard deI32 (.num "i64" (-2147483648)) == .ok (-2147483648)
++#guard deI32 (.num "i64" (-2147483649)) == .err "invalid value: integer `-2147483649`, expected i32"
++#guard deI32 (.num "u32" 4294967295) == .err "invalid value: integer `4294967295`, expected i32"
++#guard deI64 (.num "i64" (-9223372036854775808)) == .ok (-9223372036854775808)
++#guard deI64 (.num "u64" 9223372036854775807) == .ok 9223372036854775807
++#guard deI64 (.num "u64" 9223372036854775808) ==
++  .err "invalid value: integer `9223372036854775808`, expected i64"
++#guard deU8 (.num "i64" 255) == .ok 255
++#guard deU8 (.num "i8" (-1)) == .err "invalid value: integer `-1`, expected u8"
++#guard deU8 (.num "u16" 256) == .err "invalid value: integer `256`, expected u8"
++#guard deU64 (.num "u64" 18446744073709551615) == .ok 18446744073709551615
++#guard deU64 (.num "i8" 0) == .ok 0
++#guard deU64 (.num "i64" (-9223372036854775808)) ==
++  .err "invalid value: integer `-9223372036854775808`, expected u64"
++#guard deUsize (.num "u64" 18446744073709551615) == .ok 18446744073709551615
++#guard deUsize (.num "u32" 7) == .ok 7
++#guard deUsize (.num "i32" (-5)) == .err "invalid value: integer `-5`, expected usize"
++/-! The provided `visit_*`: `invalid_type`. -/
++#guard deI8 (f64v 0x3ff8000000000000) == .err "invalid type: floating point `1.5`, expected i8"
++#guard deU64 (.str "7") == .err "invalid type: string \"7\", expected u64"
++#guard deI64 (.bool true) == .err "invalid type: boolean `true`, expected i64"
++#guard deUsize .unit == .err "invalid type: unit value, expected usize"
++#guard deI32 (.some (.num "i32" 1)) == .err "invalid type: Option value, expected i32"
++#guard deI16 (.seq none []) == .err "invalid type: sequence, expected i16"
++
++/-! ### `deserialize_floats` -/
++
++def deF64 (v : TValue) : Out Nat := (de serde_collections.de_f64 v).map (·.bits.toNat)
++
++#guard deF64 (f64v nan) == .ok nan
++#guard deF64 (f64v negNan) == .ok negNan
++#guard deF64 (f64v negZero) == .ok negZero
++#guard deF64 (f64v negInf) == .ok negInf
++#guard deF64 (f64v 1) == .ok 1
++/-! `v as f64`, rounded to nearest (ties to even). -/
++#guard deF64 (.num "i64" (-9223372036854775808)) == .ok 0xc3e0000000000000
++#guard deF64 (.num "i64" 9223372036854775807) == .ok 0x43e0000000000000
++#guard deF64 (.num "u64" 18446744073709551615) == .ok 0x43f0000000000000
++#guard deF64 (.num "i64" 9007199254740993) == .ok 0x4340000000000000
++#guard deF64 (.num "u64" 9007199254740995) == .ok 0x4340000000000002
++#guard deF64 (.num "i8" (-1)) == .ok 0xbff0000000000000
++/-! `(v as f64).copysign(sign)`. -/
++#guard deF64 (f32v 0x80000000) == .ok negZero
++-- `0.1f32 as f64`
++#guard deF64 (f32v 0x3dcccccd) == .ok 0x3fb99999a0000000
++#guard deF64 (f32v 0x7fc00000) == .ok nan
++#guard deF64 (f32v 0xffc00000) == .ok negNan
++#guard deF64 (f32v 0xff800000) == .ok negInf
++#guard deF64 (.bool false) == .err "invalid type: boolean `false`, expected f64"
++#guard deF64 (.str "1.0") == .err "invalid type: string \"1.0\", expected f64"
++
++/-! ### `deserialize_bool_unit`: the float of `invalid_type` written by `WithDecimalPoint` -/
++
++def deBool (v : TValue) : Out Bool := de serde_collections.de_bool v
++def deUnit (v : TValue) : Out Unit := de serde_collections.de_unit v
++
++def floatMsg (text : String) : Out Bool :=
++  .err ("invalid type: floating point `" ++ text ++ "`, expected a boolean")
++
++#guard deBool (.bool true) == .ok true
++#guard deBool (.bool false) == .ok false
++#guard deBool (f64v nan) == floatMsg "NaN"
++#guard deBool (f64v negNan) == floatMsg "NaN"
++#guard deBool (f64v inf) == floatMsg "inf"
++#guard deBool (f64v negInf) == floatMsg "-inf"
++#guard deBool (f64v negZero) == floatMsg "-0.0"
++#guard deBool (f64v 0) == floatMsg "0.0"
++-- `0.1`
++#guard deBool (f64v 0x3fb999999999999a) == floatMsg "0.1"
++-- `-2.5`
++#guard deBool (f64v 0xc004000000000000) == floatMsg "-2.5"
++-- `1e21`
++#guard deBool (f64v 0x444b1ae4d6e2ef50) == floatMsg "1000000000000000000000.0"
++-- `1e-7`
++#guard deBool (f64v 0x3e7ad7f29abcaf48) == floatMsg "0.0000001"
++-- `format!("{}.0", f64::MAX)`
++#guard deBool (f64v maxF64) == floatMsg ("179769313486231570" ++ String.ofList (List.replicate 291 '0') ++ ".0")
++-- `format!("{}", 5e-324f64)`
++#guard deBool (f64v 1) == floatMsg ("0." ++ String.ofList (List.replicate 323 '0') ++ "5")
++#guard deBool (f32v 0xffc00000) == floatMsg "NaN"
++-- `0.1f32`
++#guard deBool (f32v 0x3dcccccd) == floatMsg "0.10000000149011612"
++#guard deBool (.num "i64" (-9223372036854775808)) ==
++  .err "invalid type: integer `-9223372036854775808`, expected a boolean"
++#guard deBool (.num "u64" 18446744073709551615) ==
++  .err "invalid type: integer `18446744073709551615`, expected a boolean"
++#guard deUnit .unit == .ok ()
++#guard deUnit .none == .err "invalid type: Option value, expected unit"
++#guard deUnit (.num "u8" 255) == .err "invalid type: integer `255`, expected unit"
++#guard deUnit (.tuple 0 []) == .err "invalid type: sequence, expected unit"
++
++/-! ### `deserialize_point`: the primitives through `next_element` -/
++
++def dePoint (v : TValue) : Out (Int × Nat) :=
++  (de serde_collections.de_point v).map fun (a, b) => (a.val, b.bits.toNat)
++
++#guard dePoint (.tuple 2 [.num "i64" (-9223372036854775808), f64v negZero]) ==
++  .ok (-9223372036854775808, negZero)
++#guard dePoint (.seq none [.num "u8" 7, .num "u64" 3]) == .ok (7, 0x4008000000000000)
++#guard dePoint (.seq none [.num "u64" 18446744073709551615, f64v 0x3ff0000000000000]) ==
++  .err "invalid value: integer `18446744073709551615`, expected i64"
++#guard dePoint (.seq none [.num "i8" 1]) == .err "invalid length 1, expected a tuple of size 2"
++#guard dePoint (.seq none []) == .err "invalid length 0, expected a tuple of size 2"
++#guard dePoint (.seq none [.num "i8" 1, .bool true]) ==
++  .err "invalid type: boolean `true`, expected f64"
++#guard dePoint (.num "i8" 1) == .err "invalid type: integer `1`, expected a tuple of size 2"
++
++/-! ### `deserialize_collections` -/
++
++def deIds (v : TValue) : Out (List Nat) :=
++  (de serde_collections.de_ids v).map fun xs => xs.val.map (·.val)
++def deTags (v : TValue) : Out (List Int) :=
++  (de serde_collections.de_tags v).map fun s => s.map.entries.map (·.1.val)
++def deNames (v : TValue) : Out (List (String × Nat)) :=
++  (de serde_collections.de_names v).map fun m => m.entries.map fun (k, x) => (k, x.val)
++def deBoxed (v : TValue) : Out (Option Nat) :=
++  (de serde_collections.de_boxed v).map (·.map (·.val))
++def deShared (v : TValue) : Out (List (List Nat)) :=
++  (de serde_collections.de_shared v).map fun xs => xs.val.map fun ys => ys.val.map (·.val)
++
++#guard deIds (.seq none [.num "u32" 3, .num "u32" 1, .num "u8" 2]) == .ok [3, 1, 2]
++#guard deIds (.tuple 0 []) == .ok []
++#guard deIds (.seq none [.num "u32" 1, .num "i8" (-1), .num "u32" 2]) ==
++  .err "invalid value: integer `-1`, expected u32"
++#guard deIds (.map none []) == .err "invalid type: map, expected a sequence"
++#guard deIds (.str "x") == .err "invalid type: string \"x\", expected a sequence"
++-- `BTreeSet`: ascending, an equal element once.
++#guard deTags (.seq none [.num "i64" 9, .num "i8" (-4), .num "i64" 9, .num "u8" 7]) ==
++  .ok [-4, 7, 9]
++#guard deTags (.seq none [.num "i64" 1, .num "u64" 18446744073709551615]) ==
++  .err "invalid value: integer `18446744073709551615`, expected i64"
++#guard deTags .unit == .err "invalid type: unit value, expected a sequence"
++-- `BTreeMap`: ascending keys, a later value of an equal key replaces the earlier one.
++#guard deNames (.map none [(.str "b", .num "u8" 2), (.str "a", .num "u8" 1), (.str "b", .num "u8" 5)]) ==
++  .ok [("a", 1), ("b", 5)]
++#guard deNames (.struct_ "S" [("x", .num "u64" 255)]) == .ok [("x", 255)]
++#guard deNames (.map none [(.str "a", .num "u8" 1), (.str "b", .num "u16" 256)]) ==
++  .err "invalid value: integer `256`, expected u8"
++#guard deNames (.map none [(.num "u8" 1, .num "u8" 1)]) ==
++  .err "invalid type: integer `1`, expected a string"
++#guard deNames (.seq none []) == .err "invalid type: sequence, expected a map"
++-- `Box<Option<u64>>`, `Arc<Vec<Vec<u8>>>`: the content's.
++#guard deBoxed (.some (.num "u64" 18446744073709551615)) == .ok (some 18446744073709551615)
++#guard deBoxed .none == .ok none
++#guard deBoxed .unit == .ok none
++#guard deBoxed (.num "u64" 1) == .err "invalid type: integer `1`, expected option"
++#guard deShared (.seq none [.seq none [.num "u8" 1, .num "u8" 2], .tuple 0 []]) == .ok [[1, 2], []]
++#guard deShared (.seq none [.seq none [.num "u16" 300]]) ==
++  .err "invalid value: integer `300`, expected u8"
++#guard deShared (.seq none [.num "u8" 1]) == .err "invalid type: integer `1`, expected a sequence"
++
++/-! The nesting bound is explicit: a bound below the nesting depth of a value gives no result (the
++    format at level 0 diverges), a bound at or above it gives the Rust result. `sample()` nests
++    three data-side calls below the record's (`nested`: the `Vec<Vec<u8>>`, its `Vec<u8>`s, their
++    `u8`s). -/
++def sampleAt (n : Nat) : Out TValue :=
++  match serde_collections.record (vec ([3, 1, 2].map u32))
++      (vec ([("b", 2), ("a", 1), ("b", 5)].map fun (s, n) => (s, u32 n))) (vec ([9, 4, 9, 7].map u32))
++      (vec ([[1, 2], []].map fun xs => vec (xs.map u8))) (some ⟨BitVec.ofNat _ (2 ^ 40)⟩) "shared"
++      ⟨BitVec.ofInt _ (-3)⟩ ⟨BitVec.ofNat _ 12⟩ (f64 0x3fe0000000000000) with
++  | ok r => out (serde_collections.Record.Insts.Serde_coreSerSerialize.serialize (valueSer n) r ())
++  | _ => .none
++
++#guard sampleAt 3 == .none
++#guard sampleAt 4 == .ok sampleValue
++
++end serde_collections.checks
+diff --git a/tests/lean/SerdeCollections/SerdeCollections.lean b/tests/lean/SerdeCollections/SerdeCollections.lean
+new file mode 100644
+index 0000000..c64a23a
+--- /dev/null
++++ b/tests/lean/SerdeCollections/SerdeCollections.lean
+@@ -0,0 +1,923 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [serde_collections]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace serde_collections
++
++/-- [serde_collections::Record]
++    Source: 'src/lib.rs', lines 32:0-47:1
++    Visibility: public -/
++structure Record where
++  ids : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++  names : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++    _root_.Aeneas.Std.U32
++  tags : _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32
++  nested : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U8)
++  maybe : _root_.Option _root_.Aeneas.Std.U64
++  shared : _root_.Aeneas.Std.alloc.sync.Arc _root_.String
++  flag : _root_.Bool
++  small : _root_.Aeneas.Std.I8
++  mid : _root_.Aeneas.Std.I16
++  word : _root_.Aeneas.Std.I32
++  delta : _root_.Aeneas.Std.I64
++  count : _root_.Aeneas.Std.Usize
++  ratio : _root_.Aeneas.Std.F64
++  unit : _root_.Unit
++
++/-- [serde_collections::{serde_core::ser::Serialize for serde_collections::Record}::serialize]:
++    Source: 'src/lib.rs', lines 50:4-68:5
++    Visibility: public -/
++def Record.Insts.Serde_coreSerSerialize.serialize
++  {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type} {Clause0_SerializeSeq :
++  Type} {Clause0_SerializeTuple : Type} {Clause0_SerializeTupleStruct : Type}
++  {Clause0_SerializeTupleVariant : Type} {Clause0_SerializeMap : Type}
++  {Clause0_SerializeStruct : Type} {Clause0_SerializeStructVariant : Type}
++  (serde_coreserSerializerInst : _root_.Aeneas.Std.serde_core.ser.Serializer S
++  Clause0_Ok Clause0_Error Clause0_SerializeSeq Clause0_SerializeTuple
++  Clause0_SerializeTupleStruct Clause0_SerializeTupleVariant
++  Clause0_SerializeMap Clause0_SerializeStruct Clause0_SerializeStructVariant)
++  (self : _root_.serde_collections.Record) (serializer : S) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Clause0_Ok
++    Clause0_Error)
++  := do
++  let r ←
++    serde_coreserSerializerInst.serialize_struct serializer
++      (_root_.Aeneas.Std.toStr "Record") 15#usize
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (r1, s) ←
++      serde_coreserSerializerInst.SerializeStructInst.serialize_field
++        (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++        (_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec
++        _root_.Aeneas.Std.serde_core.ser.impls.SerializeU32)) val
++        (_root_.Aeneas.Std.toStr "ids") self.ids
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      let (r2, s1) ←
++        serde_coreserSerializerInst.SerializeStructInst.serialize_field
++          (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++          (_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeMap
++          _root_.Aeneas.Std.serde_core.ser.impls.SerializeString
++          _root_.Aeneas.Std.serde_core.ser.impls.SerializeU32)) s
++          (_root_.Aeneas.Std.toStr "names") self.names
++      let cf2 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++      match cf2 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++        let (r3, s2) ←
++          serde_coreserSerializerInst.SerializeStructInst.serialize_field
++            (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++            (_root_.Aeneas.Std.serde_core.ser.impls.SerializeBTreeSet
++            _root_.Aeneas.Std.serde_core.ser.impls.SerializeU32)) s1
++            (_root_.Aeneas.Std.toStr "tags") self.tags
++        let cf3 ← _root_.Aeneas.Std.core.result.TryResult.branch r3
++        match cf3 with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++          let (r4, s3) ←
++            serde_coreserSerializerInst.SerializeStructInst.serialize_field
++              (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++              (_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec
++              (_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec
++              _root_.Aeneas.Std.serde_core.ser.impls.SerializeU8))) s2
++              (_root_.Aeneas.Std.toStr "nested") self.nested
++          let cf4 ← _root_.Aeneas.Std.core.result.TryResult.branch r4
++          match cf4 with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++            let (r5, s4) ←
++              serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                (_root_.Aeneas.Std.serde_core.ser.impls.SerializeOption
++                (_root_.Aeneas.Std.serde_core.ser.impls.SerializeBox
++                _root_.Aeneas.Std.serde_core.ser.impls.SerializeU64))) s3
++                (_root_.Aeneas.Std.toStr "maybe") self.maybe
++            let cf5 ← _root_.Aeneas.Std.core.result.TryResult.branch r5
++            match cf5 with
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++              let (r6, s5) ←
++                serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                  (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                  (_root_.Aeneas.Std.serde_core.ser.impls.SerializeArc
++                  _root_.Aeneas.Std.serde_core.ser.impls.SerializeString)) s4
++                  (_root_.Aeneas.Std.toStr "shared") self.shared
++              let cf6 ← _root_.Aeneas.Std.core.result.TryResult.branch r6
++              match cf6 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _
++                =>
++                let (r7, s6) ←
++                  serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                    (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                    _root_.Aeneas.Std.serde_core.ser.impls.SerializeBool) s5
++                    (_root_.Aeneas.Std.toStr "flag") self.flag
++                let cf7 ← _root_.Aeneas.Std.core.result.TryResult.branch r7
++                match cf7 with
++                | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                  _ =>
++                  let (r8, s7) ←
++                    serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                      (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                      _root_.Aeneas.Std.serde_core.ser.impls.SerializeI8) s6
++                      (_root_.Aeneas.Std.toStr "small") self.small
++                  let cf8 ← _root_.Aeneas.Std.core.result.TryResult.branch r8
++                  match cf8 with
++                  |
++                    _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                    _ =>
++                    let (r9, s8) ←
++                      serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                        (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                        _root_.Aeneas.Std.serde_core.ser.impls.SerializeI16) s7
++                        (_root_.Aeneas.Std.toStr "mid") self.mid
++                    let cf9 ← _root_.Aeneas.Std.core.result.TryResult.branch r9
++                    match cf9 with
++                    |
++                      _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                      _ =>
++                      let (r10, s9) ←
++                        serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                          (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                          _root_.Aeneas.Std.serde_core.ser.impls.SerializeI32)
++                          s8 (_root_.Aeneas.Std.toStr "word") self.word
++                      let cf10 ←
++                        _root_.Aeneas.Std.core.result.TryResult.branch r10
++                      match cf10 with
++                      |
++                        _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                        _ =>
++                        let (r11, s10) ←
++                          serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                            (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                            _root_.Aeneas.Std.serde_core.ser.impls.SerializeI64)
++                            s9 (_root_.Aeneas.Std.toStr "delta") self.delta
++                        let cf11 ←
++                          _root_.Aeneas.Std.core.result.TryResult.branch r11
++                        match cf11 with
++                        |
++                          _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                          _ =>
++                          let (r12, s11) ←
++                            serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                              (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                              _root_.Aeneas.Std.serde_core.ser.impls.SerializeUsize)
++                              s10 (_root_.Aeneas.Std.toStr "count") self.count
++                          let cf12 ←
++                            _root_.Aeneas.Std.core.result.TryResult.branch r12
++                          match cf12 with
++                          |
++                            _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                            _ =>
++                            let (r13, s12) ←
++                              serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                                (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                                _root_.Aeneas.Std.serde_core.ser.impls.SerializeF64)
++                                s11 (_root_.Aeneas.Std.toStr "ratio")
++                                self.ratio
++                            let cf13 ←
++                              _root_.Aeneas.Std.core.result.TryResult.branch
++                                r13
++                            match cf13 with
++                            |
++                              _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                              _ =>
++                              let (r14, s13) ←
++                                serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                                  (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                                  _root_.Aeneas.Std.serde_core.ser.impls.SerializeUnit)
++                                  s12 (_root_.Aeneas.Std.toStr "unit") ()
++                              let cf14 ←
++                                _root_.Aeneas.Std.core.result.TryResult.branch
++                                  r14
++                              match cf14 with
++                              |
++                                _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                                _ =>
++                                let (r15, s14) ←
++                                  serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                                    (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                                    _root_.Aeneas.Std.serde_core.ser.impls.SerializeStr)
++                                    s13 (_root_.Aeneas.Std.toStr "label")
++                                    (_root_.Aeneas.Std.toStr "rec")
++                                let cf15 ←
++                                  _root_.Aeneas.Std.core.result.TryResult.branch
++                                    r15
++                                match cf15 with
++                                |
++                                  _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                                  _ =>
++                                  serde_coreserSerializerInst.SerializeStructInst.«end»
++                                    s14
++                                |
++                                  _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                                  residual =>
++                                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                                    Clause0_Ok
++                                    (_root_.Aeneas.Std.core.convert.FromSame
++                                    Clause0_Error) residual
++                              |
++                                _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                                residual =>
++                                _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                                  Clause0_Ok
++                                  (_root_.Aeneas.Std.core.convert.FromSame
++                                  Clause0_Error) residual
++                            |
++                              _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                              residual =>
++                              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                                Clause0_Ok
++                                (_root_.Aeneas.Std.core.convert.FromSame
++                                Clause0_Error) residual
++                          |
++                            _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                            residual =>
++                            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                              Clause0_Ok
++                              (_root_.Aeneas.Std.core.convert.FromSame
++                              Clause0_Error) residual
++                        |
++                          _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                          residual =>
++                          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                            Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                            Clause0_Error) residual
++                      |
++                        _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                        residual =>
++                        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                          Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                          Clause0_Error) residual
++                    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                      residual =>
++                      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                        Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                        Clause0_Error) residual
++                  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                    residual =>
++                    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                      Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                      Clause0_Error) residual
++                | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                  residual =>
++                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                    Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                    Clause0_Error) residual
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                  Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                  Clause0_Error) residual
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++              residual =>
++              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                Clause0_Error) residual
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++              Clause0_Error) residual
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++            residual
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++          residual
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual Clause0_Ok
++        (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual Clause0_Ok
++      (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++
++/-- Trait implementation: [serde_collections::{serde_core::ser::Serialize for serde_collections::Record}]
++    Source: 'src/lib.rs', lines 49:0-69:1 -/
++@[reducible]
++def Record.Insts.Serde_coreSerSerialize :
++  _root_.Aeneas.Std.serde_core.ser.Serialize _root_.serde_collections.Record
++  := {
++  serialize := fun {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type}
++    {Clause0_SerializeSeq : Type} {Clause0_SerializeTuple : Type}
++    {Clause0_SerializeTupleStruct : Type} {Clause0_SerializeTupleVariant :
++    Type} {Clause0_SerializeMap : Type} {Clause0_SerializeStruct : Type}
++    {Clause0_SerializeStructVariant : Type} (serde_coreserSerializerInst :
++    _root_.Aeneas.Std.serde_core.ser.Serializer S Clause0_Ok Clause0_Error
++    Clause0_SerializeSeq Clause0_SerializeTuple Clause0_SerializeTupleStruct
++    Clause0_SerializeTupleVariant Clause0_SerializeMap Clause0_SerializeStruct
++    Clause0_SerializeStructVariant) =>
++    _root_.serde_collections.Record.Insts.Serde_coreSerSerialize.serialize
++    serde_coreserSerializerInst
++}
++
++/-- [serde_collections::record]: loop body 0:
++    Source: 'src/lib.rs', lines 84:4-86:5
++    Visibility: public -/
++@[rust_loop_body]
++def record_loop0.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.String ×
++  _root_.Aeneas.Std.U32))
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.String ×
++    _root_.Aeneas.Std.U32)) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++    _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done map)
++  | some p =>
++    let (name1, value) := p
++    let (_, map1) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert
++        _root_.Aeneas.Std.core.cmp.OrdString map name1 value
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, map1))
++
++/-- [serde_collections::record]: loop 0:
++    Source: 'src/lib.rs', lines 84:4-86:5
++    Visibility: public -/
++@[rust_loop]
++def record_loop0
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.String ×
++  _root_.Aeneas.Std.U32))
++  (map : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, map1) => _root_.serde_collections.record_loop0.body iter1 map1
++      : ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.String ×
++      _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter (_root_.String ×
++      _root_.Aeneas.Std.U32)) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++      _root_.Aeneas.Std.U32)))
++    (iter, map)
++
++/-- [serde_collections::record]: loop body 1:
++    Source: 'src/lib.rs', lines 88:4-90:5
++    Visibility: public -/
++@[rust_loop_body]
++def record_loop1.body
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (set : _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32))
++  := do
++  let (model_state, model_state1) ←
++    _root_.Aeneas.Std.alloc.vec.into_iter.IteratorIntoIter.next iter
++  match model_state with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done set)
++  | some tag =>
++    let (_, set1) ←
++      _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.insert
++        _root_.Aeneas.Std.core.cmp.OrdU32 set tag
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont
++      (model_state1, set1))
++
++/-- [serde_collections::record]: loop 1:
++    Source: 'src/lib.rs', lines 88:4-90:5
++    Visibility: public -/
++@[rust_loop]
++def record_loop1
++  (iter : _root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++  (set : _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, set1) => _root_.serde_collections.record_loop1.body iter1 set1
++      : ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32)
++      × (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.vec.into_iter.IntoIter _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++      _root_.Aeneas.Std.U32)))
++    (iter, set)
++
++/-- [serde_collections::record]:
++    Source: 'src/lib.rs', lines 72:0-110:1
++    Visibility: public -/
++def record
++  (ids : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (names : _root_.Aeneas.Std.alloc.vec.Vec (_root_.String ×
++  _root_.Aeneas.Std.U32))
++  (tags : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (nested : _root_.Aeneas.Std.alloc.vec.Vec (_root_.Aeneas.Std.alloc.vec.Vec
++  _root_.Aeneas.Std.U8)) (maybe : _root_.Option _root_.Aeneas.Std.U64)
++  (shared : _root_.String) (small : _root_.Aeneas.Std.I8)
++  (count : _root_.Aeneas.Std.Usize) (ratio : _root_.Aeneas.Std.F64) :
++  _root_.Aeneas.Std.Result _root_.serde_collections.Record
++  := do
++  let map ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new _root_.String
++      _root_.Aeneas.Std.U32
++  let (model_state, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter names
++  let map1 ← _root_.serde_collections.record_loop0 model_state map
++  let set ←
++    _root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.new
++      _root_.Aeneas.Std.U32
++  let (model_state1, _) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorVec.into_iter tags
++  let set1 ← _root_.serde_collections.record_loop1 model_state1 set
++  let o ←
++    match maybe with
++    | none => _root_.Aeneas.Std.Result.ok none
++    | some _ => _root_.Aeneas.Std.Result.ok maybe
++  let a ← lift (_root_.Aeneas.Std.alloc.sync.Arc.new shared)
++  let i ← lift (_root_.Aeneas.Std.IScalar.cast .I16 small)
++  let i1 ← i * (-300)#i16
++  let i2 ← lift (_root_.Aeneas.Std.IScalar.cast .I32 small)
++  let i3 ← i2 * 70000#i32
++  let i4 ← lift (_root_.Aeneas.Std.IScalar.cast .I64 small)
++  let i5 ← i4 * (-5000000000)#i64
++  _root_.Aeneas.Std.Result.ok
++    {
++      ids,
++      names := map1,
++      tags := set1,
++      nested,
++      maybe := o,
++      shared := a,
++      flag := (small < 0#i8),
++      small,
++      mid := i1,
++      word := i3,
++      delta := i5,
++      count,
++      ratio,
++      unit := ()
++    }
++
++/-- [serde_collections::Holes]
++    Source: 'src/lib.rs', lines 113:0-113:39
++    Visibility: public -/
++@[reducible]
++def Holes :=
++  _root_.Aeneas.Std.alloc.vec.Vec (_root_.Option _root_.Aeneas.Std.U32)
++
++/-- [serde_collections::{serde_core::ser::Serialize for serde_collections::Holes}::serialize]:
++    Source: 'src/lib.rs', lines 116:4-118:5
++    Visibility: public -/
++def Holes.Insts.Serde_coreSerSerialize.serialize
++  {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type} {Clause0_SerializeSeq :
++  Type} {Clause0_SerializeTuple : Type} {Clause0_SerializeTupleStruct : Type}
++  {Clause0_SerializeTupleVariant : Type} {Clause0_SerializeMap : Type}
++  {Clause0_SerializeStruct : Type} {Clause0_SerializeStructVariant : Type}
++  (serde_coreserSerializerInst : _root_.Aeneas.Std.serde_core.ser.Serializer S
++  Clause0_Ok Clause0_Error Clause0_SerializeSeq Clause0_SerializeTuple
++  Clause0_SerializeTupleStruct Clause0_SerializeTupleVariant
++  Clause0_SerializeMap Clause0_SerializeStruct Clause0_SerializeStructVariant)
++  (self : _root_.serde_collections.Holes) (serializer : S) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Clause0_Ok
++    Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.ser.impls.SerializeVec.serialize
++    (_root_.Aeneas.Std.serde_core.ser.impls.SerializeOption
++    _root_.Aeneas.Std.serde_core.ser.impls.SerializeU32)
++    serde_coreserSerializerInst self serializer
++
++/-- Trait implementation: [serde_collections::{serde_core::ser::Serialize for serde_collections::Holes}]
++    Source: 'src/lib.rs', lines 115:0-119:1 -/
++@[reducible]
++def Holes.Insts.Serde_coreSerSerialize :
++  _root_.Aeneas.Std.serde_core.ser.Serialize _root_.serde_collections.Holes
++  := {
++  serialize := fun {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type}
++    {Clause0_SerializeSeq : Type} {Clause0_SerializeTuple : Type}
++    {Clause0_SerializeTupleStruct : Type} {Clause0_SerializeTupleVariant :
++    Type} {Clause0_SerializeMap : Type} {Clause0_SerializeStruct : Type}
++    {Clause0_SerializeStructVariant : Type} (serde_coreserSerializerInst :
++    _root_.Aeneas.Std.serde_core.ser.Serializer S Clause0_Ok Clause0_Error
++    Clause0_SerializeSeq Clause0_SerializeTuple Clause0_SerializeTupleStruct
++    Clause0_SerializeTupleVariant Clause0_SerializeMap Clause0_SerializeStruct
++    Clause0_SerializeStructVariant) =>
++    _root_.serde_collections.Holes.Insts.Serde_coreSerSerialize.serialize
++    serde_coreserSerializerInst
++}
++
++/-- [serde_collections::Numbers]
++    Source: 'src/lib.rs', lines 122:0-131:1
++    Visibility: public -/
++structure Numbers where
++  small : _root_.Aeneas.Std.I8
++  mid : _root_.Aeneas.Std.I16
++  word : _root_.Aeneas.Std.I32
++  wide : _root_.Aeneas.Std.I64
++  byte : _root_.Aeneas.Std.U8
++  big : _root_.Aeneas.Std.U64
++  size : _root_.Aeneas.Std.Usize
++  floats : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.F64
++
++/-- [serde_collections::{serde_core::ser::Serialize for serde_collections::Numbers}::serialize]:
++    Source: 'src/lib.rs', lines 134:4-145:5
++    Visibility: public -/
++def Numbers.Insts.Serde_coreSerSerialize.serialize
++  {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type} {Clause0_SerializeSeq :
++  Type} {Clause0_SerializeTuple : Type} {Clause0_SerializeTupleStruct : Type}
++  {Clause0_SerializeTupleVariant : Type} {Clause0_SerializeMap : Type}
++  {Clause0_SerializeStruct : Type} {Clause0_SerializeStructVariant : Type}
++  (serde_coreserSerializerInst : _root_.Aeneas.Std.serde_core.ser.Serializer S
++  Clause0_Ok Clause0_Error Clause0_SerializeSeq Clause0_SerializeTuple
++  Clause0_SerializeTupleStruct Clause0_SerializeTupleVariant
++  Clause0_SerializeMap Clause0_SerializeStruct Clause0_SerializeStructVariant)
++  (self : _root_.serde_collections.Numbers) (serializer : S) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result Clause0_Ok
++    Clause0_Error)
++  := do
++  let r ←
++    serde_coreserSerializerInst.serialize_struct serializer
++      (_root_.Aeneas.Std.toStr "Numbers") 8#usize
++  let cf ← _root_.Aeneas.Std.core.result.TryResult.branch r
++  match cf with
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue val =>
++    let (r1, s) ←
++      serde_coreserSerializerInst.SerializeStructInst.serialize_field
++        (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++        _root_.Aeneas.Std.serde_core.ser.impls.SerializeI8) val
++        (_root_.Aeneas.Std.toStr "small") self.small
++    let cf1 ← _root_.Aeneas.Std.core.result.TryResult.branch r1
++    match cf1 with
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++      let (r2, s1) ←
++        serde_coreserSerializerInst.SerializeStructInst.serialize_field
++          (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++          _root_.Aeneas.Std.serde_core.ser.impls.SerializeI16) s
++          (_root_.Aeneas.Std.toStr "mid") self.mid
++      let cf2 ← _root_.Aeneas.Std.core.result.TryResult.branch r2
++      match cf2 with
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++        let (r3, s2) ←
++          serde_coreserSerializerInst.SerializeStructInst.serialize_field
++            (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++            _root_.Aeneas.Std.serde_core.ser.impls.SerializeI32) s1
++            (_root_.Aeneas.Std.toStr "word") self.word
++        let cf3 ← _root_.Aeneas.Std.core.result.TryResult.branch r3
++        match cf3 with
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++          let (r4, s3) ←
++            serde_coreserSerializerInst.SerializeStructInst.serialize_field
++              (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++              _root_.Aeneas.Std.serde_core.ser.impls.SerializeI64) s2
++              (_root_.Aeneas.Std.toStr "wide") self.wide
++          let cf4 ← _root_.Aeneas.Std.core.result.TryResult.branch r4
++          match cf4 with
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++            let (r5, s4) ←
++              serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                _root_.Aeneas.Std.serde_core.ser.impls.SerializeU8) s3
++                (_root_.Aeneas.Std.toStr "byte") self.byte
++            let cf5 ← _root_.Aeneas.Std.core.result.TryResult.branch r5
++            match cf5 with
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _ =>
++              let (r6, s5) ←
++                serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                  (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                  _root_.Aeneas.Std.serde_core.ser.impls.SerializeU64) s4
++                  (_root_.Aeneas.Std.toStr "big") self.big
++              let cf6 ← _root_.Aeneas.Std.core.result.TryResult.branch r6
++              match cf6 with
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue _
++                =>
++                let (r7, s6) ←
++                  serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                    (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                    _root_.Aeneas.Std.serde_core.ser.impls.SerializeUsize) s5
++                    (_root_.Aeneas.Std.toStr "size") self.size
++                let cf7 ← _root_.Aeneas.Std.core.result.TryResult.branch r7
++                match cf7 with
++                | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                  _ =>
++                  let (r8, s7) ←
++                    serde_coreserSerializerInst.SerializeStructInst.serialize_field
++                      (_root_.Aeneas.Std.serde_core.ser.Serialize.wrap
++                      (_root_.Aeneas.Std.serde_core.ser.impls.SerializeVec
++                      _root_.Aeneas.Std.serde_core.ser.impls.SerializeF64)) s6
++                      (_root_.Aeneas.Std.toStr "floats") self.floats
++                  let cf8 ← _root_.Aeneas.Std.core.result.TryResult.branch r8
++                  match cf8 with
++                  |
++                    _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Continue
++                    _ =>
++                    serde_coreserSerializerInst.SerializeStructInst.«end» s7
++                  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                    residual =>
++                    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                      Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                      Clause0_Error) residual
++                | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                  residual =>
++                  _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                    Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                    Clause0_Error) residual
++              | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++                residual =>
++                _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                  Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                  Clause0_Error) residual
++            | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break
++              residual =>
++              _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++                Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++                Clause0_Error) residual
++          | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual
++            =>
++            _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++              Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame
++              Clause0_Error) residual
++        | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++          _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++            Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++            residual
++      | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++        _root_.Aeneas.Std.core.result.FromResidualResult.from_residual
++          Clause0_Ok (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error)
++          residual
++    | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++      _root_.Aeneas.Std.core.result.FromResidualResult.from_residual Clause0_Ok
++        (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++  | _root_.Aeneas.Std.core.ops.control_flow.ControlFlow.Break residual =>
++    _root_.Aeneas.Std.core.result.FromResidualResult.from_residual Clause0_Ok
++      (_root_.Aeneas.Std.core.convert.FromSame Clause0_Error) residual
++
++/-- Trait implementation: [serde_collections::{serde_core::ser::Serialize for serde_collections::Numbers}]
++    Source: 'src/lib.rs', lines 133:0-146:1 -/
++@[reducible]
++def Numbers.Insts.Serde_coreSerSerialize :
++  _root_.Aeneas.Std.serde_core.ser.Serialize _root_.serde_collections.Numbers
++  := {
++  serialize := fun {S : Type} {Clause0_Ok : Type} {Clause0_Error : Type}
++    {Clause0_SerializeSeq : Type} {Clause0_SerializeTuple : Type}
++    {Clause0_SerializeTupleStruct : Type} {Clause0_SerializeTupleVariant :
++    Type} {Clause0_SerializeMap : Type} {Clause0_SerializeStruct : Type}
++    {Clause0_SerializeStructVariant : Type} (serde_coreserSerializerInst :
++    _root_.Aeneas.Std.serde_core.ser.Serializer S Clause0_Ok Clause0_Error
++    Clause0_SerializeSeq Clause0_SerializeTuple Clause0_SerializeTupleStruct
++    Clause0_SerializeTupleVariant Clause0_SerializeMap Clause0_SerializeStruct
++    Clause0_SerializeStructVariant) =>
++    _root_.serde_collections.Numbers.Insts.Serde_coreSerSerialize.serialize
++    serde_coreserSerializerInst
++}
++
++/-- [serde_collections::de_i8]:
++    Source: 'src/lib.rs', lines 148:0-150:1
++    Visibility: public -/
++def de_i8
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.I8 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeI8.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_i16]:
++    Source: 'src/lib.rs', lines 152:0-154:1
++    Visibility: public -/
++def de_i16
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.I16 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeI16.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_i32]:
++    Source: 'src/lib.rs', lines 156:0-158:1
++    Visibility: public -/
++def de_i32
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.I32 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeI32.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_i64]:
++    Source: 'src/lib.rs', lines 160:0-162:1
++    Visibility: public -/
++def de_i64
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.I64 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeI64.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_u8]:
++    Source: 'src/lib.rs', lines 164:0-166:1
++    Visibility: public -/
++def de_u8
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U8 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeU8.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_u64]:
++    Source: 'src/lib.rs', lines 168:0-170:1
++    Visibility: public -/
++def de_u64
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.U64 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeU64.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_usize]:
++    Source: 'src/lib.rs', lines 172:0-174:1
++    Visibility: public -/
++def de_usize
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.Usize Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeUsize.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_f64]:
++    Source: 'src/lib.rs', lines 176:0-178:1
++    Visibility: public -/
++def de_f64
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    _root_.Aeneas.Std.F64 Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeF64.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_bool]:
++    Source: 'src/lib.rs', lines 180:0-182:1
++    Visibility: public -/
++def de_bool
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Bool
++    Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeBool.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_unit]:
++    Source: 'src/lib.rs', lines 184:0-186:1
++    Visibility: public -/
++def de_unit
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result _root_.Unit
++    Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeUnit.deserialize
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_point]:
++    Source: 'src/lib.rs', lines 189:0-191:1
++    Visibility: public -/
++def de_point
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.I64 × _root_.Aeneas.Std.F64) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializePair.deserialize
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeI64
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeF64
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_ids]:
++    Source: 'src/lib.rs', lines 193:0-195:1
++    Visibility: public -/
++def de_ids
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeVec.deserialize
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeU32
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_tags]:
++    Source: 'src/lib.rs', lines 197:0-199:1
++    Visibility: public -/
++def de_tags
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet
++    _root_.Aeneas.Std.I64) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeSet.deserialize
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeI64
++    _root_.Aeneas.Std.core.cmp.EqI64 _root_.Aeneas.Std.core.cmp.OrdI64
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_names]:
++    Source: 'src/lib.rs', lines 201:0-205:1
++    Visibility: public -/
++def de_names
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.String
++    _root_.Aeneas.Std.U8) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeBTreeMap.deserialize
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeString
++    _root_.Aeneas.Std.core.cmp.OrdString
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeU8
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_boxed]:
++    Source: 'src/lib.rs', lines 207:0-209:1
++    Visibility: public -/
++def de_boxed
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result (_root_.Option
++    _root_.Aeneas.Std.U64) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeBox.deserialize
++    (_root_.Aeneas.Std.serde_core.de.impls.DeserializeOption
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeU64)
++    serde_coredeDeserializerInst deserializer
++
++/-- [serde_collections::de_shared]:
++    Source: 'src/lib.rs', lines 211:0-215:1
++    Visibility: public -/
++def de_shared
++  {D : Type} {Clause0_Error : Type} (serde_coredeDeserializerInst :
++  _root_.Aeneas.Std.serde_core.de.Deserializer D Clause0_Error)
++  (deserializer : D) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.core.result.Result
++    (_root_.Aeneas.Std.alloc.sync.Arc (_root_.Aeneas.Std.alloc.vec.Vec
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U8))) Clause0_Error)
++  := do
++  _root_.Aeneas.Std.serde_core.de.impls.DeserializeArc.deserialize
++    (_root_.Aeneas.Std.serde_core.de.impls.DeserializeBox
++    (_root_.Aeneas.Std.serde_core.de.impls.DeserializeVec
++    (_root_.Aeneas.Std.serde_core.de.impls.DeserializeVec
++    _root_.Aeneas.Std.serde_core.de.impls.DeserializeU8)))
++    serde_coredeDeserializerInst deserializer
++
++end serde_collections
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index efd736b..fe6278b 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -229,3 +229,4 @@ package «tests» {}
+ @[default_target] lean_lib VecDedupClosureState
+ @[default_target] lean_lib PhantomFnTypes
+ @[default_target] lean_lib SerdeVisitors
++@[default_target] lean_lib SerdeCollections
+diff --git a/tests/src/serde-collections/Cargo.lock b/tests/src/serde-collections/Cargo.lock
+new file mode 100644
+index 0000000..010842e
+--- /dev/null
++++ b/tests/src/serde-collections/Cargo.lock
+@@ -0,0 +1,74 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "proc-macro2"
++version = "1.0.107"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
++dependencies = [
++ "unicode-ident",
++]
++
++[[package]]
++name = "quote"
++version = "1.0.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
++dependencies = [
++ "proc-macro2",
++]
++
++[[package]]
++name = "serde"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
++dependencies = [
++ "serde_core",
++]
++
++[[package]]
++name = "serde_collections"
++version = "0.1.0"
++dependencies = [
++ "serde",
++]
++
++[[package]]
++name = "serde_core"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
++dependencies = [
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_derive"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
++[[package]]
++name = "syn"
++version = "2.0.119"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "unicode-ident"
++version = "1.0.26"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+diff --git a/tests/src/serde-collections/Cargo.toml b/tests/src/serde-collections/Cargo.toml
+new file mode 100644
+index 0000000..c8bc4eb
+--- /dev/null
++++ b/tests/src/serde-collections/Cargo.toml
+@@ -0,0 +1,14 @@
++[package]
++name = "serde_collections"
++version = "0.1.0"
++edition = "2021"
++
++[lib]
++name = "serde_collections"
++path = "src/lib.rs"
++
++[dependencies]
++serde = { version = "=1.0.228", features = ["rc"] }
++
++# A standalone package (the Aeneas tree can live inside another cargo workspace).
++[workspace]
+diff --git a/tests/src/serde-collections/aeneas-test-options b/tests/src/serde-collections/aeneas-test-options
+new file mode 100644
+index 0000000..7cb36f4
+--- /dev/null
++++ b/tests/src/serde-collections/aeneas-test-options
+@@ -0,0 +1,4 @@
++charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++[!lean] skip
++[lean] subdir=SerdeCollections
++[lean] aeneas-args=-strict-joins -warnings-as-errors
+diff --git a/tests/src/serde-collections/src/lib.rs b/tests/src/serde-collections/src/lib.rs
+new file mode 100644
+index 0000000..4126eb7
+--- /dev/null
++++ b/tests/src/serde-collections/src/lib.rs
+@@ -0,0 +1,884 @@
++//! serde's `Serialize` impls of the collections and the primitives (`Aeneas/Std/Serde/Impls.lean`)
++//! and the provided `Serializer::collect_seq`/`collect_map` (`Aeneas/Std/Serde/Ser.lean`) that the
++//! collection impls call: `Vec<T>` and `BTreeSet<T>` (`collect_seq` over the shared iterator, with
++//! its exact length hint), `BTreeMap<K, V>` (`collect_map`), `Option<T>`, `Box<T>`, `Arc<T>`, `()`,
++//! `bool`, the integers, `usize` (as a `u64`), `f64` and `str`.
++//!
++//! `Record` has the hand-written form of `#[derive(Serialize)]`: a struct of such fields. `Holes`
++//! delegates to `Vec<Option<u32>>`, which the in-test format rejects at the first `None` or the
++//! first number above 100: the first error of an element stops the iteration and is the result.
++//!
++//! `Numbers` serializes the integers and the floats at their bounds (the format records a float by
++//! its bits: NaN and its sign, the infinities, `-0.0`, the subnormals). `de_i8` ... `de_unit` and
++//! `de_point` are `Deserialize` of the primitives (`impl_deserialize_num!`, `bool`, `()`, the pair):
++//! within the target's bounds or `invalid_value` with the sign of the visited integer, the widening
++//! float conversions (rounded to nearest, `f32` with its sign kept), and the provided `visit_*`
++//! (`invalid_type`, the float written by serde's `WithDecimalPoint`).
++//!
++//! `de_ids`, `de_tags`, `de_names`, `de_boxed` and `de_shared` are `Deserialize` of the collections
++//! (`Vec<T>`, `BTreeSet<T>`: every element of a sequence in order, an equal element kept once;
++//! `BTreeMap<K, V>`: every entry of a map, a later value of an equal key replacing the earlier one;
++//! `Box<T>`, `Arc<T>`: the content's), stopped by the first error.
++//!
++//! `SerdeCollections/Checks.lean` runs these implementations against the in-test formats of the
++//! `native` test module (`ValueSer`: a value tree which records the length hints; `ValueDe`: its
++//! deserializer), encoded as `FormatProgram`s, and compares with the native results.
++
++use serde::de::{Deserialize, Deserializer};
++use serde::ser::{Serialize, SerializeStruct, Serializer};
++use std::collections::{BTreeMap, BTreeSet};
++use std::sync::Arc;
++
++pub struct Record {
++    pub ids: Vec<u32>,
++    pub names: BTreeMap<String, u32>,
++    pub tags: BTreeSet<u32>,
++    pub nested: Vec<Vec<u8>>,
++    pub maybe: Option<Box<u64>>,
++    pub shared: Arc<String>,
++    pub flag: bool,
++    pub small: i8,
++    pub mid: i16,
++    pub word: i32,
++    pub delta: i64,
++    pub count: usize,
++    pub ratio: f64,
++    pub unit: (),
++}
++
++impl Serialize for Record {
++    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        let mut s = serializer.serialize_struct("Record", 15)?;
++        s.serialize_field("ids", &self.ids)?;
++        s.serialize_field("names", &self.names)?;
++        s.serialize_field("tags", &self.tags)?;
++        s.serialize_field("nested", &self.nested)?;
++        s.serialize_field("maybe", &self.maybe)?;
++        s.serialize_field("shared", &self.shared)?;
++        s.serialize_field("flag", &self.flag)?;
++        s.serialize_field("small", &self.small)?;
++        s.serialize_field("mid", &self.mid)?;
++        s.serialize_field("word", &self.word)?;
++        s.serialize_field("delta", &self.delta)?;
++        s.serialize_field("count", &self.count)?;
++        s.serialize_field("ratio", &self.ratio)?;
++        s.serialize_field("unit", &self.unit)?;
++        s.serialize_field("label", "rec")?;
++        s.end()
++    }
++}
++
++/// A record from plain vectors (the map and the set by insertion).
++pub fn record(
++    ids: Vec<u32>,
++    names: Vec<(String, u32)>,
++    tags: Vec<u32>,
++    nested: Vec<Vec<u8>>,
++    maybe: Option<u64>,
++    shared: String,
++    small: i8,
++    count: usize,
++    ratio: f64,
++) -> Record {
++    let mut map = BTreeMap::new();
++    for (name, value) in names {
++        map.insert(name, value);
++    }
++    let mut set = BTreeSet::new();
++    for tag in tags {
++        set.insert(tag);
++    }
++    Record {
++        ids,
++        names: map,
++        tags: set,
++        nested,
++        maybe: match maybe {
++            Some(v) => Some(Box::new(v)),
++            None => None,
++        },
++        shared: Arc::new(shared),
++        flag: small < 0,
++        small,
++        mid: small as i16 * -300,
++        word: small as i32 * 70000,
++        delta: small as i64 * -5_000_000_000,
++        count,
++        ratio,
++        unit: (),
++    }
++}
++
++/// A sequence with holes.
++pub struct Holes(pub Vec<Option<u32>>);
++
++impl Serialize for Holes {
++    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        self.0.serialize(serializer)
++    }
++}
++
++/// The integers and the floats at their bounds.
++pub struct Numbers {
++    pub small: i8,
++    pub mid: i16,
++    pub word: i32,
++    pub wide: i64,
++    pub byte: u8,
++    pub big: u64,
++    pub size: usize,
++    pub floats: Vec<f64>,
++}
++
++impl Serialize for Numbers {
++    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        let mut s = serializer.serialize_struct("Numbers", 8)?;
++        s.serialize_field("small", &self.small)?;
++        s.serialize_field("mid", &self.mid)?;
++        s.serialize_field("word", &self.word)?;
++        s.serialize_field("wide", &self.wide)?;
++        s.serialize_field("byte", &self.byte)?;
++        s.serialize_field("big", &self.big)?;
++        s.serialize_field("size", &self.size)?;
++        s.serialize_field("floats", &self.floats)?;
++        s.end()
++    }
++}
++
++pub fn de_i8<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i8, D::Error> {
++    i8::deserialize(deserializer)
++}
++
++pub fn de_i16<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i16, D::Error> {
++    i16::deserialize(deserializer)
++}
++
++pub fn de_i32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
++    i32::deserialize(deserializer)
++}
++
++pub fn de_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
++    i64::deserialize(deserializer)
++}
++
++pub fn de_u8<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
++    u8::deserialize(deserializer)
++}
++
++pub fn de_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
++    u64::deserialize(deserializer)
++}
++
++pub fn de_usize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
++    usize::deserialize(deserializer)
++}
++
++pub fn de_f64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
++    f64::deserialize(deserializer)
++}
++
++pub fn de_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
++    bool::deserialize(deserializer)
++}
++
++pub fn de_unit<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(), D::Error> {
++    <()>::deserialize(deserializer)
++}
++
++/// The primitives as the elements of a sequence (`next_element`, as derived code does).
++pub fn de_point<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(i64, f64), D::Error> {
++    <(i64, f64)>::deserialize(deserializer)
++}
++
++pub fn de_ids<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u32>, D::Error> {
++    Vec::<u32>::deserialize(deserializer)
++}
++
++pub fn de_tags<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeSet<i64>, D::Error> {
++    BTreeSet::<i64>::deserialize(deserializer)
++}
++
++pub fn de_names<'de, D: Deserializer<'de>>(
++    deserializer: D,
++) -> Result<BTreeMap<String, u8>, D::Error> {
++    BTreeMap::<String, u8>::deserialize(deserializer)
++}
++
++pub fn de_boxed<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Box<Option<u64>>, D::Error> {
++    Box::<Option<u64>>::deserialize(deserializer)
++}
++
++pub fn de_shared<'de, D: Deserializer<'de>>(
++    deserializer: D,
++) -> Result<Arc<Vec<Vec<u8>>>, D::Error> {
++    Arc::<Vec<Vec<u8>>>::deserialize(deserializer)
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++    use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
++    use serde::ser::{self, SerializeMap, SerializeSeq, SerializeTuple};
++    use std::fmt;
++
++    #[derive(Debug, PartialEq)]
++    pub enum Value {
++        Unit,
++        Bool(bool),
++        /// The kind (`i8`, ..., `u64`, `f64` as its bits) and the value.
++        Num(&'static str, i128),
++        Str(String),
++        None,
++        Some(Box<Value>),
++        Seq(Option<usize>, Vec<Value>),
++        Tuple(usize, Vec<Value>),
++        Map(Option<usize>, Vec<(Value, Value)>),
++        Struct(&'static str, Vec<(&'static str, Value)>),
++    }
++    use Value::*;
++
++    #[derive(Debug, PartialEq)]
++    pub struct TestError(pub String);
++
++    impl fmt::Display for TestError {
++        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++            f.write_str(&self.0)
++        }
++    }
++
++    impl std::error::Error for TestError {}
++
++    impl ser::Error for TestError {
++        fn custom<T: fmt::Display>(msg: T) -> Self {
++            TestError(msg.to_string())
++        }
++    }
++
++    impl de::Error for TestError {
++        fn custom<T: fmt::Display>(msg: T) -> Self {
++            TestError(msg.to_string())
++        }
++    }
++
++    fn fail<T>(msg: &str) -> Result<T, TestError> {
++        Err(TestError(msg.to_string()))
++    }
++
++    pub struct ValueSer;
++    pub struct SeqState(Option<usize>, Vec<Value>);
++    pub struct TupleState(usize, Vec<Value>);
++    pub struct MapState {
++        len: Option<usize>,
++        entries: Vec<(Value, Value)>,
++        key: Option<Value>,
++    }
++    pub struct StructState {
++        name: &'static str,
++        fields: Vec<(&'static str, Value)>,
++    }
++
++    impl Serializer for ValueSer {
++        type Ok = Value;
++        type Error = TestError;
++        type SerializeSeq = SeqState;
++        type SerializeTuple = TupleState;
++        type SerializeTupleStruct = ser::Impossible<Value, TestError>;
++        type SerializeTupleVariant = ser::Impossible<Value, TestError>;
++        type SerializeMap = MapState;
++        type SerializeStruct = StructState;
++        type SerializeStructVariant = ser::Impossible<Value, TestError>;
++
++        fn serialize_bool(self, v: bool) -> Result<Value, TestError> { Ok(Bool(v)) }
++        fn serialize_i8(self, v: i8) -> Result<Value, TestError> { Ok(Num("i8", v as i128)) }
++        fn serialize_i16(self, v: i16) -> Result<Value, TestError> { Ok(Num("i16", v as i128)) }
++        fn serialize_i32(self, v: i32) -> Result<Value, TestError> { Ok(Num("i32", v as i128)) }
++        fn serialize_i64(self, v: i64) -> Result<Value, TestError> { Ok(Num("i64", v as i128)) }
++        fn serialize_u8(self, v: u8) -> Result<Value, TestError> { Ok(Num("u8", v as i128)) }
++        fn serialize_u16(self, _: u16) -> Result<Value, TestError> { fail("u16") }
++        fn serialize_u32(self, v: u32) -> Result<Value, TestError> {
++            if v > 100 { fail("big") } else { Ok(Num("u32", v as i128)) }
++        }
++        fn serialize_u64(self, v: u64) -> Result<Value, TestError> { Ok(Num("u64", v as i128)) }
++        fn serialize_f32(self, _: f32) -> Result<Value, TestError> { fail("f32") }
++        fn serialize_f64(self, v: f64) -> Result<Value, TestError> {
++            Ok(Num("f64", v.to_bits() as i128))
++        }
++        fn serialize_char(self, _: char) -> Result<Value, TestError> { fail("char") }
++        fn serialize_str(self, v: &str) -> Result<Value, TestError> { Ok(Str(v.to_string())) }
++        fn serialize_bytes(self, _: &[u8]) -> Result<Value, TestError> { fail("bytes") }
++        fn serialize_none(self) -> Result<Value, TestError> { Ok(None) }
++        fn serialize_some<T: ?Sized + Serialize>(self, v: &T) -> Result<Value, TestError> {
++            Ok(Some(Box::new(v.serialize(ValueSer)?)))
++        }
++        fn serialize_unit(self) -> Result<Value, TestError> { Ok(Unit) }
++        fn serialize_unit_struct(self, _: &'static str) -> Result<Value, TestError> {
++            fail("unit struct")
++        }
++        fn serialize_unit_variant(
++            self, _: &'static str, _: u32, _: &'static str,
++        ) -> Result<Value, TestError> {
++            fail("unit variant")
++        }
++        fn serialize_newtype_struct<T: ?Sized + Serialize>(
++            self, _: &'static str, _: &T,
++        ) -> Result<Value, TestError> {
++            fail("newtype struct")
++        }
++        fn serialize_newtype_variant<T: ?Sized + Serialize>(
++            self, _: &'static str, _: u32, _: &'static str, _: &T,
++        ) -> Result<Value, TestError> {
++            fail("newtype variant")
++        }
++        fn serialize_seq(self, len: Option<usize>) -> Result<SeqState, TestError> {
++            Ok(SeqState(len, Vec::new()))
++        }
++        fn serialize_tuple(self, len: usize) -> Result<TupleState, TestError> {
++            Ok(TupleState(len, Vec::new()))
++        }
++        fn serialize_tuple_struct(
++            self, _: &'static str, _: usize,
++        ) -> Result<Self::SerializeTupleStruct, TestError> {
++            fail("tuple struct")
++        }
++        fn serialize_tuple_variant(
++            self, _: &'static str, _: u32, _: &'static str, _: usize,
++        ) -> Result<Self::SerializeTupleVariant, TestError> {
++            fail("tuple variant")
++        }
++        fn serialize_map(self, len: Option<usize>) -> Result<MapState, TestError> {
++            Ok(MapState { len, entries: Vec::new(), key: Option::None })
++        }
++        fn serialize_struct(self, name: &'static str, _: usize) -> Result<StructState, TestError> {
++            Ok(StructState { name, fields: Vec::new() })
++        }
++        fn serialize_struct_variant(
++            self, _: &'static str, _: u32, _: &'static str, _: usize,
++        ) -> Result<Self::SerializeStructVariant, TestError> {
++            fail("struct variant")
++        }
++    }
++
++    impl SerializeSeq for SeqState {
++        type Ok = Value;
++        type Error = TestError;
++        fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), TestError> {
++            match v.serialize(ValueSer)? {
++                None => fail("none"),
++                x => {
++                    self.1.push(x);
++                    Ok(())
++                }
++            }
++        }
++        fn end(self) -> Result<Value, TestError> { Ok(Seq(self.0, self.1)) }
++    }
++
++    impl SerializeTuple for TupleState {
++        type Ok = Value;
++        type Error = TestError;
++        fn serialize_element<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), TestError> {
++            self.1.push(v.serialize(ValueSer)?);
++            Ok(())
++        }
++        fn end(self) -> Result<Value, TestError> { Ok(Tuple(self.0, self.1)) }
++    }
++
++    impl SerializeMap for MapState {
++        type Ok = Value;
++        type Error = TestError;
++        fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), TestError> {
++            self.key = Option::Some(key.serialize(ValueSer)?);
++            Ok(())
++        }
++        fn serialize_value<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), TestError> {
++            match self.key.take() {
++                Option::Some(key) => {
++                    let v = v.serialize(ValueSer)?;
++                    self.entries.push((key, v));
++                    Ok(())
++                }
++                Option::None => fail("value without key"),
++            }
++        }
++        fn end(self) -> Result<Value, TestError> { Ok(Map(self.len, self.entries)) }
++    }
++
++    impl SerializeStruct for StructState {
++        type Ok = Value;
++        type Error = TestError;
++        fn serialize_field<T: ?Sized + Serialize>(
++            &mut self, key: &'static str, v: &T,
++        ) -> Result<(), TestError> {
++            self.fields.push((key, v.serialize(ValueSer)?));
++            Ok(())
++        }
++        fn end(self) -> Result<Value, TestError> { Ok(Struct(self.name, self.fields)) }
++    }
++
++    fn ser<T: Serialize>(v: &T) -> Result<Value, TestError> {
++        v.serialize(ValueSer)
++    }
++
++    fn err(msg: &str) -> TestError {
++        TestError(msg.to_string())
++    }
++
++    fn u32s(ns: &[u32]) -> Vec<Value> {
++        ns.iter().map(|n| Num("u32", *n as i128)).collect()
++    }
++
++    fn sample() -> Record {
++        record(
++            vec![3, 1, 2],
++            vec![("b".to_string(), 2), ("a".to_string(), 1), ("b".to_string(), 5)],
++            vec![9, 4, 9, 7],
++            vec![vec![1, 2], vec![]],
++            Option::Some(1 << 40),
++            "shared".to_string(),
++            -3,
++            12,
++            0.5,
++        )
++    }
++
++    fn sample_value() -> Value {
++        Struct(
++            "Record",
++            vec![
++                ("ids", Seq(Option::Some(3), u32s(&[3, 1, 2]))),
++                (
++                    "names",
++                    Map(
++                        Option::Some(2),
++                        vec![
++                            (Str("a".to_string()), Num("u32", 1)),
++                            (Str("b".to_string()), Num("u32", 5)),
++                        ],
++                    ),
++                ),
++                ("tags", Seq(Option::Some(3), u32s(&[4, 7, 9]))),
++                (
++                    "nested",
++                    Seq(
++                        Option::Some(2),
++                        vec![
++                            Seq(Option::Some(2), vec![Num("u8", 1), Num("u8", 2)]),
++                            Seq(Option::Some(0), vec![]),
++                        ],
++                    ),
++                ),
++                ("maybe", Some(Box::new(Num("u64", 1 << 40)))),
++                ("shared", Str("shared".to_string())),
++                ("flag", Bool(true)),
++                ("small", Num("i8", -3)),
++                ("mid", Num("i16", 900)),
++                ("word", Num("i32", -210000)),
++                ("delta", Num("i64", 15_000_000_000)),
++                ("count", Num("u64", 12)),
++                ("ratio", Num("f64", 0.5f64.to_bits() as i128)),
++                ("unit", Unit),
++                ("label", Str("rec".to_string())),
++            ],
++        )
++    }
++
++    #[test]
++    fn serialize_record() {
++        assert_eq!(ser(&sample()), Ok(sample_value()));
++        let empty = record(vec![], vec![], vec![], vec![], Option::None, String::new(), 5, 0, -0.0);
++        let Ok(Struct(_, fields)) = ser(&empty) else { panic!() };
++        assert_eq!(fields[0], ("ids", Seq(Option::Some(0), vec![])));
++        assert_eq!(fields[1], ("names", Map(Option::Some(0), vec![])));
++        assert_eq!(fields[4], ("maybe", None));
++        assert_eq!(fields[6], ("flag", Bool(false)));
++        assert_eq!(fields[12], ("ratio", Num("f64", (-0.0f64).to_bits() as i128)));
++    }
++
++    #[test]
++    fn record_errors() {
++        // The first failing element of `ids` stops the record.
++        let big = record(vec![1, 200, 300], vec![], vec![], vec![], Option::None, String::new(), 0, 0, 0.0);
++        assert_eq!(ser(&big), Err(err("big")));
++        // A failing element of the set, and a failing value of the map.
++        let set = record(vec![], vec![], vec![101], vec![], Option::None, String::new(), 0, 0, 0.0);
++        assert_eq!(ser(&set), Err(err("big")));
++        let map = record(vec![], vec![("a".to_string(), 101)], vec![], vec![], Option::None, String::new(), 0, 0, 0.0);
++        assert_eq!(ser(&map), Err(err("big")));
++    }
++
++    #[test]
++    fn holes() {
++        assert_eq!(
++            ser(&Holes(vec![Option::Some(1), Option::Some(2)])),
++            Ok(Seq(Option::Some(2), vec![Some(Box::new(Num("u32", 1))), Some(Box::new(Num("u32", 2)))]))
++        );
++        assert_eq!(ser(&Holes(vec![Option::Some(1), Option::None, Option::Some(200)])), Err(err("none")));
++        assert_eq!(ser(&Holes(vec![Option::Some(200), Option::None])), Err(err("big")));
++        assert_eq!(ser(&Holes(vec![])), Ok(Seq(Option::Some(0), vec![])));
++    }
++
++    /// The deserializer of a value tree: a number is visited with its kind's `visit_*` (a float
++    /// from its bits), a sequence or a tuple as a sequence, a map or a struct (its field names as
++    /// strings) as a map.
++    pub struct ValueDe(pub Value);
++    pub struct SeqDe(std::vec::IntoIter<Value>);
++    pub struct MapDe {
++        entries: std::vec::IntoIter<(Value, Value)>,
++        value: Option<Value>,
++    }
++
++    impl<'de> de::Deserializer<'de> for ValueDe {
++        type Error = TestError;
++
++        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, TestError> {
++            match self.0 {
++                Unit => visitor.visit_unit(),
++                Bool(b) => visitor.visit_bool(b),
++                Num(kind, v) => match kind {
++                    "i8" => visitor.visit_i8(v as i8),
++                    "i16" => visitor.visit_i16(v as i16),
++                    "i32" => visitor.visit_i32(v as i32),
++                    "i64" => visitor.visit_i64(v as i64),
++                    "u8" => visitor.visit_u8(v as u8),
++                    "u16" => visitor.visit_u16(v as u16),
++                    "u32" => visitor.visit_u32(v as u32),
++                    "u64" => visitor.visit_u64(v as u64),
++                    "f32" => visitor.visit_f32(f32::from_bits(v as u32)),
++                    "f64" => visitor.visit_f64(f64::from_bits(v as u64)),
++                    _ => fail("kind"),
++                },
++                Str(s) => visitor.visit_str(&s),
++                None => visitor.visit_none(),
++                Some(v) => visitor.visit_some(ValueDe(*v)),
++                Seq(_, items) | Tuple(_, items) => visitor.visit_seq(SeqDe(items.into_iter())),
++                Map(_, entries) => {
++                    visitor.visit_map(MapDe { entries: entries.into_iter(), value: Option::None })
++                }
++                Struct(_, fields) => {
++                    let entries: Vec<(Value, Value)> =
++                        fields.into_iter().map(|(k, v)| (Str(k.to_string()), v)).collect();
++                    visitor.visit_map(MapDe { entries: entries.into_iter(), value: Option::None })
++                }
++            }
++        }
++
++        serde::forward_to_deserialize_any! {
++            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
++            bytes byte_buf option unit unit_struct newtype_struct seq tuple
++            tuple_struct map struct enum identifier ignored_any
++        }
++    }
++
++    impl<'de> SeqAccess<'de> for SeqDe {
++        type Error = TestError;
++        fn next_element_seed<T: DeserializeSeed<'de>>(
++            &mut self, seed: T,
++        ) -> Result<Option<T::Value>, TestError> {
++            match self.0.next() {
++                Option::Some(v) => seed.deserialize(ValueDe(v)).map(Option::Some),
++                Option::None => Ok(Option::None),
++            }
++        }
++    }
++
++    impl<'de> MapAccess<'de> for MapDe {
++        type Error = TestError;
++        fn next_key_seed<K: DeserializeSeed<'de>>(
++            &mut self, seed: K,
++        ) -> Result<Option<K::Value>, TestError> {
++            match self.entries.next() {
++                Option::Some((k, v)) => {
++                    self.value = Option::Some(v);
++                    seed.deserialize(ValueDe(k)).map(Option::Some)
++                }
++                Option::None => Ok(Option::None),
++            }
++        }
++        fn next_value_seed<V: DeserializeSeed<'de>>(
++            &mut self, seed: V,
++        ) -> Result<V::Value, TestError> {
++            match self.value.take() {
++                Option::Some(v) => seed.deserialize(ValueDe(v)),
++                Option::None => fail("value missing"),
++            }
++        }
++    }
++
++    fn f64v(v: f64) -> Value {
++        Num("f64", v.to_bits() as i128)
++    }
++
++    fn f32v(v: f32) -> Value {
++        Num("f32", v.to_bits() as i128)
++    }
++
++    #[test]
++    fn serialize_numbers() {
++        let low = Numbers {
++            small: i8::MIN,
++            mid: i16::MIN,
++            word: i32::MIN,
++            wide: i64::MIN,
++            byte: u8::MAX,
++            big: u64::MAX,
++            size: usize::MAX,
++            floats: vec![
++                f64::NAN,
++                -f64::NAN,
++                f64::INFINITY,
++                f64::NEG_INFINITY,
++                -0.0,
++                f64::MIN_POSITIVE,
++                5e-324,
++                f64::MAX,
++            ],
++        };
++        assert_eq!(
++            ser(&low),
++            Ok(Struct(
++                "Numbers",
++                vec![
++                    ("small", Num("i8", -128)),
++                    ("mid", Num("i16", -32768)),
++                    ("word", Num("i32", -2147483648)),
++                    ("wide", Num("i64", -9223372036854775808)),
++                    ("byte", Num("u8", 255)),
++                    ("big", Num("u64", 18446744073709551615)),
++                    ("size", Num("u64", 18446744073709551615)),
++                    (
++                        "floats",
++                        Seq(
++                            Option::Some(8),
++                            vec![
++                                Num("f64", 0x7ff8000000000000),
++                                Num("f64", 0xfff8000000000000),
++                                Num("f64", 0x7ff0000000000000),
++                                Num("f64", 0xfff0000000000000),
++                                Num("f64", 0x8000000000000000),
++                                Num("f64", 0x0010000000000000),
++                                Num("f64", 1),
++                                Num("f64", 0x7fefffffffffffff),
++                            ],
++                        ),
++                    ),
++                ],
++            ))
++        );
++        let high = Numbers {
++            small: i8::MAX,
++            mid: i16::MAX,
++            word: i32::MAX,
++            wide: i64::MAX,
++            byte: 0,
++            big: 0,
++            size: 0,
++            floats: vec![],
++        };
++        let Ok(Struct(_, fields)) = ser(&high) else { panic!() };
++        assert_eq!(fields[0], ("small", Num("i8", 127)));
++        assert_eq!(fields[1], ("mid", Num("i16", 32767)));
++        assert_eq!(fields[2], ("word", Num("i32", 2147483647)));
++        assert_eq!(fields[3], ("wide", Num("i64", 9223372036854775807)));
++        assert_eq!(fields[6], ("size", Num("u64", 0)));
++        assert_eq!(fields[7], ("floats", Seq(Option::Some(0), vec![])));
++    }
++
++    #[test]
++    fn deserialize_integers() {
++        assert_eq!(de_i8(ValueDe(Num("i8", -128))), Ok(i8::MIN));
++        assert_eq!(de_i8(ValueDe(Num("u8", 127))), Ok(127));
++        assert_eq!(de_i8(ValueDe(Num("u8", 128))), Err(err("invalid value: integer `128`, expected i8")));
++        assert_eq!(de_i8(ValueDe(Num("i16", -129))), Err(err("invalid value: integer `-129`, expected i8")));
++        assert_eq!(
++            de_i8(ValueDe(Num("u64", 18446744073709551615))),
++            Err(err("invalid value: integer `18446744073709551615`, expected i8"))
++        );
++        assert_eq!(de_i16(ValueDe(Num("i8", -128))), Ok(-128));
++        assert_eq!(de_i16(ValueDe(Num("i32", 32767))), Ok(i16::MAX));
++        assert_eq!(de_i16(ValueDe(Num("i32", 32768))), Err(err("invalid value: integer `32768`, expected i16")));
++        assert_eq!(de_i32(ValueDe(Num("i64", -2147483648))), Ok(i32::MIN));
++        assert_eq!(
++            de_i32(ValueDe(Num("i64", -2147483649))),
++            Err(err("invalid value: integer `-2147483649`, expected i32"))
++        );
++        assert_eq!(
++            de_i32(ValueDe(Num("u32", 4294967295))),
++            Err(err("invalid value: integer `4294967295`, expected i32"))
++        );
++        assert_eq!(de_i64(ValueDe(Num("i64", -9223372036854775808))), Ok(i64::MIN));
++        assert_eq!(de_i64(ValueDe(Num("u64", 9223372036854775807))), Ok(i64::MAX));
++        assert_eq!(
++            de_i64(ValueDe(Num("u64", 9223372036854775808))),
++            Err(err("invalid value: integer `9223372036854775808`, expected i64"))
++        );
++        assert_eq!(de_u8(ValueDe(Num("i64", 255))), Ok(u8::MAX));
++        assert_eq!(de_u8(ValueDe(Num("i8", -1))), Err(err("invalid value: integer `-1`, expected u8")));
++        assert_eq!(de_u8(ValueDe(Num("u16", 256))), Err(err("invalid value: integer `256`, expected u8")));
++        assert_eq!(de_u64(ValueDe(Num("u64", 18446744073709551615))), Ok(u64::MAX));
++        assert_eq!(de_u64(ValueDe(Num("i8", 0))), Ok(0));
++        assert_eq!(
++            de_u64(ValueDe(Num("i64", -9223372036854775808))),
++            Err(err("invalid value: integer `-9223372036854775808`, expected u64"))
++        );
++        assert_eq!(de_usize(ValueDe(Num("u64", 18446744073709551615))), Ok(usize::MAX));
++        assert_eq!(de_usize(ValueDe(Num("u32", 7))), Ok(7));
++        assert_eq!(de_usize(ValueDe(Num("i32", -5))), Err(err("invalid value: integer `-5`, expected usize")));
++        // The provided `visit_*`: `invalid_type`.
++        assert_eq!(de_i8(ValueDe(f64v(1.5))), Err(err("invalid type: floating point `1.5`, expected i8")));
++        assert_eq!(de_u64(ValueDe(Str("7".to_string()))), Err(err("invalid type: string \"7\", expected u64")));
++        assert_eq!(de_i64(ValueDe(Bool(true))), Err(err("invalid type: boolean `true`, expected i64")));
++        assert_eq!(de_usize(ValueDe(Unit)), Err(err("invalid type: unit value, expected usize")));
++        assert_eq!(
++            de_i32(ValueDe(Some(Box::new(Num("i32", 1))))),
++            Err(err("invalid type: Option value, expected i32"))
++        );
++        assert_eq!(de_i16(ValueDe(Seq(Option::None, vec![]))), Err(err("invalid type: sequence, expected i16")));
++    }
++
++    #[test]
++    fn deserialize_floats() {
++        let bits = |r: Result<f64, TestError>| r.map(f64::to_bits);
++        assert_eq!(bits(de_f64(ValueDe(f64v(f64::NAN)))), Ok(0x7ff8000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f64v(-f64::NAN)))), Ok(0xfff8000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f64v(-0.0)))), Ok(0x8000000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f64v(f64::NEG_INFINITY)))), Ok(0xfff0000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f64v(5e-324)))), Ok(1));
++        // `v as f64`, rounded to nearest (ties to even).
++        assert_eq!(bits(de_f64(ValueDe(Num("i64", -9223372036854775808)))), Ok(0xc3e0000000000000));
++        assert_eq!(bits(de_f64(ValueDe(Num("i64", 9223372036854775807)))), Ok(0x43e0000000000000));
++        assert_eq!(bits(de_f64(ValueDe(Num("u64", 18446744073709551615)))), Ok(0x43f0000000000000));
++        assert_eq!(bits(de_f64(ValueDe(Num("i64", 9007199254740993)))), Ok(0x4340000000000000));
++        assert_eq!(bits(de_f64(ValueDe(Num("u64", 9007199254740995)))), Ok(0x4340000000000002));
++        assert_eq!(bits(de_f64(ValueDe(Num("i8", -1)))), Ok((-1.0f64).to_bits()));
++        // `(v as f64).copysign(sign)`.
++        assert_eq!(bits(de_f64(ValueDe(f32v(-0.0)))), Ok(0x8000000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f32v(0.1)))), Ok((0.1f32 as f64).to_bits()));
++        assert_eq!(bits(de_f64(ValueDe(f32v(f32::NAN)))), Ok(0x7ff8000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f32v(-f32::NAN)))), Ok(0xfff8000000000000));
++        assert_eq!(bits(de_f64(ValueDe(f32v(f32::NEG_INFINITY)))), Ok(0xfff0000000000000));
++        assert_eq!(bits(de_f64(ValueDe(Bool(false)))), Err(err("invalid type: boolean `false`, expected f64")));
++        assert_eq!(bits(de_f64(ValueDe(Str("1.0".to_string())))), Err(err("invalid type: string \"1.0\", expected f64")));
++    }
++
++    #[test]
++    fn deserialize_bool_unit() {
++        assert_eq!(de_bool(ValueDe(Bool(true))), Ok(true));
++        assert_eq!(de_bool(ValueDe(Bool(false))), Ok(false));
++        let float = |v: Value| de_bool(ValueDe(v));
++        let msg = |text: &str| Err(err(&format!("invalid type: floating point `{text}`, expected a boolean")));
++        assert_eq!(float(f64v(f64::NAN)), msg("NaN"));
++        assert_eq!(float(f64v(-f64::NAN)), msg("NaN"));
++        assert_eq!(float(f64v(f64::INFINITY)), msg("inf"));
++        assert_eq!(float(f64v(f64::NEG_INFINITY)), msg("-inf"));
++        assert_eq!(float(f64v(-0.0)), msg("-0.0"));
++        assert_eq!(float(f64v(0.0)), msg("0.0"));
++        assert_eq!(float(f64v(0.1)), msg("0.1"));
++        assert_eq!(float(f64v(-2.5)), msg("-2.5"));
++        assert_eq!(float(f64v(1e21)), msg("1000000000000000000000.0"));
++        assert_eq!(float(f64v(1e-7)), msg("0.0000001"));
++        assert_eq!(float(f64v(f64::MAX)), msg(&format!("{}.0", f64::MAX)));
++        assert_eq!(float(f64v(5e-324)), msg(&format!("{}", 5e-324f64)));
++        assert_eq!(float(f32v(-f32::NAN)), msg("NaN"));
++        assert_eq!(float(f32v(0.1)), msg("0.10000000149011612"));
++        assert_eq!(
++            de_bool(ValueDe(Num("i64", -9223372036854775808))),
++            Err(err("invalid type: integer `-9223372036854775808`, expected a boolean"))
++        );
++        assert_eq!(
++            de_bool(ValueDe(Num("u64", 18446744073709551615))),
++            Err(err("invalid type: integer `18446744073709551615`, expected a boolean"))
++        );
++        assert_eq!(de_unit(ValueDe(Unit)), Ok(()));
++        assert_eq!(de_unit(ValueDe(None)), Err(err("invalid type: Option value, expected unit")));
++        assert_eq!(de_unit(ValueDe(Num("u8", 255))), Err(err("invalid type: integer `255`, expected unit")));
++        assert_eq!(de_unit(ValueDe(Tuple(0, vec![]))), Err(err("invalid type: sequence, expected unit")));
++    }
++
++    #[test]
++    fn deserialize_point() {
++        let point = |v: Value| de_point(ValueDe(v)).map(|(a, b)| (a, b.to_bits()));
++        assert_eq!(
++            point(Tuple(2, vec![Num("i64", -9223372036854775808), f64v(-0.0)])),
++            Ok((i64::MIN, 0x8000000000000000))
++        );
++        assert_eq!(point(Seq(Option::None, vec![Num("u8", 7), Num("u64", 3)])), Ok((7, 0x4008000000000000)));
++        assert_eq!(
++            point(Seq(Option::None, vec![Num("u64", 18446744073709551615), f64v(1.0)])),
++            Err(err("invalid value: integer `18446744073709551615`, expected i64"))
++        );
++        assert_eq!(point(Seq(Option::None, vec![Num("i8", 1)])), Err(err("invalid length 1, expected a tuple of size 2")));
++        assert_eq!(point(Seq(Option::None, vec![])), Err(err("invalid length 0, expected a tuple of size 2")));
++        assert_eq!(
++            point(Seq(Option::None, vec![Num("i8", 1), Bool(true)])),
++            Err(err("invalid type: boolean `true`, expected f64"))
++        );
++        assert_eq!(point(Num("i8", 1)), Err(err("invalid type: integer `1`, expected a tuple of size 2")));
++    }
++
++    fn s(x: &str) -> Value {
++        Str(x.to_string())
++    }
++
++    #[test]
++    fn deserialize_collections() {
++        let seq = |xs: Vec<Value>| ValueDe(Seq(Option::None, xs));
++        let map = |kvs: Vec<(Value, Value)>| ValueDe(Map(Option::None, kvs));
++        assert_eq!(de_ids(seq(vec![Num("u32", 3), Num("u32", 1), Num("u8", 2)])), Ok(vec![3, 1, 2]));
++        assert_eq!(de_ids(ValueDe(Tuple(0, vec![]))), Ok(vec![]));
++        assert_eq!(
++            de_ids(seq(vec![Num("u32", 1), Num("i8", -1), Num("u32", 2)])),
++            Err(err("invalid value: integer `-1`, expected u32"))
++        );
++        assert_eq!(de_ids(map(vec![])), Err(err("invalid type: map, expected a sequence")));
++        assert_eq!(de_ids(ValueDe(s("x"))), Err(err("invalid type: string \"x\", expected a sequence")));
++        // `BTreeSet`: ascending, an equal element once.
++        assert_eq!(
++            de_tags(seq(vec![Num("i64", 9), Num("i8", -4), Num("i64", 9), Num("u8", 7)])),
++            Ok(BTreeSet::from([-4, 7, 9]))
++        );
++        assert_eq!(
++            de_tags(seq(vec![Num("i64", 1), Num("u64", 18446744073709551615)])),
++            Err(err("invalid value: integer `18446744073709551615`, expected i64"))
++        );
++        assert_eq!(de_tags(ValueDe(Unit)), Err(err("invalid type: unit value, expected a sequence")));
++        // `BTreeMap`: ascending keys, a later value of an equal key replaces the earlier one.
++        assert_eq!(
++            de_names(map(vec![(s("b"), Num("u8", 2)), (s("a"), Num("u8", 1)), (s("b"), Num("u8", 5))])),
++            Ok(BTreeMap::from([("a".to_string(), 1), ("b".to_string(), 5)]))
++        );
++        assert_eq!(
++            de_names(ValueDe(Struct("S", vec![("x", Num("u64", 255))]))),
++            Ok(BTreeMap::from([("x".to_string(), 255)]))
++        );
++        assert_eq!(
++            de_names(map(vec![(s("a"), Num("u8", 1)), (s("b"), Num("u16", 256))])),
++            Err(err("invalid value: integer `256`, expected u8"))
++        );
++        assert_eq!(
++            de_names(map(vec![(Num("u8", 1), Num("u8", 1))])),
++            Err(err("invalid type: integer `1`, expected a string"))
++        );
++        assert_eq!(de_names(seq(vec![])), Err(err("invalid type: sequence, expected a map")));
++        // `Box<Option<u64>>`, `Arc<Vec<Vec<u8>>>`: the content's.
++        assert_eq!(
++            de_boxed(ValueDe(Some(Box::new(Num("u64", 18446744073709551615))))),
++            Ok(Box::new(Option::Some(u64::MAX)))
++        );
++        assert_eq!(de_boxed(ValueDe(None)), Ok(Box::new(Option::None)));
++        assert_eq!(de_boxed(ValueDe(Unit)), Ok(Box::new(Option::None)));
++        assert_eq!(de_boxed(ValueDe(Num("u64", 1))), Err(err("invalid type: integer `1`, expected option")));
++        assert_eq!(
++            de_shared(seq(vec![Seq(Option::None, vec![Num("u8", 1), Num("u8", 2)]), Tuple(0, vec![])]))
++                .map(|a| (*a).clone()),
++            Ok(vec![vec![1, 2], vec![]])
++        );
++        assert_eq!(
++            de_shared(seq(vec![Seq(Option::None, vec![Num("u16", 300)])])).map(|a| (*a).clone()),
++            Err(err("invalid value: integer `300`, expected u8"))
++        );
++        assert_eq!(
++            de_shared(seq(vec![Num("u8", 1)])).map(|a| (*a).clone()),
++            Err(err("invalid type: integer `1`, expected a sequence"))
++        );
++    }
++}

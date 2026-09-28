@@ -1,0 +1,2301 @@
+# aeneas integration step 148 after cba11f3beb: commit 1dbe86dd09ae61123b25176dac88f9159d39676a
+# first parent 9389a5605f76b8c7e4f6d2b994ed5bc2304fda51, merged 37e863547c7dfbdd1d5278d111e647d2052ea683
+# series aeneas: patch -p1 in the root of the upstream source
+#
+# Merge branch 'fix/lending-iterators' (for loops over values_mut/iter_mut: specialized blanket into_iter calls simplified; a lending BTreeMap ValuesMut model)
+
+diff --git a/backends/lean/Aeneas/Std/BTreeMap.lean b/backends/lean/Aeneas/Std/BTreeMap.lean
+index 3da3637..235c2bd 100644
+--- a/backends/lean/Aeneas/Std/BTreeMap.lean
++++ b/backends/lean/Aeneas/Std/BTreeMap.lean
+@@ -33,6 +33,16 @@ structure alloc.collections.btree.map.Keys (K V : Type) where
+ structure alloc.collections.btree.map.Values (K V : Type) where
+   inner : alloc.collections.btree.map.Iter K V
+ 
++/-- `btree_map::ValuesMut<'a, K, V>` is `{ inner: IterMut<'a, K, V> }` (map.rs, rustc 1.95): a
++    lending iterator over the values in key order. Like the slice `IterMut`, the model retains
++    the complete borrowed storage and the position of the next entry: `next` lends the value at
++    that position, and its lens writes the value given back at the same position of a later
++    state; `values_mut`'s restoration lens reads the map back from the final state. -/
++@[rust_type "alloc::collections::btree::map::ValuesMut" (mutRegions := #[0]) (body := .opaque)]
++structure alloc.collections.btree.map.ValuesMut (K V : Type) where
++  entries : List (K × V)
++  i : Nat := 0
++
+ @[rust_type "alloc::collections::btree::map::IntoIter"
+   (keepParams := [true, true, false]) (body := .opaque)]
+ structure alloc.collections.btree.map.IntoIter (K V : Type) where
+@@ -260,6 +270,14 @@ def BTreeMap.keys {K V : Type} (map : BTreeMap K V) : Result (Keys K V) :=
+ def BTreeMap.values {K V : Type} (map : BTreeMap K V) : Result (Values K V) :=
+   .ok ⟨⟨map.entries⟩⟩
+ 
++/-- `BTreeMap::values_mut`: `ValuesMut { inner: self.iter_mut() }`, positioned before the first
++    entry. The restoration lens gives back the map from the final iterator state. -/
++@[rust_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::values_mut"
++  (keepParams := [true, true, false]) (keepTraitClauses := [false])]
++def BTreeMap.values_mut {K V : Type} (map : BTreeMap K V) :
++    Result (ValuesMut K V × (ValuesMut K V → BTreeMap K V)) :=
++  .ok ({ entries := map.entries }, fun it => ⟨it.entries⟩)
++
+ /-- The entry-wise comparison of `BTreeMap`'s `PartialEq::eq` after its length
+     check: `self.iter().zip(other).all(|(a, b)| a == b)`, where the pair
+     comparison is `a.0 == b.0 && a.1 == b.1` (core tuple `PartialEq`). -/
+@@ -516,6 +534,22 @@ def IteratorValues.next {K V : Type} (it : Values K V) : Result (Option V × Val
+   let (item, inner) ← IteratorIter.next it.inner
+   .ok (item.map (·.2), ⟨inner⟩)
+ 
++/-- `ValuesMut::next`: `self.inner.next().map(|(_, v)| v)`, lending the value of the entry at
++    the iterator's position. The lens writes the value given back (if any) at that position of a
++    later state, keeping its key; an exhausted iterator gives nothing back. -/
++@[rust_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::ValuesMut<'a, @K, @V>, &'a mut @V>}::next"]
++def IteratorValuesMut.next {K V : Type} (it : ValuesMut K V) :
++    Result (Option V × ValuesMut K V × (ValuesMut K V → Option V → ValuesMut K V)) :=
++  match it.entries[it.i]? with
++  | none => .ok (none, it, fun it _ => it)
++  | some (_, v) =>
++    let i := it.i
++    let back (it' : ValuesMut K V) (x : Option V) : ValuesMut K V :=
++      match x with
++      | none => it'
++      | some x => { it' with entries := it'.entries.modify i (fun (k, _) => (k, x)) }
++    .ok (some v, { it with i := i + 1 }, back)
++
+ /-- `Values::size_hint`: `self.inner.size_hint()`. -/
+ @[rust_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::size_hint"]
+ def IteratorValues.size_hint {K V : Type} (it : Values K V) : Result (Usize × Option Usize) :=
+diff --git a/src/PrePasses.ml b/src/PrePasses.ml
+index 0f5e49b..67f55c4 100644
+--- a/src/PrePasses.ml
++++ b/src/PrePasses.ml
+@@ -1476,7 +1476,10 @@ let rename_type_vars (crate : crate) : crate =
+ 
+ (** Simplify calls to:
+     - the blanket [IntoIterator::into_iter] implementation (we replace it with
+-      an assignment)
++      an assignment), including its partial-monomorphization instances (e.g.
++      [into_iter::<IterMut<'0, T>, &'0 mut T>] of a [for] loop over a lending
++      iterator): the body of the blanket implementation is [self] at every
++      instantiation
+     - the blanket [TryInto::try_into] implementation (we replace it with a call
+       to the [try_from] method of the required [TryFrom] clause)
+     - unary reference identities, verified from their complete Rust bodies
+@@ -1503,7 +1506,17 @@ let simplify_trait_calls (crate : crate) : crate =
+         match_with_trait_decl_refs = Config.match_patterns_with_trait_decl_refs;
+       }
+   in
+-  let is_blanket_into_iter = match_pattern into_iter_pat in
++  (* The name of a partial-monomorphization instance without its shape: the
++     matcher compares the shape with the generics of the pattern's last
++     element, which the blanket pattern leaves empty. *)
++  let logical_name (name : name) =
++    match List.rev name with
++    | PeInstantiated _ :: rest -> List.rev rest
++    | _ -> name
++  in
++  let is_blanket_into_iter name =
++    match_pattern into_iter_pat (logical_name name)
++  in
+   let is_blanket_try_into = match_pattern try_into_pat in
+   let reference_identities =
+     FunDeclId.Map.fold
+diff --git a/src/extract/ExtractBuiltinLean.ml b/src/extract/ExtractBuiltinLean.ml
+index d5a5f14..82bf4e5 100644
+--- a/src/extract/ExtractBuiltinLean.ml
++++ b/src/extract/ExtractBuiltinLean.ml
+@@ -8,9 +8,9 @@ let lean_builtin_types = [
+   mk_type "alloc::borrow::Cow" "_root_.Aeneas.Std.alloc.borrow.Cow" ~kind:(KEnum [("Borrowed", Some "Borrowed"); ("Owned", Some "Owned")]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 16 *)
+   mk_type "alloc::collections::btree::map::BTreeMap" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap" ~keep_params:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 36 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 46 *)
+   mk_type "alloc::collections::btree::map::IntoIter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIter" ~keep_params:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 42 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 52 *)
+   mk_type "alloc::collections::btree::map::IntoValues" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoValues" ~keep_params:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 21 *)
+   mk_type "alloc::collections::btree::map::Iter" "_root_.Aeneas.Std.alloc.collections.btree.map.Iter";
+@@ -18,11 +18,13 @@ let lean_builtin_types = [
+   mk_type "alloc::collections::btree::map::Keys" "_root_.Aeneas.Std.alloc.collections.btree.map.Keys";
+   (* file: "Aeneas/Std/BTreeMap.lean", line: 32 *)
+   mk_type "alloc::collections::btree::map::Values" "_root_.Aeneas.Std.alloc.collections.btree.map.Values";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 68 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 41 *)
++  mk_type "alloc::collections::btree::map::ValuesMut" "_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut" ~mut_regions:([0]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 78 *)
+   mk_type "alloc::collections::btree::map::entry::Entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]) ~kind:(KEnum [("Vacant", Some "Vacant"); ("Occupied", Some "Occupied")]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 49 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 59 *)
+   mk_type "alloc::collections::btree::map::entry::OccupiedEntry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 60 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 70 *)
+   mk_type "alloc::collections::btree::map::entry::VacantEntry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry" ~keep_params:(Some [true; true; false]) ~mut_regions:([0]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 11 *)
+   mk_type "alloc::collections::btree::set::BTreeSet" "_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet" ~keep_params:(Some [true; false]);
+@@ -308,117 +310,121 @@ let lean_builtin_funs = [
+   mk_fun "alloc::boxed::{core::ops::deref::Deref<Box<@T>, @T>}::deref" "_root_.Aeneas.Std.alloc.boxed.Box.deref" ~keep_params:(Some [true; false]) ~can_fail:false;
+   (* file: "Aeneas/Std/Alloc.lean", line: 22 *)
+   mk_fun "alloc::boxed::{core::ops::deref::DerefMut<Box<@T>, @T>}::deref_mut" "_root_.Aeneas.Std.alloc.boxed.Box.deref_mut" ~keep_params:(Some [true; false]) ~can_fail:false;
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 358 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 376 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::Entry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.Entry.key" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 397 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 415 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 405 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 423 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::get_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.get_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 413 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 431 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 338 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 356 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::into_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.into_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 391 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 409 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.key_" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 421 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 439 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 428 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 446 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::OccupiedEntry<'a, @K, @V, @A>}::remove_entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.OccupiedEntry.remove_entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 344 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 362 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 368 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 386 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::insert_entry" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.insert_entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 384 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 402 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::into_key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.into_key" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 377 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 395 *)
+   mk_fun "alloc::collections::btree::map::entry::{alloc::collections::btree::map::entry::VacantEntry<'a, @K, @V, @A>}::key" "_root_.Aeneas.Std.alloc.collections.btree.map.entry.VacantEntry.key_" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 165 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 175 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::clear" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.clear" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 197 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 207 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::contains_key" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.contains_key" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 331 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 349 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::entry" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.entry" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 141 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 151 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 158 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 168 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get_key_value" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get_key_value" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 185 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 195 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::get_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.get_mut" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 104 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 114 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::insert" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.insert" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 482 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 500 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::into_values" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.into_values" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 241 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 251 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::is_empty" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.is_empty" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 246 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 256 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::iter" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 252 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 262 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::keys" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.keys" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 114 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 124 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::len" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.len" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 215 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 225 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::remove" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.remove" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true; true; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 258 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 268 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::values" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 81 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 275 *)
++  mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, @A>}::values_mut" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 91 *)
+   mk_fun "alloc::collections::btree::map::{alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>}::new" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.new";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 123 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 133 *)
+   mk_fun "alloc::collections::btree::map::{core::clone::Clone<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::clone" "_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.clone" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 277 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 295 *)
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::eq" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.eq" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 286 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 304 *)
+   mk_fun "alloc::collections::btree::map::{core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::ne" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap.ne" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 695 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 729 *)
+   mk_fun "alloc::collections::btree::map::{core::convert::From<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, [(@K, @V); @N]>}::from" "_root_.Aeneas.Std.alloc.collections.btree.map.FromBTreeMapArray.from_";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 85 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 95 *)
+   mk_fun "alloc::collections::btree::map::{core::default::Default<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>}::default" "_root_.Aeneas.Std.alloc.collections.btree.map.DefaultBTreeMap.default";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 304 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 322 *)
+   mk_fun "alloc::collections::btree::map::{core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>}::fmt" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap.fmt" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 227 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 237 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>}::extend" "_root_.Aeneas.Std.alloc.collections.btree.map.ExtendBTreeMap.extend" ~keep_params:(Some [true; true; false; true; true]) ~keep_trait_clauses:(Some [true; false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 678 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 712 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>}::from_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.FromIteratorBTreeMap.from_iter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 642 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 676 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorSharedBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 634 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 668 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>}::into_iter" "_root_.Aeneas.Std.alloc.collections.btree.map.IntoIteratorBTreeMap.into_iter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 624 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 658 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.collect" ~keep_params:(Some [true; true; false; true]) ~keep_trait_clauses:(Some [false; true]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 543 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 577 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.enumerate" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 459 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 477 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.next" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 473 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 491 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.size_hint" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 537 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 571 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.step_by" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 548 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 582 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoIter.take" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 488 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 506 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoValues<@K, @V, @A>, @V>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoValues.next" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 496 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 514 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoValues<@K, @V, @A>, @V>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIntoValues.size_hint" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 618 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 652 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::collect" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.collect";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 529 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 563 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::enumerate" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.enumerate";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 453 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 471 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 467 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 485 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 524 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 558 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::step_by" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.step_by";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 533 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 567 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>}::take" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorIter.take";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 503 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 521 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 509 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 527 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorKeys.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 514 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 532 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.next";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 520 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 554 *)
+   mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>}::size_hint" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValues.size_hint";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 744 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 540 *)
++  mk_fun "alloc::collections::btree::map::{core::iter::traits::iterator::Iterator<alloc::collections::btree::map::ValuesMut<'a, @K, @V>, &'a mut @V>}::next" "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next";
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 778 *)
+   mk_fun "alloc::collections::btree::map::{core::ops::index::Index<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, &'0 @Q, @V>}::index" "_root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index" ~keep_params:(Some [true; true; true; false]) ~keep_trait_clauses:(Some [false; true; true; true]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 53 *)
+   mk_fun "alloc::collections::btree::set::{alloc::collections::btree::set::BTreeSet<@T, @A>}::clear" "_root_.Aeneas.Std.alloc.collections.btree.set.BTreeSet.clear" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false; false]);
+@@ -2890,7 +2896,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::cmp::PartialEq<Box<@T>, Box<@T>>" "_root_.Aeneas.Std.core.cmp.PartialEqBox" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/SliceCmp.lean", line: 63 *)
+   mk_trait_impl "core::cmp::PartialEq<[@T], [@U]>" "_root_.Aeneas.Std.core.slice.cmp.PartialEqSliceInst";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 293 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 311 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.PartialEqBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 89 *)
+   mk_trait_impl "core::cmp::PartialEq<alloc::collections::btree::set::BTreeSet<@T, @A>, alloc::collections::btree::set::BTreeSet<@T, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.set.PartialEqBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+@@ -2960,7 +2966,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::convert::From<Box<str>, &'0 str>" "_root_.Aeneas.Std.core.convert.FromSharedStrBoxStr";
+   (* file: "Aeneas/Std/String.lean", line: 599 *)
+   mk_trait_impl "core::convert::From<Box<str>, alloc::string::String>" "_root_.Aeneas.Std.core.convert.FromStringBoxStr";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 705 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 739 *)
+   mk_trait_impl "core::convert::From<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, [(@K, @V); @N]>" "_root_.Aeneas.Std.core.convert.FromBTreeMapArray";
+   (* file: "Aeneas/Std/VecDeque.lean", line: 44 *)
+   mk_trait_impl "core::convert::From<alloc::collections::vec_deque::VecDeque<@T, alloc::alloc::Global>, [@T; @N]>" "_root_.Aeneas.Std.alloc.collections.vec_deque.FromVecDequeArray";
+@@ -3022,7 +3028,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::default::Default<[@T; 0]>" "_root_.Aeneas.Std.core.default.DefaultArrayEmpty";
+   (* file: "Aeneas/Std/Array/Array.lean", line: 295 *)
+   mk_trait_impl "core::default::Default<[@T; @N]>" "_root_.Aeneas.Std.core.default.DefaultArray";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 88 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 98 *)
+   mk_trait_impl "core::default::Default<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DefaultBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 107 *)
+   mk_trait_impl "core::default::Default<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>>" "_root_.Aeneas.Std.alloc.collections.btree.set.DefaultBTreeSet";
+@@ -3050,7 +3056,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::fmt::Debug<[@T]>" "_root_.Aeneas.Std.core.fmt.DebugSlice";
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 90 *)
+   mk_trait_impl "core::fmt::Debug<alloc::boxed::Box<@T>>" "_root_.Aeneas.Std.core.fmt.DebugBox" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 310 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 328 *)
+   mk_trait_impl "core::fmt::Debug<alloc::collections::btree::map::BTreeMap<@K, @V, @A>>" "_root_.Aeneas.Std.alloc.collections.btree.map.DebugBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; true; false]);
+   (* file: "Aeneas/Std/Core/FmtWithSlice.lean", line: 75 *)
+   mk_trait_impl "core::fmt::Debug<alloc::string::String>" "_root_.Aeneas.Std.core.fmt.DebugString";
+@@ -3232,7 +3238,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::accum::Sum<usize, &'a usize>" "_root_.Aeneas.Std.core.iter.traits.accum.SumUsizeSharedUsize";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 881 *)
+   mk_trait_impl "core::iter::traits::accum::Sum<usize, usize>" "_root_.Aeneas.Std.core.iter.traits.accum.SumUsizeUsize";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 733 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 767 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [true; false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 270 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::collections::btree::set::BTreeSet<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.ExtendBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [true; false]);
+@@ -3240,7 +3246,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, &'a @T>" "_root_.Aeneas.Std.alloc.vec.ExtendVecShared" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/Vec.lean", line: 100 *)
+   mk_trait_impl "core::iter::traits::collect::Extend<alloc::vec::Vec<@T>, @T>" "_root_.Aeneas.Std.alloc.vec.ExtendVec" ~keep_params:(Some [true; false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 727 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 761 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::map::BTreeMap<@K, @V, alloc::alloc::Global>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeMap";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 264 *)
+   mk_trait_impl "core::iter::traits::collect::FromIterator<alloc::collections::btree::set::BTreeSet<@T, alloc::alloc::Global>, @T>" "_root_.Aeneas.Std.core.iter.traits.collect.FromIteratorBTreeSet";
+@@ -3256,7 +3262,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T; @N], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedArray";
+   (* file: "Aeneas/Std/SliceIter.lean", line: 361 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a [@T], &'a @T, core::slice::iter::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedSlice";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 719 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 753 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (&'a @K, &'a @V), alloc::collections::btree::map::Iter<'a, @K, @V>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 318 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<&'a alloc::collections::btree::set::BTreeSet<@T, @A>, &'a @T, alloc::collections::btree::set::Iter<'a, @T>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorSharedBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -3268,7 +3274,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<Box<[@I]>, @I, alloc::vec::into_iter::IntoIter<@I, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBoxSlice" ~keep_params:(Some [true; false]);
+   (* file: "Aeneas/Std/ArrayIter.lean", line: 104 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<[@T; @N], @T, core::array::iter::IntoIter<@T, @N>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorArray";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 711 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 745 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, (@K, @V), alloc::collections::btree::map::IntoIter<@K, @V, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeMap" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 288 *)
+   mk_trait_impl "core::iter::traits::collect::IntoIterator<alloc::collections::btree::set::BTreeSet<@T, @A>, @T, alloc::collections::btree::set::IntoIter<@T, @A>>" "_root_.Aeneas.Std.core.iter.traits.collect.IntoIteratorBTreeSet" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -3312,15 +3318,15 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::iter::traits::exact_size::ExactSizeIterator<core::slice::iter::Iter<'a, @T>, &'_ @T>" "_root_.Aeneas.Std.core.iter.traits.exact_size.ExactSizeIteratorSliceIter";
+   (* file: "Aeneas/Std/Core/Iter.lean", line: 450 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<&'a mut @I, @Item>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorMut";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 569 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 603 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoIter<@K, @V, @A>, (@K, @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoIter" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 584 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 618 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::IntoValues<@K, @V, @A>, @V>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIntoValues" ~keep_params:(Some [true; true; false]) ~keep_trait_clauses:(Some [false]);
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 557 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 591 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Iter<'a, @K, @V>, (&'a @K, &'a @V)>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeIter";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 596 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 630 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Keys<'a, @K, @V>, &'a @K>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeKeys";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 607 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 641 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::map::Values<'a, @K, @V>, &'a @V>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeValues";
+   (* file: "Aeneas/Std/BTreeSet.lean", line: 279 *)
+   mk_trait_impl "core::iter::traits::iterator::Iterator<alloc::collections::btree::set::IntoIter<@T, @A>, @T>" "_root_.Aeneas.Std.core.iter.traits.iterator.IteratorBTreeSetIntoIter" ~keep_params:(Some [true; false]) ~keep_trait_clauses:(Some [false]);
+@@ -3512,7 +3518,7 @@ let lean_builtin_trait_impls = [
+   mk_trait_impl "core::ops::index::Index<[@T; @N], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexArray";
+   (* file: "Aeneas/Std/Slice.lean", line: 555 *)
+   mk_trait_impl "core::ops::index::Index<[@T], @I, @O>" "_root_.Aeneas.Std.core.ops.index.IndexSlice";
+-  (* file: "Aeneas/Std/BTreeMap.lean", line: 753 *)
++  (* file: "Aeneas/Std/BTreeMap.lean", line: 787 *)
+   mk_trait_impl "core::ops::index::Index<alloc::collections::btree::map::BTreeMap<@K, @V, @A>, &'0 @Q, @V>" "_root_.Aeneas.Std.core.ops.index.IndexBTreeMap" ~keep_params:(Some [true; true; true; false]) ~keep_trait_clauses:(Some [false; true; true; true]);
+   (* file: "Aeneas/Std/Vec.lean", line: 390 *)
+   mk_trait_impl "core::ops::index::Index<alloc::vec::Vec<@T>, @T, @O>" "_root_.Aeneas.Std.alloc.vec.Vec.Index" ~keep_params:(Some [true; true; false; true]);
+diff --git a/src/symbolic/ModelStateABI.ml b/src/symbolic/ModelStateABI.ml
+index bf14eb9..dba3dd1 100644
+--- a/src/symbolic/ModelStateABI.ml
++++ b/src/symbolic/ModelStateABI.ml
+@@ -365,7 +365,8 @@ let modeled_fun_abi (crate : A.crate) (decl : A.fun_decl)
+     (info : builtin_fun_info) =
+   match info.extract_name with
+   | "_root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next"
+-  | "_root_.Aeneas.Std.core.slice.iter.IteratorIterMut.find" ->
++  | "_root_.Aeneas.Std.core.slice.iter.IteratorIterMut.find"
++  | "_root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next" ->
+       Some (LendingState 0)
+   | "_root_.Aeneas.Std.core.slice.iter.IntoIteratorMutSlice.into_iter"
+   | "_root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter" ->
+diff --git a/tests/lean/LendingIteratorLoops.lean b/tests/lean/LendingIteratorLoops.lean
+new file mode 100644
+index 0000000..5b05eb5
+--- /dev/null
++++ b/tests/lean/LendingIteratorLoops.lean
+@@ -0,0 +1,2 @@
++import LendingIteratorLoops.Checks
++import LendingIteratorLoops.LendingIteratorLoops
+diff --git a/tests/lean/LendingIteratorLoops/Checks.lean b/tests/lean/LendingIteratorLoops/Checks.lean
+new file mode 100644
+index 0000000..07232b2
+--- /dev/null
++++ b/tests/lean/LendingIteratorLoops/Checks.lean
+@@ -0,0 +1,124 @@
++import LendingIteratorLoops.LendingIteratorLoops
++
++/-! Evaluate the model of `tests/src/lending-iterator-loops.rs` on the inputs of its
++    `native` test module and compare with the native results, including the
++    collections after the loops and the state given back by the loop bodies. -/
++
++namespace lending_iterator_loops.checks
++open Aeneas Aeneas.Std Result
++
++def u (n : Nat) : U32 := ⟨BitVec.ofNat _ n⟩
++
++def vec {α : Type} (xs : List α) : alloc.vec.Vec α :=
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++def slice (xs : List Nat) : Slice U32 :=
++  let xs := xs.map u
++  if h : xs.length ≤ Usize.max then ⟨xs, h⟩ else ⟨[], by simp⟩
++
++def map (xs : List (Nat × Nat)) : alloc.collections.btree.map.BTreeMap U32 U32 :=
++  ⟨xs.map fun (k, v) => (u k, u v)⟩
++
++def entries (m : alloc.collections.btree.map.BTreeMap U32 U32) : List (Nat × Nat) :=
++  m.entries.map fun (k, v) => (k.val, v.val)
++
++def nats (v : alloc.vec.Vec U32) : List Nat := v.val.map (·.val)
++
++def bumpValuesR (xs : List (Nat × Nat)) : Option (List (Nat × Nat)) :=
++  match bump_values (map xs) with
++  | ok m => some (entries m)
++  | _ => none
++
++#guard bumpValuesR [(1, 20), (2, 0), (3, 10)] == some [(1, 21), (2, 1), (3, 11)]
++#guard bumpValuesR [] == some []
++
++def bumpVecR (xs : List Nat) : Option (List Nat) :=
++  match bump_vec (vec (xs.map u)) with
++  | ok v => some (nats v)
++  | _ => none
++
++#guard bumpVecR [1, 2, 3] == some [2, 3, 4]
++
++def bumpSliceR (xs : List Nat) : Option (List Nat) :=
++  match bump_slice (slice xs) with
++  | ok s => some (s.val.map (·.val))
++  | _ => none
++
++#guard bumpSliceR [5, 0] == some [7, 2]
++
++def remapValuesR (xs table : List (Nat × Nat)) (count : Nat) :
++    Option (List (Nat × Nat) × Nat) :=
++  match remap_values (map xs) (map table) (u count) with
++  | ok (m, c) => some (entries m, c.val)
++  | _ => none
++
++#guard remapValuesR [(1, 7), (2, 8), (3, 7)] [(7, 70), (8, 80)] 5 ==
++  some ([(1, 70), (2, 80), (3, 70)], 8)
++-- A missing key panics (native: `remap_values_missing_key_panics`)
++#guard remapValuesR [(1, 7), (2, 9)] [(7, 70)] 0 == none
++
++def doubleAndLogR (xs log : List Nat) : Option (List Nat × List Nat) :=
++  match double_and_log (vec (xs.map u)) (vec (log.map u)) with
++  | ok (v, l) => some (nats v, nats l)
++  | _ => none
++
++#guard doubleAndLogR [3, 1, 4] [9] == some ([6, 2, 8], [9, 3, 1, 4])
++
++def doubleUntilR (xs : List (Nat × Nat)) (limit : Nat) : Option (List (Nat × Nat)) :=
++  match double_until (map xs) (u limit) with
++  | ok m => some (entries m)
++  | _ => none
++
++#guard doubleUntilR [(1, 1), (2, 2), (3, 9), (4, 3)] 5 == some [(1, 2), (2, 4), (3, 9), (4, 3)]
++#guard doubleUntilR [(1, 1), (2, 2)] 5 == some [(1, 2), (2, 4)]
++
++def bumpToFirstR (xs : List (Nat × Nat)) (target : Nat) :
++    Option (Option Nat × List (Nat × Nat)) :=
++  match bump_to_first (map xs) (u target) with
++  | ok (r, m) => some (r.map (·.val), entries m)
++  | _ => none
++
++#guard bumpToFirstR [(1, 5), (2, 7), (3, 7), (4, 0)] 7 ==
++  some (some 1, [(1, 6), (2, 8), (3, 7), (4, 0)])
++#guard bumpToFirstR [(1, 5), (2, 6)] 7 == some (none, [(1, 6), (2, 7)])
++
++def lastValueZeroR (xs : List (Nat × Nat)) : Option (List (Nat × Nat)) :=
++  match last_value_zero (map xs) with
++  | ok m => some (entries m)
++  | _ => none
++
++#guard lastValueZeroR [(1, 1), (2, 2), (3, 3)] == some [(1, 2), (2, 3), (3, 0)]
++#guard lastValueZeroR [] == some []
++
++def lastZeroR (xs : List Nat) : Option (List Nat) :=
++  match last_zero (vec (xs.map u)) with
++  | ok v => some (nats v)
++  | _ => none
++
++#guard lastZeroR [1, 2, 3] == some [2, 3, 0]
++
++def entryList : List Entry :=
++  [ { roots := map [(1, 10), (2, 11)], nodes := vec [u 10, u 12] },
++    { roots := map [], nodes := vec [] },
++    { roots := map [(5, 12)], nodes := vec [u 11] } ]
++
++def shape (es : alloc.vec.Vec Entry) : List (List (Nat × Nat) × List Nat) :=
++  es.val.map fun e => (entries e.roots, nats e.nodes)
++
++def remapEntriesR : Option (List (List (Nat × Nat) × List Nat)) :=
++  match remap_entries (vec entryList) (map [(10, 1), (11, 2), (12, 3)])
++      (map [(1, 100), (2, 200), (3, 300)]) with
++  | ok es => some (shape es)
++  | _ => none
++
++#guard remapEntriesR ==
++  some [([(1, 100), (2, 200)], [100, 300]), ([], []), ([(5, 300)], [200])]
++
++def remapEntriesIterMutR : Option (List (List (Nat × Nat) × List Nat)) :=
++  match remap_entries_iter_mut (vec entryList) (map [(10, 1), (11, 2), (12, 3)]) with
++  | ok es => some (shape es)
++  | _ => none
++
++#guard remapEntriesIterMutR == some [([(1, 1), (2, 2)], [1, 3]), ([], []), ([(5, 3)], [2])]
++
++end lending_iterator_loops.checks
+diff --git a/tests/lean/LendingIteratorLoops/LendingIteratorLoops.lean b/tests/lean/LendingIteratorLoops/LendingIteratorLoops.lean
+new file mode 100644
+index 0000000..4126a9b
+--- /dev/null
++++ b/tests/lean/LendingIteratorLoops/LendingIteratorLoops.lean
+@@ -0,0 +1,1385 @@
++-- THIS FILE WAS AUTOMATICALLY GENERATED BY AENEAS
++-- [lending_iterator_loops]
++import Aeneas
++open Aeneas Aeneas.Std Result ControlFlow Error
++set_option linter.dupNamespace false
++set_option linter.hashCommand false
++set_option linter.unusedVariables false
++
++/- You can set the `maxHeartbeats` value with the `-max-heartbeats` CLI option -/
++set_option maxHeartbeats 1000000
++
++namespace lending_iterator_loops
++
++/-- [lending_iterator_loops::bump_values]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 20:4-22:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_values_loop.body
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let vm := next_back iter1 none
++       back vm))
++  | some v =>
++    let v1 ← v + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun vm => let vm1 := next_back vm (some v1)
++                back vm1))
++
++/-- [lending_iterator_loops::bump_values]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 20:4-22:5
++    Visibility: public -/
++@[rust_loop]
++def bump_values_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, back1) => _root_.lending_iterator_loops.bump_values_loop.body
++       iter1 back1 : ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++    (iter, back)
++
++/-- [lending_iterator_loops::bump_values]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 19:0-23:1
++    Visibility: public -/
++def bump_values
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (iter, values_mut_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut m
++  _root_.lending_iterator_loops.bump_values_loop iter values_mut_back
++
++/-- [lending_iterator_loops::bump_vec]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 27:4-29:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_vec_loop.body
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (deref_mut_back, let im := next_back iter1 none
++                       back im))
++  | some x =>
++    let x1 ← x + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some x1)
++                back im1))
++
++/-- [lending_iterator_loops::bump_vec]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 27:4-29:5
++    Visibility: public -/
++@[rust_loop]
++def bump_vec_loop
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) => _root_.lending_iterator_loops.bump_vec_loop.body
++       deref_mut_back iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) ((_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [lending_iterator_loops::bump_vec]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 26:0-30:1
++    Visibility: public -/
++def bump_vec
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (s, deref_mut_back) ← lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut v)
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++  let (back, back1) ←
++    _root_.lending_iterator_loops.bump_vec_loop deref_mut_back iter
++      iter_mut_back
++  _root_.Aeneas.Std.Result.ok (back back1)
++
++/-- [lending_iterator_loops::bump_slice]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 34:4-36:5
++    Visibility: public -/
++@[rust_loop_body]
++def bump_slice_loop.body
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.Slice
++    _root_.Aeneas.Std.U32))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let im := next_back iter1 none
++       back im))
++  | some x =>
++    let x1 ← x + 2#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some x1)
++                back im1))
++
++/-- [lending_iterator_loops::bump_slice]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 34:4-36:5
++    Visibility: public -/
++@[rust_loop]
++def bump_slice_loop
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, back1) => _root_.lending_iterator_loops.bump_slice_loop.body
++       iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) (_root_.Aeneas.Std.Slice
++      _root_.Aeneas.Std.U32)))
++    (iter, back)
++
++/-- [lending_iterator_loops::bump_slice]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 33:0-37:1
++    Visibility: public -/
++def bump_slice
++  (s : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  := do
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++  _root_.lending_iterator_loops.bump_slice_loop iter iter_mut_back
++
++/-- [lending_iterator_loops::remap_values]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 42:4-45:5
++    Visibility: public -/
++@[rust_loop_body]
++def remap_values_loop.body
++  (table : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (count : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++    (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (count,
++      let vm := next_back iter1 none
++      back vm))
++  | some node =>
++    let node1 ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        table node
++    let count1 ← count + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun vm => let vm1 := next_back vm (some node1)
++                back vm1, count1))
++
++/-- [lending_iterator_loops::remap_values]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 42:4-45:5
++    Visibility: public -/
++@[rust_loop]
++def remap_values_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32)
++  (table : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (count : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, count1) =>
++       _root_.lending_iterator_loops.remap_values_loop.body table iter1 back1
++       count1 : ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      (_root_.Aeneas.Std.U32 ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))))
++    (iter, back, count)
++
++/-- [lending_iterator_loops::remap_values]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 41:0-46:1
++    Visibility: public -/
++def remap_values
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (table : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (count : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++  := do
++  let (iter, values_mut_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut m
++  let (count1, back) ←
++    _root_.lending_iterator_loops.remap_values_loop iter values_mut_back table
++      count
++  _root_.Aeneas.Std.Result.ok (back, count1)
++
++/-- [lending_iterator_loops::record]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 48:0-51:1 -/
++def record
++  (x : _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.U32 ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++  := do
++  let log1 ← _root_.Aeneas.Std.alloc.vec.Vec.push log x
++  let x1 ← x * 2#u32
++  _root_.Aeneas.Std.Result.ok (x1, log1)
++
++/-- [lending_iterator_loops::double_and_log]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 55:4-57:5
++    Visibility: public -/
++@[rust_loop_body]
++def double_and_log_loop.body
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (log,
++      deref_mut_back, let im := next_back iter1 none
++                      back im))
++  | some x =>
++    let (x1, log1) ← _root_.lending_iterator_loops.record x log
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some x1)
++                back im1, log1))
++
++/-- [lending_iterator_loops::double_and_log]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 55:4-57:5
++    Visibility: public -/
++@[rust_loop]
++def double_and_log_loop
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, log1) =>
++       _root_.lending_iterator_loops.double_and_log_loop.body deref_mut_back
++       iter1 back1 log1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))))
++    (iter, back, log)
++
++/-- [lending_iterator_loops::double_and_log]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 54:0-58:1
++    Visibility: public -/
++def double_and_log
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (log : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  let (s, deref_mut_back) ← lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut v)
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++  let (log1, back, back1) ←
++    _root_.lending_iterator_loops.double_and_log_loop deref_mut_back iter
++      iter_mut_back log
++  let v1 := back back1
++  _root_.Aeneas.Std.Result.ok (v1, log1)
++
++/-- [lending_iterator_loops::double_until]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 1:0-68:5
++    Visibility: public -/
++@[rust_loop_body]
++def double_until_loop.body
++  (limit : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let vm := next_back iter1 none
++       back vm))
++  | some v =>
++    if v > limit
++    then
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++        (let vm := next_back iter1 o
++         back vm))
++    else
++      let v1 ← v * 2#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        fun vm => let vm1 := next_back vm (some v1)
++                  back vm1))
++
++/-- [lending_iterator_loops::double_until]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 1:0-68:5
++    Visibility: public -/
++@[rust_loop]
++def double_until_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  loop
++    (fun (iter1, back1) => _root_.lending_iterator_loops.double_until_loop.body
++       limit iter1 back1 :
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++    (iter, back)
++
++/-- [lending_iterator_loops::double_until]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 62:0-69:1
++    Visibility: public -/
++def double_until
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (limit : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (iter, values_mut_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut m
++  _root_.lending_iterator_loops.double_until_loop iter values_mut_back limit
++
++/-- [lending_iterator_loops::bump_to_first]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 75:4-84:1
++    Visibility: public -/
++@[rust_loop_body]
++def bump_to_first_loop.body
++  (target : _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (index : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++    ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    let vm := next_back iter1 none
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (none, back
++      vm))
++  | some v =>
++    let v1 ← v + 1#u32
++    if v = target
++    then
++      let vm := next_back iter1 (some v1)
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (some
++        index, back vm))
++    else
++      let index1 ← index + 1#u32
++      _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++        fun vm => let vm1 := next_back vm (some v1)
++                  back vm1, index1))
++
++/-- [lending_iterator_loops::bump_to_first]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 75:4-84:1
++    Visibility: public -/
++@[rust_loop]
++def bump_to_first_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (target : _root_.Aeneas.Std.U32)
++  (index : _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, index1) =>
++       _root_.lending_iterator_loops.bump_to_first_loop.body target iter1 back1
++       index1 : ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × _root_.Aeneas.Std.U32)
++      ((_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))))
++    (iter, back, index)
++
++/-- [lending_iterator_loops::bump_to_first]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 73:0-84:1
++    Visibility: public -/
++def bump_to_first
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) (target : _root_.Aeneas.Std.U32)
++  :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  let (iter, values_mut_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut m
++  _root_.lending_iterator_loops.bump_to_first_loop iter values_mut_back target
++    0#u32
++
++/-- [lending_iterator_loops::last_value_zero]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 90:4-93:5
++    Visibility: public -/
++@[rust_loop_body]
++def last_value_zero_loop.body
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (last : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)) ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (last,
++      iter1, fun o1 vm => let vm1 := next_back vm none
++                          back o1 vm1))
++  | some v =>
++    let v1 ← v + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun o1 vm =>
++        let i := match o1 with
++                 | some i1 => i1
++                 | _ => v1
++        let vm1 := next_back vm (some i)
++        back last vm1, some v1))
++
++/-- [lending_iterator_loops::last_value_zero]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 90:4-93:5
++    Visibility: public -/
++@[rust_loop]
++def last_value_zero_loop
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) (last : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, last1) =>
++       _root_.lending_iterator_loops.last_value_zero_loop.body iter1 back1
++       last1 : ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32)) ((_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))))
++    (iter, back, last)
++
++/-- [lending_iterator_loops::last_value_zero]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 88:0-97:1
++    Visibility: public -/
++def last_value_zero
++  (m : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    (_root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  := do
++  let (iter, values_mut_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut m
++  let (last, vm, back) ←
++    _root_.lending_iterator_loops.last_value_zero_loop iter
++      (fun o vm1 => values_mut_back vm1) none
++  match last with
++  | none => _root_.Aeneas.Std.Result.ok (back none vm)
++  | some _ => _root_.Aeneas.Std.Result.ok (back (some 0#u32) vm)
++
++/-- [lending_iterator_loops::last_zero]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 102:4-105:5
++    Visibility: public -/
++@[rust_loop_body]
++def last_zero_loop.body
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (last : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Option _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32)) ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (last,
++      iter1, deref_mut_back,
++      fun o1 im => let im1 := next_back im none
++                   back o1 im1))
++  | some x =>
++    let x1 ← x + 1#u32
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun o1 im =>
++        let i := match o1 with
++                 | some i1 => i1
++                 | _ => x1
++        let im1 := next_back im (some i)
++        back last im1, some x1))
++
++/-- [lending_iterator_loops::last_zero]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 102:4-105:5
++    Visibility: public -/
++@[rust_loop]
++def last_zero_loop
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Option _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (last : _root_.Option _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Option _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (_root_.Option
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1, last1) =>
++       _root_.lending_iterator_loops.last_zero_loop.body deref_mut_back iter1
++       back1 last1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.Option _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Option _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32)) ((_root_.Option _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) × (_root_.Option
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))))
++    (iter, back, last)
++
++/-- [lending_iterator_loops::last_zero]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 100:0-109:1
++    Visibility: public -/
++def last_zero
++  (v : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32)
++  := do
++  let (s, deref_mut_back) ← lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut v)
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++  let (last, im, back, back1) ←
++    _root_.lending_iterator_loops.last_zero_loop deref_mut_back iter
++      (fun o im1 => iter_mut_back im1) none
++  match last with
++  | none => let s1 := back1 none im
++            _root_.Aeneas.Std.Result.ok (back s1)
++  | some _ =>
++    let s1 := back1 (some 0#u32) im
++    _root_.Aeneas.Std.Result.ok (back s1)
++
++/-- [lending_iterator_loops::Entry]
++    Source: 'tests/src/lending-iterator-loops.rs', lines 112:0-115:1
++    Visibility: public -/
++structure Entry where
++  roots : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32
++  nodes : _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32
++
++/-- [lending_iterator_loops::remap_entries]: loop body 1:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 121:8-123:9
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_loop0_loop0.body
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (iter1,
++      fun im => let im1 := next_back im none
++                back im1))
++  | some node =>
++    let i ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        remap node
++    let node1 ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        linear i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some node1)
++                back im1))
++
++/-- [lending_iterator_loops::remap_entries]: loop 1:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 121:8-123:9
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_loop0_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_loop0_loop0.body remap
++       linear iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.Aeneas.Std.U32 → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries]: loop body 2:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 124:8-126:9
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_loop0_loop1.body
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (iter1,
++      fun vm => let vm1 := next_back vm none
++                back vm1))
++  | some node =>
++    let i ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        remap node
++    let node1 ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        linear i
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun vm => let vm1 := next_back vm (some node1)
++                back vm1))
++
++/-- [lending_iterator_loops::remap_entries]: loop 2:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 124:8-126:9
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_loop0_loop1
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_loop0_loop1.body remap
++       linear iter1 back1 :
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 120:4-127:5
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_loop0.body
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.lending_iterator_loops.Entry) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.lending_iterator_loops.Entry) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++    _root_.lending_iterator_loops.Entry)) (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.lending_iterator_loops.Entry))
++  := do
++  let (o, im, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let im1 := next_back im none
++       back im1))
++  | some entry =>
++    let (iter1, into_iter_back) ←
++      _root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter entry.nodes
++    let (im1, back1) ←
++      _root_.lending_iterator_loops.remap_entries_loop0_loop0 iter1
++        into_iter_back remap linear
++    let back2 :=
++      (fun e im2 => let im3 := next_back im2 (some e)
++                    back im3 : _root_.lending_iterator_loops.Entry →
++        _root_.Aeneas.Std.core.slice.iter.IterMut
++        _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++        _root_.lending_iterator_loops.Entry)
++    let (iter2, values_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut
++        entry.roots
++    let v := back1 im1
++    let (vm, back3) ←
++      _root_.lending_iterator_loops.remap_entries_loop0_loop1 iter2
++        values_mut_back remap linear
++    let bm := back3 vm
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (im,
++      fun im2 => back2 { roots := bm, nodes := v } im2))
++
++/-- [lending_iterator_loops::remap_entries]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 120:4-127:5
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.lending_iterator_loops.Entry)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.lending_iterator_loops.Entry)
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_loop0.body remap linear
++       iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.lending_iterator_loops.Entry)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.alloc.vec.Vec
++      _root_.lending_iterator_loops.Entry)) (_root_.Aeneas.Std.alloc.vec.Vec
++      _root_.lending_iterator_loops.Entry)))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 119:0-128:1
++    Visibility: public -/
++def remap_entries
++  (entries : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.lending_iterator_loops.Entry)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (linear : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.lending_iterator_loops.Entry)
++  := do
++  let (iter, into_iter_back) ←
++    _root_.Aeneas.Std.alloc.vec.IntoIteratorMutVec.into_iter entries
++  _root_.lending_iterator_loops.remap_entries_loop0 iter into_iter_back remap
++    linear
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop body 1:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 133:8-135:9
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_iter_mut_loop0_loop0.body
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (iter1,
++      deref_mut_back, fun im => let im1 := next_back im none
++                                back im1))
++  | some node =>
++    let node1 ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        remap node
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun im => let im1 := next_back im (some node1)
++                back im1))
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop 1:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 133:8-135:9
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_iter_mut_loop0_loop0
++  (deref_mut_back : _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.Aeneas.Std.U32) × (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_iter_mut_loop0_loop0.body
++       deref_mut_back remap iter1 back1 :
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32)) →
++      _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.vec.Vec _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.Slice _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop body 2:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 136:8-138:9
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_iter_mut_loop0_loop1.body
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)))
++  := do
++  let (o, iter1, next_back) ←
++    _root_.Aeneas.Std.alloc.collections.btree.map.IteratorValuesMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done (iter1,
++      fun vm => let vm1 := next_back vm none
++                back vm1))
++  | some node =>
++    let node1 ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.IndexBTreeMap.index
++        (_root_.Aeneas.Std.core.borrow.BorrowSelf _root_.Aeneas.Std.U32)
++        _root_.Aeneas.Std.core.cmp.OrdU32 _root_.Aeneas.Std.core.cmp.OrdU32
++        remap node
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (iter1,
++      fun vm => let vm1 := next_back vm (some node1)
++                back vm1))
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop 2:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 136:8-138:9
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_iter_mut_loop0_loop1
++  (iter : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (back : _root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++  _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap _root_.Aeneas.Std.U32
++  _root_.Aeneas.Std.U32)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result
++    ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++    (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++    _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++    _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_iter_mut_loop0_loop1.body
++       remap iter1 back1 :
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))
++      ((_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) ×
++      (_root_.Aeneas.Std.alloc.collections.btree.map.ValuesMut
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32 →
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++      _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32))))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop body 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 132:4-139:5
++    Visibility: public -/
++@[rust_loop_body]
++def remap_entries_iter_mut_loop0.body
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32)
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++  _root_.lending_iterator_loops.Entry) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.ControlFlow
++    ((_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.lending_iterator_loops.Entry) ×
++    (_root_.Aeneas.Std.core.slice.iter.IterMut
++    _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++    _root_.lending_iterator_loops.Entry)) (_root_.Aeneas.Std.Slice
++    _root_.lending_iterator_loops.Entry))
++  := do
++  let (o, im, next_back) ←
++    _root_.Aeneas.Std.core.slice.iter.IteratorIterMut.next iter
++  match o with
++  | none =>
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.done
++      (let im1 := next_back im none
++       back im1))
++  | some entry =>
++    let (s, deref_mut_back) ←
++      lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut entry.nodes)
++    let (iter1, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++    let (im1, back1, back2) ←
++      _root_.lending_iterator_loops.remap_entries_iter_mut_loop0_loop0
++        deref_mut_back iter1 iter_mut_back remap
++    let back3 :=
++      (fun e im2 => let im3 := next_back im2 (some e)
++                    back im3 : _root_.lending_iterator_loops.Entry →
++        _root_.Aeneas.Std.core.slice.iter.IterMut
++        _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++        _root_.lending_iterator_loops.Entry)
++    let (iter2, values_mut_back) ←
++      _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap.values_mut
++        entry.roots
++    let s1 := back2 im1
++    let v := back1 s1
++    let (vm, back4) ←
++      _root_.lending_iterator_loops.remap_entries_iter_mut_loop0_loop1 iter2
++        values_mut_back remap
++    let bm := back4 vm
++    _root_.Aeneas.Std.Result.ok (_root_.Aeneas.Std.ControlFlow.cont (im,
++      fun im2 => back3 { roots := bm, nodes := v } im2))
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]: loop 0:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 132:4-139:5
++    Visibility: public -/
++@[rust_loop]
++def remap_entries_iter_mut_loop0
++  (iter : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry)
++  (back : _root_.Aeneas.Std.core.slice.iter.IterMut
++  _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++  _root_.lending_iterator_loops.Entry)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.Slice
++    _root_.lending_iterator_loops.Entry)
++  := do
++  loop
++    (fun (iter1, back1) =>
++       _root_.lending_iterator_loops.remap_entries_iter_mut_loop0.body remap
++       iter1 back1 : ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++      _root_.lending_iterator_loops.Entry)) → _root_.Aeneas.Std.Result
++      (_root_.Aeneas.Std.ControlFlow
++      ((_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry) ×
++      (_root_.Aeneas.Std.core.slice.iter.IterMut
++      _root_.lending_iterator_loops.Entry → _root_.Aeneas.Std.Slice
++      _root_.lending_iterator_loops.Entry)) (_root_.Aeneas.Std.Slice
++      _root_.lending_iterator_loops.Entry)))
++    (iter, back)
++
++/-- [lending_iterator_loops::remap_entries_iter_mut]:
++    Source: 'tests/src/lending-iterator-loops.rs', lines 131:0-140:1
++    Visibility: public -/
++def remap_entries_iter_mut
++  (entries : _root_.Aeneas.Std.alloc.vec.Vec
++  _root_.lending_iterator_loops.Entry)
++  (remap : _root_.Aeneas.Std.alloc.collections.btree.map.BTreeMap
++  _root_.Aeneas.Std.U32 _root_.Aeneas.Std.U32) :
++  _root_.Aeneas.Std.Result (_root_.Aeneas.Std.alloc.vec.Vec
++    _root_.lending_iterator_loops.Entry)
++  := do
++  let (s, deref_mut_back) ←
++    lift (_root_.Aeneas.Std.alloc.vec.Vec.deref_mut entries)
++  let (iter, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut s
++  let back ←
++    _root_.lending_iterator_loops.remap_entries_iter_mut_loop0 iter
++      iter_mut_back remap
++  _root_.Aeneas.Std.Result.ok (deref_mut_back back)
++
++end lending_iterator_loops
+diff --git a/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean b/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
+index b93cdde..9e0da30 100644
+--- a/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
++++ b/tests/lean/SpecializedTraitMethodAbi/SpecializedTraitMethodAbi.lean
+@@ -192,28 +192,6 @@ def
+     cloneCloneInst traitsiteratorIteratorSkipIterMutSharedPInst
+ }
+ 
+-/-- [core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<Clause0_Item, I> for I}::into_iter::<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<0, T0>>, &0 mut (T1)>]:
+-    Source: '/rustc/library/core/src/iter/traits/collect.rs', lines 322:4-322:27
+-    Name pattern: [core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<@I, @Clause0_Item, @I>}::into_iter<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>]
+-    Visibility: public -/
+-@[rust_fun
+-  "core::iter::traits::collect::{core::iter::traits::collect::IntoIterator<@I, @Clause0_Item, @I>}::into_iter<core::iter::adapters::skip::Skip<core::slice::iter::IterMut<'0, @T0>>, &'0 mut @T1>"]
+-axiom
+-  core.iter.traits.collect.IntoIteratorSkipIterMutMut0T1SkipIterMut_specialized_6517455b6159b1c53496207026ed4418.Blanket_specialized_8499f4591150105252e3ffc6f631a9e4.into_iter_specialized_3198e5e1a75c6eb7f548e3bed12fc576
+-  {T0 : Type} {T1 : Type}
+-  (iteratorIteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320Inst
+-  :
+-  _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320
+-  T0 T1) :
+-  _root_.Aeneas.Std.core.iter.adapters.skip.Skip
+-    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) → _root_.Aeneas.Std.Result
+-    ((_root_.Aeneas.Std.core.iter.adapters.skip.Skip
+-    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)) ×
+-    (_root_.Aeneas.Std.core.iter.adapters.skip.Skip
+-    (_root_.Aeneas.Std.core.slice.iter.IterMut T0) →
+-    _root_.Aeneas.Std.core.iter.adapters.skip.Skip
+-    (_root_.Aeneas.Std.core.slice.iter.IterMut T0)))
+-
+ /-- [core::iter::traits::iterator::Iterator::skip::<core::slice::iter::IterMut<0, T0>, &0 mut (T1)>]:
+     Source: '/rustc/library/core/src/iter/traits/iterator.rs', lines 1341:4-1343:20
+     Name pattern: [core::iter::traits::iterator::Iterator::skip<core::slice::iter::IterMut<'0, @T0>, &'0 mut @T1>]
+@@ -438,19 +416,12 @@ def bump_after
+     _root_.Aeneas.Std.U32))
+   := do
+   let (im, iter_mut_back) ← _root_.Aeneas.Std.core.slice.Slice.iter_mut v
+-  let (s, skip_back) ←
++  let (iter, skip_back) ←
+     _root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket.skip
+       im k
+-  let (iter, into_iter_back) ←
+-    _root_.specialized_trait_method_abi.core.iter.traits.collect.IntoIteratorSkipIterMutMut0T1SkipIterMut_specialized_6517455b6159b1c53496207026ed4418.Blanket_specialized_8499f4591150105252e3ffc6f631a9e4.into_iter_specialized_3198e5e1a75c6eb7f548e3bed12fc576
+-      (_root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorSkipIterMutMut0T1_specialized_be54c82330b5fe71ea8f55b9ab878320.Blanket_specialized_09a974e0e41f33bf48e8d3dafb25a0f5
+-      (_root_.specialized_trait_method_abi.core.iter.traits.iterator.IteratorIterMutMutAT_specialized_8b61929fcccff91989959e41ff32d745.Blanket
+-      _root_.Aeneas.Std.U32)) s
+   _root_.specialized_trait_method_abi.bump_after_loop iter
+-    (fun s1 =>
+-      let s2 := into_iter_back s1
+-      let im1 := skip_back s2
+-      iter_mut_back im1) d 0#u32
++    (fun s => let im1 := skip_back s
++              iter_mut_back im1) d 0#u32
+ 
+ /-- [specialized_trait_method_abi::sum_cloned]: loop body 0:
+     Source: 'tests/src/specialized-trait-method-abi.rs', lines 41:4-43:5
+diff --git a/tests/lean/lakefile.lean b/tests/lean/lakefile.lean
+index fe6278b..79d79c5 100644
+--- a/tests/lean/lakefile.lean
++++ b/tests/lean/lakefile.lean
+@@ -230,3 +230,4 @@ package «tests» {}
+ @[default_target] lean_lib PhantomFnTypes
+ @[default_target] lean_lib SerdeVisitors
+ @[default_target] lean_lib SerdeCollections
++@[default_target] lean_lib LendingIteratorLoops
+diff --git a/tests/src/lending-iterator-loops.rs b/tests/src/lending-iterator-loops.rs
+new file mode 100644
+index 0000000..5194336
+--- /dev/null
++++ b/tests/src/lending-iterator-loops.rs
+@@ -0,0 +1,263 @@
++//@ [!lean] skip
++//@ [lean] subdir=LendingIteratorLoops
++//@ charon-args=--mir=promoted --monomorphize-mut=except-types --remove-adt-clauses --lift-associated-types=* --error-on-warnings
++//@ [lean] aeneas-args=-strict-joins -warnings-as-errors
++//! `for` loops over lending iterators: `BTreeMap::values_mut` and the slice
++//! `iter_mut`. Charon's `--monomorphize-mut` specializes the blanket
++//! `IntoIterator::into_iter` of the loop at the iterator (`into_iter::<IterMut<'0,
++//! T>, &'0 mut T>`), whose body is `self`: the call is an assignment. Each
++//! iteration lends one element; the model's lens gives it back to the collection
++//! after the loop. The shapes are those of `chelis_ir::lower`
++//! (`lower_program_to_library_inner`, `lower_program_with_context_inner`: remap
++//! the nodes and the root nodes of every evaluation entry).
++//! `LendingIteratorLoops/Checks.lean` evaluates the models on the inputs of the
++//! `native` test module below and compares with the native results, including
++//! the collections after the loops.
++use std::collections::BTreeMap;
++
++/// Increments every value of the map.
++pub fn bump_values(m: &mut BTreeMap<u32, u32>) {
++    for v in m.values_mut() {
++        *v += 1;
++    }
++}
++
++/// Increments every element through `Vec::iter_mut` (the slice iterator).
++pub fn bump_vec(v: &mut Vec<u32>) {
++    for x in v.iter_mut() {
++        *x += 1;
++    }
++}
++
++/// Adds 2 to every element of a slice.
++pub fn bump_slice(s: &mut [u32]) {
++    for x in s.iter_mut() {
++        *x += 2;
++    }
++}
++
++/// Replaces every value by its image in `table` (panics on a missing key) and
++/// counts the values, in a captured counter.
++pub fn remap_values(m: &mut BTreeMap<u32, u32>, table: &BTreeMap<u32, u32>, count: &mut u32) {
++    for node in m.values_mut() {
++        *node = table[node];
++        *count += 1;
++    }
++}
++
++fn record(x: &mut u32, log: &mut Vec<u32>) {
++    log.push(*x);
++    *x *= 2;
++}
++
++/// Calls a function on every element with other mutable state.
++pub fn double_and_log(v: &mut Vec<u32>, log: &mut Vec<u32>) {
++    for x in v.iter_mut() {
++        record(x, log);
++    }
++}
++
++/// Doubles the values up to the first one above `limit`: the element lent at
++/// the `break` is given back unchanged, and the elements after it are untouched.
++pub fn double_until(m: &mut BTreeMap<u32, u32>, limit: u32) {
++    for v in m.values_mut() {
++        if *v > limit {
++            break;
++        }
++        *v *= 2;
++    }
++}
++
++/// Returns the key-order position of the first value equal to `target` after
++/// incrementing the values before it (and that one).
++pub fn bump_to_first(m: &mut BTreeMap<u32, u32>, target: u32) -> Option<u32> {
++    let mut index = 0;
++    for v in m.values_mut() {
++        let hit = *v == target;
++        *v += 1;
++        if hit {
++            return Some(index);
++        }
++        index += 1;
++    }
++    None
++}
++
++/// The element lent by the last iteration escapes the loop and is written
++/// after it; the elements lent before are given back when `last` drops them.
++pub fn last_value_zero(m: &mut BTreeMap<u32, u32>) {
++    let mut last = None;
++    for v in m.values_mut() {
++        *v += 1;
++        last = Some(v);
++    }
++    if let Some(v) = last {
++        *v = 0;
++    }
++}
++
++/// The same through the slice iterator of a `Vec`.
++pub fn last_zero(v: &mut Vec<u32>) {
++    let mut last = None;
++    for x in v.iter_mut() {
++        *x += 1;
++        last = Some(x);
++    }
++    if let Some(x) = last {
++        *x = 0;
++    }
++}
++
++/// An evaluation entry: root nodes by name and the nodes.
++pub struct Entry {
++    pub roots: BTreeMap<u32, u32>,
++    pub nodes: Vec<u32>,
++}
++
++/// Remaps the nodes and the root nodes of every entry through two tables (the
++/// shape of `lower_program_to_library_inner`: `*node = linear_remap[&remap[node]]`).
++pub fn remap_entries(entries: &mut Vec<Entry>, remap: &BTreeMap<u32, u32>, linear: &BTreeMap<u32, u32>) {
++    for entry in &mut *entries {
++        for node in &mut entry.nodes {
++            *node = linear[&remap[node]];
++        }
++        for node in entry.roots.values_mut() {
++            *node = linear[&remap[node]];
++        }
++    }
++}
++
++/// The same through `iter_mut` for the entries and one table.
++pub fn remap_entries_iter_mut(entries: &mut Vec<Entry>, remap: &BTreeMap<u32, u32>) {
++    for entry in entries.iter_mut() {
++        for node in entry.nodes.iter_mut() {
++            *node = remap[node];
++        }
++        for node in entry.roots.values_mut() {
++            *node = remap[node];
++        }
++    }
++}
++
++#[cfg(test)]
++mod native {
++    use super::*;
++
++    #[test]
++    fn bump_values_increments_every_value() {
++        let mut m = BTreeMap::from([(3, 10), (1, 20), (2, 0)]);
++        bump_values(&mut m);
++        assert_eq!(m, BTreeMap::from([(1, 21), (2, 1), (3, 11)]));
++        let mut e = BTreeMap::new();
++        bump_values(&mut e);
++        assert!(e.is_empty());
++    }
++
++    #[test]
++    fn bump_vec_and_slice() {
++        let mut v = vec![1, 2, 3];
++        bump_vec(&mut v);
++        assert_eq!(v, vec![2, 3, 4]);
++        let mut s = [5, 0];
++        bump_slice(&mut s);
++        assert_eq!(s, [7, 2]);
++    }
++
++    #[test]
++    fn remap_values_and_count() {
++        let mut m = BTreeMap::from([(1, 7), (2, 8), (3, 7)]);
++        let table = BTreeMap::from([(7, 70), (8, 80)]);
++        let mut count = 5;
++        remap_values(&mut m, &table, &mut count);
++        assert_eq!(m, BTreeMap::from([(1, 70), (2, 80), (3, 70)]));
++        assert_eq!(count, 8);
++    }
++
++    #[test]
++    #[should_panic]
++    fn remap_values_missing_key_panics() {
++        let mut m = BTreeMap::from([(1, 7), (2, 9)]);
++        let table = BTreeMap::from([(7, 70)]);
++        let mut count = 0;
++        remap_values(&mut m, &table, &mut count);
++    }
++
++    #[test]
++    fn double_and_log_records_in_order() {
++        let mut v = vec![3, 1, 4];
++        let mut log = vec![9];
++        double_and_log(&mut v, &mut log);
++        assert_eq!(v, vec![6, 2, 8]);
++        assert_eq!(log, vec![9, 3, 1, 4]);
++    }
++
++    #[test]
++    fn double_until_stops_at_the_limit() {
++        let mut m = BTreeMap::from([(1, 1), (2, 2), (3, 9), (4, 3)]);
++        double_until(&mut m, 5);
++        assert_eq!(m, BTreeMap::from([(1, 2), (2, 4), (3, 9), (4, 3)]));
++        let mut m = BTreeMap::from([(1, 1), (2, 2)]);
++        double_until(&mut m, 5);
++        assert_eq!(m, BTreeMap::from([(1, 2), (2, 4)]));
++    }
++
++    #[test]
++    fn bump_to_first_returns_early() {
++        let mut m = BTreeMap::from([(1, 5), (2, 7), (3, 7), (4, 0)]);
++        assert_eq!(bump_to_first(&mut m, 7), Some(1));
++        assert_eq!(m, BTreeMap::from([(1, 6), (2, 8), (3, 7), (4, 0)]));
++        let mut m = BTreeMap::from([(1, 5), (2, 6)]);
++        assert_eq!(bump_to_first(&mut m, 7), None);
++        assert_eq!(m, BTreeMap::from([(1, 6), (2, 7)]));
++    }
++
++    #[test]
++    fn last_element_escapes_the_loop() {
++        let mut m = BTreeMap::from([(1, 1), (2, 2), (3, 3)]);
++        last_value_zero(&mut m);
++        assert_eq!(m, BTreeMap::from([(1, 2), (2, 3), (3, 0)]));
++        let mut e = BTreeMap::new();
++        last_value_zero(&mut e);
++        assert!(e.is_empty());
++        let mut v = vec![1, 2, 3];
++        last_zero(&mut v);
++        assert_eq!(v, vec![2, 3, 0]);
++    }
++
++    fn entries() -> Vec<Entry> {
++        vec![
++            Entry { roots: BTreeMap::from([(1, 10), (2, 11)]), nodes: vec![10, 12] },
++            Entry { roots: BTreeMap::new(), nodes: vec![] },
++            Entry { roots: BTreeMap::from([(5, 12)]), nodes: vec![11] },
++        ]
++    }
++
++    fn shape(entries: &[Entry]) -> Vec<(Vec<(u32, u32)>, Vec<u32>)> {
++        entries
++            .iter()
++            .map(|e| (e.roots.iter().map(|(k, v)| (*k, *v)).collect(), e.nodes.clone()))
++            .collect()
++    }
++
++    #[test]
++    fn remap_entries_remaps_nodes_and_roots() {
++        let remap = BTreeMap::from([(10, 1), (11, 2), (12, 3)]);
++        let linear = BTreeMap::from([(1, 100), (2, 200), (3, 300)]);
++        let mut e = entries();
++        remap_entries(&mut e, &remap, &linear);
++        assert_eq!(
++            shape(&e),
++            vec![
++                (vec![(1, 100), (2, 200)], vec![100, 300]),
++                (vec![], vec![]),
++                (vec![(5, 300)], vec![200]),
++            ]
++        );
++        let mut e = entries();
++        remap_entries_iter_mut(&mut e, &remap);
++        assert_eq!(
++            shape(&e),
++            vec![(vec![(1, 1), (2, 2)], vec![1, 3]), (vec![], vec![]), (vec![(5, 3)], vec![2])]
++        );
++    }
++}
+diff --git a/tests/src/model-constructor-opaque-adapter.lean.out b/tests/src/model-constructor-opaque-adapter.lean.out
+index ce32e87..8145ca2 100644
+--- a/tests/src/model-constructor-opaque-adapter.lean.out
++++ b/tests/src/model-constructor-opaque-adapter.lean.out
+@@ -1,5 +1,5 @@
+ [[92mInfo[39m ] Imported: tests/llbc/model_constructor_opaque_adapter.llbc
+ [[91mError[39m] Model constructor recovery requires one structurally identified source input: the input of type model_constructor_opaque_adapter::prefix_sums::closure<'5> is found at 0 positions of the output of type core::iter::adapters::map::Map<core::slice::iter::Iter<'4, u32>, model_constructor_opaque_adapter::prefix_sums::closure<'5>> (the fields of the opaque types core::iter::adapters::map::Map are unknown: extract their declarations with Charon's --include)
+ Source: 'tests/src/model-constructor-opaque-adapter.rs', lines 21:0-23:1
+-Compiler source: symbolic/ModelStateABI.ml, line 1087
++Compiler source: symbolic/ModelStateABI.ml, line 1088
+ 

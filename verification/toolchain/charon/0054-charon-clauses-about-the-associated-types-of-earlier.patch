@@ -1,0 +1,422 @@
+# charon integration step 54 after 546078ea5d: commit 5a716176a006c2234cde9fe2b45ef55e5b39f3f6
+# first parent d5ba232f0bba63ad7e6a898976399cf8dadf81a6
+# series charon: patch -p1 in charon/ of the upstream source
+#
+# charon: clauses about the associated types of earlier clauses keep their lifetimes in signatures
+#
+# e0a15d7 fills the erased lifetimes of the trait references of an item reference from the clauses
+# they prove, instantiated with the arguments of the reference, and matches the header of the impl a
+# reference names against that instantiated clause. A clause about an associated type of an earlier
+# clause never matched: `Flatten<I>` requires `I: Iterator` and `<I as Iterator>::Item: IntoIterator`,
+# and for the return type `Map<Flatten<option::IntoIter<&'a Vec<B>>>, F>` of
+# `chelis_types::env::Env::lookup_constructors` (env.rs:324) the second clause instantiates to
+# `IntoIterator<<{impl Iterator for option::IntoIter<A>}<&'a Vec<B>> as Iterator>::Item>`, which does
+# not match the header `IntoIterator for &'a Vec<T, A>`. The reference
+# `{impl IntoIterator for &'a Vec<T, A>}<'_, B, Global>` kept its erased lifetime, and so did the
+# lifted associated types computed from it: `Flatten<.., &'a Vec<B>, &'_ B, Iter<'_, B>>`, which Aeneas
+# rejects ("Expected a runtime region type").
+#
+# PristineClauses now also snapshots the associated types of the impls (those without parameters of
+# their own), and normalizes the instantiated clauses before matching: an associated type of an impl
+# reference (`TraitType` on a `TraitImpl`) becomes the value the impl gives it, instantiated with the
+# impl arguments (post-order, at most 32 nested replacements). This applies to the clauses of the item
+# reference and, recursively, to those of the impls it names (`Seq for Flatten<I>` behind
+# `Peek<Flatten<..>>` in the test).
+#
+# Test: ui/lift-assoc-types-projection-clause-regions (new; `&'_ u32` and `Iter<'_, u32>` before,
+# `'a` now).
+
+diff --git a/src/transform/normalize/expand_associated_types.rs b/src/transform/normalize/expand_associated_types.rs
+index 45de0fb..7f587af 100644
+--- a/src/transform/normalize/expand_associated_types.rs
++++ b/src/transform/normalize/expand_associated_types.rs
+@@ -913,12 +913,22 @@ impl<'a> ComputeItemModifications<'a> {
+ /// and a closure type `closure<'a, T>[@TraitClause0]` in a signature proves its clause
+ /// `T: FnMut(&'a X)` with the predicate `T: FnMut(&'_ X)`. `refine_args` recovers these
+ /// lifetimes from the clauses of the item, instantiated with its arguments.
++///
++/// A clause may mention the associated types of the earlier ones: `Flatten<I>` requires
++/// `I: Iterator` and `<I as Iterator>::Item: IntoIterator`. Once instantiated, the second clause
++/// is about `<{impl Iterator for option::IntoIter<A>}<&'a Vec<X>> as Iterator>::Item`, which only
++/// matches the header of `{impl IntoIterator for &'a Vec<T>}` after we replace it by the value
++/// the impl gives it (`A`, so `&'a Vec<X>`); `normalize` does that with the associated types of
++/// the impls.
+ #[derive(Default)]
+ struct PristineClauses {
+     /// The trait clauses of each item which has some.
+     clauses: HashMap<ItemId, IndexVec<TraitClauseId, PolyTraitDeclRef>>,
+     /// The implemented trait of each impl, in terms of the impl parameters.
+     impl_headers: HashMap<TraitImplId, TraitDeclRef>,
++    /// The associated types of each impl (those without parameters of their own), in terms of
++    /// the impl parameters.
++    impl_types: HashMap<(TraitImplId, TraitItemName), Ty>,
+ }
+ 
+ impl PristineClauses {
+@@ -936,6 +946,12 @@ impl PristineClauses {
+             if let ItemRef::TraitImpl(timpl) = item {
+                 this.impl_headers
+                     .insert(timpl.def_id, timpl.impl_trait.clone());
++                for (name, assoc_ty) in &timpl.types {
++                    if let Some(assoc_ty) = assoc_ty.get_if_binds_nothing() {
++                        this.impl_types
++                            .insert((timpl.def_id, *name), assoc_ty.value);
++                    }
++                }
+             }
+         }
+         this
+@@ -958,9 +974,10 @@ impl PristineClauses {
+             if !has_erased_regions(tref) {
+                 continue;
+             }
+-            let Ok(expected) = clause.clone().try_substitute(args) else {
++            let Ok(mut expected) = clause.clone().try_substitute(args) else {
+                 continue;
+             };
++            self.normalize(&mut expected, Self::MAX_DEPTH);
+             if let Some(tref) = self.refine_trait_ref(tref, &expected, Self::MAX_DEPTH) {
+                 args.trait_refs[clause_id] = tref;
+             }
+@@ -1040,9 +1057,10 @@ impl PristineClauses {
+                 if !has_erased_regions(nested) {
+                     continue;
+                 }
+-                let Ok(expected) = clause.clone().try_substitute(&generics) else {
++                let Ok(mut expected) = clause.clone().try_substitute(&generics) else {
+                     continue;
+                 };
++                self.normalize(&mut expected, Self::MAX_DEPTH);
+                 if let Some(nested) = self.refine_trait_ref(nested, &expected, depth - 1) {
+                     generics.trait_refs[clause_id] = nested;
+                 }
+@@ -1053,6 +1071,43 @@ impl PristineClauses {
+             generics: Box::new(generics),
+         })
+     }
++
++    /// Replace in `x` the associated types of impls (`<{impl Trait for T}<args> as Trait>::Name`)
++    /// by the values the impls give them, instantiated with the impl arguments; at most `depth`
++    /// nested replacements. Other associated types are kept.
++    fn normalize<T: AstVisitable>(&self, x: &mut T, depth: usize) {
++        if depth == 0 {
++            return;
++        }
++        let _ = NormalizeImplTypes {
++            pristine: self,
++            depth,
++        }
++        .visit(x);
++    }
++}
++
++/// See `PristineClauses::normalize`.
++#[derive(Visitor)]
++struct NormalizeImplTypes<'a> {
++    pristine: &'a PristineClauses,
++    depth: usize,
++}
++
++impl VisitAstMut for NormalizeImplTypes<'_> {
++    // On exit, so that the arguments of the impl are already normalized.
++    fn exit_ty(&mut self, ty: &mut Ty) {
++        if let TyKind::TraitType(tref, name) = ty.kind()
++            && let TraitRefKind::TraitImpl(impl_ref) = &tref.kind
++            && let Some(value) = self.pristine.impl_types.get(&(impl_ref.id, *name))
++            && let Ok(mut value) = value
++                .clone()
++                .try_substitute_with_self(&impl_ref.generics, &tref.kind)
++        {
++            self.pristine.normalize(&mut value, self.depth - 1);
++            *ty = value;
++        }
++    }
+ }
+ 
+ fn has_erased_regions(x: &impl AstVisitable) -> bool {
+diff --git a/tests/ui/lift-assoc-types-projection-clause-regions.out b/tests/ui/lift-assoc-types-projection-clause-regions.out
+new file mode 100644
+index 0000000..42ad974
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-projection-clause-regions.out
+@@ -0,0 +1,210 @@
++# Final LLBC before serialization:
++
++// Full name: core::marker::MetaSized
++#[lang_item("meta_sized")]
++pub trait MetaSized<Self>
++
++// Full name: core::marker::Sized
++#[lang_item("sized")]
++pub trait Sized<Self>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    non-dyn-compatible
++}
++
++// Full name: core::option::Option
++#[lang_item("Option")]
++pub enum Option<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  None,
++  Some(T),
++}
++
++// Full name: UNIT_METADATA
++fn UNIT_METADATA()
++{
++    let _0: (); // return
++
++    _0 = ()
++    return
++}
++
++// Full name: UNIT_METADATA
++const UNIT_METADATA: () = UNIT_METADATA()
++
++// Full name: test_crate::Seq
++pub trait Seq<Self, Self_Item>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Item>
++    vtable: test_crate::Seq::{vtable}<Self_Item>
++}
++
++// Full name: test_crate::IntoSeq
++pub trait IntoSeq<Self, Self_Item, Self_IntoSeq>
++{
++    parent_clause0 : [@TraitClause0]: MetaSized<Self>
++    parent_clause1 : [@TraitClause1]: Sized<Self_Item>
++    parent_clause2 : [@TraitClause2]: Sized<Self_IntoSeq>
++    parent_clause3 : [@TraitClause3]: Seq<Self_IntoSeq, Self_Item>
++    vtable: test_crate::IntoSeq::{vtable}<Self_Item, Self_IntoSeq>
++}
++
++// Full name: test_crate::Once
++pub struct Once<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  T,
++}
++
++// Full name: test_crate::{impl Seq<T> for Once<T>[@TraitClause0]}
++impl<T> Seq<T> for Once<T>[@TraitClause0]
++where
++    [@TraitClause0]: Sized<T>,
++{
++    parent_clause0 = {built_in impl MetaSized for Once<T>[@TraitClause0]}
++    parent_clause1 = @TraitClause0
++    vtable: {impl Seq<T> for Once<T>[@TraitClause0]}::{vtable}<T>[@TraitClause0]
++}
++
++// Full name: test_crate::Iter
++pub struct Iter<'a, T>
++where
++    [@TraitClause0]: Sized<T>,
++    T : 'a,
++{
++  &'a T,
++}
++
++// Full name: test_crate::{impl Seq<&'a T> for Iter<'a, T>[@TraitClause0]}
++impl<'a, T> Seq<&'a T> for Iter<'a, T>[@TraitClause0]
++where
++    [@TraitClause0]: Sized<T>,
++{
++    parent_clause0 = {built_in impl MetaSized for Iter<'_, T>[@TraitClause0]}
++    parent_clause1 = {built_in impl Sized for &'_ T}
++    vtable: {impl Seq<&'a T> for Iter<'a, T>[@TraitClause0]}::{vtable}<'a, T>[@TraitClause0]
++}
++
++// Full name: test_crate::List
++pub struct List<T>
++where
++    [@TraitClause0]: Sized<T>,
++{
++  T,
++}
++
++// Full name: test_crate::{impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}
++impl<'a, T> IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]
++where
++    [@TraitClause0]: Sized<T>,
++{
++    parent_clause0 = {built_in impl MetaSized for &'_ List<T>[@TraitClause0]}
++    parent_clause1 = {built_in impl Sized for &'_ T}
++    parent_clause2 = {built_in impl Sized for Iter<'_, T>[@TraitClause0]}
++    parent_clause3 = {impl Seq<&'a T> for Iter<'a, T>[@TraitClause0]}<'_, T>[@TraitClause0]
++    vtable: {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}::{vtable}<'a, T>[@TraitClause0]
++}
++
++// Full name: test_crate::Flatten
++pub struct Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>
++where
++    [@TraitClause0]: Sized<I>,
++    [@TraitClause1]: Seq<I, Clause1_Item>,
++    [@TraitClause2]: IntoSeq<Clause1_Item, Clause2_Item, Clause2_IntoSeq>,
++{
++  iter: I,
++  front: Option<Clause2_IntoSeq>[@TraitClause2::parent_clause2],
++}
++
++// Full name: test_crate::{impl Seq<Clause2_Item> for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]}
++impl<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq> Seq<Clause2_Item> for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]
++where
++    [@TraitClause0]: Sized<I>,
++    [@TraitClause1]: Seq<I, Clause1_Item>,
++    [@TraitClause2]: IntoSeq<Clause1_Item, Clause2_Item, Clause2_IntoSeq>,
++{
++    parent_clause0 = {built_in impl MetaSized for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]}
++    parent_clause1 = @TraitClause2::parent_clause1
++    vtable: {impl Seq<Clause2_Item> for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]}::{vtable}<I>[@TraitClause0, @TraitClause1, @TraitClause2]
++}
++
++// Full name: test_crate::Peek
++pub struct Peek<S, Clause1_Item>
++where
++    [@TraitClause0]: Sized<S>,
++    [@TraitClause1]: Seq<S, Clause1_Item>,
++{
++  seq: S,
++  next: Option<Clause1_Item>[@TraitClause1::parent_clause1],
++}
++
++// Full name: test_crate::flatten
++pub fn flatten<'a>(l_1: &'a List<u32>[{built_in impl Sized for u32}]) -> Flatten<Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], &'a List<u32>[{built_in impl Sized for u32}], &'a u32, Iter<'a, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'a, u32>[{built_in impl Sized for u32}]]
++{
++    let _0: Flatten<Once<&'45 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'45 List<u32>[{built_in impl Sized for u32}]}], &'45 List<u32>[{built_in impl Sized for u32}], &'59 u32, Iter<'59, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'45 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'45 List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'45 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'45 List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'59, u32>[{built_in impl Sized for u32}]]; // return
++    let l_1: &'60 List<u32>[{built_in impl Sized for u32}]; // arg #1
++    let _2: Once<&'61 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'61 List<u32>[{built_in impl Sized for u32}]}]; // anonymous local
++    let _3: &'64 List<u32>[{built_in impl Sized for u32}]; // anonymous local
++    let _4: Option<Iter<'71, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Iter<'71, u32>[{built_in impl Sized for u32}]}]; // anonymous local
++    let _5: Iter<'74, u32>[{built_in impl Sized for u32}]; // anonymous local
++    let _6: &'76 u32; // anonymous local
++    let _7: &'77 u32; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    _3 = &(*l_1)
++    _2 = Once { 0: move _3 }
++    storage_dead(_3)
++    storage_live(_4)
++    storage_live(_5)
++    storage_live(_6)
++    storage_live(_7)
++    _7 = &((*l_1)).0
++    _6 = &(*_7)
++    _5 = Iter { 0: move _6 }
++    storage_dead(_6)
++    _4 = Option::Some { 0: move _5 }
++    storage_dead(_5)
++    _0 = Flatten { iter: move _2, front: move _4 }
++    storage_dead(_4)
++    storage_dead(_2)
++    storage_dead(_7)
++    return
++}
++
++// Full name: test_crate::peek
++pub fn peek<'a>(l_1: &'a List<u32>[{built_in impl Sized for u32}]) -> Peek<Flatten<Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], &'a List<u32>[{built_in impl Sized for u32}], &'a u32, Iter<'a, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'a, u32>[{built_in impl Sized for u32}]], &'a u32>[{built_in impl Sized for Flatten<Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], &'a List<u32>[{built_in impl Sized for u32}], &'a u32, Iter<'a, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'a, u32>[{built_in impl Sized for u32}]]}, {impl Seq<Clause2_Item> for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]}<Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], &'a List<u32>[{built_in impl Sized for u32}], &'a u32, Iter<'a, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'a List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'a List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'a, u32>[{built_in impl Sized for u32}]]]
++{
++    let _0: Peek<Flatten<Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], &'284 List<u32>[{built_in impl Sized for u32}], &'292 u32, Iter<'292, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'292, u32>[{built_in impl Sized for u32}]], &'343 u32>[{built_in impl Sized for Flatten<Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], &'284 List<u32>[{built_in impl Sized for u32}], &'292 u32, Iter<'292, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'292, u32>[{built_in impl Sized for u32}]]}, {impl Seq<Clause2_Item> for Flatten<I, Clause1_Item, Clause2_Item, Clause2_IntoSeq>[@TraitClause0, @TraitClause1, @TraitClause2]}<Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], &'284 List<u32>[{built_in impl Sized for u32}], &'343 u32, Iter<'343, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'284 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'284 List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'343, u32>[{built_in impl Sized for u32}]]]; // return
++    let l_1: &'361 List<u32>[{built_in impl Sized for u32}]; // arg #1
++    let _2: Option<&'368 u32>[{built_in impl Sized for &'368 u32}]; // anonymous local
++    let _3: &'371 u32; // anonymous local
++    let _4: &'372 u32; // anonymous local
++    let _5: Flatten<Once<&'375 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'375 List<u32>[{built_in impl Sized for u32}]}], &'375 List<u32>[{built_in impl Sized for u32}], &'389 u32, Iter<'389, u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for Once<&'375 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'375 List<u32>[{built_in impl Sized for u32}]}]}, {impl Seq<T> for Once<T>[@TraitClause0]}<&'375 List<u32>[{built_in impl Sized for u32}]>[{built_in impl Sized for &'375 List<u32>[{built_in impl Sized for u32}]}], {impl IntoSeq<&'a T, Iter<'a, T>[@TraitClause0]> for &'a List<T>[@TraitClause0]}<'389, u32>[{built_in impl Sized for u32}]]; // anonymous local
++    let _6: &'390 List<u32>[{built_in impl Sized for u32}]; // anonymous local
++
++    storage_live(_2)
++    storage_live(_3)
++    storage_live(_4)
++    _4 = &((*l_1)).0
++    _3 = &(*_4)
++    _2 = Option::Some { 0: move _3 }
++    storage_dead(_3)
++    storage_live(_5)
++    storage_live(_6)
++    _6 = &(*l_1)
++    _5 = flatten<'397>(move _6)
++    storage_dead(_6)
++    _0 = Peek { seq: move _5, next: move _2 }
++    storage_dead(_5)
++    storage_dead(_2)
++    storage_dead(_4)
++    return
++}
++
++
++
+diff --git a/tests/ui/lift-assoc-types-projection-clause-regions.rs b/tests/ui/lift-assoc-types-projection-clause-regions.rs
+new file mode 100644
+index 0000000..ee8a916
+--- /dev/null
++++ b/tests/ui/lift-assoc-types-projection-clause-regions.rs
+@@ -0,0 +1,64 @@
++//@ charon-arg=--lift-associated-types=*
++// A clause about an associated type of an earlier clause keeps the lifetimes of the ADT arguments
++// in a signature. `Flatten<I>` requires `I: Seq` and `I::Item: IntoSeq`; for
++// `Flatten<Once<&'a List<u32>>>` the second clause is proven by `{impl IntoSeq for &'a List<T>}`,
++// resolved with an erased lifetime, so the associated types computed from it used to be
++// `&'_ u32` and `Iter<'_, u32>` below (the `Flatten<option::IntoIter<&'a Vec<_>>>` returned by
++// `chelis_types::env::Env::lookup_constructors`), which Aeneas rejects. The same holds for the
++// clauses of the impl `Seq for Flatten<I>` behind `Peek<Flatten<..>>`.
++pub trait Seq {
++    type Item;
++}
++pub trait IntoSeq {
++    type Item;
++    type IntoSeq: Seq<Item = Self::Item>;
++}
++
++pub struct Once<T>(pub T);
++impl<T> Seq for Once<T> {
++    type Item = T;
++}
++
++pub struct Iter<'a, T>(pub &'a T);
++impl<'a, T> Seq for Iter<'a, T> {
++    type Item = &'a T;
++}
++
++pub struct List<T>(pub T);
++impl<'a, T> IntoSeq for &'a List<T> {
++    type Item = &'a T;
++    type IntoSeq = Iter<'a, T>;
++}
++
++pub struct Flatten<I: Seq>
++where
++    I::Item: IntoSeq,
++{
++    pub iter: I,
++    pub front: Option<<I::Item as IntoSeq>::IntoSeq>,
++}
++impl<I: Seq> Seq for Flatten<I>
++where
++    I::Item: IntoSeq,
++{
++    type Item = <I::Item as IntoSeq>::Item;
++}
++
++pub struct Peek<S: Seq> {
++    pub seq: S,
++    pub next: Option<S::Item>,
++}
++
++pub fn flatten<'a>(l: &'a List<u32>) -> Flatten<Once<&'a List<u32>>> {
++    Flatten {
++        iter: Once(l),
++        front: Some(Iter(&l.0)),
++    }
++}
++
++pub fn peek<'a>(l: &'a List<u32>) -> Peek<Flatten<Once<&'a List<u32>>>> {
++    Peek {
++        next: Some(&l.0),
++        seq: flatten(l),
++    }
++}
