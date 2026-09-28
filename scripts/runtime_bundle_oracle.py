@@ -1393,6 +1393,10 @@ def runtime_mutation_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[s
 def dependency_mutation_row(runner: EvidenceRun, context: dict[str, Any]) -> dict[str, Any]:
     old = b"usize::try_from(flat).map_err(|_| MetadataError::Overflow(\"tensor index exceeds usize\"))"
     new = b"usize::try_from(flat ^ 1).map_err(|_| MetadataError::Overflow(\"tensor index exceeds usize\"))"
+    # CLI concat indexes tensor coordinates through flat_index; compiled
+    # Python concat indexes each PAD plan through MovementMetadata::index.
+    movement_old = b"target.require_index(flat)?;\n        Ok(flat)"
+    movement_new = b"target.require_index(flat)?;\n        Ok(flat ^ 1)"
     return mutation_build_witness(
         runner,
         context,
@@ -1400,6 +1404,7 @@ def dependency_mutation_row(runner: EvidenceRun, context: dict[str, Any]) -> dic
         changed_path="crates/chelis-abi/src/metadata.rs",
         old=old,
         new=new,
+        additional_mutations=((movement_old, movement_new),),
         mutant_values=RUNTIME_MUTANT_VALUES,
     )
 
