@@ -625,8 +625,8 @@ mod tests {
     const TEST_SOURCE_DIGEST: [u8; 32] = [0x5a; 32];
 
     #[test]
-    fn cache_format_version_tracks_the_key_operand_random_nodes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 35);
+    fn cache_format_version_tracks_the_ordered_list_operations() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 36);
     }
 
     #[test]

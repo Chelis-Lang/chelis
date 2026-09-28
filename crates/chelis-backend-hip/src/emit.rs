@@ -1520,6 +1520,28 @@ impl HipEmitter {
             Self::elem_kind(&n.output_type)
         };
         Ok(match op {
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(format!("{:?}", node.op)),
+                    "ordered List capture cotangents",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        2515,
+                        "HIP ordered List capture cotangents are not implemented"
+                    ),
+                ));
+            }
+            RiscOp::Iota => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("Iota".into()),
+                    "runtime integer range generation",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        570,
+                        "HIP runtime range source is not implemented"
+                    ),
+                ));
+            }
             // WS-A4: Add / Mul use the dtype-suffixed convention so f32
             // stays unsuffixed (`kernel_add`) and non-f32 dtypes pick
             // up an explicit suffix (`kernel_add_f64`, `kernel_add_i8`).
@@ -2380,6 +2402,28 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
+            RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(format!("{:?}", node.op)),
+                    "ordered List capture cotangents",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        2515,
+                        "HIP ordered List capture cotangents are not implemented"
+                    ),
+                ));
+            }
+            RiscOp::Iota => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("Iota".into()),
+                    "runtime integer range generation",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        570,
+                        "HIP runtime range source is not implemented"
+                    ),
+                ));
+            }
             RiscOp::Const { .. } if self.is_emission_literal(node) => {}
             RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
@@ -5119,6 +5163,7 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
+            RiscOp::Iota | RiscOp::ListMapCapture { .. } | RiscOp::OrderedAdjointSum { .. } => true,
             RiscOp::Load { .. } => false,
             RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }

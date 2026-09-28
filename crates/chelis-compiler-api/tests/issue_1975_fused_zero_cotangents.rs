@@ -80,6 +80,26 @@ fn fused_named_batch_zero_retains_caller_shape() {
     );
 }
 
+#[test]
+fn fused_named_batch_zero_reads_each_callers_actual_extent() {
+    for (values, count) in [
+        ("[2.0f32]", 1),
+        ("[2.0f32, 7.0f32]", 2),
+        ("[2.0f32, 7.0f32, 11.0f32]", 3),
+    ] {
+        roots(
+            &format!(
+                "def loss(x: tensor[f32]) -> f32 = 3.0f32\n\
+                 def mapped(xs: tensor[batch, f32]) -> tensor[batch, f32] = vmap(grad(loss))(xs)\n\
+                 out = mapped(to_tensor({values}))\n"
+            ),
+            "f32",
+            &[count],
+            &[vec![0.0; count as usize]],
+        );
+    }
+}
+
 /// chelis#2178 moved this probe's constant cast from a float source to an
 /// integer one, and both halves needed it.
 ///

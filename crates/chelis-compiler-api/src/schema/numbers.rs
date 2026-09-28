@@ -148,14 +148,14 @@ impl JsonSchema for SourceInteger {
     }
 }
 
-/// Nonnegative exact int64 report count. This is not allocation authority.
+/// Nonnegative exact int64 fixed count. This is not allocation authority.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonnegativeCount(ScalarValue);
 
 impl NonnegativeCount {
     pub fn new(value: i64) -> Result<Self, String> {
         if value < 0 {
-            return Err("report count must be a nonnegative int64".to_string());
+            return Err("fixed count must be a nonnegative int64".to_string());
         }
         Ok(Self(SourceInteger::new(value).scalar()))
     }
@@ -175,7 +175,7 @@ impl NonnegativeCount {
 impl TryFrom<usize> for NonnegativeCount {
     type Error = String;
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        Self::new(i64::try_from(value).map_err(|_| "report count exceeds int64".to_string())?)
+        Self::new(i64::try_from(value).map_err(|_| "fixed count exceeds int64".to_string())?)
     }
 }
 
@@ -184,7 +184,7 @@ impl TryFrom<ScalarValue> for NonnegativeCount {
     fn try_from(value: ScalarValue) -> Result<Self, Self::Error> {
         let number = SourceInteger::try_from(value)?.get();
         if number < 0 {
-            return Err("report count must be a nonnegative int64".to_string());
+            return Err("fixed count must be a nonnegative int64".to_string());
         }
         Ok(Self(value))
     }
