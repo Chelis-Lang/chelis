@@ -957,12 +957,14 @@ traversal contributes the shape-preserving exact zero for its argument and
 does not enter the argument's subgraph, so a structurally rejected operation
 inside it does not stop construction.
 
-A signed-integer arithmetic operation reached only by an exact zero control
-cotangent passes exact zero to its operands; this is not a request for its
-forward-only adjoint. Traversal still visits those operands, so a structural
-rejection such as a float-to-integer cast beneath the operation is reported.
-If any path reaches that same operation outside the exact-zero control path,
-its signed-integer adjoint is rejected.
+A signed-integer operation whose atom assigns the `IntegerArithmeticOutput`
+structural rejection passes exact zero to its operands when reached only by an
+exact-zero control cotangent; this does not request its forward-only adjoint.
+Traversal still visits those operands, so a structural rejection such as a
+float-to-integer cast beneath the operation is reported. If any path reaches
+that same operation outside the exact-zero control path, its
+`IntegerArithmeticOutput` rejection applies. Other operations retain their
+own atom's disposition, including a structural rejection on a zero path.
 
 ### 7.6 Verification
 
