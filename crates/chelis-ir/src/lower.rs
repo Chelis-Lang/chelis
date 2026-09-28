@@ -8636,8 +8636,8 @@ impl<'program> LowerCtx<'program> {
     /// unbound here, read as the top-level value declaration
     /// [`Self::program_defs`] holds under it. Its verdict comes from
     /// lowering the initializer in a scratch context: a lowered form with a
-    /// potentially trapping node is inlined here, and a total or unlowerable
-    /// one stays the free input the caller supplies.
+    /// potentially trapping node or exact host/aggregate structure is inlined
+    /// here. A total tensor value stays the free input the caller supplies.
     fn inline_program_value(&mut self, name: &str) -> Option<LoweredValue> {
         if self.lowers_declarations {
             return None;
@@ -8708,9 +8708,18 @@ impl<'program> LowerCtx<'program> {
             return (None, reached);
         }
         let seeds = lowered.trap_seeds();
-        // Exact host constants cannot be served by tensor Loads. Keep their
-        // declaring initializer and the same lexical/once-per-site rules.
-        let verdict = (matches!(value, LoweredValue::HostConstant(_))
+        // Tensor Loads cannot carry host constants, tuple structure, or ADT
+        // tags and fields. Retain the entire declaring initializer: recursive
+        // lowering preserves every field's provenance, including nested host
+        // values and numeric producers, under the same lexical/once-per-site
+        // rules. Projecting a field must never first erase its container.
+        let structural = match value {
+            LoweredValue::HostConstant(_) | LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+                true
+            }
+            LoweredValue::Node(_) | LoweredValue::Host { .. } => false,
+        };
+        let verdict = (structural
             || lowered
                 .nodes()
                 .iter()
@@ -13470,6 +13479,36 @@ impl<'program> LowerCtx<'program> {
         app_span: Span,
     ) -> NodeId {
         match func_name {
+            // [05-OP-58] owns these exact identities. They cannot be encoded
+            // as placeholder tensor Loads: that loses the host computation
+            // and reports an unrelated comparison/precision error in Grad.
+            "string_len" | "string_concat" | "string_slice" | "string_contains"
+            | "string_starts_with" | "string_ends_with" | "string_trim" | "char_code"
+            | "char_from_code" => {
+                if unrepresentable_panic_suppressed() {
+                    std::panic::panic_any(UnrepresentableDag);
+                }
+                let unsupported = Unsupported::new(
+                    UnsupportedKind::Op(func_name.to_string()),
+                    "numeric IR lowering of a host string operation",
+                    Stage::Lowering,
+                    chelis_types::deliberate_rejection!(
+                        "[05-OP-58]",
+                        "this string operation structurally rejects differentiation; \
+                         no numeric cotangent is fabricated"
+                    ),
+                );
+                let diagnostic = LowerDiagnostic::from_unsupported(
+                    unsupported,
+                    Some(app_span),
+                    self.current_span_id.clone(),
+                );
+                raise_lowering_diagnostic(if self.allow_host_list_ad_rewrites {
+                    diagnostic.fatal()
+                } else {
+                    diagnostic
+                })
+            }
             // Tier 1: binary elementwise
             "add" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "add lhs");

@@ -272,6 +272,8 @@ The numbered spec/06 sections 2.1, 2.7, and 2.10.1 control this boundary.
 `LoweredValue::HostConstant` retains exact strings beside numeric nodes through
 helper inlining, lexical capture rebasing, and recursive aggregates. Equality
 and inequality consume this carrier without putting strings in the RISC DAG.
+Top-level tuples and ADTs retain their declaring initializer, including nested
+host fields and numeric producers; a tensor Load cannot carry that structure.
 Host-runtime Grad arguments and captures use the same carrier; structured
 cotangents replace host leaves with unit. `examples/grad_host_selectors.ch`
 exercises both branch outcomes in Eval and C.
@@ -281,3 +283,5 @@ Runtime host-valued control still requires an executable host stage. Coral's
 Hamt also computes string hashes using operations whose [05-OP-58] contract
 structurally rejects differentiation; accepting that graph needs a contract
 decision or an explicit `stop_gradient` boundary, beyond selector preservation.
+Numeric lowering rejects those string operations at their own identities with
+the [05-OP-58] authority, before a placeholder can cause a comparison error.

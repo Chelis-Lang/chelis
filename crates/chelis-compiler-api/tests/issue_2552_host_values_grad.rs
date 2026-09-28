@@ -70,6 +70,121 @@ out = grad(loss, wrt=w)(to_tensor([1.0f32, 2.0f32]), "other")
 }
 
 #[test]
+fn declaring_host_aggregates_preserve_structure_and_lexical_origin() {
+    for (declarations, selection) in [
+        (r#"keys = ("w", "other")"#, "keys.0"),
+        (
+            r#"keys = (("unused", "w"), ("other", "unused"))"#,
+            "(keys.0).1",
+        ),
+        (
+            "type Keys =\n    | Keys((string, string))\nkeys = Keys((\"w\", \"other\"))",
+            "match keys with { | Keys(pair) => pair.0 }",
+        ),
+        (
+            "type Keys =\n    | Keys(string)\nkeys = ((Keys(\"w\"), \"unused\"), \"other\")",
+            "match (keys.0).0 with { | Keys(name) => name }",
+        ),
+        (
+            "type Keys =\n    | Keys { names: (string, string) }\nkeys = Keys { names: (\"w\", \"other\") }",
+            "keys.names.0",
+        ),
+        (
+            "def names() -> (string, string) = (\"w\", \"other\")\nkeys = names()",
+            "keys.0",
+        ),
+    ] {
+        let source = format!(
+            r#"{declarations}
+def pick[n](w: tensor[n, f32]) -> tensor[n, f32] = if eq({selection}, "w") then w else neg(w)
+def loss[n](w: tensor[n, f32], keys: string) -> tensor[f32] = sum(pick(w), 0i32)
+out = grad(loss, wrt=w)(to_tensor([1.0f32, 2.0f32]), "other")
+"#
+        );
+        assert_eq!(gradient(&source).unwrap(), vec![1.0, 1.0], "{source}");
+        let opposite = source.replacen(
+            declarations,
+            &declarations.replace("\"w\"", "\"absent\""),
+            1,
+        );
+        assert_eq!(gradient(&opposite).unwrap(), vec![-1.0, -1.0], "{opposite}");
+    }
+}
+
+#[test]
+fn lexical_host_aggregate_capture_preserves_nested_values() {
+    let source = r#"
+def differentiated[n](w: tensor[n, f32], name: string) -> tensor[n, f32] = {
+    keys = (("unused", name), "other")
+    target = fn (x: tensor[n, f32]) -> if eq((keys.0).1, "w") then sum(x, 0i32) else neg(sum(x, 0i32))
+    grad(target)(w)
+}
+out = differentiated(to_tensor([1.0f32, 2.0f32]), "w")
+"#;
+    for (source, expected) in [
+        (source.to_string(), vec![1.0, 1.0]),
+        (
+            source.replace("2.0f32]), \"w\"", "2.0f32]), \"other\""),
+            vec![-1.0, -1.0],
+        ),
+    ] {
+        assert_eq!(gradient(&source).unwrap(), expected);
+    }
+}
+
+#[test]
+fn declaring_mixed_aggregate_retains_numeric_producers() {
+    let source = r#"
+column = ("w", to_tensor([2.0f32, 3.0f32]))
+def loss(w: tensor[2, f32]) -> tensor[f32] = if eq(column.0, "w") then sum(mul(w, column.1), 0i32) else neg(sum(mul(w, column.1), 0i32))
+out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
+"#;
+    assert_eq!(gradient(source).unwrap(), vec![2.0, 3.0]);
+    assert_eq!(
+        gradient(&source.replace("column = (\"w\"", "column = (\"other\"")).unwrap(),
+        vec![-2.0, -3.0]
+    );
+}
+
+#[test]
+fn string_operations_reject_grad_at_the_owning_operation() {
+    for (op, condition) in [
+        ("string_concat", r#"eq(string_concat(name, ""), "w")"#),
+        ("string_len", "eq(string_len(name), 1i64)"),
+        ("string_slice", r#"eq(string_slice(name, 0i64, 1i64), "w")"#),
+        ("string_contains", r#"string_contains(name, "w")"#),
+        ("string_starts_with", r#"string_starts_with(name, "w")"#),
+        ("string_ends_with", r#"string_ends_with(name, "w")"#),
+        ("string_trim", r#"eq(string_trim(name), "w")"#),
+        ("char_code", "eq(char_code(name), 119i64)"),
+        ("char_from_code", r#"eq(char_from_code(119i64), "w")"#),
+    ] {
+        let source = format!(
+            r#"def loss[n](w: tensor[n, f32], name: string) -> tensor[f32] = if {condition} then sum(w, 0i32) else neg(sum(w, 0i32))
+out = grad(loss, wrt=w)(to_tensor([1.0f32, 2.0f32]), "w")
+"#
+        );
+        let error = gradient(&source).unwrap_err();
+        assert!(
+            error.contains(op)
+                && error.contains("[05-OP-58]")
+                && error.contains("structurally rejects differentiation"),
+            "{error}"
+        );
+        let forward = source.replace("grad(loss, wrt=w)", "loss");
+        assert!(
+            eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: forward.clone(),
+                bindings: BTreeMap::new()
+            })
+            .is_ok()
+        );
+        assert!(native_output(&forward).contains("out = 3.0"));
+    }
+}
+
+#[test]
 fn runtime_string_argument_is_discrete() {
     for (key, expected) in [("w", vec![1.0, 1.0]), ("other", vec![-1.0, -1.0])] {
         let source = format!(
@@ -118,9 +233,14 @@ def loss[n](w: tensor[n, f32]) -> tensor[f32] = {
 out = grad(loss)(to_tensor([1.0f32, 2.0f32]))
 "#;
     assert_eq!(gradient(source).unwrap(), vec![1.0, 1.0]);
+    assert!(native_output(source).contains("out = tensor(shape=[2], data=[1.0, 1.0])"));
     assert_eq!(
         gradient(&source.replace("column = (\"w\"", "column = (\"other\"")).unwrap(),
         vec![-1.0, -1.0]
+    );
+    assert!(
+        native_output(&source.replace("column = (\"w\"", "column = (\"other\""))
+            .contains("out = tensor(shape=[2], data=[-1.0, -1.0])")
     );
 }
 
