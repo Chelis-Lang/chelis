@@ -235,6 +235,24 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "runtime-variable",
+        lines=('RUNTIME_DIR_ENV = "CHELIS_RUNTIME_DIR"',),
+        disposition="not-lookup",
+        reason=(
+            "passes the variable name to a separate consumer to test staging rejection before artifact writes; it never selects an archive"
+        ),
+    ),
+    Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "archive-name",
+        lines=('archive = artifact_dir / "libchelis_runtime.a"',),
+        disposition="not-lookup",
+        reason=(
+            "links the exact staged wheel archive after checking its SHA-256 against the receipt, without a directory/name search"
+        ),
+    ),
+    Row(
         "bindings/python/tests/manual_reef_context.py",
         "runtime-variable",
         lines=(
