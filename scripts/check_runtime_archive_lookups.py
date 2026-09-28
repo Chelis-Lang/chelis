@@ -1269,6 +1269,7 @@ REVIEWED: tuple[Row, ...] = (
             "archive = self.root / oracle.ARCHIVE_FILE_NAME",
             "archive = self.root / oracle.ARCHIVE_FILE_NAME",
             "archive = self.root / oracle.ARCHIVE_FILE_NAME",
+            "archive = self.root / oracle.ARCHIVE_FILE_NAME",
             '"archive": oracle.ARCHIVE_FILE_NAME,',
             '"archive": oracle.ARCHIVE_FILE_NAME,',
             'f\'let candidate = build_dir.join("{oracle.ARCHIVE_FILE_NAME}");\\n\',',
@@ -1278,7 +1279,7 @@ REVIEWED: tuple[Row, ...] = (
         ),
         disposition="not-lookup",
         reason=(
-            "uses the oracle's receipt-name constant in byte-integrity fixtures and the planted guard negative"
+            "uses the oracle's receipt-name constant in byte-integrity, receipt-replay tamper, and planted guard fixtures"
         ),
     ),
     Row(

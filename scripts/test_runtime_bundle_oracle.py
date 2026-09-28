@@ -237,6 +237,47 @@ class RuntimeBundleOracleContracts(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "digest does not match"):
             oracle.validate_receipt(evidence.receipt)
 
+    def test_staged_receipt_replay_rejects_replaced_bytes(self) -> None:
+        evidence = oracle.EvidenceRun(self.root / "run", "e" * 40)
+        archive = self.root / oracle.ARCHIVE_FILE_NAME
+        archive.write_bytes(b"runtime-A")
+        header = self.root / "chelis_runtime.h"
+        header.write_bytes(b"header-A")
+        receipt_path = self.root / oracle.RECEIPT_FILE_NAME
+        oracle.atomic_write_json(
+            receipt_path,
+            {
+                "schema": oracle.STAGING_RECEIPT_SCHEMA,
+                "archive": archive.name,
+                "archive_sha256": oracle.sha256_file(archive),
+                "headers": {header.name: oracle.sha256_file(header)},
+                "mode": "development",
+                "chelis_version": "0.1.0",
+            },
+        )
+        verified = oracle.read_staging_receipt(
+            receipt_path, archive, expected_mode="development", headers_dir=self.root
+        )
+        oracle.record_staged_archive(
+            evidence,
+            consumer="cli-positive",
+            target="runtime export",
+            archive=archive,
+            receipt_path=receipt_path,
+            receipt=verified,
+        )
+        for row in oracle.ORACLE_ROWS:
+            evidence.pass_row(row, {"staged_archive": archive.name})
+        evidence.receipt["prerequisites"] = {
+            "source_tree_clean": True,
+            "candidate_restored_clean": True,
+        }
+        evidence.finish()
+
+        receipt_path.write_bytes(b"x" * receipt_path.stat().st_size)
+        with self.assertRaisesRegex(oracle.OracleFailure, "staged archive receipt digest does not match"):
+            oracle.validate_receipt(evidence.receipt)
+
     def test_source_mutation_restores_file_permissions(self) -> None:
         path = self.root / "source.rs"
         path.write_bytes(b"before\n")

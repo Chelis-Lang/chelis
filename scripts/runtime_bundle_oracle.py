@@ -269,6 +269,20 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
                 raise OracleFailure(f"oracle receipt {collection_name} byte count does not match its artifact")
             if sha256_file(artifact_path) != artifact["sha256"]:
                 raise OracleFailure(f"oracle receipt {collection_name} digest does not match its artifact")
+            if collection_name == "staged_archives":
+                receipt_value = artifact.get("receipt")
+                if not isinstance(receipt_value, str) or not receipt_value:
+                    raise OracleFailure("oracle staged archive has no receipt path")
+                receipt_path = Path(receipt_value)
+                if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+                    raise OracleFailure(f"oracle staged archive receipt is missing: {receipt_path}")
+                if artifact.get("receipt_bytes") != receipt_path.stat().st_size:
+                    raise OracleFailure(f"oracle staged archive receipt byte count does not match: {receipt_path}")
+                receipt_digest = artifact.get("receipt_sha256")
+                if not isinstance(receipt_digest, str) or not SHA256_RE.fullmatch(receipt_digest):
+                    raise OracleFailure(f"oracle staged archive receipt has no SHA-256: {receipt_path}")
+                if sha256_file(receipt_path) != receipt_digest:
+                    raise OracleFailure(f"oracle staged archive receipt digest does not match: {receipt_path}")
     hardware = receipt.get("hardware")
     if (
         not isinstance(hardware, list)
@@ -498,11 +512,15 @@ def record_staged_archive(
     receipt_path: Path,
     receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise OracleFailure(f"staging receipt is missing or not a regular file: {receipt_path}")
     record = {
         "consumer": consumer,
         "target": target,
         "path": str(archive.resolve()),
-        "receipt": str(receipt_path.resolve()),
+        "receipt": str(receipt_path.absolute()),
+        "receipt_sha256": sha256_file(receipt_path),
+        "receipt_bytes": receipt_path.stat().st_size,
         "sha256": receipt["archive_sha256"],
         "mode": receipt["mode"],
     }
