@@ -397,17 +397,32 @@ closure bodies from promoted MIR and rejects stale or missing metadata. Its
 isolated Charon regression and strict two-crate native/Lean closure smoke pass.
 An independent `verification/toolchain/series.py check` reconstructs the new
 Charon, charon-ml, and round-36 Aeneas (`5cd0e4a`) integration sources exactly
-(47, 9, and 165 patches). This is a checked source pin, **not** a rebuilt Nix
-toolchain: the guarded new `.#charon` build stopped with exit 3 as shared APFS
-fell to 8.24 GiB free (7.01 GiB afterward). The four previously built pinned
-Nix outputs belong to the older Charon `5a71617` integration.
+(47, 9, and 165 patches). Four patched Nix outputs are built and rooted under
+`.work/diag/toolchain-pin-r36/`:
+
+- `nix-charon`: `/nix/store/afr91mk38byjxgmx1hiwhlfbh5ks2p9j-charon-0.1.184`
+- `nix-charon-ml`: `/nix/store/cq3v51mignvx8ddrqnb8ka92b32a3sl8-ocaml5.2.1-charon-0.1.0`
+- `nix-aeneas-source`: `/nix/store/5cfqi9zb3k76rsk9xrvy9bla95mskk4q-aeneas-source`
+- `nix-aeneas`: `/nix/store/jxr10x3aw0897phmpacpjcqrhw3yaym4-ocaml5.2.1-aeneas-0.1.0`
+
+Fresh strict Charon callgraphs, without error tolerance or dump reuse, produced
+the 52-chunk default plan (`.work/diag/toolchain-pin-r36/plan-default-strict-v2.json`,
+SHA256 `ebb56db22d4e7685162a865d8b9135a112967b434aeaedfc10d7897524f0bc70`)
+and 53-chunk lowering-trace plan
+(`.work/diag/toolchain-pin-r36/plan-trace-strict-v2.json`, SHA256
+`e23e28b55407f067af728e9930b71d1a335c93c8a7468c2a9bf1903c78bfceb1`).
+Both have no Charon dump errors and validate all 54 native-shell entries
+(73 selected local members). These are plans, not extracted or Lean-checked
+whole-core models.
 
 The earlier round-32, 52-chunk diagnostic run reached only 38 chunks and is
 not acceptance evidence. The round-36 Aeneas local gate compiled 258 Lean
 libraries (637 modules), regenerated 270/270 fixtures without strict stale
 drift, passed 78/78 model cases and a 23/23 canary. Fresh strict default and
-lowering-trace extraction, full-core proof, new-pin Nix builds, and native
-hook/unwind correspondence remain open. The AD slice is not the full core.
+lowering-trace chunk extraction, full-core proof/Audit, and native hook/unwind
+correspondence remain open. Preparing the matching pinned Aeneas Lean library
+and running extraction require more shared APFS headroom above the 8.25 GiB
+guard. The AD slice is not the full core.
 
 There is a checked **fragment** correspondence theorem, not a whole-core acceptance
 claim. On actual Aeneas-extracted `grad_dag_checked`, `lower_dag_ownership`, and

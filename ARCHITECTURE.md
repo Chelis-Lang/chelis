@@ -491,11 +491,16 @@ foreign closure bodies in promoted MIR, rejects stale or missing sidecars, and
 passes its isolated Charon regression plus strict two-crate native/Lean smoke.
 The independently checked patch series reconstructs the new Charon and
 charon-ml sources and round-36 Aeneas (`5cd0e4a`) exactly (47, 9, and 165
-patches); it does not establish a rebuilt pinned toolchain. The four previously
-built Nix outputs used Charon `5a71617`. The guarded new `.#charon` build stopped
-with exit 3 at the shared APFS 8.24 GiB floor (7.01 GiB free afterward);
-the four new outputs, fresh strict default and lowering-trace eight-crate
-extraction, and round-36 proof/model/Audit have not run to acceptance.
+patches). All four patched Nix outputs (Charon, charon-ml, Aeneas source, and
+Aeneas) are now built and rooted; their exact store paths are recorded in
+[README.md](README.md#verification-status-and-remaining-boundaries). Fresh
+strict Charon callgraphs for both feature chains produced 52 default and 53
+lowering-trace chunks without Charon dump errors, error tolerance, or dump
+reuse; both validate 54 native-shell entries and 73 selected local members.
+Their plan paths and SHA256 hashes are recorded in README. Neither plan is a
+strict eight-crate extraction, Lean whole-core build, or correspondence proof;
+matching pinned Lean-library preparation, both chunk extractions, and round-36
+proof/model/Audit still await adequate shared APFS headroom.
 
 The earlier round-32 diagnostic 52-chunk run reached only 38 chunks; its
 incomplete manifests and error-tolerant settings cannot serve as acceptance.
