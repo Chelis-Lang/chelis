@@ -25,13 +25,14 @@ the extracted function is decomposed into exactly these accepted steps (`dropout
   `dropout_forward_f64`, `dropout_forward_f32`, `dropout_forward_f16`, `dropout_forward_bf16`;
 * a whole run of source controls and dropouts (`DropoutRun`) is an `AcceptedRun`
   (`dropoutRun_accepted`), simulates the reference `runProtocol` and passes `checkProtocol`
-  from and back to a root frame, and each of its dropouts returns its input masked
-  (`Masked`, per float dtype) by the key it used: the drawn reference key `(seed, c)` for a
-  forward dropout, the recorded key for a replay (`dropoutRun_simulates`,
-  `dropoutRun_checks`).
+  from and back to a root frame; each dropout is masked by its used key (`dropoutRun_simulates`);
+* the tensor-level replay theorem (`dropout_replay_tensor_f64`) follows the recorded key with
+  no frame change, and `dropoutRun_tensor_f64` composes actual f64 output tensors at each key
+  under explicit per-dropout shape, decoding, realization, and representability hypotheses.
 
-No hypothesis restricts the rate or the input values: non-finite and out-of-range rates are
-rejected by the extracted code itself.
+Acceptance alone requires no caller-supplied rate or input-value hypothesis: non-finite and
+out-of-range rates are rejected by the extracted code. Rational tensor correspondence additionally
+requires the exact per-call decoding and representability premises stated in its theorems.
 -/
 
 open Aeneas.Std LaCaDiLECore ChelisBridge ChelisBridge.Protocol ChelisBridge.Random
@@ -716,6 +717,27 @@ def Masked (k : chelis_ir.evaluation.DrawKey) (input : TV) (rate : F64) (out : T
         if value (F64.toF32 (unitAt k.seed k.ordinal i)) < value (bf16To64 w) then BF16.ZERO
         else bf16Div x (bf16Sub BF16.ONE w)))
 
+/-- Per-row tensor correspondence for the actual f64 output of an accepted dropout. The
+shape, decoding, rate realization, denominator, and quotient exactness obligations stay local
+to each row; no global representability assumption is hidden in `Masked`. -/
+def TensorMaskedF64 (d : TV × F64 × TV) (k : chelis_ir.evaluation.DrawKey) : Prop :=
+  ∀ (shape : Shape) (xs : alloc.vec.Vec F64) (x : Tensor ℚ shape)
+      (dropoutRate : DropoutRate),
+    d.1.shape.val.map (fun dim => dim.val) = shape →
+    d.1.storage = ⟨.F64 xs⟩ →
+    decodeTensor shape xs.val = some x →
+    realize d.2.1 = some dropoutRate.val →
+    Representable .binary64 (1 - dropoutRate.val) →
+    (∀ (j : ℕ) (hj : j < xs.val.length) (a : ℚ), realize xs.val[j] = some a →
+      Representable .binary64 (a / (1 - dropoutRate.val))) →
+    ∃ (ys : alloc.vec.Vec F64) (y : Tensor ℚ shape),
+      d.2.2.shape = d.1.shape ∧
+      d.2.2.shape.val.map (fun dim => dim.val) = shape ∧
+      d.2.2.storage = ⟨.F64 ys⟩ ∧
+      decodeTensor shape ys.val = some y ∧
+      ∀ i, y i = x i * dropoutMask dropoutRate (keyOfDraw k.seed k.ordinal) i
+
+
 /-- An accepted dropout's output is masked by the key its `enter` returned. -/
 theorem dropout_masked {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV} {rate : F64}
     {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
@@ -828,6 +850,55 @@ theorem dropout_replay_key {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV
   obtain ⟨hF, hk⟩ := enter_replay_inv F node seed draw k F' back' hsite he
   exact ⟨k, hk, hF, back', he⟩
 
+/-- **Composed tensor f64 dropout at a replay site.** The accepted production call uses exactly
+the key currently recorded at `F.keys[draw]`, and replay leaves the frame unchanged. Under the
+same exact-shape, decoded-input, realized-rate, denominator, and per-element quotient hypotheses
+as the forward theorem, the actual returned f64 storage decodes to the rational mask for that
+recorded key. -/
+theorem dropout_replay_tensor_f64 {F : Frame} {node : chelis_ir.dag.NodeId}
+    {input : TV} {rate : F64} {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId}
+    {shape : Shape} {xs : alloc.vec.Vec F64} {x : Tensor ℚ shape}
+    {dropoutRate : DropoutRate} (hs : input.storage = ⟨.F64 xs⟩)
+    (hinputShape : input.shape.val.map (fun d => d.val) = shape)
+    (hx : decodeTensor shape xs.val = some x)
+    (hrate : realize rate = some dropoutRate.val)
+    (hden : Representable .binary64 (1 - dropoutRate.val))
+    (hq : ∀ (j : ℕ) (hj : j < xs.val.length) (a : ℚ), realize xs.val[j] = some a →
+      Representable .binary64 (a / (1 - dropoutRate.val)))
+    (hsite : siteOf F node = .ok (some (.Replay draw)))
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (k : chelis_ir.evaluation.DrawKey) (ys : alloc.vec.Vec F64) (y : Tensor ℚ shape),
+      F.keys.val[draw.val]? = some (some k) ∧ F' = F ∧
+      out.shape = input.shape ∧
+      out.shape.val.map (fun d => d.val) = shape ∧
+      out.storage = ⟨.F64 ys⟩ ∧
+      decodeTensor shape ys.val = some y ∧
+      ∀ i, y i = x i * dropoutMask dropoutRate (keyOfDraw k.seed k.ordinal) i := by
+  obtain ⟨replayKey, hrecorded, hframe, enterBack, he⟩ := dropout_replay_key hsite h
+  obtain ⟨p, rsv, actualKey, actualBack, hp, hcast, hnew, he', happly, hshape⟩ :=
+    dropout_ok_inv h
+  have hkey : actualKey = replayKey := by
+    rw [he] at he'
+    simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he'
+    exact he'.1.symm
+  rw [hs] at hp hnew happly
+  simp only [chelis_types.dtype_semantics.TensorStorage.prim, Result.ok.injEq] at hp
+  subst p
+  rw [cast_raw_float_f64] at hcast
+  simp only [Result.ok.injEq, core.result.Result.Ok.injEq] at hcast
+  subst rsv
+  obtain ⟨ys, y, hmask, hdecode, hy⟩ :=
+    mask_tensor_f64 xs rate dropoutRate hrate actualKey.seed actualKey.ordinal x hx hden hq
+  rw [hmask] at happly
+  simp only [Result.ok.injEq, core.result.Result.Ok.injEq] at happly
+  have hstorage : out.storage = ⟨.F64 ys⟩ := happly.symm
+  rw [hkey] at hy
+  exact ⟨replayKey, ys, y, hrecorded, hframe, hshape,
+    by rw [hshape]; exact hinputShape, hstorage, hdecode, hy⟩
+
+
 /-- **A dropout run is an accepted frame run.** From a well-formed stack, the frame operations
 of a dropout run form an `AcceptedRun` with the same events, and the stack stays well formed. -/
 theorem dropoutRun_accepted {F : Frame} {ops : List DropOp} {evs : List ProtocolEvent}
@@ -898,6 +969,67 @@ theorem dropoutRun_simulates (target : Target) {F : Frame} {ops : List DropOp}
     simp only [Result.ok.injEq, Prod.mk.injEq, core.result.Result.Ok.injEq] at he'
     obtain ⟨rfl, -⟩ := he'
     exact .cons hm ih
+
+/-- **Run-level tensor dropout composition.** The protocol transition and final stack
+well-formedness come from `dropoutRun_simulates`; each row is then related by induction over
+the actual `DropoutRun` constructors. Forward rows use their fresh-scope key, replay rows use
+the currently recorded key and emit no event. Every row retains explicit shape, decode, rate,
+denominator, and input-quotient hypotheses. -/
+theorem dropoutRun_tensor_f64 (target : Target) {F : Frame} {ops : List DropOp}
+    {evs : List ProtocolEvent} {ks : List chelis_ir.evaluation.DrawKey} {F' : Frame}
+    (h : DropoutRun F ops evs ks F') (hwf : StackWF F) :
+    runProtocol target evs (absState F) = some (absState F') ∧ StackWF F' ∧
+      List.Forall₂ (fun d k => TensorMaskedF64 d k) (DropOp.dropouts ops) ks := by
+  have hrows : List.Forall₂ (fun d k => TensorMaskedF64 d k) (DropOp.dropouts ops) ks := by
+    revert hwf
+    induction h with
+    | nil F =>
+        intro hwf
+        exact .nil
+    | enter F F' F'' scope payload sd back ops evs ks h hseed hfresh rest ih =>
+        intro hwf
+        have step := AcceptedRun.enter F F' F' scope payload sd back [] [] h hseed hfresh
+          (.nil F')
+        exact ih (accepted_run_simulates .c step hwf).2
+    | leave F F' F'' scope back ops evs ks h rest ih =>
+        intro hwf
+        have step := AcceptedRun.leave F F' F' scope back [] [] h (.nil F')
+        exact ih (accepted_run_simulates .c step hwf).2
+    | forward F F' F'' node input rate seed out draw s c back ops evs ks
+        hsite h hc hno rest ih =>
+        intro hwf
+        have hno' : ∀ c', counterAt F s = some c' → c'.val + 1 < 2 ^ 64 := by
+          intro c' hc'
+          rw [hc] at hc'
+          cases hc'
+          exact hno
+        obtain ⟨_, _, _, _, hWFout⟩ := dropout_forward_simulates .c hsite hwf hno' h
+        refine .cons ?_ (ih hWFout)
+        · intro shape xs x dropoutRate hshape hs hx hrate hden hq
+          obtain ⟨c', ys, y, hc', -, -, houtShape, houtDims,
+            houtStorage, hdecode, hy⟩ :=
+            dropout_forward_tensor_f64 .c hs hshape hx hrate hden hq hsite hwf hno' h
+          have hcEq : c' = c := (Option.some.inj (hc.symm.trans hc')).symm
+          subst c'
+          exact ⟨ys, y, houtShape, houtDims, houtStorage, hdecode, hy⟩
+    | replay F F' F'' node input rate seed out draw k back ops evs ks
+        hsite h hk rest ih =>
+        intro hwf
+        obtain ⟨recorded, hrecorded, hframe, -, -⟩ := dropout_replay_key hsite h
+        have hrow : TensorMaskedF64 (input, rate, out) k := by
+          intro shape xs x dropoutRate hshape hs hx hrate hden hq
+          obtain ⟨k', ys, y, hk', -, houtShape, houtDims, houtStorage, hdecode, hy⟩ :=
+            dropout_replay_tensor_f64 hs hshape hx hrate hden hq hsite h
+          have hkEq : k' = k :=
+            Option.some.inj (Option.some.inj (hk'.symm.trans hk))
+          subst k'
+          exact ⟨ys, y, houtShape, houtDims, houtStorage, hdecode, hy⟩
+        have hwf' : StackWF F' := by
+          rw [hframe]
+          exact hwf
+        exact .cons hrow (ih hwf')
+  obtain ⟨hrun, hwf', -⟩ := dropoutRun_simulates target h hwf
+  exact ⟨hrun, hwf', hrows⟩
 
 /-- **Protocol acceptance of a dropout run.** A dropout run from a root frame back to a root
 frame passes the reference `checkProtocol`. -/

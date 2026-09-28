@@ -415,9 +415,9 @@ the entire check; replacing its returned primal-node identity with its distinct
 scalar gradient root fails `Numeric.acceptPrimal` even with a newly searched witness.
 
 This theorem was compiled with the combined r35 `chelis_ir-3ndlar8c` model and
-matching patched Aeneas library. With the f64 production dropout theorem below,
-`ChelisBridge.Audit` accepted 591 theorems and 5910 package constants;
-`ClosureAudit` found 34,138 reachable declarations, only the foundational axioms
+matching patched Aeneas library. With the f64 production dropout, replay, and run
+theorems below, `ChelisBridge.Audit` accepted 593 theorems and 5913 package constants;
+`ClosureAudit` found 34,141 reachable declarations, only the foundational axioms
 `propext`, `Classical.choice`, `Quot.sound`, and no unjustified opaque/extern
 dependencies under `verification/trusted_base.json` (46 opaque and 114
 extern/implemented-by declarations inventoried). The model covers 25 selected
@@ -435,7 +435,19 @@ equal element counts alone do not preserve row-major tensor meaning. The
 tensor equality also needs a decodable input, an exactly interpreted rate, a
 representable binary64 denominator `1 - rate`, and representable
 per-input-element quotients. Frame well-formedness and no counter overflow
-are required for direct protocol simulation. Neither successful dropout
+are required for direct protocol simulation.
+
+`ChelisBridge.Random.dropout_replay_tensor_f64` identifies the *currently recorded*
+key of an accepted replay, proves the frame is unchanged, and decodes its actual
+output with that key. `ChelisBridge.Random.dropoutRun_tensor_f64` extends this
+per-dropout f64 relation to an accepted production `DropoutRun`: its `ks` pair
+with actual outputs in order, while `runProtocol` receives the exact `evs`
+(one draw for a forward step, none for replay). Shape, finite decoding,
+rate interpretation, denominator, and every input-element quotient remain
+explicit hypotheses **for each individual row**, not a global premise
+silently folded into `Masked`.
+
+Neither successful dropout
 alone nor a finite rate implies exact rational scaling
 (`Random.scale_counterexample` uses binary64 rate `0.1`);
 non-f64 masks can differ when the sampled unit is rounded before comparison

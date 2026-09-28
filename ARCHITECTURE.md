@@ -208,6 +208,21 @@ checked tensor-mask relation; it does not replace the returned result with a
 reference-only construction. The unrestricted exact-rational scaling claim
 fails at binary64 rate `0.1` (`Random.scale_counterexample`); non-f64 threshold
 rounding differs (`Random.nonf64_mask_counterexample`).
+
+`ChelisBridge.Random.dropout_replay_tensor_f64` separately proves that the
+actual replay call masks with the key currently stored at its draw slot and
+leaves the frame unchanged. `ChelisBridge.Random.dropoutRun_tensor_f64`
+composes forward and replay calls in execution order: `DropOp.dropouts ops`
+pair with `ks` through `TensorMaskedF64` under explicit *per-row* f64 decode,
+exact-dimension, rate, denominator and quotient premises. Its reference
+`runProtocol` sees the original `evs`: a forward site emits a draw, while
+replay emits no draw or counter advance. A concrete extracted `[2,3]` run
+at seed 42 returned `[0,2,0,0,0,0]` for both forward and replay with key
+`(42,0)` and counter `0→1→1`; altering only the recorded key to `(42,1)`
+changed replay output to `[2,0,0,0,0,2]`, still without another draw.
+The replay theorem must use the *recorded* key, not unconditionally the
+original forward key.
+
 Native IEEE execution and wrapper/state restoration remain outside this
 fragment.
 

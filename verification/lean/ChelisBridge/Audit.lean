@@ -642,8 +642,10 @@ def accepted : List Name := [
   ``ChelisBridge.Random.dropout_forward_bf16,
   ``ChelisBridge.Random.dropout_masked,
   ``ChelisBridge.Random.dropout_replay_key,
+  ``ChelisBridge.Random.dropout_replay_tensor_f64,
   ``ChelisBridge.Random.dropoutRun_accepted,
   ``ChelisBridge.Random.dropoutRun_simulates,
+  ``ChelisBridge.Random.dropoutRun_tensor_f64,
   ``ChelisBridge.Random.dropoutRun_checks,
   -- Resource: every target of `validate_build_target_handler` (ResourceTargets)
   ``ChelisBridge.Resource.str_eq_lit,
