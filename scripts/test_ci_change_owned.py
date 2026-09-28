@@ -577,6 +577,14 @@ class SchemaTests(unittest.TestCase):
 
         validate(manual_gate_row(), gate_sources())
         validate(
+            manual_gate_row(),
+            gate_sources(
+                manual_gates_doc(
+                    ("q_gate", "`scripts/hip_test.py -p q --test smoke -- --ignored`")
+                )
+            ),
+        )
+        validate(
             manual_gate_row(manual_gates=["q_case", "q_nextest", "q_all"]),
             gate_sources(
                 manual_gates_doc(
@@ -623,7 +631,7 @@ class SchemaTests(unittest.TestCase):
                 gate_sources(
                     manual_gates_doc(("q_gate", "`scripts/hip_test.py -p q --test smoke`"))
                 ),
-                "not a recognized Cargo test run",
+                "does not run exactly q::smoke",
             ),
             (
                 manual_gate_row(),
@@ -707,6 +715,10 @@ class SchemaTests(unittest.TestCase):
         )
         cases = [
             ("`cargo test -p q --test smoke`", "does not run exactly q::smoke"),
+            (
+                "`scripts/hip_test.py -p q --test smoke q_case -- --ignored --exact`",
+                "cites no docs/manual_gates.md entry that runs its whole",
+            ),
             ("`cargo nextest run -p q --test smoke`", "does not run exactly q::smoke"),
             ("`cargo test -p q --test smoke --no-run -- --ignored`", "'--no-run'"),
             ("`cargo test -p q --test smoke -- --ignored --list`", "'--list'"),
@@ -727,6 +739,10 @@ class SchemaTests(unittest.TestCase):
             (
                 f"`NEXTEST_PROFILE=nightly {nextest} --ignore-default-filter`",
                 "environment assignment 'NEXTEST_PROFILE=nightly'",
+            ),
+            (
+                "`RUSTFLAGS=--cfg=skip_all scripts/hip_test.py -p q --test smoke -- --ignored`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
             ),
             (
                 "`RUSTFLAGS=--cfg=skip_all cargo test -p q --test smoke -- --ignored`",

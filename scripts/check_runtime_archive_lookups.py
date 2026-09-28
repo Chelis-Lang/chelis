@@ -426,14 +426,13 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-cli/tests/cross_library_semantic_gap_hip_gpu.rs",
-        "linker-search",
+        "archive-name",
         lines=(
-            '.arg("-lchelis_runtime")',
+            '.arg(out_dir.join("libchelis_runtime.a"))',
         ),
-        disposition="lookup",
-        tracking="chelis#1354",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored HIP gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-gate row and wired docs/manual_gates.md entry in the same change"
+            "links the exact runtime archive staged by `chelis build` in `out_dir` before the HIP libraries"
         ),
     ),
     Row(
@@ -854,14 +853,13 @@ REVIEWED: tuple[Row, ...] = (
     ),
     Row(
         "crates/chelis-cli/tests/std_io_pipeline.rs",
-        "linker-search",
+        "archive-name",
         lines=(
-            'cmd.args(["-L.", "-lchelis_runtime"]);',
+            'cmd.arg(out_dir.join("libchelis_runtime.a"));',
         ),
-        disposition="lookup",
-        tracking="chelis#1354",
+        disposition="not-lookup",
         reason=(
-            "an entirely ignored manual gate links `-L. -lchelis_runtime` in its `chelis build` output directory; linking the staged archive by path needs its manual-only or manual-gate row in the same change"
+            "links the exact runtime archive staged by `chelis build` in `out_dir` before the remaining link flags"
         ),
     ),
     Row(
