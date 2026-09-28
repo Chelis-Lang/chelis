@@ -76,6 +76,8 @@ A valid lock is the preferred exact graph. Reef reuses it without release listin
 
 A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error. Refresh and inspect check registry index entries against matching existing lock pins even if cached directories are missing, including packages outside a targeted refresh. They check fetched archives and shells against matching lock pins when index entries are absent, before selecting or reporting versions.
 
+An uncached registry lock pin reserves one of the bounded candidate-manifest slots, ahead of release candidates ranked by requirements and version. A pin omitted from the bounded release listing, or one that cannot be verified, fails closed before refresh or inspect can select another version.
+
 Remote discovery uses one private provider interface. `GitHubReleaseProvider` is the only implementation.
 
 The production budget limits pages, requests, tags, manifests, request time, and downloaded bytes. Local resolver limits remain authoritative for graph search.

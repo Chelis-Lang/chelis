@@ -4,7 +4,9 @@ a full or targeted refresh, and `chelis reef outdated [<package>] [--json]`
 reports available versions without final writes. Both commands reject index
 or remote artifact hashes that disagree with an existing lock, even when a
 cache directory or index entry is missing and the package is unrelated to a
-targeted refresh. Candidate scans, requests, downloads, and resolver states
+targeted refresh. An uncached pin occupies a candidate-manifest slot even
+when newer releases exceed the scan limit; an unavailable or mismatched pin
+fails closed. Candidate scans, requests, downloads, and resolver states
 have finite limits, and Reef publishes complete verified cache entries before
 it replaces `reef.lock`. An explicit `chelis-std`
 dependency uses the compiler bundle without network access. Cyclic path

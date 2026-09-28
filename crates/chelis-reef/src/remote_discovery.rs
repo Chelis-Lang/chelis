@@ -1689,17 +1689,48 @@ impl DiscoverySession {
             .take()
             .unwrap_or(GitHubReleaseProvider::new()?);
         let result: Result<(), DiscoveryError> = (|| {
-            let stop_after_matches = (self.mode == DiscoveryMode::Resolve).then(|| {
-                if !known_requirements.is_empty()
-                    && known_requirements
-                        .iter()
-                        .all(|requirement| requirement.as_str().starts_with('='))
-                {
-                    1
-                } else {
-                    self.budget.limit(BudgetDimension::CandidateManifests)
-                }
-            });
+            // An uncached registry pin must be verified before a refresh or
+            // inspection can replace or report it. Reserve a manifest slot
+            // even when newer releases fill the ordinary candidate window.
+            let missing_pin = self
+                .locked
+                .get(package)
+                .filter(|locked| matches!(&locked.source, LockSource::LocalRegistry { .. }))
+                .filter(|locked| {
+                    !self
+                        .candidates
+                        .get(package)
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| match candidate {
+                            CandidateMaterial::Local { entry, .. } => {
+                                entry.version == locked.version
+                            }
+                            CandidateMaterial::Path { .. } => true,
+                            _ => false,
+                        })
+                })
+                .map(|locked| {
+                    PackageVersion::from_str(&locked.version).map_err(|error| {
+                        DiscoveryError::CandidateManifest {
+                            package: package.to_string(),
+                            message: format!("invalid locked version: {error}"),
+                        }
+                    })
+                })
+                .transpose()?;
+            let stop_after_matches = (self.mode == DiscoveryMode::Resolve && missing_pin.is_none())
+                .then(|| {
+                    if !known_requirements.is_empty()
+                        && known_requirements
+                            .iter()
+                            .all(|requirement| requirement.as_str().starts_with('='))
+                    {
+                        1
+                    } else {
+                        self.budget.limit(BudgetDimension::CandidateManifests)
+                    }
+                });
             let mut listing = provider.list_releases(
                 &locator,
                 package,
@@ -1719,13 +1750,28 @@ impl DiscoverySession {
                     .then_with(|| right.version.cmp(&left.version))
                     .then_with(|| left.tag.cmp(&right.tag))
             });
+            let pinned_release = if let Some(version) = &missing_pin {
+                let position = listing
+                    .releases
+                    .iter()
+                    .position(|release| &release.version == version)
+                    .ok_or_else(|| DiscoveryError::RemoteUnavailable {
+                        package: package.to_string(),
+                        reason: format!(
+                            "locked release `{version}` is unavailable within the bounded GitHub release listing"
+                        ),
+                    })?;
+                Some(listing.releases.remove(position))
+            } else {
+                None
+            };
             self.exclusions
                 .entry(package.clone())
                 .or_default()
                 .extend(listing.exclusions);
-            for release in listing
-                .releases
+            for release in pinned_release
                 .into_iter()
+                .chain(listing.releases)
                 .take(self.budget.limit(BudgetDimension::CandidateManifests) as usize)
             {
                 let mut material = match provider.fetch_manifest(
@@ -1762,21 +1808,8 @@ impl DiscoverySession {
                             message,
                         })?;
                     // A verified installed pin already supplies its shell.
-                    // Fetch the remote shell only if that pin cannot be read
-                    // locally; a selected remote is checked at staging too.
-                    let local_pin_available = self
-                        .candidates
-                        .get(package)
-                        .into_iter()
-                        .flatten()
-                        .any(|candidate| {
-                            matches!(
-                                candidate,
-                                CandidateMaterial::Local { entry, .. }
-                                    if entry.version == locked.version
-                            )
-                        });
-                    if !local_pin_available {
+                    // An uncached pin must verify both downloaded assets.
+                    if missing_pin.as_ref() == Some(&release.version) {
                         let shell_path = provider.fetch_selected_shell(
                             &material,
                             &temp_root,
@@ -1837,6 +1870,21 @@ impl DiscoverySession {
                         .map(|request| request.package.clone()),
                 );
                 self.insert_material(package.clone(), CandidateMaterial::Remote(material))?;
+            }
+            if let Some(version) = &missing_pin
+                && !self
+                    .candidates
+                    .get(package)
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| {
+                        matches!(candidate, CandidateMaterial::Remote(material) if &material.typed.package.version == version)
+                    })
+            {
+                return Err(DiscoveryError::RemoteUnavailable {
+                    package: package.to_string(),
+                    reason: format!("locked release `{version}` could not be verified"),
+                });
             }
             Ok(())
         })();

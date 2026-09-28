@@ -1376,6 +1376,159 @@ async fn targeted_refresh_and_outdated_reject_an_unrelated_corrupt_locked_hash()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_uncached_lock_pin_outside_the_candidate_window_is_verified_and_preserved() {
+    let directory = tempdir().unwrap();
+    let artifacts_root = directory.path().join("release-artifacts");
+    fs::create_dir_all(&artifacts_root).unwrap();
+    let registry = directory.path().join("registry");
+    let mut releases = Vec::new();
+    for minor in 0..65 {
+        let version = format!("1.{minor}.0");
+        let (archive, shell) = build_release_artifacts(&artifacts_root, "nautilus", &version);
+        if minor == 0 {
+            chelis_reef::install_validated_artifact_pair(
+                &archive, &shell, "nautilus", &version, &registry, None,
+            )
+            .unwrap();
+        }
+        releases.push((
+            version,
+            fs::read(archive).unwrap(),
+            fs::read(shell).unwrap(),
+        ));
+    }
+    let (coral_archive, coral_shell) = build_release_artifacts(&artifacts_root, "coral", "1.0.0");
+    chelis_reef::install_validated_artifact_pair(
+        &coral_archive,
+        &coral_shell,
+        "coral",
+        "1.0.0",
+        &registry,
+        None,
+    )
+    .unwrap();
+
+    let root = directory.path().join("app");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"pinned-app\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\ncoral = \"^1\"\nnautilus = \"^1\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.ch"),
+        "module Remote.Main\n\ndef main() -> i32 = 1\n",
+    )
+    .unwrap();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .args(["reef", "update", "--offline"])
+        .assert()
+        .success();
+
+    let lock_path = root.join("reef.lock");
+    let good_lock = fs::read_to_string(&lock_path).unwrap();
+    let index_path = registry.join("index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+    let digest = index["packages"]["nautilus"][0]["archive_sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    index["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("nautilus");
+    let index_before = serde_json::to_vec_pretty(&index).unwrap();
+    fs::write(&index_path, &index_before).unwrap();
+    fs::remove_dir_all(registry.join("packages/nautilus/1.0.0")).unwrap();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wire_path("/repos/chelis-lang/coral/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    let versions = releases
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(minor, (version, _, _))| {
+            (
+                version.as_str(),
+                1_000 + minor as u64 * 2,
+                1_001 + minor as u64 * 2,
+            )
+        })
+        .collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(wire_path("/repos/chelis-lang/nautilus/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_json("nautilus", &versions)))
+        .mount(&server)
+        .await;
+    for (minor, (_, archive, shell)) in releases.into_iter().enumerate() {
+        for (asset, bytes) in [
+            (1_000 + minor as u64 * 2, archive),
+            (1_001 + minor as u64 * 2, shell),
+        ] {
+            Mock::given(method("GET"))
+                .and(wire_path(format!(
+                    "/repos/chelis-lang/nautilus/releases/assets/{asset}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+                .mount(&server)
+                .await;
+        }
+    }
+    let damaged_lock = good_lock.replacen(
+        &format!("archive_sha256 = \"{digest}\""),
+        &format!("archive_sha256 = \"{}\"", "0".repeat(64)),
+        1,
+    );
+    assert_ne!(damaged_lock, good_lock);
+    fs::write(&lock_path, &damaged_lock).unwrap();
+    for arguments in [
+        ["reef", "outdated", "coral", "--json"].as_slice(),
+        ["reef", "update", "coral"].as_slice(),
+    ] {
+        chelis(&root)
+            .env("CHELIS_REEF_HOME", &registry)
+            .env("CHELIS_REEF_GITHUB_BASE_API", server.uri())
+            .env("GITHUB_TOKEN", "unit-test-token")
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "locked archive hash mismatch for `nautilus`",
+            ));
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), damaged_lock);
+        assert_eq!(fs::read(&index_path).unwrap(), index_before);
+        assert!(!registry.join("packages/nautilus/1.0.0").exists());
+    }
+
+    fs::write(&lock_path, &good_lock).unwrap();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", server.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args(["reef", "outdated", "coral", "--json"])
+        .assert()
+        .success();
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", server.uri())
+        .env("GITHUB_TOKEN", "unit-test-token")
+        .args(["reef", "update", "coral"])
+        .assert()
+        .success();
+    let updated_lock = fs::read_to_string(&lock_path).unwrap();
+    assert!(updated_lock.contains("name = \"nautilus\"\nversion = \"1.0.0\""));
+    assert!(updated_lock.contains(&format!("archive_sha256 = \"{digest}\"")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn exact_requirements_report_incompatible_remote_versions_without_changes() {
     let directory = tempdir().unwrap();
     let artifacts = directory.path().join("exact-artifacts");
@@ -1492,13 +1645,15 @@ async fn a_missing_local_directory_refreshes_from_the_locked_repository() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(wire_path("/repos/acme/nautilus/releases"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(release_json("nautilus", &[("1.1.0", 610, 611)])),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_json(
+            "nautilus",
+            &[("1.0.0", 600, 601), ("1.1.0", 610, 611)],
+        )))
         .mount(&server)
         .await;
     for (id, bytes) in [
+        (600, fs::read(&archive_100).unwrap()),
+        (601, fs::read(&shell_100).unwrap()),
         (610, fs::read(&archive_110).unwrap()),
         (611, fs::read(&shell_110).unwrap()),
     ] {
@@ -1519,11 +1674,19 @@ async fn a_missing_local_directory_refreshes_from_the_locked_repository() {
         .success();
     let updated_lock = fs::read_to_string(root.join("reef.lock")).unwrap();
     assert!(updated_lock.contains("github://acme/nautilus@v1.1.0"));
+    let requests = server.received_requests().await.unwrap();
     assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap()
+        requests
+            .iter()
+            .any(|request| { request.url.path() == "/repos/acme/nautilus/releases/assets/600" })
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| { request.url.path() == "/repos/acme/nautilus/releases/assets/601" })
+    );
+    assert!(
+        requests
             .iter()
             .all(|request| request.url.path().contains("/repos/acme/"))
     );

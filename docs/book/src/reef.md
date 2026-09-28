@@ -217,6 +217,13 @@ Reef applies these production limits:
 
 A limit error names the resource, limit, observed value, package, and provider operation.
 
+When an existing registry lock pin has no verified local package or index entry,
+Reef reserves one candidate-manifest slot for that exact release before scanning
+newer candidates. If the pin is absent from the bounded release listing, cannot
+be fetched, or disagrees with the locked archive or shell hash, refresh and
+inspection fail without selecting another version, even for an unrelated package
+in a targeted refresh.
+
 Reef scans candidate archives without archive extraction. It accepts one regular root `reef.toml` and rejects unsafe archive entries.
 
 ### Update and outdated commands
