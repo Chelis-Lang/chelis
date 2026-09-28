@@ -727,6 +727,7 @@ impl Env {
         // which each in-group use then owes.
         let shared = self.instantiate_scheme(
             &Scheme {
+                result_origin: None,
                 constraints: Vec::new(),
                 ..header.clone()
             },
@@ -755,6 +756,7 @@ impl Env {
             })
             .collect::<Vec<_>>();
         let provisional = Scheme {
+            result_origin: None,
             tvar_restrictions: hole_tvars
                 .iter()
                 .filter_map(|var| {
@@ -1064,9 +1066,13 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> InstantiatedScheme {
+        let origin = scheme.result_origin.as_ref();
+        let tvars = origin.map_or(&scheme.tvars, |origin| &origin.tvars);
+        let dvars = origin.map_or(&scheme.dvars, |origin| &origin.dvars);
+        let rvars = origin.map_or(&scheme.rvars, |origin| &origin.rvars);
         let mut subst = Subst::new();
-        let mut tvar_mapping = Vec::with_capacity(scheme.tvars.len());
-        for &tv in &scheme.tvars {
+        let mut tvar_mapping = Vec::with_capacity(tvars.len());
+        for &tv in tvars {
             let fresh = var_gen.fresh_type();
             subst
                 .insert_type(tv, fresh.clone())
@@ -1103,7 +1109,7 @@ impl Env {
         // inserted below, so a constraint whose carried type mentions one gets
         // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
-        for &dv in &scheme.dvars {
+        for &dv in dvars {
             // Mint the variable directly rather than destructuring
             // `fresh_dim()`: that is `Dim::Var(fresh_dvar())` today, but a
             // pattern match would silently drop the mapping entry (and the
@@ -1122,7 +1128,7 @@ impl Env {
             }
         }
         let mut rvar_mapping = Vec::with_capacity(scheme.rvars.len());
-        for &rv in &scheme.rvars {
+        for &rv in rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
             let fresh_rv = var_gen.fresh_rvar();
@@ -1133,8 +1139,13 @@ impl Env {
             let renamed = constraint.map_types(|ty| subst.apply(ty));
             inference_subst.record_collection_contract(renamed);
         }
+        if let Some(origin) = origin {
+            for equation in &origin.equations {
+                inference_subst.record_result_constraint(equation.map_types(|ty| subst.apply(ty)));
+            }
+        }
         InstantiatedScheme {
-            ty: subst.apply(&scheme.body),
+            ty: subst.apply(origin.map_or(&scheme.body, |origin| &origin.body)),
             tvars: tvar_mapping,
             dvars: dvar_mapping,
             rvars: rvar_mapping,
@@ -1388,6 +1399,7 @@ impl Env {
             .collect();
         (
             Scheme {
+                result_origin: None,
                 tvars,
                 tvar_restrictions,
                 dvars: ty_dvars
@@ -1488,6 +1500,7 @@ impl Env {
             .collect();
         (
             Scheme {
+                result_origin: None,
                 tvars,
                 tvar_restrictions,
                 dvars: free_dvars(&ty)
@@ -1654,6 +1667,7 @@ mod module_scope_tests {
             result: result.clone(),
         };
         let checked = Scheme {
+            result_origin: None,
             tvars: Vec::new(),
             tvar_restrictions: Vec::new(),
             dvars: Vec::new(),
@@ -1894,6 +1908,7 @@ mod tests {
     /// distinguishable from the correct one.
     fn restricted_scheme() -> Scheme {
         Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
@@ -1966,6 +1981,7 @@ mod tests {
         let quantified = DimVar(9);
         let quantified_rank = RankVar(10);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -2163,6 +2179,7 @@ mod tests {
         let quantified_dim = DimVar(20);
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
@@ -2199,6 +2216,7 @@ mod tests {
         let outer_dim = DimVar(22);
         let outer_rank = RankVar(32);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
@@ -2240,6 +2258,7 @@ mod tests {
         let target_dim = DimVar(51);
         let target_rank = RankVar(61);
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],

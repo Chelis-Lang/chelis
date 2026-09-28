@@ -626,7 +626,8 @@ pub(super) fn infer_let(
                     subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {
-                    let scheme = let_env.generalize(&final_ty, subst);
+                    let scheme =
+                        product.generalize_result_origins(&final_ty, &let_env, subst, None, errors);
                     subst.name_generic_parameters(&scheme, name, &UnordMap::new());
                     scheme
                 };

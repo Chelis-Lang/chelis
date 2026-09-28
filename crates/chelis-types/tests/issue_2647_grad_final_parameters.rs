@@ -387,3 +387,246 @@ fn recursive_return_joins_cannot_supply_a_gradient_parameter_binding() {
         check(&format!("{sibling}\n{driver}"), accepted);
     }
 }
+
+#[test]
+fn result_constraint_origins_survive_helpers_inferred_before_grad() {
+    for helper in [
+        "fn (p) -> {\n d: (f32 -> f32) = p\n d\n}",
+        "fn (p) -> {\n alias = p\n d: (f32 -> f32) = alias\n d\n}",
+        "fn (p) -> if flag then p else grad(fn (w: f32) -> 1.0f32)",
+        "fn (p) -> match flag with {\n | true => p\n | false => grad(fn (w: f32) -> 1.0f32)\n}",
+    ] {
+        for (parameter, tail, accepted) in [
+            ("w", "g", false),
+            ("w: f32", "g", true),
+            ("w", "g(2.0f32)", true),
+            ("w", "g(true)", false),
+        ] {
+            check(
+                &format!(
+                    "def main(flag: bool) = {{\n take = {helper}\n g = take(grad(fn ({parameter}) -> 1.0f32))\n {tail}\n}}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn selector_origins_survive_generalization_before_grad() {
+    for body in [
+        "if flag then f else h",
+        "match flag with {\n | true => f\n | false => h\n}",
+    ] {
+        for (parameter, tail, accepted) in [
+            ("w", "g", false),
+            ("w: f32", "g", true),
+            ("w", "g(2.0f32)", true),
+            ("w", "g(true)", false),
+        ] {
+            check(
+                &format!(
+                    "def main(flag: bool) = {{\n choose = fn (f, h) -> {body}\n g = choose(grad(fn ({parameter}) -> 1.0f32), grad(fn (w: f32) -> 1.0f32))\n {tail}\n}}"
+                ),
+                accepted,
+            );
+        }
+        check(
+            &format!(
+                "def main(flag: bool) = {{\n choose = fn (f, h) -> {body}\n number = choose(1.0f32, 2.0f32)\n truth = choose(true, false)\n (number, truth)\n}}"
+            ),
+            true,
+        );
+        check(
+            &format!(
+                "def main(flag: bool) = {{\n choose = fn (f, h) -> {body}\n choose(1.0f32, true)\n}}"
+            ),
+            false,
+        );
+    }
+}
+
+#[test]
+fn list_element_equality_is_a_result_constraint() {
+    for parameter in ["w", "w: f32"] {
+        let unknown = format!("grad(fn ({parameter}) -> 1.0f32)");
+        let known = "grad(fn (w: f32) -> 1.0f32)";
+        for (left, right) in [(&unknown[..], known), (known, &unknown[..])] {
+            check(&format!("def main() = [{left}, {right}]"), parameter != "w");
+            check(
+                &format!("def main() = {{\n g = {unknown}\n zero = g(2.0f32)\n [g, {known}]\n}}"),
+                true,
+            );
+            check(
+                &format!("def main() = {{\n g = {unknown}\n zero = g(true)\n [g, {known}]\n}}"),
+                false,
+            );
+        }
+    }
+}
+
+#[test]
+fn published_helpers_preserve_result_constraint_origins() {
+    for helper in [
+        "def forward_grad(p) -> (f32 -> f32) = p",
+        "def forward_grad(p) = {\n d: (f32 -> f32) = p\n d\n}",
+    ] {
+        check(
+            &format!("{helper}\ndef main() = forward_grad(grad(fn (w) -> 1.0f32))"),
+            false,
+        );
+        check(
+            &format!("{helper}\ndef main() = (forward_grad(grad(fn (w) -> 1.0f32)))(2.0f32)"),
+            true,
+        );
+        check(
+            &format!("{helper}\ndef main() = forward_grad(grad(fn (w: f32) -> 1.0f32))"),
+            true,
+        );
+    }
+}
+
+#[test]
+fn recursive_helpers_preserve_result_constraint_origins() {
+    for flag in ["flag", "flag: bool"] {
+        for body in [
+            "if flag then {\n d: (f32 -> f32) = p\n d\n} else forward_grad(p, true)",
+            "if flag then p else forward_grad(grad(fn (w: f32) -> 1.0f32), true)",
+        ] {
+            let helper = format!("def forward_grad(p, {flag}) = {body}");
+            check(
+                &format!("{helper}\ndef main() = forward_grad(grad(fn (w) -> 1.0f32), true)"),
+                false,
+            );
+            check(
+                &format!(
+                    "{helper}\ndef main() = (forward_grad(grad(fn (w) -> 1.0f32), true))(2.0f32)"
+                ),
+                true,
+            );
+            check(
+                &format!("{helper}\ndef main() = forward_grad(grad(fn (w: f32) -> 1.0f32), true)"),
+                true,
+            );
+        }
+    }
+}
+
+#[test]
+fn recursive_helper_input_applications_remain_binding_sites() {
+    let apply = "def apply_grad(p, flag: bool) = if flag then p(2.0f32) else sibling_grad(p, true)";
+    let sibling = "def sibling_grad(p, flag: bool) = apply_grad(p, flag)";
+    for definitions in [format!("{apply}\n{sibling}"), format!("{sibling}\n{apply}")] {
+        check(
+            &format!("{definitions}\ndef main() = sibling_grad(grad(fn (w) -> 1.0f32), true)"),
+            true,
+        );
+        check(
+            &format!(
+                "{definitions}\ndef main() = sibling_grad(grad(fn (w: bool) -> 1.0f32), true)"
+            ),
+            false,
+        );
+    }
+}
+
+#[test]
+fn result_origins_cross_recursive_sibling_chains() {
+    let first = "def first_grad(p, flag: bool) = second_grad(p, flag)";
+    let second = "def second_grad(p, flag: bool) = third_grad(p, flag)";
+    let third = "def third_grad(p, flag: bool) = if flag then {\n d: (f32 -> f32) = p\n d\n} else first_grad(p, true)";
+    for definitions in [
+        format!("{first}\n{second}\n{third}"),
+        format!("{third}\n{second}\n{first}"),
+    ] {
+        for name in ["first_grad", "second_grad", "third_grad"] {
+            check(
+                &format!("{definitions}\ndef main() = {name}(grad(fn (w) -> 1.0f32), true)"),
+                false,
+            );
+            check(
+                &format!(
+                    "{definitions}\ndef main() = ({name}(grad(fn (w) -> 1.0f32), true))(2.0f32)"
+                ),
+                true,
+            );
+        }
+    }
+}
+
+#[test]
+fn result_origins_follow_recursive_result_projections() {
+    let first = "def first_grad(p, flag: bool) = second_grad(p, flag).0";
+    let second =
+        "def second_grad(p, flag: bool) = if flag then (p, true) else (first_grad(p, true), true)";
+    for definitions in [format!("{first}\n{second}"), format!("{second}\n{first}")] {
+        check(
+            &format!("{definitions}\ndef main() = first_grad(grad(fn (w) -> 1.0f32), true)"),
+            false,
+        );
+        check(
+            &format!(
+                "{definitions}\ndef main() = (first_grad(grad(fn (w) -> 1.0f32), true))(2.0f32)"
+            ),
+            true,
+        );
+        check(
+            &format!(
+                "{definitions}\ndef main() = (first_grad(grad(fn (w: f32) -> 1.0f32), true))(true)"
+            ),
+            false,
+        );
+    }
+}
+
+#[test]
+fn record_updates_preserve_result_constraint_origins() {
+    for (parameter, tail, accepted) in [
+        ("w", "updated", false),
+        ("w: f32", "updated", true),
+        ("w", "updated.value(2.0f32)", true),
+        ("w", "updated.value(true)", false),
+    ] {
+        check(
+            &format!(
+                "type Holder[a] = | Holder {{ value: a }}\ndef main() = {{\n base = Holder {{ value: grad(fn (w: f32) -> 1.0f32) }}\n updated = base with {{ value: grad(fn ({parameter}) -> 1.0f32) }}\n {tail}\n}}"
+            ),
+            accepted,
+        );
+    }
+}
+
+#[test]
+fn checked_library_round_trip_preserves_result_constraint_origins() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    for library in [
+        "def forward_grad(p) -> (f32 -> f32) = p",
+        "def forward_grad(p, flag: bool) = if flag then {\n d: (f32 -> f32) = p\n d\n} else forward_grad(p, true)",
+    ] {
+        let parsed = parse_str(library).unwrap();
+        let library = desugar_program(&parsed).unwrap();
+        let context = build_type_env_from_library(&library).unwrap();
+        let restored: TypeEnv =
+            bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
+        let arity = match &context.scheme("forward_grad").unwrap().body {
+            chelis_types::types::Type::Fn(params, _) => params.len(),
+            _ => unreachable!(),
+        };
+        let flag = if arity == 2 { ", true" } else { "" };
+        for (parameter, application, accepted) in [
+            ("w", "", false),
+            ("w: f32", "", true),
+            ("w", "(2.0f32)", true),
+            ("w", "(true)", false),
+        ] {
+            let source = format!(
+                "def main() = (forward_grad(grad(fn ({parameter}) -> 1.0f32){flag})){application}"
+            );
+            let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+            for context in [&context, &restored] {
+                let checked = check_ir_with_context(context, &program);
+                assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
+            }
+        }
+    }
+}

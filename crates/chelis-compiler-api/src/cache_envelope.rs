@@ -90,7 +90,8 @@ impl CachePayload for crate::LibraryContext {
     // annotations are node-spelled on every ingress.
     // V20 (chelis#2413): `Effect::Random` is gone, so every effect's bincode
     // variant index shifted, and Deep lost the `random` handler kind.
-    const FORMAT_VERSION: u32 = 20;
+    // V21: generalized checker schemes retain result-equation origins.
+    const FORMAT_VERSION: u32 = 21;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -131,7 +132,8 @@ impl CachePayload for crate::StdLibContext {
     // movement bound or extent claim is a trap seed, so a cached lowered
     // library's claim carriers and retained dead nodes change meaning while
     // their bincode shape does not.
-    const FORMAT_VERSION: u32 = 35;
+    // V36: generalized checker schemes retain result-equation origins.
+    const FORMAT_VERSION: u32 = 36;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

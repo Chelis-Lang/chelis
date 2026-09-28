@@ -800,29 +800,39 @@ fn infer_app_inner(
         func_name.as_deref(),
         Some("len" | "index" | "append" | "concat")
     );
+    let mut ret_tv =
+        match unify_checked_call_contract(expr, &func_ty, &arg_tys, vg, subst, errors, product) {
+            Ok(ret_ty) => ret_ty,
+            Err(rejected) => return_with_collection_cleanup!(rejected),
+        };
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     if direct_collection_builtin {
         subst.discard_collection_contracts(&callee_collection_contracts);
     } else if matches!(
         subst.apply(&func_ty),
         Type::Fn(ref params, _) if params.len() == arg_tys.len()
     ) {
+        let alternatives = product.callable_result_alternatives(&func_ty, subst);
         let tensor_concat = subst
-            .collection_contracts_include_concat(&callee_collection_contracts, &func_ty)
+            .collection_contracts_include_concat(&callee_collection_contracts, &alternatives)
             .then(|| tensor_concat_call_evidence(kids, env, subst, errors, product));
         subst.prepare_collection_contract_call(
             &callee_collection_contracts,
-            &func_ty,
+            &alternatives,
             tensor_concat,
         );
     }
-    let mut ret_tv =
-        match unify_checked_call_contract(expr, &func_ty, &arg_tys, vg, subst, errors, product) {
-            Ok(ret_ty) => ret_ty,
-            Err(rejected) => return_with_collection_cleanup!(rejected),
-        };
-    if let Some(checked_result) =
-        subst.finish_collection_contract_application(collection_contract_mark, &arg_tys, &ret_tv)
-    {
+    let related_results = product
+        .result_equations_for(&subst.apply(&ret_tv), subst)
+        .into_iter()
+        .flat_map(|equation| equation.types().into_iter().cloned().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    if let Some(checked_result) = subst.finish_collection_contract_application(
+        collection_contract_mark,
+        &arg_tys,
+        &ret_tv,
+        &related_results,
+    ) {
         ret_tv = checked_result;
     }
     absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);

@@ -929,7 +929,8 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V23\n";
 /// runtime having none. That change shipped on main as V31, a number the
 /// explicit-key switch's unshipped intermediate state had already used, so
 /// the merged format takes the next number above both.
-const CACHE_FORMAT_VERSION: u32 = 38;
+/// V39 (chelis#2647): generalized schemes retain result-equation origins.
+const CACHE_FORMAT_VERSION: u32 = 39;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1688,7 +1689,7 @@ mod tests {
     #[test]
     fn cache_format_version_tracks_the_key_operand_random_nodes() {
         assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V23\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 38);
+        assert_eq!(CACHE_FORMAT_VERSION, 39);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

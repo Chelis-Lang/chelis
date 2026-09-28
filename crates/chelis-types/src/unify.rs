@@ -194,6 +194,8 @@ impl DimObservation {
 /// [`Subst::insert_dim`] to record new bindings during unification.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
+    #[serde(skip)]
+    result_constraints: Mutex<Vec<crate::types::ResultConstraint>>,
     types: Mutex<UnordMap<TypeVar, Type>>,
     /// Semantic domains attached to unresolved type variables. This is
     /// serialized with reusable checking contexts: a constrained function
@@ -939,6 +941,12 @@ pub enum DeferredOpaqueUse {
 impl Clone for Subst {
     fn clone(&self) -> Self {
         Subst {
+            result_constraints: Mutex::new(
+                self.result_constraints
+                    .lock()
+                    .expect("result constraints poisoned")
+                    .clone(),
+            ),
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
             tvar_restrictions: Mutex::new(
                 self.tvar_restrictions
@@ -1014,6 +1022,21 @@ impl Clone for Subst {
 }
 
 impl Subst {
+    pub(crate) fn record_result_constraint(&self, constraint: crate::types::ResultConstraint) {
+        self.result_constraints
+            .lock()
+            .expect("result constraints poisoned")
+            .push(constraint);
+    }
+
+    pub(crate) fn take_result_constraints(&self) -> Vec<crate::types::ResultConstraint> {
+        std::mem::take(
+            &mut *self
+                .result_constraints
+                .lock()
+                .expect("result constraints poisoned"),
+        )
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -1339,7 +1362,11 @@ impl Subst {
             .key_free_tvars
             .lock()
             .expect("subst.key_free_tvars poisoned");
-        for tv in &scheme.tvars {
+        for tv in scheme
+            .result_origin
+            .as_ref()
+            .map_or(&scheme.tvars, |origin| &origin.tvars)
+        {
             let binder = binders
                 .iter()
                 .find(|(declared, _)| {
@@ -1652,9 +1679,9 @@ impl Subst {
     pub(crate) fn collection_contracts_include_concat(
         &self,
         ids: &[CollectionContractId],
-        callee: &Type,
+        callees: &[Type],
     ) -> bool {
-        let callee = self.apply(callee);
+        let callees = callees.iter().map(|ty| self.apply(ty)).collect::<Vec<_>>();
         self.collection_contracts
             .lock()
             .expect("subst.collection_contracts poisoned")
@@ -1662,9 +1689,9 @@ impl Subst {
             .any(|instance| {
                 ids.contains(&instance.id)
                     && matches!(instance.constraint, CollectionConstraint::Concat { .. })
-                    && collection_contract_callable_type(
+                    && callees.contains(&collection_contract_callable_type(
                         &instance.constraint.map_types(|carried| self.apply(carried)),
-                    ) == callee
+                    ))
             })
     }
 
@@ -1672,10 +1699,10 @@ impl Subst {
     pub(crate) fn prepare_collection_contract_call(
         &self,
         ids: &[CollectionContractId],
-        callee: &Type,
+        callees: &[Type],
         tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
     ) {
-        let callee = self.apply(callee);
+        let callees = callees.iter().map(|ty| self.apply(ty)).collect::<Vec<_>>();
         let mut contracts = self
             .collection_contracts
             .lock()
@@ -1685,7 +1712,7 @@ impl Subst {
                 continue;
             }
             let normalized = instance.constraint.map_types(|carried| self.apply(carried));
-            if collection_contract_callable_type(&normalized) != callee {
+            if !callees.contains(&collection_contract_callable_type(&normalized)) {
                 continue;
             }
             let evidence = matches!(instance.constraint, CollectionConstraint::Concat { .. })
@@ -1710,6 +1737,7 @@ impl Subst {
         mark: CollectionContractId,
         arguments: &[Type],
         result: &Type,
+        related_results: &[Type],
     ) -> Option<Type> {
         let ids = self.collection_contract_ids_since(mark);
         let applied_result = self.apply(result);
@@ -1740,7 +1768,11 @@ impl Subst {
                 }
                 CollectionContractState::Transport => {
                     let normalized = instance.constraint.map_types(|carried| self.apply(carried));
-                    if collection_contract_visible_in_type(&normalized, &applied_result) {
+                    if collection_contract_visible_in_type(&normalized, &applied_result)
+                        || related_results.iter().any(|ty| {
+                            collection_contract_visible_in_type(&normalized, &self.apply(ty))
+                        })
+                    {
                         self.restore_collection_contract_instance(instance);
                     } else if collection_contract_tied_to_arguments(
                         &instance.constraint,
@@ -2160,7 +2192,10 @@ impl Subst {
     /// lookups land in O(1).
     pub fn apply(&self, ty: &Type) -> Type {
         match ty {
-            Type::Var(v) => self.resolve_tvar(*v),
+            Type::Var(v) => match self.resolve_tvar(*v) {
+                Type::Var(variable) => Type::Var(variable),
+                bound => self.apply(&bound),
+            },
             Type::Fn(args, ret) => {
                 let args = args.iter().map(|a| self.apply(a)).collect();
                 let ret = Box::new(self.apply(ret));
@@ -4202,6 +4237,26 @@ fn occurs_in_dim(v: DimVar, dim: &Dim, subst: &Subst) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn substitution_resolves_variables_inside_a_late_bound_constructor() {
+        let outer = Type::Var(TypeVar(100));
+        let inner = Type::Var(TypeVar(101));
+        let mut subst = Subst::new();
+        unify(&outer, &Type::Tuple(vec![inner.clone()]), &mut subst).unwrap();
+        unify(&inner, &Type::Prim(Prim::F32), &mut subst).unwrap();
+        assert_eq!(
+            subst.apply(&outer),
+            Type::Tuple(vec![Type::Prim(Prim::F32)])
+        );
+        assert!(
+            unify(
+                &outer,
+                &Type::Tuple(vec![Type::Prim(Prim::Bool)]),
+                &mut subst
+            )
+            .is_err()
+        );
+    }
     use super::*;
 
     #[test]
@@ -4421,6 +4476,7 @@ mod tests {
             Dim::Var(capture)
         );
         let scheme = Scheme {
+            result_origin: None,
             constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
@@ -4932,6 +4988,7 @@ mod tests {
             let mut vg = var_gen();
             let value = vg.fresh_tvar();
             let scheme = Scheme {
+                result_origin: None,
                 tvars: vec![value],
                 tvar_restrictions: vec![(value, restriction)],
                 dvars: vec![],

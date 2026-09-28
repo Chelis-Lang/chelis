@@ -319,10 +319,17 @@ pub(super) fn infer_record(
     // constructor name, so same-named constructors from colliding
     // ADTs (chelis#148) would dispatch the field types to whichever
     // deftype registered last.
-    let (instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
+    let (mut instantiated_arg_types, instantiated_ret) = match adt_reg.lookup(adt_name) {
         Some(adt_def) => instantiate_variant_of(adt_def, variant, vg),
         None => (Vec::new(), vg.fresh_type()),
     };
+    split_record_result_origin(
+        &mut instantiated_arg_types,
+        &instantiated_ret,
+        vg,
+        subst,
+        product,
+    );
 
     for kv_expr in kids.iter().skip(1) {
         // chelis#1107: read the `kv` through `stamped_parts`, which accepts
@@ -687,6 +694,30 @@ pub(super) fn infer_access(
     }
 }
 
+/// Constructor field occurrences are inputs; their equality is owned by
+/// the resulting record. Construction and update use the same relation.
+fn split_record_result_origin(
+    fields: &mut Vec<Type>,
+    result: &Type,
+    vg: &mut VarGen,
+    subst: &Subst,
+    product: &mut InferenceProduct,
+) {
+    let signature = Type::Fn(fields.clone(), Box::new(result.clone()));
+    let variables = crate::env::free_tvars(&signature)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(origin) = ResultOrigin::aggregate(&signature, &variables, &[], &[], vg) {
+        for equation in origin.equations {
+            subst.record_result_constraint(equation);
+        }
+        product.import_result_constraints(subst);
+        if let Type::Fn(params, _) = origin.body {
+            *fields = params;
+        }
+    }
+}
+
 /// Infer `(record-update {} target (kv {} field value)...)` — Deep
 /// functional record update (RFC D-CHECK prerequisite inference).
 #[allow(clippy::too_many_arguments)]
@@ -785,6 +816,21 @@ pub(super) fn infer_record_update(
             };
             let field_types =
                 instantiated_field_types(adt_name, variant, &resolved, adt_reg, vg, subst);
+            let definition = adt_reg
+                .lookup(adt_name)
+                .expect("the record variant belongs to its registered definition");
+            let (mut update_fields, updated) = instantiate_variant_of(definition, variant, vg);
+            split_record_result_origin(&mut update_fields, &updated, vg, subst, product);
+            for (position, (field_name, _)) in variant.fields.iter().enumerate() {
+                if !kv_pairs
+                    .iter()
+                    .any(|(name, _)| field_name.as_deref() == Some(*name))
+                    && let Err(error) =
+                        unify(&field_types[position], &update_fields[position], subst)
+                {
+                    errors.push(error.into());
+                }
+            }
             for (field_name, value_ty) in &kv_pairs {
                 let pos = variant
                     .fields
@@ -792,7 +838,7 @@ pub(super) fn infer_record_update(
                     .position(|(n, _)| n.as_deref() == Some(*field_name));
                 match pos {
                     Some(pos) => {
-                        if let Some(field_ty) = field_types.get(pos)
+                        if let Some(field_ty) = update_fields.get(pos)
                             && let Err(te) = unify(value_ty, field_ty, subst)
                         {
                             errors.push(te.into());
@@ -814,7 +860,12 @@ pub(super) fn infer_record_update(
                     }
                 }
             }
-            subst.apply(&resolved)
+            if !product.defer_result_type_constraint(&updated, &resolved, subst)
+                && let Err(error) = unify(&updated, &resolved, subst)
+            {
+                errors.push(error.into());
+            }
+            subst.apply(&updated)
         }
         Type::Var(tv) => {
             subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::RecordUpdate);

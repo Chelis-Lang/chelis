@@ -58,6 +58,7 @@
 use super::*;
 
 /// One in-group reference to a member whose header omits a type.
+#[derive(Clone)]
 pub(super) struct GroupReference {
     /// The declaration whose body holds the reference.
     pub(super) caller: Option<String>,
@@ -193,10 +194,8 @@ fn resolve(variable: Variable, subst: &Subst) -> Resolved {
     }
 }
 
-/// `ty` with every bound variable resolved. `Subst::apply` resolves a
-/// variable to its binding as the binding was recorded, and a binding
-/// recorded before one of its own variables was bound still names that
-/// variable, so the application is repeated until nothing changes.
+/// `ty` with every bound variable resolved, including dimension and rank
+/// substitutions exposed by a preceding application.
 pub(super) fn resolved(ty: &Type, subst: &Subst) -> Type {
     let mut current = subst.apply(ty);
     loop {
@@ -331,6 +330,8 @@ fn instance(
     env: &Env,
     vg: &mut VarGen,
     subst: &Subst,
+    origin_product: Option<&InferenceProduct>,
+    binders: &BTreeSet<Variable>,
 ) -> (Type, Vec<(Variable, Variable)>) {
     let mut scheme = Scheme::mono(ty.clone());
     for parameter in parameters {
@@ -339,6 +340,11 @@ fn instance(
             Variable::Dim(var) => scheme.dvars.push(*var),
             Variable::Rank(var) => scheme.rvars.push(*var),
         }
+    }
+    if let Some(product) = origin_product {
+        scheme = origin_scheme(ty, product, subst, |variable| {
+            in_group(variable, subst) && !binders.contains(&variable)
+        });
     }
     let instantiated = env.instantiate_scheme(&scheme, vg, subst);
     let pairs = instantiated
@@ -362,6 +368,70 @@ fn instance(
         )
         .collect();
     (instantiated.ty, pairs)
+}
+
+/// Publish or instantiate the connected component of raw result equations.
+/// Its variables belong to the component before result equality is solved.
+fn origin_scheme(
+    ty: &Type,
+    product: &InferenceProduct,
+    subst: &Subst,
+    quantify: impl Fn(Variable) -> bool,
+) -> Scheme {
+    let body = resolved(ty, subst);
+    let equations = product.result_equations_for(&body, subst);
+    let carried = Type::Tuple(
+        std::iter::once(body.clone())
+            .chain(
+                equations
+                    .iter()
+                    .flat_map(|equation| equation.types())
+                    .cloned(),
+            )
+            .collect(),
+    );
+    let mut scheme = Scheme::mono(body.clone());
+    for variable in variables(&carried).filter(|variable| quantify(*variable)) {
+        match variable {
+            Variable::Type(var) => scheme.tvars.push(var),
+            Variable::Dim(var) => scheme.dvars.push(var),
+            Variable::Rank(var) => scheme.rvars.push(var),
+        }
+    }
+    let visible = crate::env::free_tvars(&carried);
+    for (_, _, constraint) in subst.pending_collection_contracts() {
+        let footprint = constraint
+            .carried_types()
+            .into_iter()
+            .flat_map(crate::env::free_tvars)
+            .collect::<Vec<_>>();
+        if ((!footprint.is_empty() && footprint.iter().all(|variable| visible.contains(variable)))
+            || (footprint.is_empty()
+                && crate::unify::collection_contract_visible_in_type(&constraint, &carried)))
+            && !scheme.constraints.contains(&constraint)
+        {
+            scheme.constraints.push(constraint);
+        }
+    }
+    scheme.tvar_restrictions = scheme
+        .tvars
+        .iter()
+        .filter_map(|var| {
+            subst
+                .tvar_restriction(*var)
+                .map(|restriction| (*var, restriction))
+        })
+        .collect();
+    if !equations.is_empty() {
+        scheme.result_origin = Some(ResultOrigin {
+            body,
+            tvars: scheme.tvars.clone(),
+            dvars: scheme.dvars.clone(),
+            rvars: scheme.rvars.clone(),
+            equations,
+        });
+    }
+    scheme
 }
 
 /// A type up to renaming of its variables, each marked as a parameter or
@@ -504,22 +574,179 @@ pub(super) fn link_group_references(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    let component_checkpoint = errors.checkpoint();
+    product.import_result_constraints(subst);
     let (references, members, siblings) = product.take_group_links();
+    let group = Group::new(&references, &members, env);
+    // The component owns both views of every reference. The raw graph keeps
+    // result equations suspended and gives each reference its own instance;
+    // the ordinary solution below decides [04-INF-2]. Neither view is rebuilt
+    // from a published, already-normalized function signature.
+    let mut raw_references = references.clone();
+    raw_references.extend(
+        siblings
+            .iter()
+            .filter(|link| link.awaits)
+            .map(|link| GroupReference {
+                caller: link.caller.clone(),
+                callee: link.callee.clone(),
+                ty: link.ty.clone(),
+                span_id: link.span_id.clone(),
+                span_offset: link.span_offset,
+            }),
+    );
+    let raw_members = product
+        .group_result_origins
+        .iter()
+        .map(|(name, scheme)| (name.clone(), scheme.body.clone()))
+        .collect::<Vec<_>>();
+    let raw_group = Group::new(&raw_references, &raw_members, env);
+    let mut raw_subst = subst.clone();
+    let mut raw_product = product.origin_component();
+    for link in siblings.iter().filter(|link| !link.awaits) {
+        link_copies(link, &mut raw_subst, errors);
+    }
+    let raw_links = if raw_references.is_empty() {
+        Some(Vec::new())
+    } else {
+        solve(
+            &raw_group,
+            &mut raw_product,
+            env,
+            vg,
+            &mut raw_subst,
+            adt_reg,
+            errors,
+            true,
+        )
+    };
+    product.close_result_inputs();
     for link in &siblings {
         link_copies(link, subst, errors);
     }
-    if references.is_empty() {
-        return;
-    }
-    let group = Group::new(&references, &members, env);
     product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     let binder_classes = group.binders.classes(subst);
     let locals = members
         .iter()
         .map(|(_, ty)| Local::new(ty, &binder_classes, subst))
         .collect::<Vec<_>>();
-    if let Some(links) = solve(&group, product, env, vg, subst, adt_reg, errors) {
+    if let Some(links) = solve(&group, product, env, vg, subst, adt_reg, errors, false) {
         decide(&group, &links, &locals, subst, errors);
+    }
+    if errors.iter_since(component_checkpoint).next().is_some() {
+        product.group_result_origins.clear();
+        return;
+    }
+    let mut canonical_origin = None;
+    if let Some(raw_links) = raw_links {
+        // Complete a private copy of the raw graph with the admitted solution.
+        // This identifies corresponding instance classes, including variables
+        // hidden inside result equations. It never binds the raw input graph.
+        let mut canonical = raw_subst.clone();
+        let roots = Type::Tuple(
+            raw_members
+                .iter()
+                .map(|(_, ty)| ty.clone())
+                .chain(raw_references.iter().map(|reference| reference.ty.clone()))
+                .chain(
+                    product
+                        .group_result_origins
+                        .values()
+                        .map(|scheme| scheme.body.clone()),
+                )
+                .chain(
+                    raw_links
+                        .iter()
+                        .flatten()
+                        .flat_map(|link| &link.instances)
+                        .flat_map(|(own, used)| {
+                            [own, used]
+                                .into_iter()
+                                .filter_map(|variable| match variable {
+                                    Variable::Type(var) => Some(Type::Var(*var)),
+                                    _ => None,
+                                })
+                        }),
+                )
+                .collect(),
+        );
+        for equation in raw_product.result_equations_for(&resolved(&roots, &raw_subst), &raw_subst)
+        {
+            match equation {
+                ResultConstraint::Annotation { actual, declared } => {
+                    if let Err(error) = unify(&actual, &declared, &mut canonical) {
+                        errors.push(error.into());
+                    }
+                }
+                ResultConstraint::Join { inputs, result } => {
+                    for input in inputs {
+                        if let Err(error) = unify(&input, &result, &mut canonical) {
+                            errors.push(error.into());
+                        }
+                    }
+                }
+            }
+        }
+        for ty in raw_members
+            .iter()
+            .map(|(_, ty)| ty)
+            .chain(raw_references.iter().map(|reference| &reference.ty))
+            .chain(
+                product
+                    .group_result_origins
+                    .values()
+                    .map(|scheme| &scheme.body),
+            )
+        {
+            if let Err(error) = unify(ty, &resolved(ty, subst), &mut canonical) {
+                errors.push(error.into());
+            }
+        }
+        for link in raw_links.into_iter().flatten() {
+            for (parameter, instance) in link.instances {
+                let (Variable::Type(parameter), Variable::Type(instance)) = (parameter, instance)
+                else {
+                    continue;
+                };
+                let (Type::Var(own), Type::Var(used)) = (
+                    resolved(&Type::Var(parameter), &raw_subst),
+                    resolved(&Type::Var(instance), &raw_subst),
+                ) else {
+                    continue;
+                };
+                if own != used
+                    && resolved(&Type::Var(own), &canonical)
+                        == resolved(&Type::Var(used), &canonical)
+                {
+                    raw_subst.record_result_constraint(ResultConstraint::Join {
+                        // Keep this producer edge directional. Identifying the
+                        // raw nodes would narrow a generic input to a concrete
+                        // recursive instance before Grad admission.
+                        inputs: vec![Type::Var(own)],
+                        result: Type::Var(used),
+                    });
+                }
+            }
+        }
+        canonical_origin = Some(canonical);
+    }
+    raw_product.import_result_constraints(&raw_subst);
+    for scheme in product.group_result_origins.values_mut() {
+        *scheme = origin_scheme(&scheme.body, &raw_product, &raw_subst, |variable| {
+            in_group(variable, &raw_subst)
+        });
+        if let Some(canonical) = &canonical_origin {
+            let mut normalized_contracts = Vec::new();
+            scheme.constraints.retain(|constraint| {
+                let normalized = constraint.map_types(|ty| canonical.apply(ty));
+                if normalized_contracts.contains(&normalized) {
+                    false
+                } else {
+                    normalized_contracts.push(normalized);
+                    true
+                }
+            });
+        }
     }
 }
 
@@ -561,7 +788,13 @@ fn solve(
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
+    carry_origins: bool,
 ) -> Option<Vec<Option<Link>>> {
+    // A reference instantiates the component's authored graph, never the
+    // copies made for earlier references. Final origin links connect those
+    // instances after canonical admission, so cycles cannot duplicate their
+    // accumulated graphs on every solver round.
+    let origin_templates = carry_origins.then(|| product.origin_component());
     let references = group.references;
     let mut links: Vec<Option<Link>> = references.iter().map(|_| None).collect();
     let mut failed = vec![false; references.len()];
@@ -610,7 +843,15 @@ fn solve(
             .filter_map(|index| {
                 let callee = group.callees[index]?;
                 let snapshot = snapshots[callee].as_ref()?;
-                let (ty, instances) = instance(&snapshot.ty, &snapshot.parameters, env, vg, subst);
+                let (ty, instances) = instance(
+                    &snapshot.ty,
+                    &snapshot.parameters,
+                    env,
+                    vg,
+                    subst,
+                    origin_templates.as_ref(),
+                    &binder_classes,
+                );
                 let link = Link { callee, instances };
                 Some((index, snapshot.ty.clone(), ty, link))
             })

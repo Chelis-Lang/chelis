@@ -2035,6 +2035,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             "uniform_like".to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![template, low, high],
                 tvar_restrictions: vec![],
@@ -2066,6 +2067,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             helper.to_string(),
             Scheme {
+                result_origin: None,
                 constraints: vec![],
                 tvars: vec![tensor],
                 tvar_restrictions: vec![],
@@ -2254,9 +2256,21 @@ pub(super) fn generalize_deferred_recursive_binding(
     binding: DeferredRecursiveBinding,
     env: &Env,
     subst: &Subst,
+    product: &mut InferenceProduct,
 ) -> (String, Scheme) {
-    let scheme =
+    let mut scheme =
         env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
+    if let Some(raw) = product.group_result_origins.remove(&binding.name) {
+        if raw.result_origin.is_some() {
+            scheme.constraints = raw.constraints;
+        }
+        scheme.result_origin = raw.result_origin;
+        for restriction in raw.tvar_restrictions {
+            if !scheme.tvar_restrictions.contains(&restriction) {
+                scheme.tvar_restrictions.push(restriction);
+            }
+        }
+    }
     subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
     (binding.name, scheme)
 }
@@ -2513,7 +2527,14 @@ pub(super) fn infer_top_level(
             declared_ty
         } else if let Some(decl_ty) = declared_ty {
             product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
-            let unify_result = if product.defer_result_type_constraint(&body_ty, &decl_ty, subst) {
+            // Omitted results and prior checked sweep signatures are inference
+            // identities. Only authored annotations add result-only equations.
+            let inferred_result = recursive_expected.is_published()
+                || matches!(&decl_ty, Type::Fn(_, result)
+                if matches!(result.as_ref(), Type::Var(var) if !declared_type_names.contains_key(var)));
+            let unify_result = if !inferred_result
+                && product.defer_result_type_constraint(&body_ty, &decl_ty, subst)
+            {
                 Ok(())
             } else {
                 unify(&body_ty, &decl_ty, subst)
@@ -2743,6 +2764,9 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
+            product
+                .group_result_origins
+                .insert(name.clone(), Scheme::mono(scheme_body.clone()));
             Some(DeferredRecursiveBinding {
                 name,
                 ty: scheme_body,
@@ -2751,8 +2775,13 @@ pub(super) fn infer_top_level(
             })
         } else {
             let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
-            let scheme =
-                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            let scheme = product.generalize_result_origins(
+                &scheme_body,
+                env,
+                subst,
+                Some(&owned_contracts),
+                errors,
+            );
             subst.name_generic_parameters(&scheme, &name, &declared_type_names);
             env.bind(name, scheme);
             None

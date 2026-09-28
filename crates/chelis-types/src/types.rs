@@ -887,9 +887,145 @@ impl CollectionConstraint {
     }
 }
 
+/// A result equation retains its direction through function generalization.
+/// It checks a produced value; it cannot supply an unresolved Grad input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ResultConstraint {
+    Annotation { actual: Type, declared: Type },
+    Join { inputs: Vec<Type>, result: Type },
+}
+
+impl ResultConstraint {
+    pub(crate) fn map_types(&self, mut map: impl FnMut(&Type) -> Type) -> Self {
+        match self {
+            Self::Annotation { actual, declared } => Self::Annotation {
+                actual: map(actual),
+                declared: map(declared),
+            },
+            Self::Join { inputs, result } => Self::Join {
+                inputs: inputs.iter().map(&mut map).collect(),
+                result: map(result),
+            },
+        }
+    }
+
+    pub(crate) fn types(&self) -> Vec<&Type> {
+        match self {
+            Self::Annotation { actual, declared } => vec![actual, declared],
+            Self::Join { inputs, result } => inputs.iter().chain(std::iter::once(result)).collect(),
+        }
+    }
+}
+
+/// The input type and result equations before result-only inference solved
+/// a helper's published signature. Each use instantiates these together.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResultOrigin {
+    pub body: Type,
+    pub tvars: Vec<TypeVar>,
+    pub dvars: Vec<DimVar>,
+    pub rvars: Vec<RankVar>,
+    pub equations: Vec<ResultConstraint>,
+}
+
+impl ResultOrigin {
+    pub(crate) fn aggregate(
+        body: &Type,
+        tvars: &[TypeVar],
+        dvars: &[DimVar],
+        rvars: &[RankVar],
+        vg: &mut VarGen,
+    ) -> Option<Self> {
+        let Type::Fn(params, result) = body else {
+            return None;
+        };
+        let mut occurrences = std::collections::BTreeMap::<TypeVar, Vec<Type>>::new();
+        fn split(
+            ty: &Type,
+            variables: &[TypeVar],
+            occurrences: &mut std::collections::BTreeMap<TypeVar, Vec<Type>>,
+            vg: &mut VarGen,
+        ) -> Type {
+            match ty {
+                Type::Var(var) if variables.contains(var) => {
+                    let fresh = vg.fresh_type();
+                    occurrences.entry(*var).or_default().push(fresh.clone());
+                    fresh
+                }
+                Type::Fn(args, ret) => Type::Fn(
+                    args.iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                    Box::new(split(ret, variables, occurrences, vg)),
+                ),
+                Type::Tuple(items) => Type::Tuple(
+                    items
+                        .iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                ),
+                Type::Adt(name, args) => Type::Adt(
+                    name.clone(),
+                    args.iter()
+                        .map(|ty| split(ty, variables, occurrences, vg))
+                        .collect(),
+                ),
+                Type::KindedAdt(name, args) => Type::KindedAdt(
+                    name.clone(),
+                    args.iter()
+                        .map(|arg| match arg {
+                            NominalArg::Type(ty) => {
+                                NominalArg::Type(split(ty, variables, occurrences, vg))
+                            }
+                            NominalArg::Dimension(_) => arg.clone(),
+                        })
+                        .collect(),
+                ),
+                Type::Ref(inner) => Type::Ref(Box::new(split(inner, variables, occurrences, vg))),
+                Type::Tensor(dims, TensorPrec::Var(var)) if variables.contains(var) => {
+                    let Type::Var(fresh) = split(&Type::Var(*var), variables, occurrences, vg)
+                    else {
+                        unreachable!()
+                    };
+                    Type::Tensor(dims.clone(), TensorPrec::Var(fresh))
+                }
+                _ => ty.clone(),
+            }
+        }
+        let params = params
+            .iter()
+            .map(|ty| split(ty, tvars, &mut occurrences, vg))
+            .collect();
+        let mut quantified = tvars.to_vec();
+        let equations = occurrences
+            .into_iter()
+            .map(|(var, inputs)| {
+                quantified.extend(inputs.iter().filter_map(|ty| match ty {
+                    Type::Var(var) => Some(*var),
+                    _ => None,
+                }));
+                ResultConstraint::Join {
+                    inputs,
+                    result: Type::Var(var),
+                }
+            })
+            .collect::<Vec<_>>();
+        (!equations.is_empty()).then(|| Self {
+            body: Type::Fn(params, result.clone()),
+            tvars: quantified,
+            dvars: dvars.to_vec(),
+            rvars: rvars.to_vec(),
+            equations,
+        })
+    }
+}
+
 /// A polymorphic type scheme: ∀ tvars, dvars. body
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
+    /// Mandatory on the wire: old snapshots must not erase result origin.
+    #[serde(deserialize_with = "deserialize_result_origin")]
+    pub result_origin: Option<ResultOrigin>,
     pub tvars: Vec<TypeVar>,
     /// Domain restrictions for quantified type variables. Entries are kept
     /// in quantifier order for deterministic serialization.
@@ -911,10 +1047,17 @@ pub struct Scheme {
     pub body: Type,
 }
 
+fn deserialize_result_origin<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ResultOrigin>, D::Error> {
+    Option::<ResultOrigin>::deserialize(deserializer)
+}
+
 impl Scheme {
     /// A monomorphic scheme (no quantified variables).
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
+            result_origin: None,
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],

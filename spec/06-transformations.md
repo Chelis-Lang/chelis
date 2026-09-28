@@ -63,6 +63,9 @@ the enclosing declaration boundary is a type error. A result annotation on
 the gradient value does not supply a parameter binding site, including when
 application determines the operand's function type before its parameter types.
 A join with another branch's result likewise does not supply that binding site.
+Result constraints retain this role through function generalization and recursive
+references. Equality imposed by aggregate construction or record update is also
+a result constraint.
 
 The optional `wrt` parameter restricts differentiation to specific parameters:
 
