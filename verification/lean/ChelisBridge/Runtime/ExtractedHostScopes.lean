@@ -25,7 +25,12 @@ borrows beside the state; the successful-exit view `okHost` keeps the state and 
   `ActiveTypeSubstGuard`);
 * `with_inlining(name)` inserts `name` into the inlining set at entry and, at exit, removes it
   only if this scope inserted it (`withInlining_spec`, `withInlining_obligation`:
-  `InliningObligationUnder`); without a name it is the body itself (`withInlining_none`).
+  `InliningObligationUnder`); without a name it is the body itself (`withInlining_none`);
+* `with_preflight(expr)` takes a frame id from the runtime's supply, fills the program's summary
+  cache, analyzes `expr` against it and pushes the frame `{id, facts}` on the tensor-helper
+  preflight stack; the body receives the frame root `{frame := id, node := 0}`, and the exit pops
+  the top frame of the body's final context, failing (the Rust `expect` panic) when the body left
+  none (`withPreflight_spec`, `withPreflight_obligation`: `PreflightObligationFrom`).
 
 `with_inlining` meets `InliningObligation` only on states whose inlining set satisfies the
 model's representation invariant (`InliningInv`: String-ordered, the `BTreeMap.Ordered`
@@ -40,11 +45,11 @@ Every statement quantifies over every closure type and `FnOnce` instance (every 
 production code can pass), covers `Ok` and `Err` results alike (the result type is arbitrary),
 and a failing or diverging body makes the combinator fail too.
 
-Not in the model: `host::with_preflight`. Its entry computes the program's
-`cached_dynamic_to_tensor_def_summaries`, which strict Aeneas does not translate yet (E30), so
-it is not an extraction root. Its target statement is `Scopes.PreflightObligationFrom` (the
-frame is computed at entry from the runtime's frame-id supply and the summary cache, and the
-exit pops the body's top frame, which must exist), not the literal `PreflightObligation`.
+`with_preflight` meets `PreflightObligationFrom`, not the literal `PreflightObligation`: its entry
+changes more than the stack (the frame-id supply and the summary cache) and computes the frame it
+pushes (`preflightEntry`), and its exit fails when the body leaves no frame. The stack is the
+`Vec` of the invocation state, whose last element is the top; `preflightLens` views it top first.
+The entry fails when the stack already holds `usize::MAX` frames (`Vec::push`).
 -/
 
 open Aeneas.Std
@@ -462,5 +467,165 @@ theorem withInlining_obligation_false (m : String) (n : Str) (hm : Str.ofString 
   have := h (fun t => .ok (withOversized t, r)) s
   rw [withInlining_oversized_fails m n hm γ r s hs] at this
   simp [okResult] at this
+
+/-! ## `with_preflight` -/
+
+/-- The tensor-helper preflight frames of the context, top first: the `Vec`'s last element is the
+top (`Vec::push` appends, `Vec::pop` removes the last element). `set` stores a stack of at most
+`usize::MAX` frames and leaves the context unchanged otherwise (no `Vec` holds more). -/
+def preflightLens : Lens HCx (List chelis_ir.host.PreflightFrame) where
+  get s := s.state.invocation.preflight.val.reverse
+  set l s := if h : l.length ≤ Usize.max then
+      { s with state := { s.state with invocation := { s.state.invocation with
+          preflight := ⟨l.reverse, by simpa using h⟩ } } }
+    else s
+
+/-- The entry step of the extracted `with_preflight expr`: take the frame id from the runtime's
+supply (`fresh_preflight_frame`), fill the program's summary cache
+(`cached_dynamic_to_tensor_def_summaries`) and analyze `expr` against those summaries; the scope
+pushes the frame `{id, facts}` on the resulting context. `none` when a step fails or diverges, or
+when the stack already holds `usize::MAX` frames (`Vec::push` fails). -/
+def preflightEntry (expr : chelis_deep.ast.Expr) (s : HCx) :
+    Option (HCx × chelis_ir.host.PreflightFrame) :=
+  match (do
+      let (i, lr) ← Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_preflight_frame
+        s.runtime
+      let (summaries, s₀, _) ←
+        chelis_ir.host.cached_dynamic_to_tensor_def_summaries { s with runtime := lr }
+      let facts ← chelis_ir.host.PreflightFacts.new
+      let (_, facts1) ← chelis_ir.host.analyze_tensor_helper_preflight expr
+        (Aeneas.Std.alloc.sync.DerefArc.deref summaries) facts
+      Result.ok (s₀, ({ id := i, facts := facts1 } : chelis_ir.host.PreflightFrame)) :
+      Result (HCx × chelis_ir.host.PreflightFrame)) with
+  | .ok (s₀, fr) => if s₀.state.invocation.preflight.val.length < Usize.max then some (s₀, fr) else none
+  | _ => none
+
+/-- `Vec::push` succeeds exactly below `usize::MAX` elements, appending. -/
+theorem vec_push_eq {α : Type} (v : alloc.vec.Vec α) (x : α) :
+    v.push x = if h : v.val.length < Usize.max then
+      .ok ⟨v.val ++ [x], by simp; omega⟩ else .fail .maximumSizeExceeded := by
+  unfold alloc.vec.Vec.push
+  by_cases h : v.val.length < Usize.max
+  · simp [h]
+  · have h1 : ¬ (v.val.length + 1 ≤ Usize.max) := by omega
+    have h2 : ¬ (v.val.length + 1 ≤ U32.max) := by
+      rcases Usize.bounds_eq with h3 | h3 <;> simp only [U32.max_eq, U64.max_eq] at h3 ⊢ <;> omega
+    simp [h, h1, h2]
+
+/-- Pushing a frame on a stack that has room is the lens update. -/
+theorem preflightLens_set_push (s : HCx) (fr : chelis_ir.host.PreflightFrame)
+    (h : s.state.invocation.preflight.val.length < Usize.max) :
+    preflightLens.set (fr :: preflightLens.get s) s =
+      { s with state := { s.state with invocation := { s.state.invocation with
+          preflight := ⟨s.state.invocation.preflight.val ++ [fr], by simp; omega⟩ } } } := by
+  have hl : (fr :: s.state.invocation.preflight.val.reverse).length ≤ Usize.max := by simp; omega
+  simp only [preflightLens, hl, _root_.dite_true, List.reverse_cons, List.reverse_reverse]
+
+/-- Popping the top frame of a stack is the lens update. -/
+theorem preflightLens_set_pop (s : HCx) :
+    preflightLens.set (preflightLens.get s).tail s =
+      { s with state := { s.state with invocation := { s.state.invocation with
+          preflight := ⟨s.state.invocation.preflight.val.dropLast, by
+            have := s.state.invocation.preflight.property; simp; omega⟩ } } } := by
+  have hl : s.state.invocation.preflight.val.dropLast.reverse.length ≤ Usize.max := by
+    have := s.state.invocation.preflight.property; simp; omega
+  simp only [preflightLens, List.tail_reverse, List.reverse_reverse, dif_pos hl]
+
+/-- **`with_preflight expr`, every instance**: on a successful entry (`preflightEntry`: fresh
+frame id, filled summary cache, analyzed facts, room on the stack) the body runs on the context
+with the frame `{id, facts}` pushed and receives the frame's root node `{frame := id, node := 0}`;
+at exit the scope pops the top frame of the body's final context, failing (the Rust `expect`
+panic) when the body left no frame; the body's result is returned unchanged. A failing entry or
+body makes the scope fail. -/
+theorem withPreflight_spec {R T1 : Type} (inst) (expr : chelis_deep.ast.Expr) (b : T1) (s : HCx) :
+    okHost (chelis_ir.host.with_preflight (R := R) (T1 := T1) inst expr s b) =
+      match preflightEntry expr s with
+      | none => none
+      | some (s₀, fr) =>
+        match okHost (inst.call_once b (preflightLens.set (fr :: preflightLens.get s₀) s₀,
+            ({ frame := fr.id, node := 0#usize } : chelis_ir.host.PreflightNode))) with
+        | none => none
+        | some (s₁, r) => if preflightLens.get s₁ = [] then none
+            else some (preflightLens.set (preflightLens.get s₁).tail s₁, r) := by
+  simp only [chelis_ir.host.with_preflight]
+  unfold_specialized
+  simp only [Aeneas.Std.chelis_ir.lowering_runtime.scoped, core.ops.function.FnOnceMutArg.thread,
+    core.ops.function.FnOnceMutArgPair.thread, chelis_ir.host.push_preflight_frame,
+    chelis_ir.host.pop_preflight_frame, preflightEntry,
+    Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime.fresh_preflight_frame, bind_tc_ok,
+    Function.uncurry_apply_pair, lift]
+  generalize ({ s.runtime with nextPreflightFrame := _ } :
+    Aeneas.Std.chelis_ir.lowering_runtime.LoweringRuntime) = lr
+  generalize s.runtime.nextPreflightFrame = i
+  generalize ({ checked := s.checked, state := s.state, runtime := lr, native := s.native } : HCx) = s'
+  cases hc : chelis_ir.host.cached_dynamic_to_tensor_def_summaries s' with
+  | fail e => simp [okHost]
+  | div => simp [okHost]
+  | ok x =>
+  obtain ⟨summaries, s₀, bk⟩ := x
+  simp only [bind_tc_ok, Function.uncurry_apply_pair]
+  cases hf : chelis_ir.host.PreflightFacts.new with
+  | fail e => simp [okHost]
+  | div => simp [okHost]
+  | ok facts =>
+  simp only [bind_tc_ok]
+  cases ha : chelis_ir.host.analyze_tensor_helper_preflight expr
+      (Aeneas.Std.alloc.sync.DerefArc.deref summaries) facts with
+  | fail e => simp [okHost]
+  | div => simp [okHost]
+  | ok y =>
+  obtain ⟨u, facts1⟩ := y
+  simp only [bind_tc_ok, Function.uncurry_apply_pair, vec_push_eq]
+  by_cases hlen : s₀.state.invocation.preflight.val.length < Usize.max
+  · cases hb : inst.call_once b (preflightLens.set ({ id := i, facts := facts1 } :: preflightLens.get s₀) s₀,
+        { frame := i, node := 0#usize }) with
+    | fail e =>
+      simp only [preflightLens_set_push _ _ hlen] at hb
+      simp [hlen, hb, okHost, preflightLens_set_push _ _ hlen]
+    | div =>
+      simp only [preflightLens_set_push _ _ hlen] at hb
+      simp [hlen, hb, okHost, preflightLens_set_push _ _ hlen]
+    | ok z =>
+    obtain ⟨r, s₁, cb⟩ := z
+    simp only [preflightLens_set_push _ _ hlen] at hb
+    simp only [hlen, _root_.dite_true, _root_.if_true, bind_tc_ok, Function.uncurry_apply_pair,
+      preflightLens_set_push _ _ hlen, hb, okHost, alloc.vec.Vec.pop]
+    cases hl : s₁.state.invocation.preflight.val.getLast? with
+    | none =>
+      have h0 : s₁.state.invocation.preflight.val = [] := List.getLast?_eq_none_iff.mp hl
+      simp [h0, preflightLens, core.option.Option.expect, Result.ofOption]
+    | some x =>
+      have hne : preflightLens.get s₁ ≠ [] := by
+        intro h
+        simp only [preflightLens, List.reverse_eq_nil_iff] at h
+        simp [h] at hl
+      rw [if_neg hne, preflightLens_set_pop]
+      simp [core.option.Option.expect, Result.ofOption]
+  · simp [hlen, okHost]
+
+/-- The extracted `with_preflight expr` as a `Scopes.Combinator`: state-transformer bodies that
+ignore the frame root they receive. -/
+def preflightComb (expr : chelis_deep.ast.Expr) (γ : Type) : Combinator Result HCx γ :=
+  asComb fun body s =>
+    chelis_ir.host.with_preflight (R := γ) (T1 := HCx → Result (HCx × γ))
+      ⟨fun b a => stCall b a.1⟩ expr s body
+
+/-- **`Scopes.PreflightObligationFrom`** for the extracted `with_preflight expr`, with the entry
+step `preflightEntry expr`: on bodies that leave a frame, the scope runs the body on the entry's
+context with the computed frame pushed and pops the top frame of the body's final context. -/
+theorem withPreflight_obligation (expr : chelis_deep.ast.Expr) (γ : Type) :
+    PreflightObligationFrom okResult preflightLens (preflightEntry expr) (preflightComb expr γ) := by
+  intro body s s₀ fr hpre hleave
+  simp only [preflightComb, okResult_asComb, withPreflight_spec, hpre]
+  show (match okHost (stCall body (preflightLens.set (fr :: preflightLens.get s₀) s₀)) with
+      | none => none
+      | some (s₁, r) => if preflightLens.get s₁ = [] then none
+          else some (preflightLens.set (preflightLens.get s₁).tail s₁, r)) = _
+  rw [okHost_stCall]
+  cases hb : okResult (body (preflightLens.set (fr :: preflightLens.get s₀) s₀)) with
+  | none => rfl
+  | some x =>
+    obtain ⟨s₁, r⟩ := x
+    simp [hleave s₁ r hb]
 
 end ChelisBridge.Runtime.ExtractedHostScopes

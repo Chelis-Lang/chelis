@@ -24,8 +24,9 @@ s body` (adapting argument order / the backward-function pair convention through
 `ScopeSpecOn` below) with a `Lens` onto the relevant field, and proves the obligations against
 the extracted definitions: the suppression and install/restore obligations for the lowering
 runtime and the checker's diagnostic sink; `Runtime/ExtractedHostScopes.lean` those of the host
-scopes (`with_host_invocation`, `with_mono_probe`, `with_type_subst`, and `with_inlining` in the
-restricted form `InliningObligationUnder`, with a counterexample to the unrestricted one).
+scopes (`with_host_invocation`, `with_mono_probe`, `with_type_subst`, `with_inlining` in the
+restricted form `InliningObligationUnder`, with a counterexample to the unrestricted one, and
+`with_preflight` in the form `PreflightObligationFrom`).
 
 `scope_obligations_are_satisfiable` shows the obligations are not vacuous, `restore_ne_clear`
 records why restore and clear-to-false must stay separate obligations, and the `model_*`
@@ -139,12 +140,12 @@ def PreflightObligation {M : Type → Type} {σ F γ : Type} (ok : M (σ × γ) 
 /-- `PreflightObligation` with the frame computed at entry, on bodies that leave a frame. An
 entry step `pre` gives the state the scope pushes on and the frame it pushes (`none`: the entry
 failed, and then so does the scope); the exit pops the top frame of the body's final state,
-which the body must leave (`L.get s₁ ≠ []`). This is the target statement for the production
-`with_preflight` (not extracted yet, E30; `Runtime/ExtractedHostScopes.lean`): in the Rust
-source its entry allocates the frame id from the runtime's supply and fills the program's
-summary cache, so it changes more than the stack, and its pop panics when the body leaves no
-frame, so the literal obligation, the special case of a constant entry step
-(`PreflightObligation.from_const`), is too strong for it. -/
+which the body must leave (`L.get s₁ ≠ []`). The production `with_preflight` meets it
+(`Runtime/ExtractedHostScopes.lean`, `withPreflight_obligation`): in the Rust source its entry
+allocates the frame id from the runtime's supply and fills the program's summary cache, so it
+changes more than the stack, and its pop panics when the body leaves no frame, so the literal
+obligation, the special case of a constant entry step (`PreflightObligation.from_const`), is too
+strong for it. -/
 def PreflightObligationFrom {M : Type → Type} {σ F γ : Type} (ok : M (σ × γ) → Option (σ × γ))
     (L : Lens σ (List F)) (pre : σ → Option (σ × F)) (comb : Combinator M σ γ) : Prop :=
   ∀ body s s₀ fr, pre s = some (s₀, fr) →
