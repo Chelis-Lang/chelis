@@ -1,13 +1,6 @@
 # Phase 2: Language Maturity - Expanded Implementation Plan
 
-## Context
-
-Phase 1 is structurally complete. The GPU backend works, real models compile and run
-correctly, and the benchmark suite proves correctness across CPU/HIP/PyTorch. Known
-limitations carried forward: `pad`/`shrink` not implemented in HIP, `layer_norm`
-still requiring a concrete normalized-axis extent, dotted Deep path round-trip gap, and
-cross-function user-defined specialization still needing broader backend and pattern
-coverage beyond the first C BLAS helper-summary slice.
+## Scope
 
 **Phase 2 deliverable:** The language is usable by researchers. Effects, linear types,
 macros, the agent API, and tooling make Chelis a credible alternative to PyTorch for
