@@ -58,6 +58,8 @@ fn incorrect_gradient_payloads_fail_at_checking() {
         "def main() -> f32 = grad(fn (z: f32, w) -> mul(z, z))(3.0f32, 1.0f32)",
         "def main() -> f32 = grad(fn (z: f32, w) -> mul(z, z), wrt=w)(3.0f32, true)",
         "def main() = grad(fn (z: f32, w) -> mul(z, z))",
+        "def make_grad() -> (f32 -> f32) = grad(fn (w) -> 1.0f32)",
+        "def make_grad() = {\n g: (f32 -> f32) = grad(fn (w) -> 1.0f32)\n g\n}",
     ] {
         std::fs::write(&path, source).unwrap();
         let output = Command::new(assert_cmd::cargo_bin!("chelis"))

@@ -2512,6 +2512,7 @@ pub(super) fn infer_top_level(
             }
             declared_ty
         } else if let Some(decl_ty) = declared_ty {
+            product.finish_local_grad_parameters(vg, subst, adt_reg, errors);
             let unify_result = unify(&body_ty, &decl_ty, subst);
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);

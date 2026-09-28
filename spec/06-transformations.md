@@ -59,7 +59,8 @@ By default, `grad(f)` differentiates with respect to all differentiable paramete
 components. An unresolved type variable is not a non-differentiable type and
 cannot justify omitting a gradient component. Application may determine a
 lambda's parameter types under [04-INF-1]; an unresolved classification at
-the enclosing declaration boundary is a type error.
+the enclosing declaration boundary is a type error. A result annotation on
+the gradient value does not supply a parameter binding site.
 
 The optional `wrt` parameter restricts differentiation to specific parameters:
 

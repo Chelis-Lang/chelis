@@ -571,25 +571,30 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             Ok(declared) => declared,
             Err(witness) => propagate(&witness),
         };
-        if let Err(error) = unify(&result, &declared, subst) {
-            let mut diagnostic = CheckError::new(
-                check_error_kind_from_type_error_kind(&error.kind),
-                format!(
-                    "expression ascription does not match value: {}",
-                    error.message
-                ),
-                vec![format!(
-                    "Declared expression type is {declared}; inferred value type is {result}"
-                )],
-            );
-            if let Some(location) = TypeDiagnosticLocation::from_expr(authored_type.expression())
-                .or_else(|| TypeDiagnosticLocation::from_expr(expr))
-            {
-                diagnostic = location.attach(diagnostic);
+        if product.defer_grad_result_ascription(&result, &declared, subst) {
+            result
+        } else {
+            if let Err(error) = unify(&result, &declared, subst) {
+                let mut diagnostic = CheckError::new(
+                    check_error_kind_from_type_error_kind(&error.kind),
+                    format!(
+                        "expression ascription does not match value: {}",
+                        error.message
+                    ),
+                    vec![format!(
+                        "Declared expression type is {declared}; inferred value type is {result}"
+                    )],
+                );
+                if let Some(location) =
+                    TypeDiagnosticLocation::from_expr(authored_type.expression())
+                        .or_else(|| TypeDiagnosticLocation::from_expr(expr))
+                {
+                    diagnostic = location.attach(diagnostic);
+                }
+                errors.push(diagnostic);
             }
-            errors.push(diagnostic);
+            declared
         }
-        declared
     } else {
         result
     };

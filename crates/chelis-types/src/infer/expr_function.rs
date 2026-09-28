@@ -548,50 +548,54 @@ pub(super) fn infer_let(
                             Err(witness) => propagate(&witness),
                         },
                     };
-                    match unify(&expr_ty, &declared_ty, subst) {
-                        Ok(()) if local_ascription_origin.is_some() => {
-                            checked_local_ascription = Some((
-                                local_ascription_origin.expect("checked above"),
-                                declared_ty_expr.clone(),
-                                declared_ty.clone(),
-                            ));
-                        }
-                        Ok(()) => {}
-                        Err(e) => {
-                            let mut diagnostic = CheckError::new(
-                                check_error_kind_from_type_error_kind(&e.kind),
-                                format!(
-                                    "let-binding `{name}` ascription does not match RHS: {}",
-                                    e.message
-                                ),
-                                vec![format!(
-                                    "Declared type for `{name}` is {declared_ty}; \
-                                     RHS inferred to {expr_ty}"
-                                )],
-                            );
-                            if let Some(location) =
-                                TypeDiagnosticLocation::from_expr(declared_ty_expr)
-                                    .or_else(|| TypeDiagnosticLocation::from_expr(rhs_expr))
-                            {
-                                diagnostic = location.attach(diagnostic);
+                    if product.defer_grad_result_ascription(&expr_ty, &declared_ty, subst) {
+                        expr_ty
+                    } else {
+                        match unify(&expr_ty, &declared_ty, subst) {
+                            Ok(()) if local_ascription_origin.is_some() => {
+                                checked_local_ascription = Some((
+                                    local_ascription_origin.expect("checked above"),
+                                    declared_ty_expr.clone(),
+                                    declared_ty.clone(),
+                                ));
                             }
-                            errors.push(diagnostic);
+                            Ok(()) => {}
+                            Err(e) => {
+                                let mut diagnostic = CheckError::new(
+                                    check_error_kind_from_type_error_kind(&e.kind),
+                                    format!(
+                                        "let-binding `{name}` ascription does not match RHS: {}",
+                                        e.message
+                                    ),
+                                    vec![format!(
+                                        "Declared type for `{name}` is {declared_ty}; \
+                                     RHS inferred to {expr_ty}"
+                                    )],
+                                );
+                                if let Some(location) =
+                                    TypeDiagnosticLocation::from_expr(declared_ty_expr)
+                                        .or_else(|| TypeDiagnosticLocation::from_expr(rhs_expr))
+                                {
+                                    diagnostic = location.attach(diagnostic);
+                                }
+                                errors.push(diagnostic);
+                            }
                         }
+                        // On unify failure, bind `name` to the declared
+                        // type rather than the inferred RHS type. This
+                        // produces a cleaner error cascade: downstream uses
+                        // of `name` see what the user said they meant, not
+                        // what the (already-rejected) RHS inferred to, so
+                        // a single ascription-mismatch diagnostic stands
+                        // alone instead of fanning out into multiple
+                        // downstream errors. The trade-off: pathological
+                        // bodies where the user's ascription is *also*
+                        // independently wrong against later code may have
+                        // a second mismatch masked. The single-error
+                        // cascade is the better default for chelis#159's
+                        // user-facing diagnostic ergonomics.
+                        declared_ty
                     }
-                    // On unify failure, bind `name` to the declared
-                    // type rather than the inferred RHS type. This
-                    // produces a cleaner error cascade: downstream uses
-                    // of `name` see what the user said they meant, not
-                    // what the (already-rejected) RHS inferred to, so
-                    // a single ascription-mismatch diagnostic stands
-                    // alone instead of fanning out into multiple
-                    // downstream errors. The trade-off: pathological
-                    // bodies where the user's ascription is *also*
-                    // independently wrong against later code may have
-                    // a second mismatch masked. The single-error
-                    // cascade is the better default for chelis#159's
-                    // user-facing diagnostic ergonomics.
-                    declared_ty
                 } else {
                     expr_ty
                 };

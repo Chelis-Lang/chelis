@@ -158,6 +158,11 @@ impl InferredAdmissionContract {
 
 #[derive(Clone)]
 pub(super) enum DeferredShapeRule {
+    /// A value ascription cannot supply a suspended Grad parameter type.
+    /// Check it after an application supplies the awaited parameter types.
+    ResultAscription {
+        declared: Type,
+    },
     Matmul,
     Reduction {
         name: String,
@@ -1095,6 +1100,54 @@ impl InferenceProduct {
         self.replaying_shape_checks = false;
     }
 
+    /// Keep result constraints separate from parameter binding constraints.
+    /// An ascription on a Grad value (including one carried in an aggregate)
+    /// must not instantiate its unbound parameters. Publish the inferred type
+    /// until an application binds them, then check the same ascription.
+    pub(super) fn defer_grad_result_ascription(
+        &mut self,
+        actual: &Type,
+        declared: &Type,
+        subst: &Subst,
+    ) -> bool {
+        let actual_variables = crate::env::free_tvars(&resolved(actual, subst));
+        let mut awaited = Vec::new();
+        for check in &self.deferred_shape_checks {
+            let DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }) = &check.rule else {
+                continue;
+            };
+            let Type::Fn(args, _) = resolved(&check.arg_tys[0], subst) else {
+                continue;
+            };
+            for (index, arg) in args.iter().enumerate() {
+                if wrt
+                    .as_ref()
+                    .is_some_and(|indices| !indices.contains(&index))
+                {
+                    continue;
+                }
+                for variable in grad_argument_variables(arg) {
+                    let ty = Type::Var(variable);
+                    if actual_variables.contains(&variable) && !awaited.contains(&ty) {
+                        awaited.push(ty);
+                    }
+                }
+            }
+        }
+        if awaited.is_empty() {
+            return false;
+        }
+        self.defer_shape_check(
+            DeferredShapeRule::ResultAscription {
+                declared: declared.clone(),
+            },
+            Vec::new(),
+            awaited,
+            actual.clone(),
+        );
+        true
+    }
+
     fn replay_ready_shape_checks_once(
         &mut self,
         vg: &mut VarGen,
@@ -1105,11 +1158,13 @@ impl InferenceProduct {
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         let prior_owner = self.replaying_owner.take();
         for check in checks {
-            if check
-                .arg_tys
-                .iter()
-                .any(|ty| shape_operand_awaits_binding(ty, subst))
-            {
+            if check.arg_tys.iter().any(|ty| {
+                if matches!(check.rule, DeferredShapeRule::ResultAscription { .. }) {
+                    !grad_argument_variables(&resolved(ty, subst)).is_empty()
+                } else {
+                    shape_operand_awaits_binding(ty, subst)
+                }
+            }) {
                 self.deferred_shape_checks.push(check);
                 continue;
             }
@@ -1117,6 +1172,12 @@ impl InferenceProduct {
             self.replaying_owner.clone_from(&check.owner);
 
             let resolved = match &check.rule {
+                DeferredShapeRule::ResultAscription { declared } => {
+                    if let Err(error) = unify(&check.result_ty, declared, subst) {
+                        errors.push(error.into());
+                    }
+                    continue;
+                }
                 DeferredShapeRule::Matmul => {
                     check_matmul_signature(&check.arg_tys, &check.result_ty, subst, errors)
                 }
@@ -1309,6 +1370,50 @@ impl InferenceProduct {
         }
     }
 
+    /// [04-INF-1]: close locally authored Grad parameter holes before checking
+    /// the declaration's result annotation. Unifying that annotation first
+    /// would erase whether the body actually supplied a parameter binding site.
+    /// Recursive sibling variables remain owned by the group's later solve.
+    pub(super) fn finish_local_grad_parameters(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        adt_reg: &AdtRegistry,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
+        let mut rejected = Vec::new();
+        for check in &self.deferred_shape_checks {
+            if check.owner != self.active_declaration_name {
+                continue;
+            }
+            let DeferredShapeRule::Derivation(TypeDerivation::Grad { wrt }) = &check.rule else {
+                continue;
+            };
+            let Type::Fn(args, _) = resolved(&check.arg_tys[0], subst) else {
+                continue;
+            };
+            for (index, arg) in args.iter().enumerate() {
+                if wrt
+                    .as_ref()
+                    .is_some_and(|indices| !indices.contains(&index))
+                {
+                    continue;
+                }
+                if grad_argument_variables(arg)
+                    .into_iter()
+                    .any(|var| !self.awaits_group_completion(&Type::Var(var), subst))
+                {
+                    errors.push(unresolved_grad_parameter(index));
+                    rejected.push(check.id);
+                    break;
+                }
+            }
+        }
+        self.deferred_shape_checks
+            .retain(|check| !rejected.contains(&check.id));
+    }
+
     /// Acceptance boundary for bind-on-first-use shape lambdas, and for every
     /// other obligation still open when the declaration closes. Every ledger
     /// entry left after the ready replay is decided or reported here; none is
@@ -1333,7 +1438,9 @@ impl InferenceProduct {
             .filter(|check| {
                 !matches!(
                     check.rule,
-                    DeferredShapeRule::PostApp { .. } | DeferredShapeRule::Derivation(_)
+                    DeferredShapeRule::PostApp { .. }
+                        | DeferredShapeRule::Derivation(_)
+                        | DeferredShapeRule::ResultAscription { .. }
                 )
             })
             .flat_map(|check| &check.arg_tys)
@@ -1344,6 +1451,7 @@ impl InferenceProduct {
             .collect();
         for check in checks {
             let operation = match check.rule {
+                DeferredShapeRule::ResultAscription { .. } => "result ascription".to_string(),
                 DeferredShapeRule::Matmul => "matmul".to_string(),
                 DeferredShapeRule::Reduction { name } => name,
                 DeferredShapeRule::Expand { builtin, .. } => builtin.to_string(),

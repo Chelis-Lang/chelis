@@ -142,11 +142,7 @@ pub(super) fn decide_grad(
         for var in grad_argument_variables(arg) {
             let variable = Type::Var(var);
             if !defer_parameters {
-                return GradDecision::Decided(Err(Box::new(CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("grad parameter {index} has an unresolved type at the declaration boundary"),
-                    vec!["Annotate the parameter or apply the gradient within the enclosing declaration so its parameter types are determined".to_string()],
-                ))));
+                return GradDecision::Decided(Err(Box::new(unresolved_grad_parameter(index))));
             }
             if !awaited.contains(&variable) {
                 awaited.push(variable);
@@ -160,6 +156,14 @@ pub(super) fn decide_grad(
         };
     }
     GradDecision::Decided(grad_function_type(args, ret, wrt, adt_reg))
+}
+
+pub(super) fn unresolved_grad_parameter(index: usize) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        format!("grad parameter {index} has an unresolved type at the declaration boundary"),
+        vec!["Annotate the parameter or apply the gradient within the enclosing declaration so its parameter types are determined; a result annotation is not a parameter binding site".to_string()],
+    )
 }
 
 /// The variables the output rule reads: the output when it is a variable, or
@@ -177,7 +181,7 @@ fn grad_output_variables(ret: &Type) -> Vec<TypeVar> {
 
 /// The variables [`grad_argument_type`] reads in a parameter: every variable
 /// outside a function type, which is not differentiable whatever it holds.
-fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
+pub(super) fn grad_argument_variables(arg: &Type) -> Vec<TypeVar> {
     match arg {
         Type::Fn(..) => Vec::new(),
         Type::Tuple(items) | Type::Adt(_, items) => {

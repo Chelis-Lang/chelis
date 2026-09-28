@@ -2,4 +2,5 @@
 inferred types, including nested components and disconnected parameters.
 A previously unannotated float parameter contributes its cotangent instead
 of being silently omitted from the checked result type. Unresolved selected parameter
-types at the declaration boundary are rejected.
+types at the declaration boundary are rejected. A result annotation alone does
+not determine an unresolved parameter type.

@@ -106,3 +106,65 @@ fn inferred_tensor_parameter_retains_its_shape_and_precision() {
         false,
     );
 }
+
+#[test]
+fn a_declaration_result_annotation_is_not_a_gradient_parameter_binding_site() {
+    for source in [
+        "def make_grad() -> (f32 -> f32) = grad(fn (w) -> 1.0f32)",
+        "def make_grad() -> (f32 -> f32) = grad(fn (w) -> 1.0f32, wrt=w)",
+        "def make_grad() -> (f32 -> f32) = {\n g = grad(fn (w) -> 1.0f32)\n g\n}",
+        "def make_grad() -> (tensor[2, f32] -> tensor[2, f32]) = grad(fn (w) -> 1.0f32)",
+    ] {
+        check(source, false);
+    }
+    for source in [
+        "def make_grad() -> (f32 -> f32) = grad(fn (w: f32) -> 1.0f32)",
+        "def make_grad() -> (f32 -> f32) = {\n g = grad(fn (w) -> 1.0f32)\n zero = g(1.0f32)\n g\n}",
+        "def make_grad() -> (tensor[2, f32] -> tensor[2, f32]) = {\n g = grad(fn (w) -> 1.0f32)\n zero = g(to_tensor([1.0f32, 2.0f32]))\n g\n}",
+    ] {
+        check(source, true);
+    }
+}
+
+#[test]
+fn a_local_result_ascription_waits_for_a_gradient_parameter_binding_site() {
+    check(
+        "def make_grad() = {\n g: (f32 -> f32) = grad(fn (w) -> 1.0f32)\n g\n}",
+        false,
+    );
+    check(
+        "def make_grad() = {\n g: (f32 -> f32) = grad(fn (w) -> 1.0f32)\n zero = g(1.0f32)\n g\n}",
+        true,
+    );
+    check(
+        "def make_grad() = {\n g: (f32 -> f32) = grad(fn (w) -> 1.0f32)\n zero = g(true)\n g\n}",
+        false,
+    );
+    check(
+        "def make_grad() = {\n g = grad(fn (w) -> 1.0f32)\n h: (f32 -> f32) = g\n h\n}",
+        false,
+    );
+    check(
+        "def make_grad() = {\n g = grad(fn (w) -> 1.0f32)\n h: (f32 -> f32) = g\n zero = h(1.0f32)\n h\n}",
+        true,
+    );
+    check(
+        "def make_grad() = {\n g = grad(fn (w) -> 1.0f32)\n unrelated: f32 = 2.0f32\n zero = g(1.0f32)\n g\n}",
+        true,
+    );
+}
+
+#[test]
+fn deep_expression_ascription_is_not_a_gradient_parameter_binding_site() {
+    for (parameter, accepted) in [("w", false), ("(w {type: (t-prim {} f32)})", true)] {
+        let source = format!(
+            "(def {{}} make_grad (fn {{}} (params {{}})
+                (grad {{type: (t-fn {{}} (t-prim {{}} f32) (t-prim {{}} f32))}}
+                    (fn {{}} (params {{}} {parameter})
+                        (lit {{type: (t-prim {{}} f32)}} 1.0)))))"
+        );
+        let deep = chelis_deep::parse_and_stamp_file(&source).expect("Deep fixture stamps");
+        let result = check_typed_program(&deep);
+        assert_eq!(result.is_ok(), accepted, "{source}\n{result:?}");
+    }
+}
