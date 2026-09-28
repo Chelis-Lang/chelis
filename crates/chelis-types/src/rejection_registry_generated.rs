@@ -198,6 +198,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
 
 #[rustfmt::skip]
 pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
+    570,
     600,
     689,
     693,
@@ -224,6 +225,7 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     2413,
     2493,
     2503,
+    2515,
     2583,
     2651,
     2702,

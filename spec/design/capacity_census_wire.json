@@ -543,7 +543,7 @@
     },
     {
       "authority": "TaggedTransport",
-      "contract": "fixed-number/byte-estimate,edit-count,report-count",
+      "contract": "fixed-number/adjoint-contribution-group-count,byte-estimate,edit-count,report-count",
       "flags": [
         "numeric-field"
       ],

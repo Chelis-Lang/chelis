@@ -688,11 +688,13 @@ pub fn sync_managed_blocks(root: &Path, version: &str) -> Result<(), String> {
 
 fn reef_toml(name: &str, module_prefix: &str, version: &str) -> String {
     format!(
-        "[package]\n\
+        "schema = \"3\"\n\n\
+         [package]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\
          compiler = \"={version}\"\n\
-         module_prefix = \"{module_prefix}\"\n"
+         module_prefix = \"{module_prefix}\"\n\
+         resolver = \"2\"\n"
     )
 }
 

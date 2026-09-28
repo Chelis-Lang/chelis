@@ -109,9 +109,9 @@ fn advise_upgrade(refusal: String, version: &str, chelisup: &str) -> String {
     }
 }
 
-/// Require the export `output` reports on, written to `exported`, to describe
-/// a sealed build of `version` whose runtime files are the ones in `unpacked`.
-/// Returns the shipped archive's SHA-256.
+/// Require `output` to report a sealed build of `version` whose exported
+/// archive and headers match the receipt and whose shipped counterparts match
+/// those same digests. Returns the archive SHA-256.
 fn verify(
     version: &str,
     output: &Output,
@@ -150,6 +150,7 @@ fn verify(
     }
 
     let archive_sha256 = sha256_field(&receipt, "archive_sha256", version)?;
+    require_exported(exported, Path::new(ARCHIVE), archive_sha256, version)?;
     require_shipped(
         unpacked,
         &Path::new("lib").join(ARCHIVE),
@@ -176,6 +177,7 @@ fn verify(
                     "the chelis {version} release's runtime export records no SHA-256 for {name}"
                 )
             })?;
+        require_exported(exported, Path::new(name), digest, version)?;
         require_shipped(unpacked, &Path::new("include").join(name), digest, version)?;
     }
     Ok(archive_sha256.to_owned())
@@ -194,6 +196,31 @@ fn is_sha256_hex(digest: &str) -> bool {
         && digest
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Require the regular exported file `relative` to have the digest in the receipt.
+fn require_exported(
+    exported: &Path,
+    relative: &Path,
+    expected: &str,
+    version: &str,
+) -> Result<(), String> {
+    let observed = within_release(exported, relative)
+        .and_then(|()| sha256_file(&exported.join(relative)))
+        .map_err(|e| {
+            format!(
+                "the chelis {version} runtime export has no usable {}: {e}",
+                relative.display()
+            )
+        })?;
+    if observed != expected {
+        return Err(format!(
+            "the chelis {version} runtime export reports {} with SHA-256 {observed}, but its \
+             receipt records {expected}",
+            relative.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Require the regular file `relative` under `unpacked` to have SHA-256 `expected`.

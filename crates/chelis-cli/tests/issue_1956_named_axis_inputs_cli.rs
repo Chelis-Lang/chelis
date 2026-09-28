@@ -27,7 +27,7 @@ fn success(root: &Path, args: &[&str]) -> Output {
 fn package(formal: bool, body: &str, failing: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("src")).unwrap();
-    std::fs::write(dir.path().join("reef.toml"), format!("[package]\nname = \"named_axis_inputs\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", env!("CARGO_PKG_VERSION"))).unwrap();
+    std::fs::write(dir.path().join("reef.toml"), format!("schema = \"1\"\n[package]\nname = \"named-axis-inputs\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", env!("CARGO_PKG_VERSION"))).unwrap();
     let initializer = if failing {
         "uniform_like(key_from_seed(17i64), to_tensor([0.0f32, 0.0f32]), 0.0f32, 1.0f32); to_tensor([floor_div(1i32, 0i32) |> cast(f32), 0.0f32])"
     } else {

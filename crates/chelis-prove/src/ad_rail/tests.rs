@@ -195,6 +195,8 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
     // d/dx and d/dy of mean(x + y) are both 1/4 and share their contribution
     // tail. spec/06 §2.4 nevertheless requires each forward value's canonical
     // accumulation tree to begin with its own exact positive-zero base leaf.
+    // A tensor base reads its physical axes through Expand; the Const leaf is
+    // scalar even when the resulting zero has a fixed declared shape.
     // The two GradGoals therefore have distinct final Add roots while sharing
     // the one gradient-DAG hash. This pins the semantic tree, not an incidental
     // node count.
@@ -267,8 +269,26 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         "each target has its own exact-zero leaf"
     );
     for zero in [x_node.inputs[0], y_node.inputs[0]] {
-        let WireRiscOp::Const { value } = &parsed.nodes[usize::try_from(zero).unwrap()].op else {
-            panic!("adjoint accumulation base must be a Const");
+        let expanded = &parsed.nodes[usize::try_from(zero).unwrap()];
+        let WireRiscOp::Expand {
+            axis: 0,
+            size:
+                chelis_compiler_api::schema::WireRtDim::InputAxis {
+                    tensor: 1,
+                    axis: chelis_compiler_api::schema::WireRtAxis::Lit { value: 0 },
+                },
+        } = &expanded.op
+        else {
+            panic!(
+                "tensor zero must read its primal's physical axis: {:?}",
+                expanded.op
+            );
+        };
+        assert_eq!(expanded.inputs.len(), 2);
+        let scalar = &parsed.nodes[usize::try_from(expanded.inputs[0]).unwrap()];
+        assert!(scalar.output_type.dims.is_empty());
+        let WireRiscOp::Const { value } = &scalar.op else {
+            panic!("adjoint accumulation base must have a scalar Const leaf");
         };
         assert_eq!(
             value.as_f64_lossy().to_bits(),
@@ -278,7 +298,7 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
     }
     assert_eq!(
         x_node.inputs[1], y_node.inputs[1],
-        "equal adjoints share the contribution tail"
+        "equal adjoints share the numeric contribution tail"
     );
 
     // Still no in-tree fit: each equal-adjoint goal is no-fit -> Unsupported, never

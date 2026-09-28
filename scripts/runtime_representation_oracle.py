@@ -303,6 +303,23 @@ EXACT_REDUCTION_BACKEND_FINAL_FORMS = (
         "CEmitter::emit_reduce_extreme",
     ),
 )
+LIST_MAP_BACKEND_FINAL_FORMS = (
+    # [05-OP-55] and spec/06 section 2.4: the capture stores the scalar's
+    # declared element bits once per actual invocation, and the ordered sum
+    # loads each declared-width contribution in row/consumer order before
+    # the typed adjacent-pair accumulator. Both are private, exact numeric
+    # operations; neither creates a public untagged numeric carrier.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_list_map_capture",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_ordered_adjoint_sum",
+    ),
+)
 # [04-NUM-14], [05-OP-46,49]: closed dtype-directed integer finalization
 # and stored-element expansion. The non-hardware legs and explicit device
 # harnesses below bind these exact identities to positive/negative execution.
@@ -334,6 +351,17 @@ UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
         "crates/chelis-backend-c/src/host_emit.rs",
         "load-store-template",
         "HostEmitter < 'a >::assign_uniform_like",
+    ),
+)
+KEY_CALLABLE_BACKEND_FINAL_FORMS = (
+    # chelis#2709: a closed checked key-builtin alias lowers to private C
+    # scalar/tensor entries. Their key-bit loads and stores implement the
+    # existing [05-OP-69]..[05-OP-72] operations, with each call specialized
+    # by its checked signature and no public numeric carrier.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_key_callable_helpers",
     ),
 )
 DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
@@ -476,9 +504,13 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     ) or (
         (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
     ) or (
+        (path, kind, owner) in LIST_MAP_BACKEND_FINAL_FORMS
+    ) or (
         (path, kind, owner) in INTEGER_UNARY_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in KEY_CALLABLE_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
     ) or (
@@ -864,8 +896,10 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
         *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
         *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
+        *LIST_MAP_BACKEND_FINAL_FORMS,
         *INTEGER_UNARY_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
+        *KEY_CALLABLE_BACKEND_FINAL_FORMS,
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *RESULT_CLAIM_METADATA_FINAL_FORMS,
@@ -2268,6 +2302,13 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
+            "checked key callable scalar and tensor C execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-compiler-api",
+                "--features", "ownership-ledger", "--test", "key_tensor_forms",
+            ),
+        ),
+        OracleLeg(
             "checked C reduction delegation and bypass mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
         ),
@@ -2290,6 +2331,25 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "chelis-backend-c",
                 "--test",
                 "issue_1281_exact_reductions",
+            ),
+        ),
+        OracleLeg(
+            "exact C List-map capture and ordered cotangent execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-c",
+                "--test", "issue_570_runtime_iota", "-E",
+                "test(ordered_cotangent_native_groups_check_actual_column_lengths)",
+            ),
+        ),
+        OracleLeg(
+            "exact List-map capture compiled C parity and negative controls",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_2419_range_tensor_ad", "-E",
+                "test(runtime_capture_accumulation_preserves_the_executed_consumer_tree) | "
+                "test(runtime_capture_tree_rounds_each_pair_at_the_capture_dtype) | "
+                "test(runtime_capture_tree_preserves_inactive_and_empty_rows) | "
+                "test(captured_cotangent_keeps_the_false_forward_range_claim)",
             ),
         ),
         OracleLeg(

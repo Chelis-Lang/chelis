@@ -27,8 +27,10 @@ fn package(name: &str, source: &str) -> (TempDir, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir");
     let root = dir.path().join(name);
     fs::create_dir_all(root.join("src")).expect("src");
+    // Reef package names are lowercase ASCII with internal hyphens.
+    let package_name = name.to_ascii_lowercase().replace('_', "-");
     let manifest = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Bind\"\n",
+        "[package]\nname = \"{package_name}\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Bind\"\n",
         chelis_compiler_api::COMPILER_VERSION
     );
     fs::write(root.join("reef.toml"), manifest).expect("manifest");

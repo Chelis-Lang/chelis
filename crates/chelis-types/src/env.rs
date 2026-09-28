@@ -1261,17 +1261,19 @@ impl Env {
         if !ledger_removals.is_empty() {
             subst.take_collection_contracts(&ledger_removals);
         }
-        // [04-LIN-10]: every variable a definition or `let` binding quantifies
-        // is a generic's type parameter and is never instantiated at a
-        // key-carrying type. Marking here, in the one generalization
-        // mechanism, rather than at each binding site means no binding route
-        // can publish a generic without the rule; the binding sites only add
-        // the generic's name for the diagnostic
-        // ([`Subst::name_generic_parameters`]). A variable that already
-        // carries a mark keeps it, so a generic stored in a tuple or a data
-        // value and then generalized still names the generic it came from.
+        // [04-LIN-10]: quantified variables of authored generic values stay
+        // key-free. The variables wholly inside a transported checked key
+        // operation are different: its closed scalar/tensor relation chooses
+        // their values at application, rather than the author exposing them
+        // as unrestricted type parameters. Their governing relation must be
+        // serialized with the scheme and visibly own the entire callable.
+        // A variable used anywhere outside that callable, or already marked
+        // by an enclosing generic, retains the ordinary key-free boundary.
+        let closed_key_variables = closed_key_relation_variables(&level_scheme);
         for tv in &level_scheme.tvars {
-            subst.forbid_key_instantiation(*tv, GenericParameter::default());
+            if !closed_key_variables.contains(tv) {
+                subst.forbid_key_instantiation(*tv, GenericParameter::default());
+            }
         }
         level_scheme
     }
@@ -1515,6 +1517,83 @@ impl Env {
             split.ledger_removals,
         )
     }
+}
+
+/// Variables selected solely by a checked key operation's closed relation.
+/// A relation with no matching callable in the value, or a variable also used
+/// outside that callable, cannot grant any exception to [04-LIN-10].
+pub(crate) fn closed_key_relation_variables(scheme: &Scheme) -> UnordSet<TypeVar> {
+    fn outside_callable(ty: &Type, callable: &Type, outside: &mut UnordSet<TypeVar>) -> bool {
+        if ty == callable {
+            return true;
+        }
+        match ty {
+            Type::Fn(args, ret) => {
+                let mut found = outside_callable(ret, callable, outside);
+                for arg in args {
+                    found |= outside_callable(arg, callable, outside);
+                }
+                found
+            }
+            Type::Ref(inner) => outside_callable(inner, callable, outside),
+            Type::Adt(_, args) | Type::Tuple(args) => {
+                let mut found = false;
+                for arg in args {
+                    found |= outside_callable(arg, callable, outside);
+                }
+                found
+            }
+            Type::KindedAdt(_, args) => {
+                let mut found = false;
+                for arg in args {
+                    if let NominalArg::Type(arg) = arg {
+                        found |= outside_callable(arg, callable, outside);
+                    }
+                }
+                found
+            }
+            other => {
+                outside.extend(free_tvars(other));
+                false
+            }
+        }
+    }
+
+    let mut closed = UnordSet::new();
+    for relation in &scheme.constraints {
+        if !matches!(
+            relation,
+            CollectionConstraint::KeyFromSeed { .. }
+                | CollectionConstraint::SplitKey { .. }
+                | CollectionConstraint::SplitKeys { .. }
+                | CollectionConstraint::FoldIn { .. }
+        ) {
+            continue;
+        }
+        let callable = crate::unify::collection_contract_callable_type(relation);
+        let mut outside = UnordSet::new();
+        if !outside_callable(&scheme.body, &callable, &mut outside) {
+            continue;
+        }
+        // The scheme can own several checked collection relations whose
+        // variables unify. A variable carried by another relation is not
+        // selected solely by this key operation, even when that other
+        // callable is absent from the scheme body's visible shape.
+        for other in &scheme.constraints {
+            if std::ptr::eq(other, relation) {
+                continue;
+            }
+            for carried in other.carried_types() {
+                outside.extend(free_tvars(carried));
+            }
+        }
+        for var in free_tvars(&callable) {
+            if scheme.tvars.contains(&var) && !outside.contains(&var) {
+                closed.insert(var);
+            }
+        }
+    }
+    closed
 }
 
 /// chelis#1654: what one generalization decided about the pending collection
@@ -1887,6 +1966,86 @@ fn collect_rvars(ty: &Type, vars: &mut Vec<RankVar>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_key_variables_require_the_exact_owned_callable() {
+        let operand = Type::Var(TypeVar(1));
+        let result = Type::Var(TypeVar(2));
+        let relation = CollectionConstraint::KeyFromSeed {
+            operand: operand.clone(),
+            result: result.clone(),
+        };
+        let callable = crate::unify::collection_contract_callable_type(&relation);
+        let mut scheme = Scheme {
+            tvars: vec![TypeVar(1), TypeVar(2)],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            constraints: vec![relation],
+            body: callable.clone(),
+        };
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![TypeVar(1), TypeVar(2)]
+        );
+
+        // A function that also exposes the operation's result variable as
+        // ordinary data has authored a generic key-carrying surface. The
+        // checked relation grants no exception to that occurrence.
+        scheme.body = Type::Tuple(vec![callable.clone(), result]);
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![TypeVar(1)]
+        );
+        scheme.constraints.clear();
+        assert!(closed_key_relation_variables(&scheme).is_empty());
+        scheme.body = callable;
+        assert!(closed_key_relation_variables(&scheme).is_empty());
+    }
+
+    #[test]
+    fn shared_collection_constraint_keeps_key_relation_variable_key_free() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let level = subst.enter_level(&var_gen);
+        let operand = var_gen.fresh_type();
+        let result = var_gen.fresh_type();
+        let key_relation = CollectionConstraint::SplitKey {
+            operand: operand.clone(),
+            result: result.clone(),
+        };
+        let list = Type::Adt("List".to_string(), vec![operand.clone()]);
+        let append_relation = CollectionConstraint::Append {
+            list: list.clone(),
+            value: operand.clone(),
+            result: list,
+        };
+        subst.record_collection_contract(key_relation.clone());
+        subst.record_collection_contract(append_relation.clone());
+        subst.leave_level(level, &var_gen);
+
+        let scheme = env.generalize(
+            &crate::unify::collection_contract_callable_type(&key_relation),
+            &subst,
+        );
+        assert_eq!(scheme.constraints, vec![key_relation, append_relation]);
+        let Type::Var(operand_var) = operand else {
+            unreachable!()
+        };
+        let Type::Var(result_var) = result else {
+            unreachable!()
+        };
+        assert_eq!(
+            closed_key_relation_variables(&scheme).into_sorted(),
+            vec![result_var],
+            "a second owned constraint exposes the operand as an ordinary generic"
+        );
+        assert!(
+            subst.key_free_origin(operand_var).is_some(),
+            "[04-LIN-10] must forbid key instantiation of the shared operand"
+        );
+    }
 
     /// A scheme exercising every quantifier kind, with a restriction on one
     /// type variable and none on the other, so a route that drops

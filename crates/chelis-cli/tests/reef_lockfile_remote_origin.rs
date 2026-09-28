@@ -726,7 +726,7 @@ shell_sha256 = "def"
 [dependencies.source]
 kind = "local_registry"
 "#,
-            ver = env!("CARGO_PKG_VERSION"),
+            ver = CURRENT_COMPILER_PIN,
         ),
     )
     .expect("write lockfile");

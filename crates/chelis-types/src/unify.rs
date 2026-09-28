@@ -872,7 +872,7 @@ pub(crate) fn collection_contract_visible_in_type(
     contains(ty, &callable)
 }
 
-fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
+pub(crate) fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
     Type::Fn(
         constraint.operands().into_iter().cloned().collect(),
         Box::new(constraint.result().clone()),
@@ -1335,11 +1335,18 @@ impl Subst {
         binders: &UnordMap<TypeVar, String>,
     ) {
         let binders = binders.to_sorted();
+        let closed_key_variables = crate::env::closed_key_relation_variables(scheme);
         let mut marks = self
             .key_free_tvars
             .lock()
             .expect("subst.key_free_tvars poisoned");
         for tv in &scheme.tvars {
+            // A closed checked key relation is not an authored unconstrained
+            // type parameter. Preserve any older generic mark, however: a
+            // relation cannot erase the restriction of an enclosing binder.
+            if closed_key_variables.contains(tv) && !marks.contains_key(tv) {
+                continue;
+            }
             let binder = binders
                 .iter()
                 .find(|(declared, _)| {

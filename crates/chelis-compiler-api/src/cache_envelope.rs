@@ -131,7 +131,9 @@ impl CachePayload for crate::StdLibContext {
     // movement bound or extent claim is a trap seed, so a cached lowered
     // library's claim carriers and retained dead nodes change meaning while
     // their bincode shape does not.
-    const FORMAT_VERSION: u32 = 35;
+    // V36 (#2419): Iota and ordered List capture/cotangent operations extend
+    // RiscOp; old bincode variant indices cannot be decoded as this layout.
+    const FORMAT_VERSION: u32 = 36;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

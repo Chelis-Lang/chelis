@@ -235,6 +235,24 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "runtime-variable",
+        lines=('RUNTIME_DIR_ENV = "CHELIS_RUNTIME_DIR"',),
+        disposition="not-lookup",
+        reason=(
+            "passes the variable name to a separate consumer to test staging rejection before artifact writes; it never selects an archive"
+        ),
+    ),
+    Row(
+        "bindings/python/tests/python_wheel_smoke.py",
+        "archive-name",
+        lines=('archive = artifact_dir / "libchelis_runtime.a"',),
+        disposition="not-lookup",
+        reason=(
+            "links the exact staged wheel archive after checking its SHA-256 against the receipt, without a directory/name search"
+        ),
+    ),
+    Row(
         "bindings/python/tests/manual_reef_context.py",
         "runtime-variable",
         lines=(
@@ -951,20 +969,21 @@ REVIEWED: tuple[Row, ...] = (
             "/// `lib/libchelis_runtime.a` in the tarball.",
             "/// Ship `lib/libchelis_runtime.a` as a symlink to a sibling holding",
             '"archive": "libchelis_runtime.a",',
+            'let exported_archive = runtime_export.join("libchelis_runtime.a");',
             'let archive = root.join("lib/libchelis_runtime.a");',
             'root.join("lib/libchelis_runtime.real"),',
             'std::os::unix::fs::symlink("libchelis_runtime.real", &archive).unwrap();',
         ),
         disposition="not-lookup",
         reason=(
-            "builds fixture release tarballs whose `lib/` holds the archive, including a symlinked archive `chelisup` must refuse, and a fake export's receipt"
+            "builds fixture release tarballs with a shipped `lib/` archive, an exact fake-export archive, a symlinked archive `chelisup` must refuse, and a fake export receipt"
         ),
     ),
     Row(
         "crates/chelisup/tests/common/mod.rs",
         "runtime-variable",
         lines=(
-            "/// `<dir>` (and, like the real export, refuses a set `CHELIS_RUNTIME_DIR`).",
+            "/// refuses a set `CHELIS_RUNTIME_DIR`). Other invocations echo their args.",
             '\\x20 if [ -n \\"${{CHELIS_RUNTIME_DIR+set}}\\" ]; then\\n\\',
             "\\x20   echo 'error: CHELIS_RUNTIME_DIR is set' >&2; exit 1\\n\\",
         ),
@@ -980,6 +999,9 @@ REVIEWED: tuple[Row, ...] = (
             '"match `chelis runtime export` (libchelis_runtime.a sha256 {})",',
             'assert!(toolchain.join("lib/libchelis_runtime.a").is_file());',
             '"ships lib/libchelis_runtime.a with SHA-256",',
+            '"runtime export has no usable libchelis_runtime.a",',
+            '"runtime export reports libchelis_runtime.a with SHA-256",',
+            '"runtime export has no usable libchelis_runtime.a: libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib/libchelis_runtime.a is not a regular file",',
             '"no usable lib/libchelis_runtime.a: lib is not a directory",',
         ),

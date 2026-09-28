@@ -1552,6 +1552,9 @@ impl CEmitter {
             RiscOp::Split { branch } => self.emit_split_key(node, *branch, dag),
             RiscOp::FoldIn => self.emit_fold_in(node, dag),
             RiscOp::SplitN { count } => self.emit_split_keys(node, count),
+            RiscOp::Iota => self.emit_iota(node),
+            RiscOp::ListMapCapture { .. } => self.emit_list_map_capture(node),
+            RiscOp::OrderedAdjointSum { groups } => self.emit_ordered_adjoint_sum(node, groups),
             RiscOp::KeySelect => self.emit_key_select(node, dag),
             RiscOp::Dropout => self.emit_keyed_dropout(node, dag),
             RiscOp::DropoutReplay => self.emit_keyed_dropout(node, dag),
@@ -5306,6 +5309,102 @@ impl CEmitter {
         self.line("}");
     }
 
+    /// [05-OP-54]: exact i64 range, with its own realized count witness.
+    fn emit_list_map_capture(&mut self, node: &DagNode) {
+        let id = node.id.0;
+        let source = node.inputs[0].0;
+        let carrier = node.inputs[1].0;
+        let count = format!("chelis_tensor_shape(t{carrier}, 0)");
+        self.emit_runtime_dim_sites(id, &[(0, count.clone())]);
+        self.emit_declared_extent_guards("map", &node.output_type.dims, |_| count.clone());
+        self.emit_slot_wrapper(id, &node.output_type);
+        let et = Self::elem_type(&node.output_type);
+        self.line(&format!("for (int64_t i = 0; i < {count}; i++) (({et}*)t{id}_data)[i] = ((const {et}*)t{source}_data)[0];"));
+    }
+
+    fn emit_ordered_adjoint_sum(&mut self, node: &DagNode, groups: &[usize]) {
+        let id = node.id.0;
+        let et = Self::elem_type(&node.output_type);
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!("int64_t t{id}_contributions = 1;"));
+        let mut offset = 0;
+        for &width in groups {
+            let first = node.inputs[offset].0;
+            for input in &node.inputs[offset + 1..offset + width] {
+                self.line(&format!("if (t{}_size != t{first}_size) {{ fprintf(stderr, \"ordered List cotangent columns have different lengths\\n\"); abort(); }}", input.0));
+            }
+            self.line(&format!("t{id}_contributions = chelis_int_checked_add(t{id}_contributions, chelis_int_checked_mul(t{first}_size, {width}, 64, \"ordered List cotangent count overflow\"), 64, \"ordered List cotangent count overflow\");"));
+            offset += width;
+        }
+        self.emit_sum_level(
+            id,
+            &format!("t{id}_contributions"),
+            node.output_type.precision,
+        );
+        self.line(&format!(
+            "__sum_level_{id}[0] = {};",
+            Self::scalar_zero_literal(node.output_type.precision)
+        ));
+        self.line(&format!("int64_t t{id}_leaf = 1;"));
+        offset = 0;
+        for &width in groups {
+            let first = node.inputs[offset].0;
+            self.line(&format!(
+                "for (int64_t row = 0; row < t{first}_size; row++) {{"
+            ));
+            self.indent += 1;
+            for input in &node.inputs[offset..offset + width] {
+                self.line(&format!(
+                    "__sum_level_{id}[t{id}_leaf++] = ((const {et}*)t{}_data)[row];",
+                    input.0
+                ));
+            }
+            self.indent -= 1;
+            self.line("}");
+            offset += width;
+        }
+        self.line("{");
+        self.indent += 1;
+        self.line("const int64_t outer = 0;");
+        self.emit_sum_fold(id, node.output_type.precision);
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_iota(&mut self, node: &DagNode) {
+        let id = node.id.0;
+        let start = node.inputs[0].0;
+        let end = node.inputs[1].0;
+        let index = Self::prim_elem_type(Prim::Int64);
+        let trap = NumericTrap::Overflow {
+            op: "range",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        self.line(&format!(
+            "{index} t{id}_start = ((const {index}*)t{start}_data)[0];"
+        ));
+        self.line(&format!(
+            "{index} t{id}_end = ((const {index}*)t{end}_data)[0];"
+        ));
+        if let Some(active) = node.owner.activation {
+            let active = active.0;
+            let byte = Self::prim_elem_type(Prim::Bool);
+            self.line(&format!(
+                "if (((const {byte}*)t{active}_data)[0] == 0) {{ t{id}_start = 0; t{id}_end = 0; }}"
+            ));
+        }
+        self.line(&format!("{index} t{id}_count = t{id}_end <= t{id}_start ? 0 : chelis_int_checked_sub(t{id}_end, t{id}_start, 64, {trap:?});"));
+        self.emit_runtime_dim_sites(id, &[(0, format!("t{id}_count"))]);
+        self.emit_declared_extent_guards("range", &node.output_type.dims, |_| {
+            format!("t{id}_count")
+        });
+        self.emit_slot_wrapper(id, &node.output_type);
+        self.line(&format!(
+            "for ({index} i = 0; i < t{id}_count; i++) (({index}*)t{id}_data)[i] = t{id}_start + i;"
+        ));
+    }
+
     /// [05-OP-71]: row `j` of key `i` is `derive(derive(k[i], 2), j)`, the
     /// count axis last. A negative runtime count traps before allocation.
     /// Where the split's activation holds in no row, it reads no count: the
@@ -6567,7 +6666,11 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.line(&format!("{index_et} __right_{id} = __left_{id} + 1;"));
         let left = format!("__sum_level_{id}[__left_{id}]");
         let right = format!("__sum_level_{id}[__right_{id}]");
-        let sum = if precision.is_integer() {
+        let sum = if matches!(precision, Prim::F16 | Prim::Bf16) {
+            let load = Self::reduced_to_f32_fn(precision);
+            let store = Self::f32_to_reduced_fn(precision);
+            format!("{store}({load}({left}) + {load}({right}))")
+        } else if precision.is_integer() {
             let bits = Self::integer_width(precision);
             let trap = NumericTrap::Overflow {
                 op: "sum",
