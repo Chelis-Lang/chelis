@@ -511,7 +511,7 @@ pub(super) fn pack_dag_roots(
     if packed.len() == 1 {
         Ok(packed.pop().expect("checked length"))
     } else {
-        Ok(RuntimeValue::Tuple(packed))
+        Ok(RuntimeValue::Tuple(packed.into()))
     }
 }
 

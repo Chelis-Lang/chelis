@@ -459,9 +459,10 @@ class SchemaTests(unittest.TestCase):
             config, fixture_metadata(), tracked, fixture_sources().__getitem__
         )
 
-    def test_feature_gated_manual_and_excluded_targets_are_valid(self) -> None:
+    def test_feature_gated_standing_manual_and_excluded_targets_are_valid(self) -> None:
         tracked = set(fixture_sources()) | {"scripts/tool.py"}
         for content in (
+            config_text(standing=("p", "gated")),
             config_text(manual_only_target=("p", "gated")),
             config_text(target_exclusion=("p", "gated")),
             config_text(test_exclusion=("p", "gated", "gated_case")),
@@ -2222,10 +2223,16 @@ class DurationBaselineTests(unittest.TestCase):
 
 
 class MetadataAndDiffTests(unittest.TestCase):
-    def test_default_feature_eligibility_and_duplicate_names_are_package_qualified(self) -> None:
-        targets = owned.integration_targets(fixture_metadata())
-        self.assertIn(owned.Identity("p", "default_gated"), targets)
-        self.assertNotIn(owned.Identity("p", "gated"), targets)
+    def test_every_feature_set_is_discovered_and_duplicate_names_are_package_qualified(self) -> None:
+        targets = owned.all_integration_targets(fixture_metadata())
+        self.assertEqual(
+            targets[owned.Identity("p", "default_gated")].required_features,
+            ("enabled",),
+        )
+        self.assertEqual(
+            targets[owned.Identity("p", "gated")].required_features,
+            ("extra",),
+        )
         self.assertIn(owned.Identity("p", "smoke"), targets)
         self.assertIn(owned.Identity("q", "smoke"), targets)
         self.assertNotEqual(
@@ -3598,6 +3605,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
                 "owner": OWNER,
             }
         ]
+        plan["target_features"].update(
+            {identity.canonical: [] for identity in (*ordinary, other)}
+        )
         groups = owned.execution_groups(
             plan,
             lane="package-expansion",
@@ -3632,6 +3642,9 @@ class ShardingAndExecutionTests(unittest.TestCase):
         )
 
         many = [owned.Identity("p", f"target_{index:02}") for index in range(80)]
+        plan["target_features"].update(
+            {identity.canonical: [] for identity in many}
+        )
         baseline = duration_baseline(
             {identity: 30_000 for identity in many}
         )
@@ -3670,6 +3683,58 @@ class ShardingAndExecutionTests(unittest.TestCase):
         self.assertEqual(
             sorted(identity.canonical for group in chunked for identity in group),
             sorted(selected),
+        )
+
+    def test_expansion_chunks_share_one_package_and_exact_feature_set(self) -> None:
+        features = {
+            owned.Identity("p", "plain_a"): [],
+            owned.Identity("p", "ledger_a"): ["ledger"],
+            owned.Identity("p", "plain_b"): [],
+            owned.Identity("p", "ledger_b"): ["ledger"],
+            owned.Identity("p", "traced"): ["ledger", "trace"],
+            owned.Identity("q", "ledger"): ["ledger"],
+        }
+        plan = self._plan(lane="package-expansion")
+        set_package_expansion(
+            plan,
+            list(features),
+            weights={identity: 1_000 for identity in features},
+        )
+        plan["target_features"].update(
+            {identity.canonical: value for identity, value in features.items()}
+        )
+        groups = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[identity.canonical for identity in features],
+        )
+        self.assertEqual(
+            [[identity.target for identity in group] for group in groups],
+            [["plain_a", "plain_b"], ["ledger_a", "ledger_b"], ["traced"], ["ledger"]],
+        )
+        self.assertEqual(groups[3][0].package, "q")
+        for group in groups:
+            wanted = {tuple(features[identity]) for identity in group}
+            self.assertEqual(len(wanted), 1, group)
+
+        ledger = [owned.Identity("p", f"ledger_{index:02}") for index in range(17)]
+        plan = self._plan(lane="package-expansion")
+        set_package_expansion(
+            plan,
+            ledger,
+            weights={identity: 1_000 for identity in ledger},
+        )
+        plan["target_features"].update(
+            {identity.canonical: ["ledger"] for identity in ledger}
+        )
+        chunked = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[identity.canonical for identity in ledger],
+        )
+        self.assertEqual(
+            [len(group) for group in chunked],
+            [owned.PACKAGE_EXPANSION_GROUP_TARGET_LIMIT, 1],
         )
 
     def test_same_package_deadline_preserves_completed_chunks(self) -> None:

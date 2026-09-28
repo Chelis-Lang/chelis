@@ -32,13 +32,9 @@ pub(crate) enum ResultProducer {
     /// has that combinator as its producer (spec/04 section 4.7), so a
     /// projection of any child is the same stamp.
     Uniform(String),
-}
-
-/// One pending step of [`ResultProducer::interface_load`]'s walk.
-enum InterfaceStep<'a> {
-    Visit(&'a RuntimeValue),
-    /// The last `usize` stamps are one aggregate's children, in order.
-    Assemble(usize),
+    /// A runtime interface stamps every nested tensor as a load without
+    /// walking a potentially deep container at entry.
+    Interface,
 }
 
 impl ResultProducer {
@@ -49,6 +45,7 @@ impl ResultProducer {
     pub(crate) fn operation(&self) -> Option<&str> {
         match self {
             Self::Tensor(operation) | Self::Uniform(operation) => Some(operation),
+            Self::Interface => Some("load"),
             Self::Aggregate(_) => None,
         }
     }
@@ -56,7 +53,7 @@ impl ResultProducer {
     pub(crate) fn child(&self, index: usize) -> Option<Self> {
         match self {
             Self::Aggregate(children) => children.get(index).cloned().flatten(),
-            Self::Uniform(_) => Some(self.clone()),
+            Self::Uniform(_) | Self::Interface => Some(self.clone()),
             Self::Tensor(_) => None,
         }
     }
@@ -66,7 +63,7 @@ impl ResultProducer {
             Self::Aggregate(children) => {
                 Self::aggregate(children.iter().take(count).cloned().collect())
             }
-            Self::Uniform(_) => Some(self.clone()),
+            Self::Uniform(_) | Self::Interface => Some(self.clone()),
             Self::Tensor(_) => None,
         }
     }
@@ -76,7 +73,7 @@ impl ResultProducer {
             Self::Aggregate(children) => {
                 Self::aggregate(children.iter().skip(start).cloned().collect())
             }
-            Self::Uniform(_) => Some(self.clone()),
+            Self::Uniform(_) | Self::Interface => Some(self.clone()),
             Self::Tensor(_) => None,
         }
     }
@@ -88,76 +85,26 @@ impl ResultProducer {
             .then_some(Self::Aggregate(children))
     }
 
-    /// Stamp a value crossing a genuine runtime interface. Every tensor leaf
-    /// is observed through `load`; aggregate shape is retained so a later
-    /// projection cannot lose the interface origin or borrow a sibling's.
-    /// The value is walked from a worklist, so a value nested far deeper than
-    /// the native stack is stamped with bounded native depth (chelis#2567).
+    /// Stamp a value crossing a runtime interface without visiting every
+    /// nested element. An interface stamp follows projections and applies
+    /// only where the projected value can contain a tensor.
     pub(crate) fn interface_load(value: &RuntimeValue) -> Option<Self> {
-        if let Some(stamp) = Self::shallow_interface_load(value) {
-            return stamp;
-        }
-        let mut steps = vec![InterfaceStep::Visit(value)];
-        let mut stamped: Vec<Option<Self>> = Vec::new();
-        while let Some(step) = steps.pop() {
-            match step {
-                InterfaceStep::Visit(value) => match value {
-                    value if let Some(stamp) = Self::shallow_interface_load(value) => {
-                        stamped.push(stamp)
-                    }
-                    RuntimeValue::Tensor(_) => stamped.push(Some(Self::tensor("load"))),
-                    RuntimeValue::Tuple(values)
-                    | RuntimeValue::List(values)
-                    | RuntimeValue::Adt { fields: values, .. } => {
-                        steps.push(InterfaceStep::Assemble(values.len()));
-                        steps.extend(values.iter().rev().map(InterfaceStep::Visit));
-                    }
-                    _ => stamped.push(None),
-                },
-                InterfaceStep::Assemble(count) => {
-                    let children = stamped.split_off(stamped.len() - count);
-                    stamped.push(Self::aggregate(children));
-                }
-            }
-        }
-        stamped.pop().flatten()
-    }
-
-    /// The stamp of a leaf, or of an aggregate whose children are all leaves,
-    /// made directly; `None` when a child is itself an aggregate. An aggregate
-    /// with no tensor child is stamped without allocating.
-    fn shallow_interface_load(value: &RuntimeValue) -> Option<Option<Self>> {
-        let values = match value {
-            RuntimeValue::Tensor(_) => return Some(Some(Self::tensor("load"))),
-            RuntimeValue::Tuple(values)
-            | RuntimeValue::List(values)
-            | RuntimeValue::Adt { fields: values, .. } => values,
-            _ => return Some(None),
-        };
-        let mut has_tensor = false;
-        for value in values {
-            match value {
-                RuntimeValue::Tensor(_) => has_tensor = true,
-                RuntimeValue::Tuple(_) | RuntimeValue::List(_) | RuntimeValue::Adt { .. } => {
-                    return None;
-                }
-                _ => {}
-            }
-        }
-        if !has_tensor {
-            return Some(None);
-        }
-        let children = values
-            .iter()
-            .map(|value| matches!(value, RuntimeValue::Tensor(_)).then(|| Self::tensor("load")))
-            .collect();
-        Some(Some(Self::Aggregate(children)))
+        Self::Interface
+            .matches_value(value)
+            .then_some(Self::Interface)
     }
 
     pub(crate) fn matches_value(&self, value: &RuntimeValue) -> bool {
         match (self, value) {
             (Self::Uniform(_), _) => true,
             (Self::Tensor(_), RuntimeValue::Tensor(_)) => true,
+            (
+                Self::Interface,
+                RuntimeValue::Tensor(_)
+                | RuntimeValue::Tuple(_)
+                | RuntimeValue::List(_)
+                | RuntimeValue::Adt { .. },
+            ) => true,
             (Self::Aggregate(children), RuntimeValue::Tuple(values))
             | (Self::Aggregate(children), RuntimeValue::List(values)) => {
                 children.len() == values.len()
@@ -520,17 +467,26 @@ mod tests {
         let tensor = RuntimeValue::Tensor(super::super::RuntimeTensorValue::new(
             chelis_ir::eval::TensorValue::from_vec(vec![1], vec![1.0]),
         ));
-        let value = RuntimeValue::Tuple(vec![
-            int(7),
-            tensor.clone(),
-            RuntimeValue::Adt {
-                ctor: "Some".to_string(),
-                fields: vec![tensor],
-                field_names: None,
-            },
-        ]);
+        let value = RuntimeValue::Tuple(
+            vec![
+                int(7),
+                tensor.clone(),
+                RuntimeValue::Adt {
+                    ctor: "Some".to_string(),
+                    fields: vec![tensor].into(),
+                    field_names: None,
+                },
+            ]
+            .into(),
+        );
         let producer = ResultProducer::interface_load(&value).expect("tensor leaves exist");
-        assert_eq!(producer.child(0), None);
+        // A projection keeps a producer only where it matches the value.
+        assert_eq!(
+            producer
+                .child(0)
+                .filter(|child| child.matches_value(&int(7))),
+            None
+        );
         assert_eq!(
             producer
                 .child(1)

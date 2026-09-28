@@ -91,7 +91,7 @@ pub(super) fn pattern_matches_with_result_producer(
                         if kids.len() != 3 || items.is_empty() {
                             return Ok(false);
                         }
-                        let tail = RuntimeValue::List(items[1..].to_vec());
+                        let tail = RuntimeValue::List(items[1..].to_vec().into());
                         let head_producer = producer.and_then(|producer| producer.child(0));
                         let tail_producer =
                             producer.and_then(|producer| producer.aggregate_suffix(1));
@@ -769,7 +769,7 @@ pub(super) fn expect_list_arg(
     index: usize,
 ) -> Result<Vec<RuntimeValue>, String> {
     match args.get(index) {
-        Some(RuntimeValue::List(items)) => Ok(items.clone()),
+        Some(RuntimeValue::List(items)) => Ok(items.to_vec()),
         other => Err(format!("expected list arg at index {index}, got {other:?}")),
     }
 }
@@ -779,7 +779,7 @@ pub(super) fn expect_dict_arg(
     index: usize,
 ) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
     match args.get(index) {
-        Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
+        Some(RuntimeValue::Dict(entries)) => Ok(entries.to_vec()),
         other => Err(format!("expected dict arg at index {index}, got {other:?}")),
     }
 }
@@ -2373,7 +2373,7 @@ pub(super) fn tensor_split_value(
             IrTensorValue::from_storage(shape, tensor.value.storage().reuse_gather(&picks)),
         )));
     }
-    Ok(RuntimeValue::List(parts))
+    Ok(RuntimeValue::List(parts.into()))
 }
 
 pub(super) fn tensor_gather_value(
@@ -2645,18 +2645,21 @@ pub(super) fn tensor_sort_value(
     // or spins an empty loop, matching the C runtime's guard in
     // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
     if tensor.value.is_empty() {
-        return Ok(RuntimeValue::Tuple(vec![
-            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
-                tensor.value.shape.clone(),
-                tensor.value.storage().reuse_gather(&[]),
-            ))),
-            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
-                "sort",
-                Prim::Int64,
-                tensor.value.shape.clone(),
-                Vec::new(),
-            )?),
-        ]));
+        return Ok(RuntimeValue::Tuple(
+            vec![
+                RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                    tensor.value.shape.clone(),
+                    tensor.value.storage().reuse_gather(&[]),
+                ))),
+                RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                    "sort",
+                    Prim::Int64,
+                    tensor.value.shape.clone(),
+                    Vec::new(),
+                )?),
+            ]
+            .into(),
+        ));
     }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
@@ -2690,18 +2693,21 @@ pub(super) fn tensor_sort_value(
     }
     // reuse_* contract: the sorted values are a permutation of the input
     // (section C3, element-preserving); the index tensor is exact i64.
-    Ok(RuntimeValue::Tuple(vec![
-        RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
-            tensor.value.shape.clone(),
-            tensor.value.storage().reuse_gather(&picks),
-        ))),
-        RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
-            "sort",
-            Prim::Int64,
-            tensor.value.shape.clone(),
-            indices,
-        )?),
-    ]))
+    Ok(RuntimeValue::Tuple(
+        vec![
+            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                tensor.value.shape.clone(),
+                tensor.value.storage().reuse_gather(&picks),
+            ))),
+            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                "sort",
+                Prim::Int64,
+                tensor.value.shape.clone(),
+                indices,
+            )?),
+        ]
+        .into(),
+    ))
 }
 
 pub(super) fn tensor_diagonal_value(

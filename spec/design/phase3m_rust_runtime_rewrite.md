@@ -177,7 +177,8 @@ target directory are never read.
   target directory into another, and an embedded path would then name the other
   directory's archive.
 - A test or oracle that needs an instrumented runtime builds its consumer with
-  that runtime feature, or links an exact instrumented Cargo artifact itself.
+  that runtime feature and links the runtime the consumer carries. The
+  ownership-ledger harnesses require their crate's `ownership-ledger` feature.
 - `scripts/check_runtime_archive_lookups.py` makes every line outside the two
   bundle crates that names the runtime a reviewed line: `libchelis_runtime` in
   any form, a `CHELIS_RUNTIME_` variable, the library or Cargo target name as a

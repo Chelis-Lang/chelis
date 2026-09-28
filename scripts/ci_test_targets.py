@@ -55,7 +55,12 @@ def default_features(package: dict) -> set[str]:
 
 
 def cargo_selections(metadata: dict, selected: list[tuple[str, str]]) -> list[list[str]]:
-    """Select units once, isolating shared test names by their exact package."""
+    """Select units once, isolating shared test names by their exact package.
+
+    A target whose required features are not all default-enabled builds in its
+    own group with exactly those features, shared only with targets of the same
+    package and feature set, so no other unit is compiled with them.
+    """
     if not selected or len(set(selected)) != len(selected):
         raise ValueError("integration selection is empty or contains duplicate identities")
     by_name: dict[str, list[tuple[str, dict]]] = {}
@@ -66,18 +71,34 @@ def cargo_selections(metadata: dict, selected: list[tuple[str, str]]) -> list[li
                 by_name.setdefault(target["name"], []).append((package["name"], target))
     args = ["--workspace", "--lib", "--bins"]
     scoped: dict[str, list[str]] = {}
+    gated: dict[tuple[str, tuple[str, ...]], list[str]] = {}
     for package, name in selected:
         matches = by_name.get(name, [])
         exact = [target for owner, target in matches if owner == package]
         if len(exact) != 1:
             raise ValueError(f"missing or duplicate integration target: {package}::{name}")
-        if not set(exact[0].get("required-features", [])) <= default_features(workspace[package]):
-            raise ValueError(f"fast integration must use default features: {package}::{name}")
-        if len(matches) == 1:
+        required = tuple(sorted(set(exact[0].get("required-features", []))))
+        undeclared = [
+            feature for feature in required
+            if feature not in workspace[package].get("features", {})
+        ]
+        if undeclared:
+            raise ValueError(
+                f"integration target requires undeclared features {undeclared}: {package}::{name}"
+            )
+        if not set(required) <= default_features(workspace[package]):
+            gated.setdefault(
+                (package, required), ["-p", package, "--features", ",".join(required)]
+            ).extend(["--test", name])
+        elif len(matches) == 1:
             args.extend(["--test", name])
         else:
             scoped.setdefault(package, ["-p", package]).extend(["--test", name])
-    return [args, *(scoped[package] for package in sorted(scoped))]
+    return [
+        args,
+        *(scoped[package] for package in sorted(scoped)),
+        *(gated[key] for key in sorted(gated)),
+    ]
 
 
 def merge_listings(documents: list[dict]) -> dict:

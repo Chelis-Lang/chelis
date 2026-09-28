@@ -639,48 +639,6 @@ def _relative(path: str, root: str) -> str:
     return relative.as_posix()
 
 
-def default_features(package: Mapping[str, Any]) -> set[str]:
-    """Return the package-local named feature closure enabled by default."""
-    features = package.get("features", {})
-    if not isinstance(features, dict):
-        raise ValueError(f"malformed feature map for {package.get('name')}")
-    enabled: set[str] = set()
-    pending = ["default"]
-    while pending:
-        feature = pending.pop()
-        if feature in enabled:
-            continue
-        enabled.add(feature)
-        for successor in features.get(feature, []):
-            if not isinstance(successor, str):
-                raise ValueError(f"malformed feature edge in {package.get('name')}")
-            if successor in features:
-                pending.append(successor)
-    return enabled
-
-
-def integration_targets(metadata: Mapping[str, Any]) -> dict[Identity, TargetInfo]:
-    root = metadata["workspace_root"]
-    result: dict[Identity, TargetInfo] = {}
-    for package in _workspace_packages(metadata):
-        enabled = default_features(package)
-        for target in package["targets"]:
-            if "test" not in target.get("kind", []):
-                continue
-            required = tuple(target.get("required-features", []))
-            if not set(required) <= enabled:
-                continue
-            identity = Identity(package["name"], target["name"])
-            if identity in result:
-                raise ValueError(f"duplicate Cargo target identity: {identity.canonical}")
-            result[identity] = TargetInfo(
-                identity,
-                _relative(target["src_path"], root),
-                required,
-            )
-    return result
-
-
 def all_integration_targets(metadata: Mapping[str, Any]) -> dict[Identity, TargetInfo]:
     root = metadata["workspace_root"]
     result: dict[Identity, TargetInfo] = {}
@@ -1124,7 +1082,6 @@ def validate_config(
 ) -> None:
     """Reject stale package, target, test, and path-rule authority."""
     packages = {package.name for package in package_infos(metadata)}
-    eligible = integration_targets(metadata)
     all_targets = all_integration_targets(metadata)
 
     for identity in config.standing_targets:
@@ -1132,10 +1089,6 @@ def validate_config(
             raise ValueError(f"stale standing package: {identity.package}")
         if identity not in all_targets:
             raise ValueError(f"stale standing target: {identity.canonical}")
-        if identity not in eligible:
-            raise ValueError(
-                f"standing target is not default-feature eligible: {identity.canonical}"
-            )
     for identity in config.manual_only_targets:
         if identity.package not in packages:
             raise ValueError(f"stale manual-only package: {identity.package}")
@@ -3079,7 +3032,9 @@ def execution_groups(
     lane: str,
     selected: Sequence[str],
 ) -> list[tuple[Identity, ...]]:
-    """Batch ordinary expansion targets into bounded package-scoped chunks."""
+    """Batch ordinary expansion targets into bounded chunks of one package and
+    one exact required-feature set, so a chunk never compiles a target with a
+    feature it does not require."""
     identities = [Identity.parse(canonical) for canonical in selected]
     if lane != "package-expansion":
         return [(identity,) for identity in identities]
@@ -3095,7 +3050,7 @@ def execution_groups(
     default_milliseconds = planning["default_milliseconds"]
     groups: list[list[Identity]] = []
     group_estimates: list[int] = []
-    ordinary_by_package: dict[str, int] = {}
+    ordinary_by_key: dict[tuple[str, tuple[str, ...]], int] = {}
     for identity in identities:
         special = (
             identity.canonical in manual_only
@@ -3108,7 +3063,11 @@ def execution_groups(
             )
             continue
         estimate = weights.get(identity.canonical, default_milliseconds)
-        index = ordinary_by_package.get(identity.package)
+        key = (
+            identity.package,
+            tuple(plan["target_features"][identity.canonical]),
+        )
+        index = ordinary_by_key.get(key)
         if (
             index is None
             or len(groups[index]) >= PACKAGE_EXPANSION_GROUP_TARGET_LIMIT
@@ -3118,7 +3077,7 @@ def execution_groups(
                 > PACKAGE_EXPANSION_GROUP_ESTIMATED_MILLISECONDS
             )
         ):
-            ordinary_by_package[identity.package] = len(groups)
+            ordinary_by_key[key] = len(groups)
             groups.append([identity])
             group_estimates.append(estimate)
         else:

@@ -2292,7 +2292,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         ),
         OracleLeg(
             "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
-            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--features", "ownership-ledger",
+             "--test", "issue_1314_json_bigint_ledger",
              "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
         ),
         OracleLeg(

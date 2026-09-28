@@ -197,9 +197,10 @@ class LocalCommandListTests(unittest.TestCase):
         # ownership-boundary contracts, the compiler pipeline artifact
         # contracts, the raw-checkpoint fixture, the
         # two cheap pipeline-core boundary guards (dependency + no_std doc),
-        # the canonical chelis-std generated-artifact currency check, and the
-        # chelis#908 unrepresentable-domain oracle, and chelis#893's
-        # release-profile runtime-representation Phase 0 oracle.
+        # the canonical chelis-std generated-artifact currency check, the
+        # chelis#908 unrepresentable-domain oracle, chelis#893's
+        # release-profile runtime-representation Phase 0 oracle, and the
+        # feature-gated test targets the per-crate runs would skip.
         # Two clippy configurations, not three: the closure check's leg 3
         # needs the solver-free row on a fresh target (it is the only
         # per-pull-request row compiling crates/chelis-prove/src/
@@ -214,7 +215,9 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo clippy --workspace --all-targets -- -D warnings",
                 "cargo clippy --workspace --all-targets --features "
                 "chelis-backend-c/sleef,"
+                "chelis-cli/ownership-ledger,"
                 "chelis-compiler-api/compilation-trace,"
+                "chelis-compiler-api/ownership-ledger,"
                 "chelis-e2e/hip-local-gpu,"
                 "chelis-ir/lowering-trace,"
                 "chelis-prove/clarabel,"
@@ -244,6 +247,20 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo nextest run -p chelis-compiler-api --features compilation-trace "
                 "--lib --test emission_observer --test execution_artifact_metadata "
                 "--test compilation_trace",
+                "cargo nextest run -p chelis-compiler-api --features ownership-ledger "
+                "--test builtin_named_kernel_inputs --test dropout_fixed_stream_api "
+                "--test fixed_control_host_c --test generated_header_native_probe "
+                "--test invocation_local_random --test issue_1684_entry_cleanup "
+                "--test issue_1685_multi_root_cleanup --test issue_2445_match_arm_ownership "
+                "--test issue_2485_region_entry_terminals --test issue_2508_list_step_ownership "
+                "--test issue_2522_data_type_c_lane --test issue_2576_option_items_render "
+                "--test issue_2577_filter_named_predicate --test key_admission_lanes "
+                "--test key_affinity_lanes --test key_extent_lanes --test key_operand_random_c "
+                "--test key_operations_c --test key_root_lanes --test key_split_count_lanes "
+                "--test key_surface_lanes --test local_ascription_activation "
+                "--test rule_d_entered_lanes --test untaken_arm_gradients",
+                "cargo nextest run -p chelis-cli --features ownership-ledger "
+                "--test issue_1314_json_bigint_ledger",
             ],
         )
 

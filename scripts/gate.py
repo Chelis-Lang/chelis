@@ -312,7 +312,9 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
+    "chelis-cli/ownership-ledger,"
     "chelis-compiler-api/compilation-trace,"
+    "chelis-compiler-api/ownership-ledger,"
     "chelis-e2e/hip-local-gpu,"
     "chelis-ir/lowering-trace,"
     "chelis-prove/clarabel,"
@@ -529,6 +531,45 @@ EMISSION_OBSERVER_TESTS: list[str] = [
     "--test", "execution_artifact_metadata", "--test", "compilation_trace",
 ]
 
+# The ownership-ledger harnesses link the runtime their own build carries, so
+# each target requires its package's `ownership-ledger` feature and the
+# featureless workspace runs skip it. The CLI command rebuilds
+# <target>/debug/chelis against the instrumented runtime, so it runs after
+# every command that trusts the binary the producers above built.
+OWNERSHIP_LEDGER_API_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
+    "ownership-ledger",
+    "--test", "builtin_named_kernel_inputs",
+    "--test", "dropout_fixed_stream_api",
+    "--test", "fixed_control_host_c",
+    "--test", "generated_header_native_probe",
+    "--test", "invocation_local_random",
+    "--test", "issue_1684_entry_cleanup",
+    "--test", "issue_1685_multi_root_cleanup",
+    "--test", "issue_2445_match_arm_ownership",
+    "--test", "issue_2485_region_entry_terminals",
+    "--test", "issue_2508_list_step_ownership",
+    "--test", "issue_2522_data_type_c_lane",
+    "--test", "issue_2576_option_items_render",
+    "--test", "issue_2577_filter_named_predicate",
+    "--test", "key_admission_lanes",
+    "--test", "key_affinity_lanes",
+    "--test", "key_extent_lanes",
+    "--test", "key_operand_random_c",
+    "--test", "key_operations_c",
+    "--test", "key_root_lanes",
+    "--test", "key_split_count_lanes",
+    "--test", "key_surface_lanes",
+    "--test", "local_ascription_activation",
+    "--test", "rule_d_entered_lanes",
+    "--test", "untaken_arm_gradients",
+]
+
+OWNERSHIP_LEDGER_CLI_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-cli", "--features",
+    "ownership-ledger", "--test", "issue_1314_json_bigint_ledger",
+]
+
 STAGES: dict[str, list[list[str]]] = {
     "ci-fast": [[MANAGED_PYTHON, "scripts/ci_test_targets.py"]],
     "targeted-units": [NEXTEST_TARGETED_UNITS],
@@ -554,9 +595,11 @@ STAGES: dict[str, list[list[str]]] = {
         NEXTEST_WORKSPACE_CI,
         LOWERING_TRACE_TESTS,
         EMISSION_OBSERVER_TESTS,
+        OWNERSHIP_LEDGER_API_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
         [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+        OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
         RUNTIME_REPRESENTATION_ORACLE,
@@ -616,6 +659,8 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     RUNTIME_REPRESENTATION_ORACLE,
     LOWERING_TRACE_TESTS,
     EMISSION_OBSERVER_TESTS,
+    OWNERSHIP_LEDGER_API_TESTS,
+    OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
@@ -2949,7 +2994,7 @@ def selected_stage_commands(
     else:
         selected = [list(command) for command in commands]
     if support_slice is not None:
-        selected = selected[:3] if support_slice == "frontend" else selected[3:]
+        selected = selected[:4] if support_slice == "frontend" else selected[4:]
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected

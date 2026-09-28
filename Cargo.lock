@@ -575,6 +575,8 @@ dependencies = [
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-reef",
+ "chelis-runtime",
+ "chelis-runtime-bundle",
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",

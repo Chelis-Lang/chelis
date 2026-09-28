@@ -441,30 +441,6 @@ REVIEWED: tuple[Row, ...] = (
         ),
     ),
     Row(
-        "crates/chelis-cli/tests/issue_1314_json_bigint.rs",
-        "archive-name",
-        lines=(
-            'fs::copy(archives[0], out.join("libchelis_runtime.a")).unwrap();',
-        ),
-        disposition="lookup",
-        tracking="chelis#1354",
-        reason=(
-            "copies a separately built ownership-ledger archive over the runtime `chelis build` staged"
-        ),
-    ),
-    Row(
-        "crates/chelis-cli/tests/issue_1314_json_bigint.rs",
-        "library-name",
-        lines=(
-            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
-        ),
-        disposition="lookup",
-        tracking="chelis#1354",
-        reason=(
-            "selects a separately built ownership-ledger archive from Cargo's compiler-artifact messages instead of building its consumer with chelis-runtime/ownership-ledger"
-        ),
-    ),
-    Row(
         "crates/chelis-cli/tests/issue_1464_transformed_fail_traps.rs",
         "archive-name",
         lines=(
@@ -880,31 +856,6 @@ REVIEWED: tuple[Row, ...] = (
         disposition="not-lookup",
         reason=(
             "documents and links the archive `chelis build` staged in its build directory"
-        ),
-    ),
-    Row(
-        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
-        "archive-name",
-        lines=(
-            "/// or not, replaces the uplifted `debug/libchelis_runtime.a` with a new file.",
-            'let archive = staged.join(format!("libchelis_runtime-{:016x}.a", hasher.finish()));',
-        ),
-        disposition="lookup",
-        tracking="chelis#1354",
-        reason=(
-            "stages a separately built ownership-ledger archive under a content-addressed `libchelis_runtime-<hash>.a` name; a comment explains why it does not link the uplifted build-tree archive"
-        ),
-    ),
-    Row(
-        "crates/chelis-compiler-api/tests/ownership_support/mod.rs",
-        "library-name",
-        lines=(
-            'row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"',
-        ),
-        disposition="lookup",
-        tracking="chelis#1354",
-        reason=(
-            "selects a separately built ownership-ledger archive from Cargo's compiler-artifact messages instead of building its consumer with chelis-runtime/ownership-ledger"
         ),
     ),
     Row(

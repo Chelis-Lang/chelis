@@ -3,15 +3,13 @@
 //!
 //! A `fold` builds each chain, so no Chelis-level recursion is involved. The
 //! interpreter overflowed its stack between 2,000 and 5,000 links: reading the
-//! accumulator deep-copied it through the derived `Clone`, passing it into the
+//! accumulator deep-copied it, passing it into the
 //! callback walked it to stamp its interface provenance, and printing or
 //! returning it rendered and converted it, each one native frame group per
 //! level. Those walks now run from worklists.
 //!
-//! `DEPTH` is past the old overflow and small enough to run in a debug test:
-//! every read of the accumulator still copies the whole chain, so a fold of n
-//! links costs O(n^2). Copy-on-write container payloads, which remove that
-//! cost, are chelis#2592.
+//! `DEPTH` is past the old overflow. Shared container payloads make each
+//! accumulator copy constant-time (chelis#2592).
 
 use assert_cmd::Command;
 use tempfile::tempdir;
@@ -135,5 +133,29 @@ fn shallow_values_render_exactly() {
          b = Node([Node([Leaf])])\n\
          c = More((1, More((0, Done))))\n\
          d = Deeper(dict(k: Stop))\n"
+    );
+}
+
+/// chelis#2592: a fold-built Chain must no longer copy every
+/// preceding link at each step. Four times the input should take under six
+/// times as long, with room for process startup and a busy CI host. The
+/// old owned-Vec payload took 0.39 s at 1,000 links and 4.22 s at 4,000
+/// links on the merge head; both outputs were correct.
+#[test]
+fn fold_chain_growth_is_subquadratic() {
+    let measure = |n: usize| {
+        let roots = format!(
+            "def head(n: i64) -> i64 = match chain(n) with {{\n  | End => 0i64\n  | Link(k, rest) => k\n}}\na = head({n}i64)\n"
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(eval(&roots), format!("a = {}\n", n - 1));
+        started.elapsed()
+    };
+    let best_of_two = |n| std::cmp::min(measure(n), measure(n));
+    let small = best_of_two(1_000);
+    let large = best_of_two(4_000);
+    assert!(
+        large < small * 6,
+        "fold of 4,000 links took {large:?} versus {small:?} for 1,000 links"
     );
 }
