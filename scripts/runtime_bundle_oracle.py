@@ -611,14 +611,14 @@ def build_python_extension(
         "develop",
         "--manifest-path",
         str(context["candidate"] / "crates/chelis-python/Cargo.toml"),
-        "--interpreter",
-        str(python_env["python"]),
         "--locked",
+        "--uv",
     ]
     if sealed:
         argv.extend(["--features", "sealed-runtime"])
     env = rust_cargo_env(context)
     env["PYO3_PYTHON"] = str(python_env["python"])
+    env["VIRTUAL_ENV"] = str(python_env["dir"])
     runner.run(label, argv, cwd=context["candidate"] / "bindings/python", env=env)
 
 
