@@ -931,3 +931,116 @@ fn callback_accumulator_results_keep_applications_and_required_equality() {
         );
     }
 }
+
+fn check_accumulator_alias_result(operation: &str, result_type: &str) {
+    let call = "op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])";
+    check(
+        &format!("def main() -> {result_type} = {{\n op = {operation}\n {call}\n}}"),
+        true,
+    );
+    check(
+        &format!("def main() -> bool = {{\n op = {operation}\n {call}\n}}"),
+        false,
+    );
+}
+
+#[test]
+fn fold_alias_retains_its_required_result_type() {
+    check_accumulator_alias_result("fold", "f32");
+}
+
+#[test]
+fn scan_alias_retains_its_required_result_type() {
+    check_accumulator_alias_result("scan", "List[f32]");
+}
+
+#[test]
+fn accumulator_contract_survives_callable_transport_and_cache() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    for (operation, output) in [("fold", "f32"), ("scan", "List[f32]")] {
+        let library = format!(
+            "def return_op() = {operation}\ndef pair_op() = ({operation}, true)\ndef identity(f) = f\ndef recursive_op(flag: bool) = if flag then {operation} else recursive_op(true)"
+        );
+        let program = desugar_program(&parse_str(&library).unwrap()).unwrap();
+        let context = build_type_env_from_library(&program).unwrap();
+        let restored: TypeEnv =
+            bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
+        for callee in [
+            "return_op()".to_string(),
+            "pair_op().0".to_string(),
+            "recursive_op(true)".to_string(),
+            format!("identity({operation})"),
+        ] {
+            for (result_type, accepted) in [(output, true), ("bool", false)] {
+                let source = format!(
+                    "def main() -> {result_type} = {{\n op = {callee}\n op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])\n}}"
+                );
+                let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+                for context in [&context, &restored] {
+                    let checked = check_ir_with_context(context, &program);
+                    assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn accumulator_aliases_retain_callback_and_element_requirements() {
+    for operation in ["fold", "scan"] {
+        for (callback, initial, elements, accepted) in [
+            ("fn (acc: f32, item: i64) -> acc", "1.0f32", "[1i64]", true),
+            (
+                "fn (acc: f32, item: i64) -> true",
+                "1.0f32",
+                "[1i64]",
+                false,
+            ),
+            ("fn (acc: f32, item: i64) -> acc", "true", "[1i64]", false),
+            ("fn (acc: f32, item: i64) -> acc", "1.0f32", "[true]", false),
+            ("fn (acc: f32, item: i64) -> acc", "1.0f32", "1i64", false),
+            ("fn (acc: f32) -> acc", "1.0f32", "[1i64]", false),
+        ] {
+            check(
+                &format!(
+                    "def main() = {{\n op = {operation}\n op({callback}, {initial}, {elements})\n}}"
+                ),
+                accepted,
+            );
+        }
+    }
+}
+
+#[test]
+fn accumulator_aliases_carry_grad_result_origin_before_helper_instantiation() {
+    use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+    for operation in ["fold", "scan"] {
+        let project = if operation == "scan" {
+            "index(r, 0i64)"
+        } else {
+            "r"
+        };
+        let library = format!(
+            "def pick(p) = {{\n op = {operation}\n r = op(fn (acc, item: i64) -> grad(fn (w: f32) -> 1.0f32), p, [1i64])\n {project}\n}}"
+        );
+        let program = desugar_program(&parse_str(&library).unwrap()).unwrap();
+        let context = build_type_env_from_library(&program).unwrap();
+        let restored: TypeEnv =
+            bincode::deserialize(&bincode::serialize(&context).unwrap()).unwrap();
+        for (parameter, application, accepted) in [
+            ("w: f32", "", true),
+            ("w", "(2.0f32)", true),
+            ("w", "", false),
+            ("w", "(true)", false),
+        ] {
+            let source =
+                format!("def main() = (pick(grad(fn ({parameter}) -> 1.0f32))){application}");
+            check(&format!("{library}\n{source}"), accepted);
+            let program = desugar_program(&parse_str(&source).unwrap()).unwrap();
+            for context in [&context, &restored] {
+                let checked = check_ir_with_context(context, &program);
+                assert_eq!(checked.is_ok(), accepted, "{source}\n{checked:?}");
+            }
+        }
+    }
+}

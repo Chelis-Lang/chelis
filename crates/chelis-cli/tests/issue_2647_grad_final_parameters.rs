@@ -60,6 +60,8 @@ fn incorrect_gradient_payloads_fail_at_checking() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grad.ch");
     for source in [
+        "def main() -> bool = {\n op = fold\n op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])\n}",
+        "def main() -> bool = {\n op = scan\n op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])\n}",
         "def main() = dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", grad(fn (w) -> 1.0f32))",
         "def main() = dict_merge(dict_of([(\"a\", grad(fn (w) -> 1.0f32))]), dict_of([(\"b\", grad(fn (w: f32) -> 1.0f32))]))",
         "def pick(p) = index(dict_values(dict_insert(dict_of([(\"a\", grad(fn (w: f32) -> 1.0f32))]), \"b\", p)), 0i64)\ndef main() = pick(grad(fn (w) -> 1.0f32))",
@@ -128,5 +130,25 @@ fn native_scalar_lambda_admission_matches_the_annotated_control() {
             String::from_utf8_lossy(&output.stderr).contains("applies/binds `grad`"),
             "{output:?}"
         );
+    }
+}
+
+#[test]
+fn accumulator_aliases_check_at_their_required_result_types() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("accumulator_alias.ch");
+    for (operation, output) in [("fold", "f32"), ("scan", "List[f32]")] {
+        let source = format!(
+            "def main() -> {output} = {{\n op = {operation}\n op(fn (acc: f32, item: i64) -> acc, 1.0f32, [1i64])\n}}"
+        );
+        std::fs::write(&path, source).unwrap();
+        let output = Command::new(assert_cmd::cargo_bin!("chelis"))
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(payload["errors"], serde_json::json!([]));
     }
 }

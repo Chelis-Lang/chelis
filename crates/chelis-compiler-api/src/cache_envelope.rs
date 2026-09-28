@@ -91,7 +91,8 @@ impl CachePayload for crate::LibraryContext {
     // V20 (chelis#2413): `Effect::Random` is gone, so every effect's bincode
     // variant index shifted, and Deep lost the `random` handler kind.
     // V21: generalized checker schemes retain result-equation origins.
-    const FORMAT_VERSION: u32 = 21;
+    // V22: checked fold/scan aliases retain accumulator/result equations.
+    const FORMAT_VERSION: u32 = 22;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
@@ -133,7 +134,8 @@ impl CachePayload for crate::StdLibContext {
     // library's claim carriers and retained dead nodes change meaning while
     // their bincode shape does not.
     // V36: generalized checker schemes retain result-equation origins.
-    const FORMAT_VERSION: u32 = 36;
+    // V37: checked fold/scan aliases retain accumulator/result equations.
+    const FORMAT_VERSION: u32 = 37;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

@@ -140,7 +140,9 @@ pub struct TypeEnv {
 // suggested repair after a round trip.
 // v7 carries result-equation origins with every generalized scheme. Omitting
 // them would let a cached helper turn a result check into a Grad input binding.
-const TYPE_ENV_FORMAT_VERSION: u32 = 7;
+// v8 requires transported fold/scan accumulator and result contracts.
+// v7 could serialize an alias with an unconstrained result slot.
+const TYPE_ENV_FORMAT_VERSION: u32 = 8;
 
 #[derive(Serialize)]
 struct TypeEnvWireRef<'a> {
@@ -326,8 +328,10 @@ mod tests {
         wire.as_object_mut().unwrap().remove("result_origin");
         assert!(serde_json::from_value::<Scheme>(wire).is_err());
         let mut wire = serde_json::to_value(TypeEnv::empty()).unwrap();
-        wire["format_version"] = serde_json::json!(6);
-        assert!(serde_json::from_value::<TypeEnv>(wire).is_err());
+        for version in [6, 7] {
+            wire["format_version"] = serde_json::json!(version);
+            assert!(serde_json::from_value::<TypeEnv>(wire.clone()).is_err());
+        }
         let wire = bincode::serialize(&TypeEnv::empty()).unwrap();
         assert!(bincode::deserialize::<TypeEnv>(&wire).is_ok());
     }

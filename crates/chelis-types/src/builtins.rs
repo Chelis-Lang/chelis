@@ -3457,18 +3457,63 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("range", &mut env, &mut vg);
     generic_binop("map", &mut env, &mut vg);
     generic_binop("filter", &mut env, &mut vg);
-    // Each operand and the result have independent scheme slots. The
-    // registered aggregate rule owns callback application and the separate
-    // accumulator/result equality.
-    generic_triop("fold", &mut env, &mut vg);
-    generic_triop("scan", &mut env, &mut vg);
+    // [05-OP-55]/[04-INF-9]: every function value carries its complete
+    // callback/collection signature. Applying the callback binds its A and T
+    // inputs; equality between A and the callback's result is a result-origin
+    // equation, so a known returned value cannot admit an unresolved Grad.
+    for (name, list_result) in [("fold", false), ("scan", true)] {
+        let initial = vg.fresh_tvar();
+        let item = vg.fresh_tvar();
+        let callback_result = vg.fresh_tvar();
+        let published = vg.fresh_tvar();
+        let list = |ty| Type::Adt("List".to_string(), vec![ty]);
+        let output = |ty| if list_result { list(ty) } else { ty };
+        let signature = |callback_result, result| {
+            Type::Fn(
+                vec![
+                    Type::Fn(
+                        vec![Type::Var(initial), Type::Var(item)],
+                        Box::new(callback_result),
+                    ),
+                    Type::Var(initial),
+                    list(Type::Var(item)),
+                ],
+                Box::new(result),
+            )
+        };
+        env.bind(
+            name.to_string(),
+            Scheme {
+                body: signature(Type::Var(initial), output(Type::Var(initial))),
+                tvars: vec![initial, item],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                constraints: vec![],
+                result_origin: Some(ResultOrigin {
+                    body: signature(Type::Var(callback_result), Type::Var(published)),
+                    tvars: vec![initial, item, callback_result, published],
+                    dvars: vec![],
+                    rvars: vec![],
+                    equations: vec![ResultConstraint::Join {
+                        inputs: vec![
+                            output(Type::Var(initial)),
+                            output(Type::Var(callback_result)),
+                        ],
+                        result: Type::Var(published),
+                    }],
+                }),
+            },
+        );
+    }
     // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
     // The actual constraint shape (scalar `T`, callback signature, i64 `n`,
     // tensor return) is enforced by the special-case arm in
     // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
     // role independently. This loose generic scheme is the type-env entry
     // point; it lets the inference engine see three argument slots and a
-    // return slot it will overwrite. Same shape as `fold`/`scan` above.
+    // return slot it will overwrite. This scalar-only rule does not carry
+    // the callable accumulator equality of `fold`/`scan`.
     let tensor_scan_a = vg.fresh_tvar();
     let tensor_scan_b = vg.fresh_tvar();
     let tensor_scan_c = vg.fresh_tvar();
