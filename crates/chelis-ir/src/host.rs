@@ -2905,30 +2905,6 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
     })
 }
 
-/// Does the named entry def's body use a `grad`/`vmap`/`vmap-grad` form?
-///
-/// Such an entry MUST stay on the host lane even though it is
-/// tensor-signature and [`lower_named_tensor_entry_dag`] *can* produce a
-/// DAG for it: the host lane owns the multi-root grad-tuple emission
-/// (assembling a real `chelis_tuple` from per-`wrt` gradient outputs, see
-/// #309), which the single-root entry-scoped kernel path does not.
-///
-/// This is deliberately narrower than "the body needs the host runtime":
-/// a DAG-lowerable host-runtime builtin such as `concat` lowers cleanly
-/// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
-/// NOT excluded here. Only genuinely host-lane-owned forms are.
-pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
-    // A whole-program entry owns its session, so nothing outside this crate
-    // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
-    let program = &session;
-    let defs = cached_program_defs(program);
-    match lookup_program_def(&defs, name) {
-        Some(body) => expr_contains_grad_like(body),
-        None => false,
-    }
-}
-
 /// Does the checked program bind any top-level VALUE binding — a
 /// `(def name body)` whose body is not a `fn`, i.e. a global like
 /// `glb = 2.0` or `total = add(...)`?
@@ -17021,26 +16997,6 @@ fn expr_reaches_forward_fail(
             .iter()
             .any(|kid| expr_reaches_forward_fail(kid, defs, visiting)),
         Expr::MetaExpr(meta, _) => expr_reaches_forward_fail(&meta.expr, defs, visiting),
-        Expr::Atom(_, _) | Expr::Map(_, _) => false,
-    }
-}
-
-/// Does this Deep expr contain a `grad`/`vmap`/`vmap-grad` node anywhere?
-/// Entry-point routing uses the whole-expression answer because transformed
-/// result packaging is host-owned; the forward-fail gate above intentionally
-/// uses the more precise subtree-aware traversal instead.
-fn expr_contains_grad_like(expr: &Expr) -> bool {
-    record_host_work(|profile| profile.grad_scan_nodes += 1);
-    match expr {
-        Expr::Node(list, _) => {
-            matches!(list.tag(), DeepTag::Grad | DeepTag::Vmap)
-                || list.children_slice().iter().any(expr_contains_grad_like)
-        }
-        Expr::UnknownForm(data) => {
-            data.head == "vmap-grad" || data.children.iter().any(expr_contains_grad_like)
-        }
-        Expr::BareList(items, _) => items.iter().any(expr_contains_grad_like),
-        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
     }
 }
