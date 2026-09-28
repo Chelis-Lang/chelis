@@ -250,8 +250,7 @@ Tensors alone cannot express that variable-length host-side structure.
   dict remove/update/overlay, key/value/entry enumeration, and dataset-friendly
   helpers such as cumulative scans, stable boolean partitioning, and callback-driven
   list expansion
-- effect propagation through iteration
-  this is now covered by checker tests for callback-driven `IO` and `Random`
+- effect propagation through iteration, including callback-driven `IO`
 
 **Collection/tensor bridge:**
 
@@ -1517,8 +1516,9 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
   parser returns diagnostics naming the offending token — it must never
   silently drop to an empty `SymExpr`. This test lives inside the acceptance
   oracle, not only in loose unit tests.
-- Type-overlay rendering: named tensor dims appear as subscripts, `Random`/`IO`
-  effects produce correct markers, `grad(f, wrt=x)` renders as
+- Type-overlay rendering: named tensor dims appear as subscripts, `IO`
+  effects produce correct markers, explicit key parameters render as ordinary
+  inputs, and `grad(f, wrt=x)` renders as
   `\frac{\partial f}{\partial x}`.
 - Provenance completeness: a fuzz-style test generates ten varied in-scope
   expressions, lowers each, and asserts zero Deep nodes have missing or empty
@@ -1569,7 +1569,7 @@ Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, `Random` effect), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
 | `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`, `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`. Configurable variable-name conventions. | 3n render surface |
 | `Octant.Notebook` | Cell runtime — formula, parameter, execution, Greek cells. Not a Jupyter kernel. Cells produce Deep, execution runs compiled C, rendering is mathematical notation. UI layer (web / VS Code / Cove extension / standalone) is a separate implementation decision. | full 3n Octant surface |
 | `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. No Deep node produced by Octant lowering may be missing a span. | 3n provenance surface |
@@ -1677,7 +1677,7 @@ The refreshed skill should teach:
 
 - the shipped pipe-first Surf idiom from `3e`
 - effects, linearity, macros, `vmap`, and tuples
-- handler syntax (`withSeed`, `withDevice`)
+- supported effect handlers and explicit key inputs
 - scalar types (`Int`, `Float`, `Bool`) and operations
 - strings and string operations
 - collections (`List`, `Dict`) and functional iteration (`map`, `filter`, `fold`)
@@ -1834,9 +1834,9 @@ since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed
 
 - `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
-- `Std.Nn.Generate` keeps the pure greedy path (`generate`) distinct from the seeded
+- generation keeps the pure greedy path (`generate`) distinct from the keyed
   sampled path (`generate_with`)
-- temperature + top-k + top-p sampling with seed is reproducible
+- temperature + top-k + top-p sampling replays across runs with the same initial key
 - decoupled AdamW weight decay remains observable even with zero gradients
 - cosine_with_warmup matches expected edge points
 - at least one pure package-mode 3i program builds to C, links, runs, and matches
