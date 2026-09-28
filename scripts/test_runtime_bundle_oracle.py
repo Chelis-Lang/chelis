@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,19 +23,28 @@ class RuntimeBundleOracleContracts(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_prerequisite_executable_invokes_symlink_as_cargo(self) -> None:
-        rustup = self.root / "rustup"
+        tools = self.root / "tools with spaces"
+        tools.mkdir()
+        rustup = tools / "rustup"
         rustup.write_text(
-            f"#!{sys.executable}\n"
+            "#!/usr/bin/env python3\n"
             "import sys\n"
             "from pathlib import Path\n"
             "print(Path(sys.argv[0]).name, *sys.argv[1:])\n",
             encoding="utf-8",
         )
         rustup.chmod(0o755)
-        (self.root / "cargo").symlink_to(rustup)
+        (tools / "cargo").symlink_to(rustup)
+        (tools / "python3").symlink_to(sys.executable)
 
-        cargo = oracle.require_executable("cargo", search_path=str(self.root))
-        result = subprocess.run([cargo, "build", "--locked"], capture_output=True, check=True, text=True)
+        cargo = oracle.require_executable("cargo", search_path=str(tools))
+        result = subprocess.run(
+            [cargo, "build", "--locked"],
+            capture_output=True,
+            check=True,
+            text=True,
+            env={**os.environ, "PATH": str(tools)},
+        )
         self.assertEqual(result.stdout, "cargo build --locked\n")
         self.assertEqual(result.stderr, "")
 
