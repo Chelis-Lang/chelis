@@ -3,8 +3,9 @@
 **Status:** Current Phase A distribution contract, with historical implementation-plan
 notes preserved for context. Phase A is complete in `spec/12-roadmap.md`: the shipped
 surface includes `chelis reef install --from-github`, `--bootstrap`, default-on
-auto-fetch during `chelis reef build`, lockfile `remote_origin`, and
-`chelis reef install --from-lockfile`. The public registry server remains deferred.
+auto-fetch during `chelis reef build`, lockfile `remote_origin`, bounded resolver-2 discovery,
+`chelis reef update`, `chelis reef outdated`, and `chelis reef install --from-lockfile`.
+The public registry server remains deferred.
 
 Companion to `chelis_trust_stack.md` and `effect_taxonomy_expansion.md` (which adds
 install-time effect manifests on top of the install path described here).
@@ -53,18 +54,70 @@ Versioned editor schemas under `docs/schemas/reef/` describe syntax only. Execut
 
 The schema allocation sequence is manifest 1, resolver-2 manifest 2, and package-metadata manifest 3. The lock remains schema 1 until its fields change.
 
+### Typed package identities and local candidates
+
+Reef parses each package name, package version, compiler pin, lock identity, index identity, release identity, and shell identity before use.
+
+Canonical package names use lowercase ASCII letters, digits, and internal hyphens. Complete package versions use Semantic Versioning without build metadata.
+
+Manifest schema 1 retains complete exact dependency versions. Manifest schema 2 requires resolver 2 and uses Cargo-style requirements.
+
+Candidates can come from an exact lock, the local registry, GitHub Releases, the bundled runtime, or a path.
+
+Resolver 2 uses bytewise package order, lock preference, descending version precedence, bounded depth-first search, and failed-state memoization.
+
+All modes limit candidates and resolved packages to 256. They limit dependencies to 256, depth to 128, and explored states to 100000.
+
+One active path source overrides registry candidates for its package name. Reef rejects two active paths or conflicting verified non-path sources.
+
+Discovery traversal rejects a cyclic path dependency graph with an ordered cycle report. A shared path package loads once for each canonical root.
+
+A valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
+
+A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error.
+
+Remote discovery uses one private provider interface. `GitHubReleaseProvider` is the only implementation.
+
+The production budget limits pages, requests, tags, manifests, request time, and downloaded bytes. Local resolver limits remain authoritative for graph search.
+
+Candidate archives stay in command-owned temporary storage. Reef scans one root `reef.toml` without complete archive extraction.
+
+A refresh stages and verifies each selected pair. Then it gets the project lock before the registry lock.
+
+Reef publishes complete package directories, replaces `index.json`, and replaces the project lock last. A late failure can leave complete unused cache entries.
+
+### Package metadata and declared files
+
+Manifest schema 3 owns optional descriptive package metadata. It accepts descriptions, SPDX licenses, HTTPS URLs, READMEs, and custom license files.
+
+Descriptive metadata does not enter package identity, dependency matching, source selection, `reef.lock`, `index.json`, or `.chb`.
+
+Declared files use a bounded Unicode NFC path grammar with `/` separators. The grammar rejects unsafe components and platform-sensitive names.
+
+On supported Unix platforms, Reef opens each component relative to the package-root handle. Each open rejects symbolic links.
+
+Each declared file contains at most 4 MiB. Reef reads one open handle twice and rejects different byte sequences.
+
+The source archive contains stable captured bytes for declared files. A bytewise member map preserves canonical order and deduplicates identical declared paths.
+
+A metadata snapshot supplies member bytes when a source root selects the same path. Two distinct hard-link paths remain distinct archive members.
+
+Reef completes all snapshots before final archive replacement. A snapshot failure preserves the prior archive.
+
 ### Shipped surface
 
 - `chelis reef init` scaffolds a new package with the newest supported manifest schema.
 - `chelis reef upgrade` checks or applies ordered manifest and lock schema migrations.
+- `chelis reef update [<package>]` performs a full or targeted remote refresh.
+- `chelis reef outdated [<package>] [--json]` reports remote state without final writes.
 - `chelis reef build` resolves dependencies from the local registry, and auto-fetches
   missing dependencies from recorded or canonical GitHub release origins unless
   `--no-auto-fetch` is passed. It type-checks, lowers, and emits
   `dist/<name>-<version>.{chb,tar.zst}` plus a `reef.lock` recording the resolved
   dependency tuples.
 - `chelis check <package-source>` and `chelis build <package-source>` use the same
-  resolved package graph and MUST repair a missing or malformed `reef.lock`, including
-  when the prepared graph itself came from a warm cache (chelis#971).
+  resolved package graph and repair a missing `reef.lock`, including when the prepared
+  graph came from a warm cache. A malformed identity or integrity failure remains hard.
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.
@@ -124,6 +177,8 @@ mtime equal to `SOURCE_DATE_EPOCH`; when the variable is absent, Reef uses the
 fixed Unix epoch (`0`). A present value must be a non-negative integer number
 of seconds or the build fails. Filesystem mtimes, ownership, permissions, and
 directory enumeration order never enter the artifact.
+
+Declared README and license snapshots join the same canonical member map. Reef does not discover undeclared metadata files.
 
 The CHB continues to embed the SHA-256 of the resulting canonical source
 archive. Changing `SOURCE_DATE_EPOCH` can therefore intentionally change both
@@ -470,9 +525,8 @@ lockfile command is a thin wrapper over Item 6's helper.
 
 ### Item 10 — Public registry server (deferred)
 
-Post-launch endgame. A dedicated registry service replaces GitHub
-Releases as the artifact backend. Adds version search, semver
-resolution, multiple publishers, discoverability. Substantial product
+Post-launch endgame. A dedicated registry service can replace GitHub
+Releases as the artifact backend. It adds multiple publishers and registry discovery around the typed resolver. Substantial product
 work; do not start without a specific driver pulling for it. Recorded
 here for forward-compatibility so the design of Items 6-9 stays
 compatible with a future migration (the lockfile's `remote_origin`

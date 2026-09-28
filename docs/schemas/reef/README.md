@@ -11,8 +11,10 @@ Reef parsing remains the validation authority. Editor validation is advisory.
 Add the applicable directive as the first comment in an editor-only document or template:
 
 ```toml
-#:schema ./docs/schemas/reef/manifest-v1.schema.json
+#:schema ./docs/schemas/reef/manifest-v3.schema.json
 ```
+
+Use `manifest-v1.schema.json` for schema 1. Use `manifest-v2.schema.json` for schema 2.
 
 Use this directive for a lock document:
 

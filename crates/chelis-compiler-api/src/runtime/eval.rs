@@ -5952,7 +5952,7 @@ mod legacy_capture_order_tests {
     fn declaration_exact_and_unique_resolution_never_populates_an_ambiguous_alias() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("src")).unwrap();
-        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
+        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity-frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
         for (module, value) in [("Left", 3), ("Right", 5)] {
             std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
         }

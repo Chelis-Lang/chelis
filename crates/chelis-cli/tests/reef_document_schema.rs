@@ -51,7 +51,7 @@ fn chelis(root: &Path) -> Command {
 }
 
 #[test]
-fn reef_init_writes_manifest_schema_1_and_project_lock_ignore_rule() {
+fn reef_init_writes_manifest_schema_3_resolver_2_and_project_lock_ignore_rule() {
     let directory = tempdir().expect("tempdir");
     let root = directory.path().join("new-package");
 
@@ -69,7 +69,8 @@ fn reef_init_writes_manifest_schema_1_and_project_lock_ignore_rule() {
         .success();
 
     let manifest = fs::read_to_string(root.join("reef.toml")).expect("manifest");
-    assert!(manifest.starts_with("schema = \"1\"\n"), "{manifest}");
+    assert!(manifest.starts_with("schema = \"3\"\n"), "{manifest}");
+    assert!(manifest.contains("resolver = \"2\""), "{manifest}");
     let ignore = fs::read_to_string(root.join(".gitignore")).expect("generated ignore");
     assert!(ignore.lines().any(|line| line == ".reef-write.lock"));
     assert!(ignore.lines().any(|line| line == ".*.reef-tmp-*"));
@@ -134,6 +135,7 @@ fn check_reports_both_legacy_steps_without_writes() {
         .success()
         .stdout(
             predicate::str::contains("reef.toml: schema 0 -> 1")
+                .and(predicate::str::contains("reef.toml: schema 2 -> 3"))
                 .and(predicate::str::contains("reef.lock: schema 0 -> 1")),
         );
 
@@ -161,8 +163,9 @@ fn upgrade_accepts_a_manifest_pinned_to_an_older_compiler() {
         .success();
 
     let upgraded = fs::read_to_string(root.join("reef.toml")).unwrap();
-    assert!(upgraded.starts_with("schema = \"1\"\n"));
+    assert!(upgraded.starts_with("schema = \"3\"\n"));
     assert!(upgraded.contains("compiler = \"=0.0.1\""));
+    assert!(upgraded.contains("resolver = \"2\""));
 }
 
 #[test]
@@ -180,7 +183,7 @@ fn inplace_upgrade_preserves_manifest_text_and_exact_lock_values() {
     assert_eq!(
         manifest,
         format!(
-            "schema = \"1\"\n# retained package comment\n[package]\nname = \"legacy-inplace\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Schema\"\n"
+            "schema = \"3\"\n# retained package comment\n[package]\nname = \"legacy-inplace\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Schema\"\nresolver = \"2\"\n"
         )
     );
     let lock = fs::read_to_string(root.join("reef.lock")).expect("lock");
@@ -211,7 +214,7 @@ fn upgrade_keeps_a_taplo_schema_directive_on_the_first_line() {
     let upgraded = fs::read_to_string(root.join("reef.toml")).unwrap();
     assert!(
         upgraded.starts_with(
-            "#:schema ../../docs/schemas/reef/manifest-v1.schema.json\nschema = \"1\"\n"
+            "#:schema ../../docs/schemas/reef/manifest-v3.schema.json\nschema = \"3\"\n"
         ),
         "{upgraded}"
     );
@@ -234,7 +237,7 @@ fn current_documents_are_an_unchanged_success() {
             "upgrade",
             "--inplace",
             "--manifest-to",
-            "1",
+            "3",
             "--lock-to",
             "1",
         ])
@@ -261,10 +264,10 @@ fn invalid_mode_and_unsupported_target_fail_without_writes() {
         .assert()
         .failure();
     chelis(&root)
-        .args(["reef", "upgrade", "--inplace", "--manifest-to", "2"])
+        .args(["reef", "upgrade", "--inplace", "--manifest-to", "4"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported manifest schema 2"));
+        .stderr(predicate::str::contains("unsupported manifest schema 4"));
 
     assert_eq!(fs::read(root.join("reef.toml")).unwrap(), manifest_before);
 }
@@ -595,6 +598,12 @@ fn committed_editor_schemas_match_the_wire_models() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let manifest = fs::read_to_string(repository.join("docs/schemas/reef/manifest-v1.schema.json"))
         .expect("manifest schema");
+    let manifest_v2 =
+        fs::read_to_string(repository.join("docs/schemas/reef/manifest-v2.schema.json"))
+            .expect("manifest schema 2");
+    let manifest_v3 =
+        fs::read_to_string(repository.join("docs/schemas/reef/manifest-v3.schema.json"))
+            .expect("manifest schema 3");
     let lock = fs::read_to_string(repository.join("docs/schemas/reef/lock-v1.schema.json"))
         .expect("lock schema");
 
@@ -602,6 +611,16 @@ fn committed_editor_schemas_match_the_wire_models() {
         manifest,
         chelis_reef::manifest_schema_v1_json(),
         "manifest schema 1 drifted; run `cargo run -p chelis-reef --example generate_document_schemas`"
+    );
+    assert_eq!(
+        manifest_v2,
+        chelis_reef::manifest_schema_v2_json(),
+        "manifest schema 2 drifted; run `cargo run -p chelis-reef --example generate_document_schemas`"
+    );
+    assert_eq!(
+        manifest_v3,
+        chelis_reef::manifest_schema_v3_json(),
+        "manifest schema 3 drifted; run `cargo run -p chelis-reef --example generate_document_schemas`"
     );
     assert_eq!(
         lock,
