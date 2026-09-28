@@ -3,7 +3,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <iomanip>
 #include <initializer_list>
 #include <limits>
 #include <locale>
@@ -487,87 +486,17 @@ bool scan_string(TSLexer *lexer) {
 }
 
 bool parse_float_classic(const std::string &text, double &value) {
-  // Callers pass strings whose decimal grammar was already validated (or a
-  // string produced below). Some standard libraries set `failbit` while
-  // still returning the correctly rounded subnormal value. libstdc++ 10 also
-  // saturates overflow at `double::max()` while setting `failbit`, whereas
-  // libc++ returns infinity. Reject the saturating form explicitly; infinity
-  // and underflow-to-zero still fail the finite/canonical-render comparison.
+  // Callers pass strings whose decimal grammar was already validated. Some
+  // standard libraries set `failbit` while still returning the correctly
+  // rounded subnormal value. libstdc++ 10 also saturates overflow at
+  // `double::max()` while setting `failbit`, whereas libc++ returns infinity.
+  // Reject the saturating form explicitly; infinity still fails the caller's
+  // `std::isfinite` check and underflow-to-zero is a finite decode.
   std::istringstream input(text);
   input.imbue(std::locale::classic());
   input >> std::noskipws >> value;
   return !input.bad() &&
          !(input.fail() && value == std::numeric_limits<double>::max());
-}
-
-std::string shortest_scientific(double value) {
-  for (int significant_digits = 1;
-       significant_digits <= std::numeric_limits<double>::max_digits10;
-       ++significant_digits) {
-    std::ostringstream output;
-    output.imbue(std::locale::classic());
-    output << std::scientific << std::setprecision(significant_digits - 1)
-           << value;
-    const std::string candidate = output.str();
-
-    double reparsed = 0.0;
-    if (parse_float_classic(candidate, reparsed) && reparsed == value) {
-      return candidate;
-    }
-  }
-  return {};
-}
-
-std::string canonical_float(double value) {
-  // Floating `<charconv>` is absent from GCC/libstdc++ 10, which is the
-  // toolchain used by the glibc 2.31 compatibility build. The classic-locale
-  // streams keep the scanner locale-independent while the round-trip search
-  // preserves the same shortest-source rule as the Surf Ryū printer.
-  const std::string shortest = shortest_scientific(value);
-  const std::size_t exponent_pos = shortest.find('e');
-  if (exponent_pos == std::string::npos) {
-    return {};
-  }
-
-  std::string digits;
-  for (std::size_t index = 0; index < exponent_pos; ++index) {
-    if (shortest[index] != '.') {
-      digits.push_back(shortest[index]);
-    }
-  }
-
-  int exponent = 0;
-  const char *exponent_begin = shortest.data() + exponent_pos + 1;
-  const char *exponent_end = shortest.data() + shortest.size();
-  if (exponent_begin != exponent_end && *exponent_begin == '+') {
-    ++exponent_begin;
-  }
-  const auto exponent_result =
-      std::from_chars(exponent_begin, exponent_end, exponent);
-  if (exponent_result.ec != std::errc() || exponent_result.ptr != exponent_end) {
-    return {};
-  }
-
-  const int kk = exponent + 1;
-  const int length = static_cast<int>(digits.size());
-  const int k = kk - length;
-  if (k >= 0 && kk <= 16) {
-    return digits + std::string(static_cast<std::size_t>(k), '0') + ".0";
-  }
-  if (kk > 0 && kk <= 16) {
-    return digits.substr(0, static_cast<std::size_t>(kk)) + "." +
-           digits.substr(static_cast<std::size_t>(kk));
-  }
-  if (kk > -5 && kk <= 0) {
-    return "0." + std::string(static_cast<std::size_t>(-kk), '0') + digits;
-  }
-
-  std::string rendered(1, digits.front());
-  if (digits.size() > 1) {
-    rendered += "." + digits.substr(1);
-  }
-  rendered += "e" + std::to_string(exponent);
-  return rendered;
 }
 
 bool is_integer_suffix(const std::string &suffix) {
@@ -738,11 +667,12 @@ bool scan_number(TSLexer *lexer, const bool *valid_symbols) {
     if ((!suffix.empty() && !is_float_suffix(suffix)) || is_radix) {
       return false;
     }
+    // Every finite decimal float body decodes to the value its canonical
+    // spelling round-trips to, so the scanner admits the whole family and
+    // leaves canonicalization to `chelis fmt` (spec/02 §P10, chelis#2119).
+    // Only a non-finite decode is refused here.
     double value = 0.0;
     if (!parse_float_classic(clean, value) || !std::isfinite(value)) {
-      return false;
-    }
-    if (!has_exponent && canonical_float(value) != clean) {
       return false;
     }
   } else {
@@ -756,8 +686,17 @@ bool scan_number(TSLexer *lexer, const bool *valid_symbols) {
       return false;
     }
     if (is_float_suffix(suffix)) {
-      if (is_radix || canonical_float(static_cast<double>(value)) + suffix !=
-                          spelling + suffix) {
+      // spec/02 §P10a: an integer body under a float suffix keeps its integer
+      // spelling, and no radix form carries a float suffix.
+      if (is_radix || std::to_string(value) != clean) {
+        return false;
+      }
+      // The body binds at the suffix width, so a magnitude that rounds to
+      // infinity there is not a literal of that type. f16 is the only width an
+      // integer body can overflow: the rest have finite ranges above
+      // `i64::max`, which the bound above already refuses. 65520 is the
+      // round-half-to-even boundary above f16's largest finite value, 65504.
+      if (suffix == "f16" && value >= 65520) {
         return false;
       }
     } else if (!is_radix && std::to_string(value) != clean) {

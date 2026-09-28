@@ -79,7 +79,7 @@ fn decimal_div_by_zero_calls_fail_with_branded_message() {
 
 import Std.Decimal (decimal_div, decimal_from_int, round_half_even)
 
-quotient = decimal_div(decimal_from_int(cast(1, int64)), decimal_from_int(cast(0, int64)), cast(0, int64), round_half_even())
+quotient = decimal_div(decimal_from_int(cast(1, i64)), decimal_from_int(cast(0, i64)), cast(0, i64), round_half_even())
 "#,
     );
     // Std.Decimal.decimal_div/4 fails with the literal:

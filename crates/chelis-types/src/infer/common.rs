@@ -5,35 +5,22 @@
 
 use super::*;
 
-pub(super) fn get_tag(list: &deep::List) -> Option<DeepTag> {
-    list.tag()
-}
-
-pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
-}
-
-/// Observe a decoded vocabulary node without changing its physical carrier.
+/// Observe a decoded vocabulary node's tag, metadata and children.
 ///
-/// `Expr::List` remains available only for legacy/programmatic callers during
-/// the #1023 migration. Stamped compiler ingress uses `Expr::Node`; readers at
-/// semantic boundaries must preserve that carrier instead of rebuilding a
-/// `List` through `Node::to_list`.
-pub(super) fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
-    match expr {
-        deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        deep::Expr::List(list, _) => {
-            let tag = get_tag(list)?;
-            let deep::Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((tag, meta, children(list)))
-        }
-        _ => None,
+/// A vocabulary node has the single spelling `Expr::Node` whatever its
+/// ingress (chelis#1125), so this is the `DecodedNode` arm of
+/// [`deep::Expr::carrier`] as an `Option` for readers that decline every other
+/// carrier alike.
+pub(super) fn stamped_parts(
+    expr: &deep::Expr,
+) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -46,12 +33,12 @@ pub(super) fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMa
 /// tagged-children count) per §C2 -- the calibration example is the Deep
 /// parser's own "found unknown tag ..." message.
 pub(super) fn malformed_form(
-    list: &deep::List,
+    node: &DeepNode,
     tag: &str,
     expected: &str,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    let found = children(list).len();
+    let found = node.child_count();
     report(
         errors,
         CheckError::new(
@@ -115,7 +102,7 @@ pub(super) fn report_builtin_arity_bare(
 
 pub(super) fn report_builtin_arity(
     errors: &mut DiagnosticSink<'_>,
-    list: &deep::List,
+    node: &DeepNode,
     builtin: &str,
     expected: usize,
     got: usize,
@@ -124,8 +111,8 @@ pub(super) fn report_builtin_arity(
         errors,
         CheckError::new(
             CheckErrorKind::ArityMismatch,
-            with_macro_provenance(
-                &deep::Expr::List(list.clone(), zero_span()),
+            with_node_provenance(
+                node,
                 format!(
                     "builtin `{builtin}` expects {expected} argument(s), got {got} \
                      (chelis#731 [04-TOT-3])"
@@ -136,114 +123,10 @@ pub(super) fn report_builtin_arity(
     )
 }
 
-/// True when a `uniform_like` low/high bound is a statically-resolvable numeric
-/// value the compiled-backend lowering can fold to a compile-time constant.
-///
-/// This MIRRORS `extract_f64_value` in `chelis-ir/src/lower.rs` (chelis#776) so
-/// the checker's disposition and the backend agree on what a valid bound is: a
-/// bare `Float`/`Int` atom, a `(lit ...)` wrapping one, a float-target `cast` of
-/// a resolvable value, or a `neg` of a resolvable value. A genuinely-runtime
-/// bound (a variable, an `add`, a `shape()` read) is not resolvable and is the
-/// checker's reject case; the lowering's fatal error is then defense-in-depth.
-///
-/// chelis#731 Phase 1 context: before the `handle-effect` case landed, this
-/// gate never fired where `uniform_like` actually lives (inside a `with seed`
-/// body, unchecked per chelis#709), so the older `is_numeric_literal_expr`
-/// form (literal-only) never had to agree with the backend's broader fold set.
-/// Now that the gate fires inside handler bodies, it is aligned with the fold
-/// set so that `uniform_like(t, -3.0, ...)` (a `neg` literal) and
-/// `uniform_like(t, cast(2.0, f32), ...)` -- both of which the backend folds --
-/// are accepted rather than spuriously rejected.
-pub(super) fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
-    // Recurses on the `cast`/`neg` inner node; guard the native stack against a
-    // pathologically deep wrapper chain, bailing conservatively to `false` (the
-    // bound is then treated as non-resolvable and rejected loudly, never a
-    // silent accept).
-    stack_guard!("is_static_numeric_bound", expr, false);
-    if matches!(
-        expr,
-        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _)
-    ) {
-        return true;
-    }
-    // chelis#1107 round 3: this was an `Expr::List`-only match with a
-    // fail-CLOSED `_ => false` default, so on the stamped ingress EVERY bound
-    // read as non-resolvable and `uniform_like(x, 0.0, 1.0)` -- ordinary
-    // literal bounds -- was REJECTED by `check_typed_program` while
-    // `check_ir_program` accepted it. An over-rejection of a valid program,
-    // in the same reader class as the shape-path findings.
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
-        return false;
-    };
-    match tag {
-        // A float-target cast of a resolvable value. An integer target
-        // truncates and is left unresolved, matching the lowering.
-        DeepTag::Cast => {
-            let inner_resolvable = kids.first().is_some_and(is_static_numeric_bound);
-            let target_is_float = kids.get(1).is_some_and(deep_prim_is_float);
-            target_is_float && inner_resolvable
-        }
-        // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
-        DeepTag::App if kids.first().is_some_and(expr_is_neg_var) => {
-            kids.get(1).is_some_and(is_static_numeric_bound)
-        }
-        // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
-        // The lowering's `extract_f64_value` catch-all reads element 2 of
-        // ANY list, which blesses a form whose value is NOT at element 2 --
-        // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
-        // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
-        // (2.0). Accepting that would let the checker bless a bound the
-        // lowering folds from the wrong position (the chelis#703 silent-
-        // substitution shape; chelis#731 red team). The checker's arm is
-        // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
-        // (or otherwise non-literal, non-cast, non-neg) bound is rejected
-        // here, so it never reaches the fold. The lowering-side over-broad
-        // catch-all is filed separately.
-        DeepTag::Lit => matches!(
-            kids.first(),
-            Some(deep::Expr::Atom(
-                deep::Atom::Float(_) | deep::Atom::Int(_),
-                _
-            ))
-        ),
-        _ => false,
-    }
-}
-
-/// True when `target` is a `(t-prim {} <name>)` naming a float precision.
-pub(super) fn deep_prim_is_float(target: &deep::Expr) -> bool {
-    // chelis#1107 round 3: carrier-preserving read.
-    matches!(stamped_parts(target), Some((DeepTag::TPrim, _, kids))
-        if kids
-            .first()
-            .and_then(symbol_name)
-            .and_then(Prim::parse_name)
-            .is_some_and(|prim| prim.is_float()))
-}
-
-/// True when `expr` is `(var {} neg)`, the callee of a desugared unary minus.
-pub(super) fn expr_is_neg_var(expr: &deep::Expr) -> bool {
-    // chelis#1107 round 3: carrier-preserving read.
-    matches!(stamped_parts(expr), Some((DeepTag::Var, _, kids))
-        if kids.first().and_then(symbol_name) == Some("neg"))
-}
-
-/// Get metadata map from element[1] of a list.
-pub(super) fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
-    if list.elements.len() > 1
-        && let deep::Expr::Map(meta, _) = &list.elements[1]
-    {
-        return Some(meta);
-    }
-    None
-}
-
 /// True when a `deftype` node carries `opaque: true` metadata
 /// (RFC D-META; the key is unprefixed language semantics).
-pub(super) fn deftype_opaque_meta(meta: &deep::MetaMap) -> bool {
-    meta.entries.iter().any(|(key, value)| {
-        key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
-    })
+pub(super) fn deftype_opaque_meta(meta: &deep::Metadata) -> bool {
+    meta.opaque().is_some()
 }
 
 /// Extract a symbol name from an Expr.
@@ -259,6 +142,18 @@ pub(super) fn with_macro_provenance(expr: &deep::Expr, message: String) -> Strin
         return message;
     };
     format!("{message} (in expansion of {source})")
+}
+
+/// [`with_macro_provenance`] for a node the caller already holds: the
+/// provenance is the node's own `source` metadata.
+pub(super) fn with_node_provenance(node: &DeepNode, message: String) -> String {
+    let Some(source) = node.meta().source() else {
+        return message;
+    };
+    format!(
+        "{message} (in expansion of {})",
+        chelis_deep::printer::print_macro_source(source)
+    )
 }
 
 // chelis#317 constructor-scope invariant (read before touching the helpers
@@ -408,7 +303,10 @@ pub(super) fn pattern_constructor_for_scrutinee<'adt>(
 pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> CheckErrorKind {
     match kind {
         TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
-        TypeErrorKind::PrecisionMismatch => CheckErrorKind::PrecisionMismatch,
+        TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
+            CheckErrorKind::PrecisionMismatch
+        }
+        TypeErrorKind::KeyInstantiation { .. } => CheckErrorKind::KeyReuse,
         TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
         TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
         TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
@@ -419,8 +317,8 @@ pub(super) fn check_error_kind_from_type_error_kind(kind: &TypeErrorKind) -> Che
 pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
     match expr {
         deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(|child| match child {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Lit => {
+            node.children_slice().first().and_then(|child| match child {
                 deep::Expr::Atom(deep::Atom::Str(value), _) => Some(value.clone()),
                 _ => None,
             })
@@ -445,8 +343,8 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///
 /// - `Dim::Lit(_)` — always safe. Concrete literals are self-contained.
 ///
-/// - `Dim::Var(v)` — safe ONLY when `v` is also bound by a *parameter*
-///   tensor-dim position of the declared signature (`param_dvars`). This
+/// - `Dim::Var(v)` or `Dim::Name(v)` — safe ONLY when `v` is also bound by a *parameter*
+///   tensor-dim position of the declared signature (`param_dims`). This
 ///   is the `const_col[n](spots: tensor[n, f32], ..) -> tensor[n, 1]`
 ///   family: the body's `to_tensor(map(..))` return is `tensor[*, 1]`,
 ///   but the declared return dim `n` is the same dim var as the `spots`
@@ -457,22 +355,18 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///   (chelis#405 / WS-3 build ICE).
 ///
 ///   A *return-only* dim var (one that appears in the declared return but
-///   in NO parameter tensor position — e.g. `arange[n](start: int32,
-///   stop: int32) -> tensor[n, int32]`, where the length comes from a
-///   value parameter) is NOT in `param_dvars` and is deliberately left as
+///   in NO parameter tensor position — e.g. `arange[n](start: i32,
+///   stop: i32) -> tensor[n, i32]`, where the length comes from a
+///   value parameter) is NOT in `param_dims` and is deliberately left as
 ///   `Wildcard`. Baking such an unbound var into the generalized scheme is
 ///   the red-team RT-39+44 soundness regression (commit 8067c9ce): it
 ///   leaks a free dim var into callers and breaks the chelis-std self-test
-///   corpus. The `param_dvars` gate is exactly the line between "the
+///   corpus. The `param_dims` gate is exactly the line between "the
 ///   caller supplies this dim" (safe) and "this dim is output-inferred /
 ///   value-parameter-derived" (unsafe).
 ///
 /// - `Dim::Name`, `Dim::Rank`, existing `Var`/`Lit` in `ty` — preserved.
-pub(super) fn narrow_wildcards_with(
-    ty: &Type,
-    template: &Type,
-    param_dvars: &UnordSet<DimVar>,
-) -> Type {
+pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Dim]) -> Type {
     match (ty, template) {
         (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
             let new_dims = dims
@@ -480,7 +374,9 @@ pub(super) fn narrow_wildcards_with(
                 .zip(tmpl_dims.iter())
                 .map(|(d, t)| match (d, t) {
                     (Dim::Wildcard, Dim::Lit(_)) => t.clone(),
-                    (Dim::Wildcard, Dim::Var(v)) if param_dvars.contains(v) => t.clone(),
+                    (Dim::Wildcard, Dim::Var(_) | Dim::Name(_)) if param_dims.contains(t) => {
+                        t.clone()
+                    }
                     _ => d.clone(),
                 })
                 .collect();
@@ -490,16 +386,16 @@ pub(super) fn narrow_wildcards_with(
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dims))
                 .collect();
-            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dvars));
+            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dims));
             Type::Fn(new_args, new_ret)
         }
         (Type::Tuple(ts), Type::Tuple(t_ts)) if ts.len() == t_ts.len() => {
             let new_ts = ts
                 .iter()
                 .zip(t_ts.iter())
-                .map(|(t, tt)| narrow_wildcards_with(t, tt, param_dvars))
+                .map(|(t, tt)| narrow_wildcards_with(t, tt, param_dims))
                 .collect();
             Type::Tuple(new_ts)
         }
@@ -507,7 +403,7 @@ pub(super) fn narrow_wildcards_with(
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dims))
                 .collect();
             Type::Adt(n.clone(), new_args)
         }
@@ -517,7 +413,7 @@ pub(super) fn narrow_wildcards_with(
                 .zip(t_args)
                 .map(|(argument, template)| match (argument, template) {
                     (NominalArg::Type(ty), NominalArg::Type(template)) => {
-                        NominalArg::Type(narrow_wildcards_with(ty, template, param_dvars))
+                        NominalArg::Type(narrow_wildcards_with(ty, template, param_dims))
                     }
                     (
                         NominalArg::Dimension(Dim::Wildcard),
@@ -525,8 +421,8 @@ pub(super) fn narrow_wildcards_with(
                     ) => NominalArg::Dimension(template.clone()),
                     (
                         NominalArg::Dimension(Dim::Wildcard),
-                        NominalArg::Dimension(template @ Dim::Var(var)),
-                    ) if param_dvars.contains(var) => NominalArg::Dimension(template.clone()),
+                        NominalArg::Dimension(template @ (Dim::Var(_) | Dim::Name(_))),
+                    ) if param_dims.contains(template) => NominalArg::Dimension(template.clone()),
                     _ => argument.clone(),
                 })
                 .collect();
@@ -536,23 +432,195 @@ pub(super) fn narrow_wildcards_with(
     }
 }
 
-/// Collect the set of dim vars that occur in a *parameter* (non-return)
+/// Collect the dimension variables and names in a *parameter* (non-return)
 /// tensor-dim position of a resolved declared `Fn` signature. These are
 /// the dims a caller binds from its actual arguments; the
 /// `narrow_wildcards_with` gate uses this set to decide when a body
-/// wildcard may be safely narrowed to a declared `Dim::Var`. A non-`Fn`
-/// type (or one whose params carry no tensor dim vars) yields the empty
+/// wildcard may be safely narrowed to its declared binder. A non-`Fn`
+/// type (or one whose params carry no dimension binders) yields the empty
 /// set, so narrowing falls back to the literal-only behavior.
-pub(super) fn param_bound_dvars(decl_ty: &Type) -> UnordSet<DimVar> {
-    let mut out = UnordSet::new();
-    if let Type::Fn(params, _) = decl_ty {
-        for param in params {
-            for dv in crate::env::free_dvars(param) {
-                out.insert(dv);
+pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
+    let mut out = Vec::new();
+    let Type::Fn(params, _) = decl_ty else {
+        return out;
+    };
+    let mut pending = params.iter().collect::<Vec<_>>();
+    while let Some(ty) = pending.pop() {
+        match ty {
+            Type::Tensor(dims, _) => out.extend(
+                dims.iter()
+                    .filter(|dim| matches!(dim, Dim::Name(_) | Dim::Var(_)))
+                    .cloned(),
+            ),
+            Type::Ref(inner) => pending.push(inner),
+            Type::Tuple(items) | Type::Adt(_, items) => pending.extend(items),
+            Type::KindedAdt(_, items) => {
+                for item in items {
+                    match item {
+                        NominalArg::Type(ty) => pending.push(ty),
+                        NominalArg::Dimension(dim @ (Dim::Name(_) | Dim::Var(_))) => {
+                            out.push(dim.clone());
+                        }
+                        NominalArg::Dimension(_) => {}
+                    }
+                }
             }
+            Type::Fn(args, result) => {
+                pending.extend(args);
+                pending.push(result);
+            }
+            Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => {}
         }
     }
     out
+}
+
+/// Decide a shape-computing call now, or suspend it if the operand is not
+/// resolved yet (chelis#1489).
+///
+/// The ONE entry point every shape-route arm uses, so "decide now" and "decide
+/// later" cannot drift apart: both end in [`shape_route_result`], and the only
+/// difference is when.
+///
+/// Suspending returns a FRESH result variable rather than the operand's,
+/// exactly as the `copy`/`cast` gates do, so the expression's type cannot
+/// depend on when the operand resolved.
+pub(crate) fn decide_shape_route(
+    route: crate::unify::ShapeRoute,
+    operand: &Type,
+    node: &DeepNode,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    if let Type::Var(tv) = operand {
+        let result = vg.fresh_type();
+        subst.record_deferred_tensor_operand(
+            *tv,
+            crate::unify::DeferredOperandGate::ShapeRoute {
+                route,
+                result: Box::new(result.clone()),
+            },
+        );
+        return result;
+    }
+    match shape_route_result(&route, operand) {
+        Ok((result, updates)) => {
+            if let Some(expected_updates) = updates
+                && let crate::unify::ShapeRoute::Gather {
+                    updates: Some(actual),
+                    ..
+                } = &route
+                && let Err(te) = unify(&expected_updates, actual.as_ref(), subst)
+            {
+                return report(errors, te.into());
+            }
+            result
+        }
+        Err(message) => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_node_provenance(node, message),
+                vec![],
+            ),
+        ),
+    }
+}
+
+/// Decide a shape-computing call (chelis#1489).
+///
+/// THE decision function for `gather`, `scatter`, `scatter_replace` and
+/// `trace`. The eager arm calls it with the operand it just resolved; a
+/// suspended [`crate::unify::DeferredOperandGate::ShapeRoute`] calls it with
+/// the operand the binding just settled. One implementation, so the two cannot
+/// disagree -- an earlier revision hand-copied the arm's tail here instead and
+/// silently lost `scatter`'s mode check and the borrow normalization.
+///
+/// Everything the call decides happens HERE, not in the arm: the operand is
+/// normalized through one borrow where the route's arm does so, the axis is
+/// normalized against the operand's own rank, and the mode string is
+/// validated. The arm's remaining job is to report the `Err`, and to unify the
+/// updates obligation this returns.
+///
+/// These routes only COPY the operand's dims into their result, so a dim that
+/// is still a variable when this runs passes through and resolves later.
+/// `concat` and `diagonal` compute a new extent from those dims and are NOT
+/// decided here: see the deferred-operand ledger's doc in `unify.rs`.
+///
+/// Returns `(result type, updates obligation)`. The updates unification is the
+/// caller's because discharge runs inside unification while the eager arm has
+/// a `&mut Subst`; the DECISION of what updates must equal is here.
+pub(crate) fn shape_route_result(
+    route: &crate::unify::ShapeRoute,
+    operand: &Type,
+) -> Result<(Type, Option<Type>), String> {
+    use crate::unify::ShapeRoute;
+    // Strip one borrow only for the routes whose arms do, so a deferred
+    // `gather(&t, ..)` accepts what the eager one accepts WITHOUT widening
+    // `scatter`/`scatter_replace`, which reject a borrowed operand.
+    let operand = match operand {
+        Type::Ref(inner) if route.normalizes_borrow() => inner.as_ref(),
+        other => other,
+    };
+    match route {
+        ShapeRoute::Gather {
+            op,
+            indices,
+            raw_axis,
+            updates,
+            mode,
+        } => {
+            // Axis bounds first, then the mode string: the order the eager arm
+            // had, so a call that is wrong in both ways reports the same one.
+            let axis = settled_axis(op, operand, *raw_axis, 0)?;
+            if let Some(mode) = mode
+                && !matches!(mode.as_str(), "replace" | "add")
+            {
+                return Err(format!("{op} mode must be \"replace\" or \"add\""));
+            }
+            let result = infer_gather_result_type(op, operand, indices.as_ref(), axis)?;
+            match updates {
+                // `scatter` returns the BASE tensor; the gathered shape is what
+                // its updates operand must equal.
+                Some(_) => Ok((operand.clone(), Some(result))),
+                None => Ok((result, None)),
+            }
+        }
+        ShapeRoute::Trace {
+            raw_axis1,
+            raw_axis2,
+        } => {
+            let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
+            let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
+            Ok((infer_trace_result_type(operand, axis1, axis2)?, None))
+        }
+    }
+}
+
+/// Normalize a raw axis against the operand's rank (chelis#1489).
+///
+/// The eager resolvers, with the same message text. `default` is the axis the
+/// call uses when none was written, matching their fallback.
+///
+/// A non-tensor operand yields `default` rather than an error, exactly as the
+/// eager resolvers do: the route's own helper rejects it, and it does so AFTER
+/// `scatter`'s mode check. Rejecting here instead made a call that is wrong in
+/// both ways report the operand error where it had reported the mode error.
+fn settled_axis(
+    op: &str,
+    operand: &Type,
+    raw: Option<i64>,
+    default: usize,
+) -> Result<usize, String> {
+    let Type::Tensor(dims, _) = operand else {
+        return Ok(default);
+    };
+    match raw {
+        Some(raw) => normalize_static_axis(dims.len(), raw)
+            .ok_or_else(|| format!("{op} axis {raw} out of bounds for rank {}", dims.len())),
+        None => Ok(default),
+    }
 }
 
 pub(super) fn infer_gather_result_type(
@@ -609,10 +677,102 @@ pub(super) fn infer_trace_result_type(
     Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
+/// One selected axis of a `diagonal` pair, identified by its position in the
+/// pair rather than by its index in the operand, so the decision function does
+/// not have to carry the operand's axis numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DiagonalBound {
+    /// `0` for the first selected axis, `1` for the second.
+    pub(super) selected: usize,
+    /// The literal extent on that axis. `min` can never exceed it.
+    pub(super) extent: i64,
+}
+
+/// What `[05-OP-33]`'s "smaller selected extent" is, plus the upper bound a
+/// literal selected axis imposes when the minimum itself is not statically
+/// known.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DiagonalExtent {
+    /// The dimension the retained axis carries in the result type.
+    pub(super) dim: Dim,
+    /// Present only when exactly one selected axis is literal. `min(x, k) <= k`
+    /// for every runtime `x`, so a declared extent strictly greater than `k` is
+    /// unreachable even though `dim` stays a wildcard (chelis#1739).
+    pub(super) bound: Option<DiagonalBound>,
+}
+
+/// The single decision function for a `diagonal` axis pair.
+///
+/// Preserve chelis#1355's minimum/name policy while observing carrier
+/// constraints: known extents declare their minimum, equal names retain the
+/// selected identity when no known contradiction exists, and unknown pairs
+/// keep the wildcard. `Dim` has no bounded variant for `min(n, 4)`.
+///
+/// `bound` is what chelis#1739 adds. A literal beside a non-literal extent is
+/// an upper bound on the result: whatever `n` is at run time, `min(n, 4) <= 4`.
+/// The checker rejects a declared extent strictly greater than the bound and
+/// accepts at or below it, where only the runtime can decide which side of the
+/// minimum wins. A rank spread is deliberately excluded: it stands for a run of
+/// dimensions rather than one extent, so no minimum relation holds.
+///
+/// Callers that need the bound read it through [`diagonal_result_bound`], which
+/// maps the pair position back onto the operand's axes. Both readers go through
+/// this one function so the eager and deferred shape routes cannot drift.
+pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &Subst) -> DiagonalExtent {
+    let left = subst.observe_dim(a);
+    let right = subst.observe_dim(b);
+    let same_name = left.name().is_some() && left.name() == right.name();
+    let dim = match (left.known_extent(), right.known_extent()) {
+        // Known unequal extents must not be hidden by equal labels.
+        (Some(lhs), Some(rhs)) if lhs != rhs || !same_name => Dim::Lit(lhs.min(rhs)),
+        // Retain the selected identity, not a bare Name before result guards.
+        _ if same_name => a.clone(),
+        _ => Dim::Wildcard,
+    };
+    let bound = match (left.known_extent(), right.known_extent()) {
+        (Some(extent), None) if right.rank().is_none() => Some(DiagonalBound {
+            selected: 0,
+            extent,
+        }),
+        (None, Some(extent)) if left.rank().is_none() => Some(DiagonalBound {
+            selected: 1,
+            extent,
+        }),
+        _ => None,
+    };
+    DiagonalExtent { dim, bound }
+}
+
+/// The upper bound a `diagonal` call imposes on its declared result, expressed
+/// in the coordinates a caller can compare against a declared type.
+///
+/// Returns the result-type axis the bound applies to, the operand axis the
+/// literal came from (for the diagnostic), and the bound itself. The result
+/// axis is not the source axis: `diagonal` removes `axis2`, so a retained
+/// `axis1` after it shifts down by one.
+pub(super) fn diagonal_result_bound(
+    tensor_ty: &Type,
+    axis1: usize,
+    axis2: usize,
+    subst: &Subst,
+) -> Option<(usize, usize, i64)> {
+    let Type::Tensor(dims, _) = tensor_ty else {
+        return None;
+    };
+    if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
+        return None;
+    }
+    let bound = select_diagonal_extent(&dims[axis1], &dims[axis2], subst).bound?;
+    let source_axis = if bound.selected == 0 { axis1 } else { axis2 };
+    let result_axis = if axis1 < axis2 { axis1 } else { axis1 - 1 };
+    Some((result_axis, source_axis, bound.extent))
+}
+
 pub(super) fn infer_diagonal_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("diagonal expects tensor input, got {tensor_ty}"));
@@ -640,11 +800,7 @@ pub(super) fn infer_diagonal_result_type(
     // Everything else keeps the wildcard - distinct names, a mixed
     // literal/symbolic pair, a dimension variable, a rank spread - because there
     // the minimum genuinely is not known at check time.
-    let diag_dim = match (&dims[axis1], &dims[axis2]) {
-        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
-        (Dim::Name(lhs), Dim::Name(rhs)) if lhs == rhs => Dim::Name(lhs.clone()),
-        _ => Dim::Wildcard,
-    };
+    let diag_dim = select_diagonal_extent(&dims[axis1], &dims[axis2], subst).dim;
     let mut out_dims = Vec::with_capacity(dims.len() - 1);
     for (index, dim) in dims.iter().enumerate() {
         if index == axis1 {
@@ -659,13 +815,7 @@ pub(super) fn infer_diagonal_result_type(
 pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
     // chelis#1107 amendment: carrier-preserving read.
     let (_, meta, _) = stamped_parts(expr)?;
-    let source = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "source")
-        .map(|(_, value)| value)?;
-    let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(source));
-    Some(rendered.replace('\n', " ").trim().to_string())
+    Some(chelis_deep::printer::print_macro_source(meta.source()?))
 }
 
 pub(super) struct AliasExpansionSession<'a> {
@@ -870,153 +1020,6 @@ pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut Va
     AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
-/// A declaration's resolved type together with the three binder facts the
-/// declaration carries: the dtype-family bounds its metadata declared
-/// (chelis#1474), the source spelling of every dimension parameter it
-/// introduced (chelis#260), and the source spelling of every authored TYPE
-/// binder it introduced (chelis#260 Site 2 and chelis#1486, [04-INF-6]).
-///
-/// A struct rather than a tuple because this has now grown twice: chelis#1474
-/// added the dtype-family bounds and chelis#260 added the dimension names,
-/// each time making an unnamed tuple harder to read at the call sites.
-///
-/// `dim_names` and `type_names` are the same fact on the two binder kinds,
-/// and both exist for the same reason: the names are in scope only while the
-/// declaration's signature is being resolved, and the diagnostics that need
-/// them, the borrow report and the [04-INF-6] rigidity check, both run after
-/// instantiation, where only the internal ids survive.
-pub(super) struct ResolvedDeclaredType {
-    pub(super) ty: Type,
-    pub(super) bounds: Vec<(TypeVar, TypeVarRestriction)>,
-    pub(super) dim_names: UnordMap<DimVar, String>,
-    pub(super) type_names: UnordMap<TypeVar, String>,
-}
-
-pub(super) fn resolve_deep_type(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    use_site: TypeUseSite,
-    binder_mode: BinderMode<'_>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<Type, ErrorWitness> {
-    let resolved = resolve_deep_type_with_bounds_and_dim_names(
-        expr,
-        vg,
-        adt_reg,
-        use_site,
-        binder_mode,
-        UnordMap::new(),
-        errors,
-    )?;
-    Ok(resolved.ty)
-}
-
-/// Resolve a declaration's type expression under declared dtype-family bounds
-/// (`spec/04-type-system.md` §5.9), additionally returning the source name
-/// bound to each dimension variable (chelis#260) and to each authored type
-/// binder (chelis#1486) the resolution minted.
-///
-/// The bounds arrive from the declaration node's `dtype_bounds` metadata and
-/// leave as `(variable, family)` pairs the caller installs on the
-/// substitution, so generalization re-quantifies them onto the scheme. The
-/// resolver holds `name -> DimVar` only for its own lifetime; every other
-/// caller drops it, which is why a declared-dim collapse could report `d44`
-/// and `d45` but never `n` and `m`.
-///
-/// One call returns both because one call site needs both: the `Defsig` arm
-/// installs the bounds and records the names for the same declaration. Two
-/// entry points that each ran the resolver would resolve the declaration
-/// twice and leave two mechanisms to keep in step.
-pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
-    expr: &deep::Expr,
-    vg: &mut VarGen,
-    adt_reg: &AdtRegistry,
-    use_site: TypeUseSite,
-    binder_mode: BinderMode<'_>,
-    dtype_bounds: UnordMap<String, TypeVarRestriction>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<ResolvedDeclaredType, ErrorWitness> {
-    let (ty, bounds, dim_names, type_names) = {
-        let mut resolver =
-            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors)
-                .with_dtype_bounds(dtype_bounds);
-        let ty = resolver.resolve(expr)?.into_type();
-        let dim_names = resolver.dim_var_names();
-        let type_names = resolver.type_var_names();
-        let bounds = resolver.finish_dtype_bounds()?;
-        (ty, bounds, dim_names, type_names)
-    };
-    Ok(ResolvedDeclaredType {
-        ty: resolve_type_aliases(&ty, adt_reg, vg),
-        bounds,
-        dim_names,
-        type_names,
-    })
-}
-
-/// Decode a declaration node's `dtype_bounds` metadata into checker
-/// restrictions, reporting a malformed bound rather than dropping it.
-pub(super) fn declaration_dtype_bounds(
-    meta: &deep::MetaMap,
-    declaration: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<UnordMap<String, TypeVarRestriction>, ErrorWitness> {
-    match chelis_deep::decode_dtype_bounds(meta) {
-        Ok(bounds) => Ok(bounds
-            .into_iter()
-            .map(|(binder, family)| (binder, restriction_for_family(family)))
-            .collect()),
-        Err(error) => Err(report_witness(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!("malformed dtype-family bound on `{declaration}`: {error}"),
-                vec![
-                    "declare each bound as `name: Float`, `name: Int`, or `name: Numeric`"
-                        .to_string(),
-                ],
-            ),
-        )),
-    }
-}
-
-/// Attach a declaration's resolved bounds to the substitution so
-/// generalization re-quantifies them onto the scheme.
-pub(super) fn install_declared_bounds(
-    bounds: &[(TypeVar, TypeVarRestriction)],
-    subst: &mut Subst,
-    declaration: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<(), ErrorWitness> {
-    for (variable, restriction) in bounds {
-        if let Err(error) = subst.narrow_tvar_restriction(*variable, *restriction) {
-            return Err(report_witness(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!(
-                        "`{declaration}` declares conflicting dtype bounds: {}",
-                        error.message
-                    ),
-                    vec![],
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The checker restriction for a surface dtype family. Total over the closed
-/// `spec/04-type-system.md` §5.9 family set.
-pub(super) fn restriction_for_family(family: chelis_deep::DtypeFamily) -> TypeVarRestriction {
-    match family {
-        chelis_deep::DtypeFamily::Float => TypeVarRestriction::ActiveFloat,
-        chelis_deep::DtypeFamily::Int => TypeVarRestriction::ActiveInt,
-        chelis_deep::DtypeFamily::Numeric => TypeVarRestriction::ActiveNumeric,
-    }
-}
-
 // ── Declaration collection (first pass) ──────────────────────────
 
 /// Which declaration kinds a `collect_declarations` sub-pass should process.
@@ -1086,12 +1089,14 @@ fn note_eager_value_ordinals(items: &[(Option<String>, &deep::Expr)], env: &mut 
 /// function bodies, so a binding timeline cannot express source order.
 pub(super) fn collect_all_declarations(
     items: &[(Option<String>, &deep::Expr)],
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &mut AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
 ) {
+    debug_assert_eq!(items.len(), declaration_diagnostic_owners.len());
     // chelis#258 (main): duplicate-def / builtin-shadowing rejection runs
     // over the bare item list. Our `items` is paired with module keys, so
     // project to the `&deep::Expr` slice the reporters expect.
@@ -1113,10 +1118,13 @@ pub(super) fn collect_all_declarations(
     // declarations unbound; the check entry's `cancellation_gate` rejects the
     // unit before anything reads it.
     let cancel = crate::cancel::current_cancel_token();
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1127,12 +1135,16 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Aliases,
+            diagnostic_owner,
         );
     }
-    for (module, expr) in items {
+    for (index, (module, expr)) in items.iter().enumerate() {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
             return;
         }
+        let diagnostic_owner = declaration_diagnostic_owners
+            .get(index)
+            .and_then(Option::as_ref);
         collect_declarations(
             expr,
             module.as_deref(),
@@ -1143,8 +1155,14 @@ pub(super) fn collect_all_declarations(
             &resolution_env,
             errors,
             DeclPhase::Rest,
+            diagnostic_owner,
         );
     }
+    // [04-LIN-10] / spec/04 section 8.4.1: every `type` of this check, and of
+    // the library context it extends, is registered now and no body has been
+    // inferred yet, so the key-carrying set is complete before any generic is
+    // instantiated.
+    subst.set_key_carrying_adts(adt_reg.key_carrying_adts());
 }
 
 /// Collect nominal names and arities before resolving any declaration body.
@@ -1172,7 +1190,6 @@ pub(super) fn precollect_type_resolution_env(
             declarations.insert(name.to_string(), (Vec::new(), kids[1..].iter().collect()));
         } else {
             let params = match params_expr {
-                deep::Expr::List(list, _) => list.elements.as_slice(),
                 deep::Expr::BareList(elements, _) => elements.as_slice(),
                 _ => continue,
             };
@@ -1717,6 +1734,7 @@ pub(super) fn collect_declarations(
     headers: &TypeResolutionEnv,
     errors: &mut DiagnosticSink<'_>,
     phase: DeclPhase,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) {
     let Some((tag, meta, kids)) = stamped_parts(expr) else {
         return;
@@ -1790,42 +1808,52 @@ pub(super) fn collect_declarations(
             }
         }
         DeepTag::Defsig => {
-            // (defsig {dtype_bounds?} name type_expr)
-            if kids.len() >= 2
-                && let Some(name) = symbol_name(&kids[0])
+            // (defsig {dtype_bounds?} name [(binders...)] type_expr)
+            if let Some((name_expr, binder_list, type_expr)) = defsig_parts(kids)
+                && let Some(name) = symbol_name(name_expr)
+                && let Some(binder_names) = defsig_binder_names(binder_list, errors)
             {
-                let Ok(dtype_bounds) = declaration_dtype_bounds(meta, name, errors) else {
-                    return;
-                };
+                let dtype_bounds = declaration_dtype_bounds(meta);
                 let signature_level = subst.enter_level(vg);
-                let resolved = resolve_deep_type_with_bounds_and_dim_names(
-                    &kids[1],
+                let resolved = resolve_deep_type_with_binder_identities(
+                    type_expr,
                     vg,
                     adt_reg,
                     TypeUseSite::Defsig,
-                    BinderMode::ImplicitGeneric,
+                    BinderMode::ExplicitGeneric(&binder_names),
                     dtype_bounds,
+                    declaration_diagnostic_owner,
                     errors,
                 );
-                let installed = match &resolved {
-                    Ok(resolved) => install_declared_bounds(&resolved.bounds, subst, name, errors),
-                    Err(_) => Ok(()),
+                let bounds = match &resolved {
+                    Ok(resolved) => &resolved.bounds,
+                    Err(rejected) => &rejected.bounds,
                 };
+                let installed = install_declared_bounds(bounds, subst, name, errors);
                 subst.leave_level(signature_level, vg);
-                if let (Ok(resolved), Ok(())) = (resolved, installed) {
-                    let scheme = env.generalize(&resolved.ty, subst);
-                    env.bind(name.to_string(), scheme);
-                    // chelis#260: keep the source names of the declared dim
-                    // and type parameters. This is the only point where `n`,
-                    // `m` and `t` are still associated with their variables.
-                    env.record_declared_dim_names(name, resolved.dim_names);
-                    // chelis#1486 / [04-INF-6]: the type-name recording has a
-                    // second consumer. It covers authored binders, explicit
-                    // (`def f[a](..)`) and implicit (`def f(x: a) -> a`)
-                    // alike, so the post-body rigidity check can name `a`
-                    // rather than `t44`. An inference hole never reaches this
-                    // map ([04-INF-5]).
-                    env.record_declared_type_names(name, resolved.type_names);
+                match (resolved, installed) {
+                    (Ok(resolved), Ok(())) => {
+                        let scheme = env.generalize(&resolved.ty, subst);
+                        subst.name_generic_parameters(
+                            &scheme,
+                            name,
+                            &resolved.binder_identities.type_names(),
+                        );
+                        env.bind(name.to_string(), scheme);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
+                    }
+                    (Ok(resolved), Err(witness)) => {
+                        let recovery = crate::deep_type::RejectedSignatureType::from_resolved(
+                            resolved.ty,
+                            witness,
+                        );
+                        env.bind_rejected_signature(name.to_string(), recovery, subst);
+                        env.record_declared_binder_identities(name, resolved.binder_identities);
+                    }
+                    (Err(rejected), _) => {
+                        env.bind_rejected_signature(name.to_string(), rejected.recovery, subst);
+                        env.record_declared_binder_identities(name, rejected.binder_identities);
+                    }
                 }
             }
         }
@@ -1845,12 +1873,6 @@ pub(super) fn collect_declarations(
                     return;
                 }
                 let params = match &kids[1] {
-                    deep::Expr::List(list, _) => list
-                        .elements
-                        .iter()
-                        .filter_map(symbol_name)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>(),
                     deep::Expr::BareList(elements, _) => elements
                         .iter()
                         .filter_map(symbol_name)
@@ -1910,10 +1932,7 @@ pub(super) fn collect_declarations(
             // already declares the name; without one the desugarer emits the
             // bound on the synthesized `defsig` instead.
             if let Some(name) = kids.first().and_then(symbol_name)
-                && meta
-                    .entries
-                    .iter()
-                    .any(|(key, _)| key == chelis_deep::DTYPE_BOUNDS_KEY)
+                && meta.dtype_bounds().is_some()
             {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
@@ -1957,13 +1976,18 @@ fn is_exact_op35_wrapper(name: &str) -> bool {
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_normal"
             | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
+            | "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform_given"
             | "pkg__chelis__std__Std__Init__Kaiming__tensor_shape"
             | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_given"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__Random__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal"
+            | "pkg__chelis__std__Std__Init__XavierExt__trunc_normal_given"
             | "pkg__chelis__std__Std__Init__XavierExt__tensor_shape"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_normal"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
+            | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform_given"
             | "pkg__chelis__std__Std__Sort__sort"
             | "pkg__chelis__std__Std__Tensor__Construct__arange"
             | "pkg__chelis__std__Std__Tensor__Construct__arange_values"
@@ -2002,7 +2026,7 @@ fn install_exact_op35_dependency_contracts(
     if matches!(
         name,
         "pkg__chelis__std__Std__Init__Kaiming__kaiming_uniform"
-            | "pkg__chelis__std__Std__Init__Random__normal_like"
+            | "pkg__chelis__std__Std__Init__Random__normal_like_sample"
             | "pkg__chelis__std__Std__Init__XavierExt__xavier_uniform"
     ) {
         let template = vg.fresh_tvar();
@@ -2011,12 +2035,14 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             "uniform_like".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![template, low, high],
                 tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
                     vec![
+                        Type::Prim(Prim::Key),
                         Type::Ref(Box::new(Type::Var(template))),
                         Type::Var(low),
                         Type::Var(high),
@@ -2040,6 +2066,7 @@ fn install_exact_op35_dependency_contracts(
         env.bind(
             helper.to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![tensor],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2087,7 +2114,8 @@ pub(super) fn collect_user_def_names(items: &[&deep::Expr]) -> UnordSet<String> 
 /// Walk a rank-polymorphic def's body and reject any call whose output shape is
 /// not *name-trackable* at symbolic rank. Admitted: shape-identity (elementwise)
 /// builtins and named-axis reductions (the procedural arm verifies those drop a
-/// named axis and carry the rest through). Rejected: positional shape-rewriting
+/// named axis and carry the rest through), and checked ordered-prefix key
+/// derivations. Rejected: positional shape-rewriting
 /// builtins (`permute`/`reshape`/`matmul`/…), and any user/non-builtin/computed
 /// callee not proven rank-safe — against a spread `..r` there are no named axes
 /// left to catch an untracked transposition/reshape, so admitting one would
@@ -2100,28 +2128,18 @@ pub(super) fn check_rank_body_discipline(
     errors: &mut DiagnosticSink<'_>,
 ) {
     stack_guard!("check_rank_body_discipline", expr);
-    // chelis#1107 amendment: bridge a stamped `Expr::Node` one level and
-    // recurse. The walk re-enters per child, so each nested Node is bridged in
-    // turn -- without this the §4.2 rank-body-discipline check returned at the
-    // first node and never ran on the stamped ingress.
-    if let deep::Expr::Node(node, span) = expr {
-        let bridged = deep::Expr::List(node.to_list(*span), *span);
-        check_rank_body_discipline(def_name, &bridged, user_def_names, errors);
-        return;
-    }
-    // chelis#1107 amendment (justified-safe, not routed): the `Node` bridge
-    // directly above re-enters with a `List`, so this reader only ever sees
-    // the `List` carrier.
-    let deep::Expr::List(list, _) = expr else {
+    // Only decoded nodes carry calls; structural lists, unknown forms,
+    // metadata and atoms hold none this discipline reads.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
         return;
     };
-    match get_tag(list) {
+    match tag {
         // Function-taking transforms apply a *referenced* user function across
         // the opaque rank. That callee is not inlined here, so its body can
         // transpose/reshape undetected — reject outright (spec §4.2).
         // `jit`/`realize`/`cast`/`copy` wrap an *inline* expression that the
         // recursion below still checks, so they are not rejected here.
-        Some(t @ (DeepTag::Grad | DeepTag::Vmap)) => {
+        t @ (DeepTag::Grad | DeepTag::Vmap) => {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
@@ -2133,7 +2151,7 @@ pub(super) fn check_rank_body_discipline(
                 vec![],
             ));
         }
-        Some(DeepTag::App) => match children(list).first().and_then(app_var_name) {
+        DeepTag::App => match kids.first().and_then(app_var_name) {
             // A user-defined `def` of this name — possibly SHADOWING an
             // Identity builtin (`def relu(x) = permute(x,1,0)`). The call
             // resolves to the user def, whose body is not proven rank-safe, so
@@ -2150,6 +2168,8 @@ pub(super) fn check_rank_body_discipline(
                     vec![],
                 ));
             }
+            // OrderedPrefix relations retain every operand axis and may only
+            // append trailing axes, including in each tuple result component.
             // Identity (elementwise) or NameTracked (named-axis reduction /
             // named-axis expand) builtin — admissible. For a NameTracked op
             // the procedural inference arm (`check_reduction_signature` /
@@ -2163,7 +2183,9 @@ pub(super) fn check_rank_body_discipline(
                 if builtins::BUILTIN_NAMES.contains(&name)
                     && matches!(
                         builtins::shape_class(name),
-                        builtins::ShapeClass::Identity | builtins::ShapeClass::NameTracked
+                        builtins::ShapeClass::Identity
+                            | builtins::ShapeClass::NameTracked
+                            | builtins::ShapeClass::OrderedPrefix
                     ) => {}
             // A named builtin that rewrites shape positionally (not name-tracked).
             Some(name) if builtins::BUILTIN_NAMES.contains(&name) => {
@@ -2175,7 +2197,7 @@ pub(super) fn check_rank_body_discipline(
                          `..r` there are no named axes left to catch a transposition or reshape \
                          (spec/04-type-system.md \u{00a7}4.2). A `..r` body may call shape-identity \
                          (elementwise) operations, named-axis reductions, and the named-axis \
-                         `expand` and `insert` forms only."
+                         `expand` and `insert` forms, and ordered-prefix key derivations only."
                     ),
                     vec![format!(
                         "remove the `{name}` call from the rank-polymorphic body, or use \
@@ -2214,12 +2236,35 @@ pub(super) fn check_rank_body_discipline(
         _ => {}
     }
     // Recurse so nested calls (in let/if/match/lambda bodies, args) are checked.
-    for child in &list.elements {
+    for child in kids {
         check_rank_body_discipline(def_name, child, user_def_names, errors);
     }
 }
 
 // ── Top-level inference (second pass) ────────────────────────────
+
+/// A recursive group member's inferred type, held until the whole group is
+/// inferred and generalized together.
+pub(super) struct DeferredRecursiveBinding {
+    pub(super) name: String,
+    pub(super) ty: Type,
+    pub(super) owned_contracts: Vec<crate::unify::CollectionContractId>,
+    /// The authored binders of the member's declaration, so [04-LIN-10]'s
+    /// diagnostic can name the parameter a key reached.
+    pub(super) binder_names: UnordMap<TypeVar, String>,
+}
+
+/// Generalize a recursive group member and name its generic parameters.
+pub(super) fn generalize_deferred_recursive_binding(
+    binding: DeferredRecursiveBinding,
+    env: &Env,
+    subst: &Subst,
+) -> (String, Scheme) {
+    let scheme =
+        env.generalize_with_collection_contracts(&binding.ty, subst, &binding.owned_contracts);
+    subst.name_generic_parameters(&scheme, &binding.name, &binding.binder_names);
+    (binding.name, scheme)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_top_level(
@@ -2231,12 +2276,13 @@ pub(super) fn infer_top_level(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     prebound_type_failure: Option<&ErrorWitness>,
-    provisional_recursive_type: Option<&Type>,
+    recursive_expected: Option<recursion::RecursiveExpected<'_>>,
     defer_recursive_binding: bool,
     user_def_names: &UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
-) -> Option<(String, Type)> {
-    let Some((tag, _, kids)) = stamped_parts(expr) else {
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+) -> Option<DeferredRecursiveBinding> {
+    let Some((tag, declaration_meta, kids)) = stamped_parts(expr) else {
         // chelis#858 / [04-TOT-1]: a top-level list with no decoded tag
         // used to be silently skipped here, so a program like
         // `((var {} f) (var {} x))` was never type-checked while the
@@ -2244,7 +2290,6 @@ pub(super) fn infer_top_level(
         // is a loud rejection; the raw-string boundary names an unknown
         // symbol head when there is one.
         let named = match expr {
-            deep::Expr::List(list, _) => list.unknown_tag_symbol().unwrap_or("<untagged-list>"),
             deep::Expr::UnknownForm(data) => data.head.as_str(),
             _ => "<untagged-list>",
         };
@@ -2272,55 +2317,65 @@ pub(super) fn infer_top_level(
         // ordinary declaration owns this per-definition level and closes it
         // before its inferred scheme is generalized.
         let ordinary_level = (!defer_recursive_binding).then(|| subst.enter_level(vg));
+        let collection_contract_mark = subst.collection_contract_mark();
+        let recursive_expected =
+            recursion::PreparedRecursiveExpected::prepare(recursive_expected, env, vg, subst);
+        let provisional_recursive_type = recursive_expected.expected_type();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         // spec/04 §3.1.1: when this def is a member of the active recursive
         // binding group, remember which fresh tvars its own body was
         // instantiated at, so in-group recursive calls can be validated
         // against the caller's own instantiation.
-        let mut recursion_caller_guard = recursion::CallerGuard::inactive();
         // chelis#260: the names of this signature's declared dim parameters,
         // keyed by the FRESH variables the instantiation below mints. Empty
         // when the signature was never recorded, in which case the collapse
         // diagnostic falls back to the internal id.
-        let mut declared_dim_names: UnordMap<DimVar, String> = UnordMap::new();
-        // chelis#260 Site 2 and chelis#1486 / [04-INF-6]: the names of this
-        // signature's AUTHORED type binders, keyed by the fresh variables the
-        // instantiation below mints. Empty when the signature authored none,
-        // in which case nothing in the declaration is rigid; an inference hole
-        // is never a member. The deferred-borrow drain reports on these fresh
-        // variables long after this instantiation, so the composed map is
-        // parked on `Env` below.
-        let mut declared_type_names: UnordMap<TypeVar, String> = UnordMap::new();
-        let declared_ty = if provisional_recursive_type.is_none() {
-            env.lookup(&name).map(|s| {
-                let s = s.clone();
-                // All three renamings: the type mapping validates in-group
-                // recursive calls and names this signature's authored type
-                // binders, and the dim mapping names its declared dimension
-                // parameters. A recursive `def` can collapse two rigid dims or
-                // two rigid type binders exactly like a non-recursive one, so
-                // neither branch may be the one that falls back to the internal
-                // id (spec/04 [04-FIT-9], [04-INF-6]).
-                let (ty, mapping, dvar_mapping) = env.instantiate_scheme(&s, vg, subst);
-                declared_dim_names = env.declared_dim_names_for(&name, &dvar_mapping);
-                declared_type_names = env.declared_type_names_for(&name, &mapping);
-                if recursion::group_member(&name) {
-                    recursion_caller_guard = recursion::begin_caller(
-                        &name,
-                        declared_signatures.get(&name).map(|m| &m.binders),
-                        &mapping,
-                    );
-                }
-                ty
-            })
+        // [04-INF-6]: compose this declaration's authored type, dimension, and
+        // rank identities. Outer-signature occurrences come from one scheme
+        // instantiation; roles absent there are completed from the structural
+        // binder list. An inference hole is never a member. The deferred-borrow
+        // drain reports on the type projection long after this setup, so that
+        // projection is parked on `Env` below.
+        let binder_names = declared_signatures
+            .get(&name)
+            .map(|metadata| &metadata.binders);
+        let rejected_signature = env.rejected_signature(&name).cloned();
+        let replaying_authored_signature =
+            recursive_expected.is_published() && declared_signatures.contains_key(&name);
+        let declared_scheme = if let Some(rejected) = &rejected_signature {
+            Some(&rejected.scheme)
+        } else if provisional_recursive_type.is_none() {
+            env.lookup(&name)
         } else {
-            if recursion::group_member(&name) {
-                recursion_caller_guard = recursion::begin_caller(&name, None, &[]);
-            }
             None
         };
-        let _recursion_caller_guard = recursion_caller_guard;
+        let recursion::DeclaredMemberSetup {
+            ty: declared_ty,
+            binder_identities: declared_binder_identities,
+            caller_guard: _recursion_caller_guard,
+        } = recursive_expected.prepare_declared_member(
+            recursion::DeclaredMemberRequest::new(
+                &name,
+                binder_names,
+                declared_scheme,
+                replaying_authored_signature,
+            ),
+            env,
+            vg,
+            subst,
+        );
+        // chelis#2590: a member whose header omits a type is inferred against
+        // its own instance of its provisional scheme, and its component's
+        // completion decides each in-group reference against this one.
+        if env.is_holed_group_member(&name)
+            && let Some(ty) = &declared_ty
+        {
+            product.record_group_member_type(&name, ty.clone());
+        }
+        let declared_dim_names = declared_binder_identities.dim_names();
+        let declared_type_names = declared_binder_identities.type_names();
+        let declared_rank_names = declared_binder_identities.rank_names();
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`
@@ -2334,15 +2389,24 @@ pub(super) fn infer_top_level(
         // THIS declaration computed rather than reading the parked one
         // back, which body inference could have replaced.
         env.set_active_declared_type_names(declared_type_names.clone());
+        let declared_dtype_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>> =
+            declared_type_names
+                .to_sorted()
+                .into_iter()
+                .map(|(variable, _)| (*variable, env.declared_binder_bound(*variable, subst)))
+                .collect();
+        env.set_active_declared_type_bounds(declared_dtype_bounds.clone());
         let mut body_env = env.clone();
-        body_env.set_type_resolution_binders(
-            declared_signatures
-                .get(&name)
-                .map(|metadata| &metadata.binders),
+        body_env.set_type_resolution_scope(
+            binder_names.map(|_| &declared_binder_identities),
+            declaration_diagnostic_owner,
         );
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 
         let body_diagnostic_checkpoint = errors.checkpoint();
+        if let Some(Type::Fn(params, _)) = &declared_ty {
+            subst.protect_dimensions(params.iter().flat_map(crate::env::free_dvars));
+        }
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
         // declared signature gives concrete param types, seed the body's
         // params with the declared types BEFORE inferring the body. Without
@@ -2364,24 +2428,30 @@ pub(super) fn infer_top_level(
         let body_ty = if let Some(witness) = prebound_type_failure {
             propagate(witness)
         } else if let Some(decl_ty) = &declared_ty {
-            let inferred = infer_def_body_with_sig(
+            infer_declared_def_body(
                 &kids[1],
                 decl_ty,
+                declaration_meta,
+                declared_signatures.get(&name),
                 &mut body_env,
                 vg,
                 subst,
                 adt_reg,
                 errors,
                 product,
-            );
-            product.record_bypass(
-                &kids[1],
-                inferred.clone(),
-                "declared-signature function inference",
-            );
-            inferred
+                declaration_diagnostic_owner,
+            )
         } else {
-            infer_expr(&kids[1], &mut body_env, vg, subst, adt_reg, errors, product)
+            infer_expr_with_declaration_diagnostic_owner(
+                &kids[1],
+                &mut body_env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                product,
+                declaration_diagnostic_owner,
+            )
         };
         // Did the body's inference report any UnboundVariable diagnostic?
         // We use this to discriminate WS-A5 RT-3a F1's masked-by-Error
@@ -2408,18 +2478,20 @@ pub(super) fn infer_top_level(
         // declared concrete shape (#39).
         //
         // Implicit-copy fan-out v3 Shape A: if the initial unify fails
-        // and the body's tail position resolves to a `(var x)`
-        // reference (after walking `let`/`if`/`match` wrappers via
-        // `descend_to_tail_var`) whose declared return is owned `T`
-        // while the body's inferred type returns `Ref(T)`, retry the
+        // and the body's tail position resolves to one borrowed
+        // parameter (after walking `let`/`if`/`match` wrappers via
+        // `descend_to_tail_parameter`) whose declared return is owned
+        // `T` while the body's inferred type returns `Ref(T)`, retry the
         // unify against the declared return relaxed into `Ref(T)`.
         // This mirrors `auto_borrow_call_arg_types`'s owned-to-borrow
         // coercion at argument positions: the caller already arranged
-        // the borrow lifetime via the param itself, and the tail-var
-        // descent confirms every reachable return path returns the
-        // same parameter.  Heterogeneous returns and bodies whose tail
+        // the borrow lifetime via the param itself, and the descent
+        // confirms every reachable return path returns the same
+        // parameter's own value, by binding identity rather than by
+        // source spelling.  Heterogeneous returns and bodies whose tail
         // is an `app` or other non-var expression still fail with the
         // existing TypeMismatch.
+        let mut binder_rigidity = None;
         let scheme_body = if is_exact_op35_wrapper(&name) {
             // These package-reserved wrappers intentionally consume contracts
             // delivered by sibling Phase-4 issues: all-dtype random parameters
@@ -2449,47 +2521,24 @@ pub(super) fn infer_top_level(
             let resolved_body = subst.apply(&body_ty);
             let resolved_decl = subst.apply(&decl_ty);
             // Declared-dim rigidity check (TypeCheck-FreeDimVarUnification-F1
-            // Path B). The declared signature's param positions introduce
-            // the universally-quantified dim parameters; after the
-            // post-body sig-unify above, two distinct declared dims must
-            // not have collapsed into one another (and none may have been
-            // pinned to a concrete literal). This runs here, not inside
-            // `infer_def_body_with_sig`, because the collapse for an
-            // annotated-param body happens in the sig-unify itself, not
-            // during body inference. The body's tail returns the wrong
-            // declared dim (`def g[n, m](x: tensor[n, f32],
-            // y: tensor[m, f32]) -> tensor[n, f32] = y`), and the
-            // structural relaxed-retry guard does not see it because the
+            // Path B), with its type and rank twins ([04-INF-6]). After the
+            // post-body sig-unify above, two distinct declared binders must not
+            // have collapsed into one another, and none may have been pinned to
+            // a concrete literal or type. The collapse for an annotated-param
+            // body happens in the sig-unify itself, not during body inference:
+            // the body's tail returns the wrong declared dim (`def g[n, m](x:
+            // tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y`), and
+            // the structural relaxed-retry guard does not see it because the
             // initial unify already succeeded by collapsing `n` and `m`.
-            let mut declared_dvars: Vec<DimVar> = Vec::new();
-            if let Type::Fn(decl_params, _) = &decl_ty {
-                for t in decl_params {
-                    for dv in crate::env::free_dvars(t) {
-                        if !declared_dvars.contains(&dv) {
-                            declared_dvars.push(dv);
-                        }
-                    }
-                }
-            }
-            check_declared_dvars_rigid(&declared_dvars, &declared_dim_names, subst, errors);
-            // chelis#1486 / [04-INF-6]: the type-binder twin of the check
-            // above. `declared_type_names`' key set is exactly this
-            // declaration's authored binders, explicit and implicit alike, so
-            // the check needs no separate walk of the declared type and an
-            // inference hole ([04-INF-5]) is excluded by construction.
-            check_declared_tvars_rigid(&name, &declared_type_names, subst, errors);
-            // chelis#273: the param-position guard above never sees a dim
-            // parameter that occurs only in the return type, so a body
-            // could silently pin a return-only rigid dim. Reject the
-            // input-coupled pins/collapses while keeping the legitimate
-            // output-inferred uses (hello_tensor-style) green.
-            check_return_only_dvars_rigid(
-                &decl_ty,
-                &declared_dvars,
-                &declared_dim_names,
-                subst,
-                errors,
-            );
+            //
+            // The contract is decided by `close_declaration`, not here: the
+            // declaration boundary still replays suspended calls after this
+            // point, and a replay can pin or narrow a binder (chelis#2537).
+            binder_rigidity = Some((
+                decl_ty.clone(),
+                declared_dim_names.clone(),
+                declared_rank_names.clone(),
+            ));
             // Tier-2 rank-polymorphism Body Discipline
             // (spec/design/rank_polymorphism.md §Soundness Boundary, spec §4.2):
             // a def whose signature mentions a rank variable `..r` may call only
@@ -2544,10 +2593,10 @@ pub(super) fn infer_top_level(
             };
             // WS-A5 RT-3a F1: the permissive `(Error, _)` unify rule lets
             // a body whose return position collapses to `Type::Error`
-            // (e.g. `def use_mix(x: tensor[3, int32]) -> tensor[3, f32]
+            // (e.g. `def use_mix(x: tensor[3, i32]) -> tensor[3, f32]
             // = poly_id(nonexistent_function(x))`, where the outer call
             // early-exits at `Type::Error` so the body's `fn` type is
-            // `Fn([tensor[3, int32]], Type::Error)`) silently satisfy a
+            // `Fn([tensor[3, i32]], Type::Error)`) silently satisfy a
             // concrete declared signature, masking the precision/shape
             // mismatch the user would otherwise see. Surface the masked
             // mismatch here when the body collapses to `Type::Error` at
@@ -2579,6 +2628,7 @@ pub(super) fn infer_top_level(
                 // [04-ADT-4].
                 let mismatch_kind = match unify_result.as_ref().err().map(|error| &error.kind) {
                     Some(TypeErrorKind::DimensionMismatch) => CheckErrorKind::DimensionMismatch,
+                    Some(TypeErrorKind::DtypeFamilyMismatch) => CheckErrorKind::PrecisionMismatch,
                     _ => CheckErrorKind::TypeMismatch,
                 };
                 // RT-2 fixup B1: when the mismatch is a tensor
@@ -2588,22 +2638,30 @@ pub(super) fn infer_top_level(
                 // so the user sees the result-precision table rule
                 // rather than a generic "doesn't match declared
                 // signature".
-                let extra = match (&resolved_body, &resolved_decl) {
-                    (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
-                        if body_prec != decl_prec =>
-                    {
-                        format!(
-                            " (precision `{}` vs declared `{}`; if the body is a \
+                let extra = if let Some(error) = unify_result
+                    .as_ref()
+                    .err()
+                    .filter(|error| matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch))
+                {
+                    format!(": {}", error.message)
+                } else {
+                    match (&resolved_body, &resolved_decl) {
+                        (Type::Tensor(_, body_prec), Type::Tensor(_, decl_prec))
+                            if body_prec != decl_prec =>
+                        {
+                            format!(
+                                " (precision `{}` vs declared `{}`; if the body is a \
                              `reduce_sum`, see spec/04-type-system.md §5.7.1: \
-                             narrow integer operands widen to int32 to prevent \
+                             narrow integer operands widen to i32 to prevent \
                              silent overflow; use `tensor[{}]` or omit the result \
                              type)",
-                            body_prec.name(),
-                            decl_prec.name(),
-                            body_prec.name(),
-                        )
+                                body_prec.name(),
+                                decl_prec.name(),
+                                body_prec.name(),
+                            )
+                        }
+                        _ => String::new(),
                     }
-                    _ => String::new(),
                 };
                 errors.push(CheckError::new(
                     mismatch_kind,
@@ -2616,15 +2674,15 @@ pub(super) fn infer_top_level(
                 ));
             }
             // #39 wildcard narrowing. The narrow may now substitute a
-            // declared `Dim::Var` (not just `Dim::Lit`) into a body
-            // wildcard, but ONLY for dim vars bound by a parameter tensor
-            // position (`param_bound_dvars`). That keeps the
+            // declared `Dim::Var` or `Dim::Name` into a body
+            // wildcard, but ONLY for binders in a parameter tensor
+            // position (`param_bound_dims`). That keeps the
             // `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` family's
             // return dim tied to its input (chelis#405 / WS-3 build ICE)
             // while leaving return-only / value-parameter dims as
             // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
-            let param_dvars = param_bound_dvars(&resolved_decl);
-            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dvars)
+            let param_dims = param_bound_dims(&resolved_decl);
+            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dims)
         } else if let Some(provisional) = provisional_recursive_type {
             if let Err(error) = unify(&body_ty, provisional, subst) {
                 errors.push(error.into());
@@ -2634,6 +2692,26 @@ pub(super) fn infer_top_level(
             body_ty
         };
 
+        let binder_contract = AuthoredBinderContract::new(
+            name.clone(),
+            declared_type_names.clone(),
+            declared_dtype_bounds,
+        )
+        .in_holed_group(env.is_holed_group_member(&name));
+        product.record_authored_binder_contract(match binder_rigidity {
+            Some((decl_ty, dim_names, rank_names)) => {
+                binder_contract.with_rigidity(decl_ty, dim_names, rank_names)
+            }
+            None => binder_contract,
+        });
+
+        // The private frame constrains this body, but never replaces the
+        // rejected declaration with a callable public signature.
+        let scheme_body = match rejected_signature {
+            Some(rejected) => propagate(&rejected.witness),
+            None => scheme_body,
+        };
+
         if let Some(level) = ordinary_level {
             subst.leave_level(level, vg);
         }
@@ -2641,13 +2719,13 @@ pub(super) fn infer_top_level(
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 
         // chelis#397/#469: record the size provenance of a top-level value
-        // binding (e.g. `zero_count = sub(cast(0, int32), cast(0, int32))`)
+        // binding (e.g. `zero_count = sub(cast(0, i32), cast(0, i32))`)
         // BEFORE binding it, so a later `expand(b, 0, zero_count)` recovers
         // whether it is a materializable extent (static / shape-sourced) or a
         // sourceless runtime scalar. Classified against the pre-binding scope.
         // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
         // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env) {
+        match classify_expand_size(&kids[1], env, adt_reg, subst) {
             SizeClass::Static => {
                 if let Some(value) =
                     fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
@@ -2665,9 +2743,17 @@ pub(super) fn infer_top_level(
         // chelis#631: same discipline for list-literal lengths.
         note_list_literal_binding(env, &name, &kids[1]);
         if defer_recursive_binding {
-            Some((name, scheme_body))
+            Some(DeferredRecursiveBinding {
+                name,
+                ty: scheme_body,
+                owned_contracts: subst.collection_contract_ids_since(collection_contract_mark),
+                binder_names: declared_type_names,
+            })
         } else {
-            let scheme = env.generalize(&scheme_body, subst);
+            let owned_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+            let scheme =
+                env.generalize_with_collection_contracts(&scheme_body, subst, &owned_contracts);
+            subst.name_generic_parameters(&scheme, &name, &declared_type_names);
             env.bind(name, scheme);
             None
         }

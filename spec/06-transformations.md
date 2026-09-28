@@ -40,6 +40,13 @@ The recursive definition is shape-preserving. It never drops a tuple field,
 list element, or ADT field merely because its cotangent is unit, and it never
 uses a backend carrier limitation to reject a language-defined cotangent.
 
+A disconnected differentiable scalar or tensor receives exact zeros with its
+actual argument's dtype and ordered shape, including empty axes and rank zero. See
+[`grad_disconnected.ch`](../examples/grad_disconnected.ch).
+
+[`grad_bitwise.ch`](../examples/grad_bitwise.ch) demonstrates exact discrete
+coefficients retained in the forward graph under `grad` and `vmap`.
+
 Source-level `grad` returns gradients only, not `(value, grad)`.
 For a multi-parameter function, the gradient payload is flattened:
 
@@ -68,7 +75,20 @@ dw = grad(loss, wrt=w)(w, x, y)
 
 When `wrt` is specified, the gradient result contains entries only for the listed
 parameters, in the order they appear in `wrt`. One listed parameter returns one
-gradient value directly; multiple listed parameters return a flat tuple.
+gradient value directly; multiple listed parameters return a flat tuple. Repeated
+parameter names are retained as repeated result positions. Each name denotes a
+formal parameter of the target callable's immutable lexical origin, so aliases
+and alias chains do not rename or reorder formals. Branches retain that origin
+only when every path has the same exact lexical identity and ordered formals;
+same-signature lambdas or declarations remain distinct. Tuple, ADT constructor,
+and record patterns recursively project callable origins from their scrutinee
+payloads. Unknown names and targets without a statically established callable
+origin are rejected.
+
+The executable [`grad_wrt_order.ch`](../examples/grad_wrt_order.ch) example
+distinguishes written target order from declaration order using unequal
+cotangents. [`grad_selector_provenance.ch`](../examples/illustrative/grad_selector_provenance.ch)
+checks and evaluates alias-preserving constructor and record pattern projection.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 
@@ -240,15 +260,15 @@ unchanged, and its argument receives the shape-preserving exact zero
 cotangent.
 
 An explicit `wrt` target must contain at least one differentiable float leaf.
-A bool, signed-integer, string, function, resource, or recursively all-unit
-parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
+A bool, signed-integer, key, string, function, resource, or recursively
+all-unit parameter is a `non_differentiable` type error. A List, tuple, or ADT with a
 differentiable leaf is legal and returns §2.1's shape-preserving cotangent;
 its discrete fields remain present as `unit`.
 
 ### 2.7.1 Symbolic Input Dimensions in Adjoint Construction
 
 Adjoint construction preserves symbolic identities where ordinary type
-reasoning proves them and otherwise carries exact runtime int64 extent nodes.
+reasoning proves them and otherwise carries exact runtime i64 extent nodes.
 `Sum`/`Expand` carry their selected extents, `Reshape`/`Permute` restore the
 recorded source shape, and `Pad`/`Shrink`/`Stride` use [05-MOV-1]'s runtime
 bounds and exact inverse graphs. Bound and axis scalars have zero cotangent.
@@ -263,10 +283,10 @@ runtime dimension, loop extent, step, window, or target shape is a structural
 execution mode evaluates the same generated runtime graph and guards.
 
 **Scalar `shape()` value reads.** A `shape(x, axis)` read used as a scalar
-value is the rank-zero int64 extent operation in
+value is the rank-zero i64 extent operation in
 `spec/05-risc-primitives.md` [05-OP-7]/[05-SHAPE-1]. It is AD-transparent:
 the operation reads only shape metadata, so its adjoint routes zero cotangent
-to the input and discrete int32 axis. A loss whose value depends on a runtime
+to the input and discrete i32 axis. A loss whose value depends on a runtime
 dimension (for example `loss = sum(x) * shape(x, axis)`) therefore
 differentiates with the actual selected runtime extent. Literal and computed
 axes have one semantic operation and remain representable through every DAG
@@ -301,8 +321,10 @@ Every execution mode applies `grad`/`vmap` through the same semantic transform
 rules. Host lists are ordinary differentiable carriers under §2.1, not a
 target-specific boundary subset. In particular:
 
-- `to_tensor(to_list(x))`, which is the identity boundary and whose adjoint is
-  the identity cotangent
+- `to_tensor(to_list(x))` for positive-rank tensors, with any trailing
+  extents hidden by empty Lists supplied by the expected tensor type per
+  [05-OP-57], is the identity boundary; its adjoint is the identity cotangent
+  and uses the saved full forward shape
 - `map(f, xs)` differentiates each executed application of `f` in list order
   and returns the same-length positional cotangent list
 - `filter(p, xs)` treats the exact forward predicate mask as constant,
@@ -328,7 +350,10 @@ destructuring preserves the field paths used by §2.1's recursive cotangent
 type.
 
 Scalar `if` likewise differentiates the executed branch and gives its boolean
-condition zero cotangent. Tensor conditions use the exact `where` adjoint.
+condition zero cotangent. The untaken arm contributes exactly zero to every
+cotangent outside it, row by row under `vmap`, even where a where-lowered
+branch computes that arm's values and they or their derivatives are not
+finite (spec/10 §3). Tensor conditions use the exact `where` adjoint.
 Branch values may be scalar, tensor, List, tuple, or ADT; their cotangent keeps
 the same recursive shape.
 
@@ -372,10 +397,14 @@ carrier is a backend capability gap, not a language restriction.
 - `Diff` is treated as a capability of the AD pipeline rather than a boundary effect
 - `Accum` is an internal backward-pass accumulation effect and is not a
   user-handled boundary effect
-- `with seed(...)` fixes [05-RNG-1]'s stream for the complete forward and
-  reverse execution; random source words and the seed have zero cotangent,
-  while [05-OP-8]/[05-OP-37] and the stdlib graphs use their exact pathwise
-  parameter adjoints
+- a `key` is a discrete input, like an integer: a key, its seed, and random
+  source words have zero cotangent (`unit` in a structured cotangent), while
+  [05-OP-8]'s bounds, [05-OP-37]'s data input, and the stdlib graphs use their
+  exact pathwise adjoints at the forward draw's key and [05-OP-37] states the
+  rate's contract
+- the backward pass, and checkpoint recomputation under §2.9, re-read the bits
+  of a key that its forward draw consumed in order to replay that draw; such a
+  replay read is not a use under spec/04 [04-LIN-9]
 
 `with device(...)` is not a DAG-to-DAG transform. It selects the declared
 `Resource(Device)` region at the checked execution boundary; a target
@@ -409,9 +438,35 @@ vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
 
+A scalar `key` formal of `f` is mapped: its actual SHALL be a
+`tensor[n, key]` holding one key per row, and row `i` of the expansion above
+applies `f` to that tensor's row-`i` key, so row `i`'s draws are keyed from it
+([05-RNG-1]). A scalar key actual for a key formal, or a key captured by `f`,
+is a type error: every row would consume the same key (spec/04 [04-LIN-9]).
+
+The executable [`vmap_tensor_capture.ch`](../examples/vmap_tensor_capture.ch)
+demonstrates that the mapped input varies by row while one lexical tensor
+capture is shared across all rows.
+
+Fusing `vmap(grad(f))` does not remove §2.3's shape-preserving zero
+cotangents or change §2.2's selected-parameter order. An absent adjoint after
+lowering a complete body gives an exact positive-zero tensor of the batched
+actual's shape and precision; an unresolved live callable is not evidence
+of a constant body. Forward dependencies required by §5.2 remain observable.
+The executable [`grad_fused_zero.ch`](../examples/grad_fused_zero.ch) demonstrates
+a single batched zero cotangent; it does not demonstrate native export of
+multi-result fused gradients.
+
 ### 3.3 DAG Rewrite Rules
 
-For each node in the original DAG, the vmap transformation adds the batch dimension as follows:
+For each node in the original DAG, the vmap transformation adds the batch dimension as follows.
+Only a tensor `Load` that denotes a mapped formal receives the batch dimension
+at the call boundary. A tensor `Load` that denotes a lexical capture retains
+its authored type and is served once at that exact rank. When a batched
+consumer needs that captured value, the rewrite inserts an explicit
+`Insert(capture, axis=0, size=batch)` movement node, whose result has the batch
+axis prepended. This explicit lift does not authorize implicit rank extension
+or shape broadcasting in elementwise primitives.
 
 | Original Op | vmapped Op |
 |-------------|------------|
@@ -424,7 +479,10 @@ For each node in the original DAG, the vmap transformation adds the batch dimens
 | `Expand(x, dim, size)` | `Expand(x', dim, size)` -- broadcast within each batch element |
 | `Insert(x, dim, size)` | `Insert(x', dim, size)` -- insert within each batch element |
 | `Const(v, D, P)` | Batch-typed `Const(v, {batch} + D, P)` -- broadcast constant |
-| `Load(buf)` | Load with batch dimension added to buffer type |
+| `Load(mapped_formal)` | Load with batch dimension added to the mapped formal type |
+| `Load(key formal)` | Load of `tensor[{batch}, key]`, one key per row |
+| Random draw keyed by `k` | The same draw keyed by the batched `k'`: row `b` draws with `k'[b]` (spec/10 §3.2) |
+| `Load(capture)` | Exact authored capture load followed by `Insert(capture, 0, batch)` |
 
 The key principle: the batch dimension passes through all operations without being touched. Elementwise ops are naturally batched. Reductions reduce over the original axis, not the batch axis. Shape operations preserve the batch dimension. The rank-0 subgraph that produces a bound, and the bound carrier inside a movement operation, follow §3.7: in the rewritten DAG's numbering a positional `dim` and an `InputAxis` axis shift by the inserted batch axis, and a rank-0 extent value is shared rather than batched.
 
@@ -437,7 +495,7 @@ The key principle: the batch dimension passes through all operations without bei
                             -> tensor[D' with batch inserted at n, P]
 ```
 
-If `f` takes multiple arguments, each tensor argument gains the batch dimension:
+If `f` takes multiple arguments, each mapped tensor formal gains the batch dimension:
 
 ```
       G |- f : (tensor[D1, P], tensor[D2, P]) -> tensor[D3, P]
@@ -445,6 +503,21 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
       G |- vmap(f) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
                              -> tensor[{batch} + D3, P]
 ```
+
+A scalar `key` formal maps to a key tensor with the batch axis alone:
+
+```
+      G |- f : (key, tensor[D, P]) -> tensor[D', P]
+      ---------------------------------------------------
+      G |- vmap(f) : (tensor[{batch}, key], tensor[{batch} + D, P])
+                             -> tensor[{batch} + D', P]
+```
+
+A lexical tensor capture is not an additional mapped argument. In the
+conceptual expansion in §3.2 it is loop-invariant, and its authored rank is
+unchanged. The transformed DAG makes its use shape-equal with mapped values by
+the explicit `Insert` rule in §3.3. A plain elementwise application to
+different-rank tensors remains a type error under spec/04 and spec/05.
 
 ### 3.5 Composition
 
@@ -478,7 +551,7 @@ These two are distinct concepts:
 
 - `axis_out_of_bounds`: The integer axis is out of bounds for one of the vmapped tensor
   arguments or results.
-- If `f` has non-tensor arguments, those arguments are broadcast (shared across the batch). They are not vmapped.
+- If `f` has non-tensor arguments other than scalar `key` formals, those arguments are broadcast (shared across the batch). They are not vmapped. A scalar `key` formal is always mapped (§3.2). A broadcast argument that carries a key (spec/04 §8.4.1) is a type error, because every row would use its keys (spec/04 [04-LIN-9]); keys reach the rows only as a mapped `tensor[n, key]`.
 
 ### 3.7 Runtime Extents
 
@@ -554,7 +627,7 @@ Optimization passes are DAG-to-DAG rewrites that preserve semantics while improv
 
 ### 5.1 Constant Folding
 
-**Rule:** If all inputs to a node are `Const` nodes, evaluate the operation at compile time and replace the node with a single `Const` node containing the result.
+**Rule:** If all inputs to a node are `Const` nodes, evaluate the operation at compile time and replace the node with a single `Const` node containing the result. A key operation ([05-OP-69] through [05-OP-72]) is never folded: no `Const` holds a key (spec/10 §3.2), so key derivations stay symbolic.
 
 **Applies to:** All elementwise ops (unary and binary), reductions, Cast. Does not apply to Load/Store (which depend on external buffers).
 
@@ -572,11 +645,25 @@ After:  Const(0.0, shape_of(x), precision_of(x))    -- by algebraic simplificati
 **Rule:** Remove a node only when its result is not consumed by another live
 node and removing its execution preserves every effect and trap occurrence.
 Potentially effectful or trapping nodes are observable roots; purity alone does
-not make a possible trap dead.
+not make a possible trap dead. A potentially trapping node traps only within
+its activation (spec/10 §3): where its activation is false it computes a value
+and checks nothing.
+
+Liveness is scoped to the program the evaluation runs. An evaluation of
+selected roots enters each selected root's declaration. Another declaration's
+work runs only inlined into the nodes of the declaration that reaches it: a
+call runs the function's body in its caller, and a reference to a top-level
+value declaration whose initializer has a potentially trapping node runs that
+initializer at the reference, within the reference's activation, whether or
+not the reference is read (spec/03 §4.4). A value declaration with no
+potentially trapping node is one set of nodes that every reference reads. A
+node of a declaration the evaluation does not enter is not part of that
+program, and a node whose activation is false checks nothing ([05-RNG-1]).
 
 **Algorithm:**
-1. Mark every effectful node, every potentially trapping node, every `Store`,
-   and every designated output as **live**.
+1. Mark every effectful and every potentially trapping node of a declaration
+   the evaluation enters, every `Store`, and every designated output as
+   **live**.
 2. Walk backward through the DAG: for each live node, mark all its input nodes as live.
 3. Remove all nodes not marked as live.
 
@@ -601,9 +688,13 @@ DCE is particularly important after `grad`, which may produce gradient nodes for
 **Rule:** If two total, deterministic, pure nodes perform the same operation on
 the same typed inputs and semantic parameters, they may merge only when one
 execution has the same stored result and observation order as both original
-executions. Effectful, Random, resource, IO, Test, and potentially trapping
+executions. Effectful, resource, IO, Test, and potentially trapping
 nodes never merge. The key includes the complete dtype, shape, accumulator,
-and operation identity; an implementation name is not a semantic key.
+and operation identity; an implementation name is not a semantic key. A
+random draw or random-key operation is a pure function of its operands
+([05-RNG-1]): CSE, reordering, and DCE treat it like any other pure node, and
+a draw or `split_keys` count that can trap is potentially trapping under
+§5.2.
 
 **Algorithm:**
 1. For each node, compute a hash: `hash(op, input_node_id_1, input_node_id_2, ..., params)`.
@@ -868,6 +959,15 @@ declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
 traversal contributes the shape-preserving exact zero for its argument and
 does not enter the argument's subgraph, so a structurally rejected operation
 inside it does not stop construction.
+
+A signed-integer operation whose atom assigns the `IntegerArithmeticOutput`
+structural rejection passes exact zero to its operands when reached only by an
+exact-zero control cotangent; this does not request its forward-only adjoint.
+Traversal still visits those operands, so a structural rejection such as a
+float-to-integer cast beneath the operation is reported. If any path reaches
+that same operation outside the exact-zero control path, its
+`IntegerArithmeticOutput` rejection applies. Other operations retain their
+own atom's disposition, including a structural rejection on a zero path.
 
 ### 7.6 Verification
 

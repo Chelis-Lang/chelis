@@ -26,13 +26,20 @@ pub enum TypeVarRestriction {
     /// `spec/04-type-system.md` §5.9 `Float`: the variable may instantiate
     /// only at an active float primitive (`f16`, `bf16`, `f32`, `f64`).
     ActiveFloat,
-    /// §5.9 `Int`: only at an active signed integer primitive (`int8`,
-    /// `int16`, `int32`, `int64`).
+    /// §5.9 `Int`: only at an active signed integer primitive (`i8`,
+    /// `i16`, `i32`, `i64`).
     ActiveInt,
     /// §5.9 `Numeric`: the union of [`TypeVarRestriction::ActiveFloat`] and
     /// [`TypeVarRestriction::ActiveInt`]. `bool` and `string` are excluded,
     /// as are the §1.1.1 reserved spellings.
     ActiveNumeric,
+    /// An operation argument is a scalar or tensor with float precision.
+    /// This is a value constraint, not the surface `Float` type-argument bound.
+    FloatValue,
+    /// An operation argument is a scalar or tensor with signed integer precision.
+    IntValue,
+    /// An operation argument is a scalar or tensor with numeric precision.
+    NumericValue,
 }
 
 impl TypeVarRestriction {
@@ -40,9 +47,9 @@ impl TypeVarRestriction {
     /// Surf surface spell it.
     pub fn family_name(self) -> &'static str {
         match self {
-            TypeVarRestriction::ActiveFloat => "Float",
-            TypeVarRestriction::ActiveInt => "Int",
-            TypeVarRestriction::ActiveNumeric => "Numeric",
+            TypeVarRestriction::ActiveFloat | TypeVarRestriction::FloatValue => "Float",
+            TypeVarRestriction::ActiveInt | TypeVarRestriction::IntValue => "Int",
+            TypeVarRestriction::ActiveNumeric | TypeVarRestriction::NumericValue => "Numeric",
         }
     }
 
@@ -53,6 +60,9 @@ impl TypeVarRestriction {
             TypeVarRestriction::ActiveFloat => "the active float dtypes",
             TypeVarRestriction::ActiveInt => "the active signed integer dtypes",
             TypeVarRestriction::ActiveNumeric => "the active numeric dtypes",
+            TypeVarRestriction::FloatValue => "float scalars or tensors",
+            TypeVarRestriction::IntValue => "signed integer scalars or tensors",
+            TypeVarRestriction::NumericValue => "numeric scalars or tensors",
         }
     }
 
@@ -64,10 +74,33 @@ impl TypeVarRestriction {
     /// `ActiveNumeric`: it admits `f8e4m3` so that rejection sites can
     /// describe it, and a bound must not admit a dtype §1.1 does not.
     pub fn admits(self, prim: Prim) -> bool {
-        match self {
+        match self.precision_family() {
             TypeVarRestriction::ActiveFloat => prim.is_float(),
             TypeVarRestriction::ActiveInt => prim.is_integer(),
             TypeVarRestriction::ActiveNumeric => prim.is_float() || prim.is_integer(),
+            _ => unreachable!("precision_family returns a primitive dtype family"),
+        }
+    }
+
+    pub(crate) fn is_value_constraint(self) -> bool {
+        matches!(self, Self::FloatValue | Self::IntValue | Self::NumericValue)
+    }
+
+    pub(crate) fn precision_family(self) -> Self {
+        match self {
+            Self::FloatValue => Self::ActiveFloat,
+            Self::IntValue => Self::ActiveInt,
+            Self::NumericValue => Self::ActiveNumeric,
+            family => family,
+        }
+    }
+
+    pub(crate) fn for_value(self) -> Self {
+        match self.precision_family() {
+            Self::ActiveFloat => Self::FloatValue,
+            Self::ActiveInt => Self::IntValue,
+            Self::ActiveNumeric => Self::NumericValue,
+            _ => unreachable!("precision_family returns a primitive dtype family"),
         }
     }
 
@@ -79,14 +112,22 @@ impl TypeVarRestriction {
     /// only empty case is `Float` against `Int`.
     pub fn intersect(self, other: TypeVarRestriction) -> Option<TypeVarRestriction> {
         use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
-        match (self, other) {
+        let family = match (self.precision_family(), other.precision_family()) {
             (ActiveFloat, ActiveFloat) => Some(ActiveFloat),
             (ActiveInt, ActiveInt) => Some(ActiveInt),
             (ActiveNumeric, ActiveNumeric) => Some(ActiveNumeric),
             (ActiveNumeric, ActiveFloat) | (ActiveFloat, ActiveNumeric) => Some(ActiveFloat),
             (ActiveNumeric, ActiveInt) | (ActiveInt, ActiveNumeric) => Some(ActiveInt),
             (ActiveFloat, ActiveInt) | (ActiveInt, ActiveFloat) => None,
-        }
+            _ => unreachable!("precision_family returns a primitive dtype family"),
+        }?;
+        Some(
+            if self.is_value_constraint() && other.is_value_constraint() {
+                family.for_value()
+            } else {
+                family
+            },
+        )
     }
 }
 
@@ -102,7 +143,7 @@ pub struct RankVar(pub u32);
 /// Numeric precision types.
 ///
 /// The active numeric primitive set is pinned by `spec/04-type-system.md` §1.1:
-/// `f32`, `f64`, `bf16`, `f16`, `int8`, `int16`, `int32`, `int64`, plus `bool`
+/// `f32`, `f64`, `bf16`, `f16`, `i8`, `i16`, `i32`, `i64`, plus `bool`
 /// and `string`. The `f8e4m3` variant is reserved per §1.1.1 but is **not
 /// active** in this dtype build-out cycle: parse paths still produce
 /// `Prim::F8e4m3` so producers can be diagnosed precisely, but every
@@ -122,6 +163,15 @@ pub enum Prim {
     Int64,
     Bool,
     String,
+    /// A random key (spec/04 §1.1, [05-RNG-2]): an active tensor element
+    /// dtype that is structurally non-numeric, with no arithmetic,
+    /// comparison, cast, or literal carrier. A `tensor[D, key]` is stored
+    /// with runtime dtype `key`. It is not one of the nine active data element
+    /// dtypes ([`Prim::is_data_element_dtype`]), so an operation scheme admits
+    /// it only where its own atom names `key`. Every key value is produced by
+    /// a graph node or enters as an input. It has no source spelling yet; its
+    /// interchange spelling is `key`.
+    Key,
 }
 
 // Canonical identity order for order-free collection indices. This is byte
@@ -139,6 +189,14 @@ impl Ord for Prim {
 }
 
 impl Prim {
+    /// The active float dtypes of `spec/04-type-system.md` §1.1, the one list
+    /// [`Prim::is_float`] and every float-family enumeration read.
+    pub const ACTIVE_FLOATS: [Prim; 4] = [Prim::F32, Prim::F64, Prim::F16, Prim::Bf16];
+
+    /// The active signed integer dtypes of §1.1, narrowest first: the one list
+    /// [`Prim::is_integer`] and every integer-family enumeration read.
+    pub const ACTIVE_INTEGERS: [Prim; 4] = [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64];
+
     /// Parse a primitive type from its canonical name.
     pub fn parse_name(s: &str) -> Option<Prim> {
         match s {
@@ -147,12 +205,13 @@ impl Prim {
             "f16" => Some(Prim::F16),
             "bf16" => Some(Prim::Bf16),
             "f8e4m3" => Some(Prim::F8e4m3),
-            "int8" => Some(Prim::Int8),
-            "int16" => Some(Prim::Int16),
-            "int32" => Some(Prim::Int32),
-            "int64" => Some(Prim::Int64),
+            "i8" => Some(Prim::Int8),
+            "i16" => Some(Prim::Int16),
+            "i32" => Some(Prim::Int32),
+            "i64" => Some(Prim::Int64),
             "bool" => Some(Prim::Bool),
             "string" => Some(Prim::String),
+            "key" => Some(Prim::Key),
             _ => None,
         }
     }
@@ -164,12 +223,40 @@ impl Prim {
             Prim::F16 => "f16",
             Prim::Bf16 => "bf16",
             Prim::F8e4m3 => "f8e4m3",
+            Prim::Int8 => "i8",
+            Prim::Int16 => "i16",
+            Prim::Int32 => "i32",
+            Prim::Int64 => "i64",
+            Prim::Bool => "bool",
+            Prim::String => "string",
+            Prim::Key => "key",
+        }
+    }
+
+    /// Stable ecosystem spelling used by versioned JSON and ABI-facing
+    /// interchange surfaces. This is deliberately separate from [`Self::name`]:
+    /// Chelis source and Deep use `i*`, while existing external payloads keep
+    /// their `int*` identities.
+    pub fn interchange_name(&self) -> &'static str {
+        match self {
             Prim::Int8 => "int8",
             Prim::Int16 => "int16",
             Prim::Int32 => "int32",
             Prim::Int64 => "int64",
-            Prim::Bool => "bool",
-            Prim::String => "string",
+            _ => self.name(),
+        }
+    }
+
+    /// Parse the stable ecosystem spelling used by versioned interchange
+    /// formats. Language and Deep ingress must use [`Self::parse_name`].
+    pub fn parse_interchange_name(s: &str) -> Option<Prim> {
+        match s {
+            "int8" => Some(Prim::Int8),
+            "int16" => Some(Prim::Int16),
+            "int32" => Some(Prim::Int32),
+            "int64" => Some(Prim::Int64),
+            "i8" | "i16" | "i32" | "i64" => None,
+            _ => Self::parse_name(s),
         }
     }
 
@@ -187,7 +274,26 @@ impl Prim {
             Prim::Int32 => Ok(RuntimeDType::I32),
             Prim::Int64 => Ok(RuntimeDType::I64),
             Prim::Bool => Ok(RuntimeDType::Bool),
+            Prim::Key => Ok(RuntimeDType::Key),
             Prim::F8e4m3 | Prim::String => Err(RuntimeDTypeMappingError { prim: self }),
+        }
+    }
+
+    /// The language dtype a runtime ABI dtype stores, the inverse of
+    /// [`Self::runtime_dtype`]. Every runtime dtype has one, so a runtime
+    /// dtype added without its language dtype fails to compile here.
+    pub fn from_runtime_dtype(dtype: RuntimeDType) -> Prim {
+        match dtype {
+            RuntimeDType::F32 => Prim::F32,
+            RuntimeDType::F64 => Prim::F64,
+            RuntimeDType::F16 => Prim::F16,
+            RuntimeDType::Bf16 => Prim::Bf16,
+            RuntimeDType::I8 => Prim::Int8,
+            RuntimeDType::I16 => Prim::Int16,
+            RuntimeDType::I32 => Prim::Int32,
+            RuntimeDType::I64 => Prim::Int64,
+            RuntimeDType::Bool => Prim::Bool,
+            RuntimeDType::Key => Prim::Key,
         }
     }
 
@@ -195,19 +301,19 @@ impl Prim {
     /// `f8e4m3` is deferred (§1.1.1) and is NOT a float for any active
     /// classification purpose.
     pub fn is_float(&self) -> bool {
-        matches!(self, Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16)
+        Self::ACTIVE_FLOATS.contains(self)
     }
 
     /// True for any numeric precision in the active set, including `f8e4m3`
     /// (so deferred-dtype rejection sites can still treat it as numeric for
-    /// surface diagnostics). `Bool` and `String` are not numeric.
+    /// surface diagnostics). `Bool`, `String` and `Key` are not numeric.
     pub fn is_numeric(&self) -> bool {
-        !matches!(self, Prim::Bool | Prim::String)
+        !matches!(self, Prim::Bool | Prim::String | Prim::Key)
     }
 
     /// True for all signed integer dtypes in the active set per §1.1.
     pub fn is_integer(&self) -> bool {
-        matches!(self, Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64)
+        Self::ACTIVE_INTEGERS.contains(self)
     }
 
     /// The representable `[min, max]` range of a signed integer width, or
@@ -228,7 +334,7 @@ impl Prim {
     /// for a non-integer primitive. The SINGLE source every prove-path
     /// integer sampler (the obligation engine, the property runner, the
     /// injection path, and the CLI fuzz sampler) shares, so a narrow width
-    /// (e.g. int8) samples in `[-128, 127]` everywhere -- never an
+    /// (e.g. i8) samples in `[-128, 127]` everywhere -- never an
     /// unrepresentable value that would yield a spurious counterexample.
     pub fn integer_fuzz_bounds(&self) -> Option<(i64, i64)> {
         let (lo, hi) = self.integer_range()?;
@@ -244,10 +350,12 @@ impl Prim {
         !matches!(self, Prim::F8e4m3)
     }
 
-    /// Whether this precision is valid as the element type of a tensor.
-    /// Per spec §1.1 the active tensor element set is f32, f64, bf16, f16,
-    /// int8, int16, int32, int64, and bool. The deferred `f8e4m3` (§1.1.1)
-    /// is rejected.
+    /// Whether this precision is one of spec §1.1's ten active tensor element
+    /// dtypes: f32, f64, bf16, f16, i8, i16, i32, i64, bool, and key. The
+    /// deferred `f8e4m3` (§1.1.1) is rejected. This says only that a
+    /// `tensor[D, p]` exists; an operation scheme that admits every element
+    /// dtype admits [`Prim::is_data_element_dtype`]'s nine, and `key` only
+    /// where its own atom names it.
     ///
     /// Note: backend support for the reduced floats (`f16`, `bf16`) is
     /// staged separately in WS-A1/A2/A3; the type checker admits them here
@@ -255,6 +363,14 @@ impl Prim {
     /// yet emit them are expected to produce their own targeted diagnostic
     /// rather than let them slip through silently.
     pub fn is_valid_tensor_precision(&self) -> bool {
+        self.is_data_element_dtype() || matches!(self, Prim::Key)
+    }
+
+    /// Whether this precision is one of spec §1.1's nine active data element
+    /// dtypes: the active tensor element dtypes other than `key`, that is the
+    /// eight numeric dtypes and bool. A domain written as every active tensor
+    /// element dtype is exactly this set.
+    pub fn is_data_element_dtype(&self) -> bool {
         matches!(
             self,
             Prim::F32
@@ -270,9 +386,9 @@ impl Prim {
     }
 
     /// Whether this precision is a legitimate target for `cast(scalar, p)`.
-    /// Mirrors `is_valid_tensor_precision` in this cycle: the host scalar
-    /// lane carries the same active dtype set per spec §1.1, and the
-    /// deferred `f8e4m3` (§1.1.1) is rejected here too.
+    /// Mirrors `is_data_element_dtype` in this cycle: the host scalar lane
+    /// carries the same active data dtype set per spec §1.1, and the deferred
+    /// `f8e4m3` (§1.1.1) is rejected here too. A key has no cast.
     pub fn is_valid_scalar_cast_target(&self) -> bool {
         matches!(
             self,
@@ -297,9 +413,9 @@ impl Prim {
     /// - bf16 / f16  → f32
     /// - f32         → f32 (operand-matching)
     /// - f64         → f64 (operand-matching)
-    /// - int8 / int16 → int32
-    /// - int32       → int32 (operand-matching)
-    /// - int64       → int64 (operand-matching)
+    /// - i8 / i16 → i32
+    /// - i32       → i32 (operand-matching)
+    /// - i64       → i64 (operand-matching)
     ///
     /// Returns `Err` for non-numeric operands and for the deferred
     /// `f8e4m3` (§1.1.1).
@@ -313,7 +429,7 @@ impl Prim {
             Prim::Int64 => Prim::Int64,
             Prim::Bool => {
                 return Err(
-                    "reduce_sum is not defined on bool tensors; cast to int32 first".to_string(),
+                    "reduce_sum is not defined on bool tensors; cast to i32 first".to_string(),
                 );
             }
             Prim::F8e4m3 => {
@@ -324,6 +440,9 @@ impl Prim {
             }
             Prim::String => {
                 return Err("reduce_sum is not defined for string operands".to_string());
+            }
+            Prim::Key => {
+                return Err("reduce_sum is not defined for random key operands".to_string());
             }
         })
     }
@@ -336,9 +455,9 @@ impl Prim {
     ///   inside the op and downcast on output)
     /// - f32         → f32
     /// - f64         → f64
-    /// - int8 / int16 → int32 (accumulator precision)
-    /// - int32       → int32
-    /// - int64       → int64
+    /// - i8 / i16 → i32 (accumulator precision)
+    /// - i32       → i32
+    /// - i64       → i64
     ///
     /// This is the user-visible result precision. The IR-level Sum
     /// node's `output_type.precision` is the accumulator precision;
@@ -393,7 +512,7 @@ pub enum Dim {
 ///
 /// Per `spec/04-type-system.md` §5.8 and `spec/02-surf-syntax.md`, the
 /// precision slot of a tensor type may be either a concrete primitive
-/// (e.g. `f32`, `int32`) or a sig-bound type variable (precision
+/// (e.g. `f32`, `i32`) or a sig-bound type variable (precision
 /// polymorphism, WS-A5). After monomorphization every reachable
 /// tensor must carry `TensorPrec::Concrete(_)`; backends assert this
 /// invariant at lowering time.
@@ -533,7 +652,7 @@ impl fmt::Display for NominalArg {
 /// Chelis type.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    /// Primitive type (f32, int32, bool, etc.).
+    /// Primitive type (f32, i32, bool, etc.).
     Prim(Prim),
     /// Function type: args → return.
     Fn(Vec<Type>, Box<Type>),
@@ -567,7 +686,6 @@ pub enum Type {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Effect {
-    Random,
     Accum,
     Io,
     /// Chelis-native testing effect. Pinned at the root, no handler.
@@ -581,7 +699,6 @@ pub enum Effect {
 impl fmt::Display for Effect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Random => f.write_str("Random"),
             Self::Accum => f.write_str("Accum"),
             Self::Io => f.write_str("IO"),
             Self::Test => f.write_str("Test"),
@@ -642,6 +759,200 @@ impl fmt::Display for EffectSet {
     }
 }
 
+/// The checked operand/result relation of a first-class builtin operation.
+///
+/// Builtin schemes own these contracts. Aliasing, higher-order passage,
+/// import, and serialization retain them; applying the value consumes and
+/// decides them. A newly authored wrapper does not create one from its body
+/// because [04-INF-9] requires an explicit sufficient parameter contract.
+///
+/// Each variant holds the route's operands and its result in FIXED fields.
+/// A rule tag plus an operand vector would describe `(List, List)` membership
+/// and lose the equations the rule also imposes -- that `concat`'s two lists
+/// share an element type and that its result is a list at that same type --
+/// so a mixed-element call, or one whose result was annotated to something
+/// the rule never produces, would satisfy the carried constraint.
+///
+/// The carried types are ordinary types, so [`crate::env::Env::instantiate`]'s
+/// renaming substitution rewrites any dimension or rank variable they mention
+/// exactly as it rewrites the scheme body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CollectionConstraint {
+    /// `len(operand) -> i64`: the operand is a `List` or a `Dict`.
+    Len { operand: Type, result: Type },
+    /// `index(list, index) -> result`: `list` is a `List[e]`, `index` is
+    /// exactly `i64`, and `result` is `e`.
+    Index {
+        list: Type,
+        index: Type,
+        result: Type,
+    },
+    /// `append(list, value) -> result`: `list` is a `List[e]`, `value` is an
+    /// `e`, and `result` is `List[e]`.
+    Append {
+        list: Type,
+        value: Type,
+        result: Type,
+    },
+    /// `concat(lhs, rhs) -> result`, both spec/04 §4.5.4 overloads: two
+    /// `List[e]` giving `List[e]`, or a `List[tensor[..]]` and an `i32`
+    /// axis giving a tensor.
+    Concat { lhs: Type, rhs: Type, result: Type },
+    /// [05-OP-69]: scalar i64 -> key, or tensor[D,i64] -> tensor[D,key].
+    KeyFromSeed { operand: Type, result: Type },
+    /// [05-OP-70]: each half preserves the key operand's surface and shape.
+    SplitKey { operand: Type, result: Type },
+    /// [05-OP-71]: append one runtime count axis to a key's shape.
+    SplitKeys {
+        operand: Type,
+        count: Type,
+        result: Type,
+    },
+    /// [05-OP-72]: equal scalar/tensor surfaces and exactly equal shapes.
+    FoldIn {
+        operand: Type,
+        index: Type,
+        result: Type,
+    },
+}
+
+impl CollectionConstraint {
+    /// The builtin this constraint belongs to, for diagnostics.
+    pub fn builtin(&self) -> &'static str {
+        match self {
+            Self::KeyFromSeed { .. } => "key_from_seed",
+            Self::SplitKey { .. } => "split_key",
+            Self::SplitKeys { .. } => "split_keys",
+            Self::FoldIn { .. } => "fold_in",
+            Self::Len { .. } => "len",
+            Self::Index { .. } => "index",
+            Self::Append { .. } => "append",
+            Self::Concat { .. } => "concat",
+        }
+    }
+
+    /// The operand positions, in the order the rule reads them. The result is
+    /// deliberately absent: an unresolved RESULT is what the rule computes,
+    /// not what it waits on.
+    pub fn operands(&self) -> Vec<&Type> {
+        match self {
+            Self::KeyFromSeed { operand, .. } | Self::SplitKey { operand, .. } => vec![operand],
+            Self::SplitKeys { operand, count, .. } => vec![operand, count],
+            Self::FoldIn { operand, index, .. } => vec![operand, index],
+            Self::Len { operand, .. } => vec![operand],
+            Self::Index { list, index, .. } => vec![list, index],
+            Self::Append { list, value, .. } => vec![list, value],
+            Self::Concat { lhs, rhs, .. } => vec![lhs, rhs],
+        }
+    }
+
+    /// Every type this constraint carries, operands and result alike. Used to
+    /// decide which variables a pending constraint keeps monomorphic.
+    pub fn carried_types(&self) -> Vec<&Type> {
+        match self {
+            Self::KeyFromSeed { operand, result } | Self::SplitKey { operand, result } => {
+                vec![operand, result]
+            }
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => vec![operand, count, result],
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => vec![operand, index, result],
+            Self::Len { operand, result } => vec![operand, result],
+            Self::Index {
+                list,
+                index,
+                result,
+            } => vec![list, index, result],
+            Self::Append {
+                list,
+                value,
+                result,
+            } => vec![list, value, result],
+            Self::Concat { lhs, rhs, result } => vec![lhs, rhs, result],
+        }
+    }
+
+    /// The result the suspended call already handed its consumer.
+    pub fn result(&self) -> &Type {
+        match self {
+            Self::KeyFromSeed { result, .. }
+            | Self::SplitKey { result, .. }
+            | Self::SplitKeys { result, .. }
+            | Self::FoldIn { result, .. }
+            | Self::Len { result, .. }
+            | Self::Index { result, .. }
+            | Self::Append { result, .. }
+            | Self::Concat { result, .. } => result,
+        }
+    }
+
+    /// Rewrite every carried type with `f`. Instantiation passes the
+    /// quantifier renaming; discharge passes the current substitution.
+    pub fn map_types(&self, f: impl Fn(&Type) -> Type) -> Self {
+        match self {
+            Self::KeyFromSeed { operand, result } => Self::KeyFromSeed {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKey { operand, result } => Self::SplitKey {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::SplitKeys {
+                operand,
+                count,
+                result,
+            } => Self::SplitKeys {
+                operand: f(operand),
+                count: f(count),
+                result: f(result),
+            },
+            Self::FoldIn {
+                operand,
+                index,
+                result,
+            } => Self::FoldIn {
+                operand: f(operand),
+                index: f(index),
+                result: f(result),
+            },
+            Self::Len { operand, result } => Self::Len {
+                operand: f(operand),
+                result: f(result),
+            },
+            Self::Index {
+                list,
+                index,
+                result,
+            } => Self::Index {
+                list: f(list),
+                index: f(index),
+                result: f(result),
+            },
+            Self::Append {
+                list,
+                value,
+                result,
+            } => Self::Append {
+                list: f(list),
+                value: f(value),
+                result: f(result),
+            },
+            Self::Concat { lhs, rhs, result } => Self::Concat {
+                lhs: f(lhs),
+                rhs: f(rhs),
+                result: f(result),
+            },
+        }
+    }
+}
+
 /// A polymorphic type scheme: ∀ tvars, dvars. body
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
@@ -654,6 +965,15 @@ pub struct Scheme {
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
     pub rvars: Vec<RankVar>,
+    /// Checked builtin-operation relations transported by this function
+    /// value and renamed at each instantiation. Usually empty.
+    ///
+    /// Deliberately NOT `#[serde(default)]`. A default would let a scheme
+    /// persisted before this field existed decode as unconstrained and erase a
+    /// checked function value's contract on the reuse path. A payload without
+    /// this field must fail to decode; the TypeEnv format version makes that
+    /// an obsolete-snapshot error.
+    pub constraints: Vec<CollectionConstraint>,
     pub body: Type,
 }
 
@@ -665,6 +985,7 @@ impl Scheme {
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
+            constraints: vec![],
             body: ty,
         }
     }
@@ -744,6 +1065,7 @@ mod prim_classification_tests {
         Prim::Int64,
         Prim::Bool,
         Prim::String,
+        Prim::Key,
     ];
 
     #[test]
@@ -774,7 +1096,7 @@ mod prim_classification_tests {
     #[test]
     fn is_numeric_excludes_bool_and_string() {
         for prim in ALL_PRIMS {
-            let expected = !matches!(prim, Prim::Bool | Prim::String);
+            let expected = !matches!(prim, Prim::Bool | Prim::String | Prim::Key);
             assert_eq!(
                 prim.is_numeric(),
                 expected,
@@ -786,10 +1108,11 @@ mod prim_classification_tests {
     #[test]
     fn is_valid_tensor_precision_matches_active_set() {
         // Active dtype set per §1.1, including f16/bf16 (active per WS-0
-        // spec lock cc47e6d). Excludes the deferred f8e4m3 (§1.1.1) and
-        // String (no tensor element representation).
+        // spec lock cc47e6d) and key. Excludes the deferred f8e4m3 (§1.1.1)
+        // and String (no tensor element representation). The data element
+        // set is the same minus key.
         for prim in ALL_PRIMS {
-            let expected = matches!(
+            let data = matches!(
                 prim,
                 Prim::F32
                     | Prim::F64
@@ -802,8 +1125,14 @@ mod prim_classification_tests {
                     | Prim::Int64
             );
             assert_eq!(
+                prim.is_data_element_dtype(),
+                data,
+                "is_data_element_dtype({prim:?}) disagrees with §1.1 \
+                 active data element set"
+            );
+            assert_eq!(
                 prim.is_valid_tensor_precision(),
-                expected,
+                data || *prim == Prim::Key,
                 "is_valid_tensor_precision({prim:?}) disagrees with §1.1 \
                  active tensor element set"
             );
@@ -862,6 +1191,36 @@ mod prim_classification_tests {
         }
     }
 
+    // chelis#2413: a random key is an active tensor element dtype with
+    // runtime storage and the source and Deep spelling `key` (spec/04
+    // section 1.1). It is not numeric, it is not one of the nine active data
+    // element dtypes, and it has no cast.
+    #[test]
+    fn a_random_key_has_one_spelling_in_source_deep_and_interchange() {
+        assert_eq!(Prim::parse_name("key"), Some(Prim::Key));
+        assert_eq!(Prim::parse_interchange_name("key"), Some(Prim::Key));
+        assert_eq!(Prim::Key.interchange_name(), "key");
+        assert!(!Prim::Key.is_numeric());
+        assert!(!Prim::Key.is_float());
+        assert!(Prim::Key.is_valid_tensor_precision());
+        assert!(!Prim::Key.is_data_element_dtype());
+        assert!(!Prim::Key.is_valid_scalar_cast_target());
+        assert_eq!(Prim::Key.runtime_dtype(), Ok(RuntimeDType::Key));
+        assert!(Prim::String.runtime_dtype().is_err());
+    }
+
+    #[test]
+    fn from_runtime_dtype_inverts_runtime_dtype() {
+        for dtype in RuntimeDType::ALL {
+            assert_eq!(Prim::from_runtime_dtype(dtype).runtime_dtype(), Ok(dtype));
+        }
+        for prim in ALL_PRIMS {
+            if let Ok(dtype) = prim.runtime_dtype() {
+                assert_eq!(Prim::from_runtime_dtype(dtype), *prim);
+            }
+        }
+    }
+
     #[test]
     fn int16_is_an_active_dtype() {
         // Pin the new variant explicitly so a refactor cannot silently
@@ -872,8 +1231,8 @@ mod prim_classification_tests {
         assert!(Prim::Int16.is_valid_tensor_precision());
         assert!(Prim::Int16.is_valid_scalar_cast_target());
         assert!(!Prim::Int16.is_float());
-        assert_eq!(Prim::Int16.name(), "int16");
-        assert_eq!(Prim::parse_name("int16"), Some(Prim::Int16));
+        assert_eq!(Prim::Int16.name(), "i16");
+        assert_eq!(Prim::parse_name("i16"), Some(Prim::Int16));
     }
 
     #[test]
@@ -955,7 +1314,7 @@ impl VarGen {
 pub enum Target {
     /// The Rust tensor evaluator (stores f64, supports all prims).
     Eval,
-    /// The C backend (f32/bool/bf16/f16/int32/int64; rejects f64).
+    /// The C backend (f32/bool/bf16/f16/i32/i64; rejects f64).
     C,
     /// The HIP/ROCm backend.
     Hip,
@@ -981,7 +1340,7 @@ mod dtype_family_bound_tests {
 
     use super::*;
 
-    const EVERY_PRIM: [Prim; 11] = [
+    const EVERY_PRIM: [Prim; 12] = [
         Prim::F32,
         Prim::F64,
         Prim::F16,
@@ -993,6 +1352,7 @@ mod dtype_family_bound_tests {
         Prim::Int64,
         Prim::Bool,
         Prim::String,
+        Prim::Key,
     ];
 
     fn admitted(restriction: TypeVarRestriction) -> Vec<Prim> {
@@ -1037,7 +1397,7 @@ mod dtype_family_bound_tests {
             TypeVarRestriction::ActiveInt,
             TypeVarRestriction::ActiveNumeric,
         ] {
-            for prim in [Prim::Bool, Prim::String, Prim::F8e4m3] {
+            for prim in [Prim::Bool, Prim::String, Prim::Key, Prim::F8e4m3] {
                 assert!(
                     !restriction.admits(prim),
                     "{} must not admit {prim:?}",

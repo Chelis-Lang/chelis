@@ -55,21 +55,40 @@ fn dirty_name(s: &str) -> LoadStoreName {
         .expect("LoadStoreName deserialize is transparent (no re-validation)")
 }
 
+fn codegen_with_invalid_test_entry(dag: &Dag, name: &str) -> chelis_backend_c::CodegenResult {
+    codegen_with_options(
+        dag,
+        name,
+        CodegenOptions {
+            static_entry: true,
+            ..CodegenOptions::default()
+        },
+    )
+    .expect("the source-only sanitizer probe bypasses public artifact sealing")
+}
+
 #[test]
 fn c_fprintf_format_string_escapes_percent_in_func_name() {
     // The orchestrator's reproduction recipe: a `%` in the func_name
     // would be misread by printf as a positional specifier. The
     // emit-side format-string sanitizer doubles `%` to `%%`.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     // `%s` in func_name would be a runtime crash if printf tried to
     // consume an argument that isn't there. The CLI never produces this
     // shape, but downstream tooling could; the sanitizer is the seat
     // belt.
-    let result = codegen(&dag, "f%spct").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "f%spct");
     let src = &result.c_source;
 
     // The format string itself must contain the escaped form `%%s`.
@@ -92,9 +111,10 @@ fn c_fprintf_format_string_escapes_percent_in_load_name() {
     // (handled in metal); for C the `name` flows into the
     // input-shape-preamble fprintf — that's the format-string context.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let bad = dirty_name("inp%s");
-    let a = dag.add_node(RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen(&dag, "test_load_pct").unwrap();
@@ -118,11 +138,18 @@ fn c_fprintf_format_string_escapes_newline_in_func_name() {
     // line; defense-in-depth even though the CLI's filename-derived
     // func_name normally wouldn't carry newlines.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "f\nINJECT").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "f\nINJECT");
     let src = &result.c_source;
 
     // Escape: `\n` inside the C string literal becomes the two-character
@@ -146,11 +173,18 @@ fn c_fprintf_format_string_escapes_newline_in_func_name() {
 fn c_fprintf_format_string_escapes_double_quote_in_func_name() {
     // A `"` would terminate the surrounding C string literal early.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
-    let result = codegen(&dag, "fn\"injected").unwrap();
+    let result = codegen_with_invalid_test_entry(&dag, "fn\"injected");
     let src = &result.c_source;
 
     assert!(
@@ -165,8 +199,15 @@ fn c_clean_func_name_emitted_verbatim() {
     // emitted byte-identical in fprintf format strings — no spurious
     // escaping.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen(&dag, "my_func").unwrap();
@@ -194,24 +235,27 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
     // being a legal C identifier (otherwise emitted C fails to compile,
     // which is the desired loud failure).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // Two Load nodes sharing a symbolic dim — this triggers the
     // mismatch fprintf in `emit_input_shape_preamble`. Use an
     // identifier-grammar-valid name for the dim because it ALSO emits
     // as a C identifier; the format-string sanitization is independent
     // of the identifier validity.
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_f32_named("batch"),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         vec_f32_named("batch"),
         None,
     );
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32_named("batch"), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32_named("batch"), None);
     dag.add_root(s);
 
     let result = codegen(&dag, "sym").unwrap();
@@ -230,7 +274,7 @@ fn c_fprintf_format_string_escapes_percent_in_symbolic_dim_name() {
         "the guard's name-bearing context line must be emitted; source:\n{src}"
     );
     assert!(
-        src.contains("numeric trap: domain in load at int64"),
+        src.contains("numeric trap: domain in load at i64"),
         "and the trap line is [04-NUM-9]'s exact rendering; source:\n{src}"
     );
 }
@@ -245,12 +289,13 @@ fn c_sanitized_format_strings_still_compile_cleanly() {
     // literal (raw `"` terminating early, raw `\n` splitting the source
     // line, raw `\\` mis-escaping the next char), gcc rejects it.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // Every adversarial byte in one identifier — the sanitizer must
     // escape ALL of them so the surrounding `"..."` C string literal
     // stays well-formed.
     let bad = dirty_name("inp%s\\back\"q\n");
-    let a = dag.add_node(RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let a = dag.add_node(decl, RiscOp::Load { name: bad }, vec![], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     // Clean func_name so the declarator (`void {func_name}(...)`) is
@@ -267,6 +312,7 @@ fn c_sanitized_format_strings_still_compile_cleanly() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -308,8 +354,15 @@ fn c_codegen_with_options_inherits_sanitization() {
     // for inline tensor helpers. It must honour the same format-string
     // sanitization as the default `codegen` path.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_with_options(

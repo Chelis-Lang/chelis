@@ -37,13 +37,13 @@ Type annotations on parameters and the return are optional; the compiler infers 
 leave off. The return arrow is `->`.
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
 The body can be a `{ ... }` block of bindings ending in a result expression:
 
 ```chelis-surf
-def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] = {
+def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] = {
   y = add(x, x)
   relu(y)
 }
@@ -118,12 +118,21 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 
 ## Literals
 
-- Integers: canonical decimal such as `42` and `1000000`. Default type `int32`.
+- Integers: canonical decimal such as `42` and `1000000`. Default type `i32`.
 - Floats: finite shortest round-trippable spellings such as `1.0`, `1e-5`, and
-  `31400000000.0`. Default type `f32`.
+  `31400000000.0`. Default type `f32`. You may write a longer body that decodes
+  to the same value — a constant transcribed from a reference at published
+  precision, say `0.319381530f64` — and `chelis fmt` prints the shortest
+  spelling for it. A float literal must be finite at the type it binds at:
+  `70000.0f16` and an unsuffixed `1e40` (an `f32`) are rejected because they
+  round to infinity there. A cast of a finite wider value,
+  `cast(70000.0f32, f16)`, is an operation and does yield infinity.
 - A literal can carry a precision suffix that binds it exactly: float suffixes `f32 f64
   bf16 f16` (for example `42.0f32`, `1.0f64`), integer suffixes `i8
   i16 i32 i64` (int tokens only). The suffix must follow the digits with no space.
+  A float suffix on an integer body (`42f32`) is a different literal from the
+  decimal-bodied one: it binds the exact integer directly at that width instead
+  of decoding a decimal, and the formatter keeps whichever you wrote.
   Literal patterns are unsuffixed because Deep patterns preserve only the raw value.
 - Strings: `"hello"` with escapes `\" \\ \n \t \r \0`.
 - Booleans: `true`, `false`.
@@ -138,15 +147,15 @@ Delimited nonempty lists may carry one trailing comma (or a trailing semicolon i
 `par`/`do`). The parser discards it and the formatter omits it; the comma in `(a,)`
 remains because it distinguishes a one-element tuple from grouping.
 
-The parser accepts value-preserving digit separators, hexadecimal/binary integers,
-equivalent finite exponent spellings, and equivalent valid Unicode escapes. `chelis fmt`
-prints their canonical decimal/string spelling; `fmt --check` rejects the resulting source
-diff. Padded non-exponent decimals, malformed separators, invalid escapes, and semantic
-suffix/adoption changes remain errors.
+The parser accepts value-preserving digit separators, hexadecimal/binary integers, every
+finite decimal float body that decodes to the literal's value, and equivalent valid
+Unicode escapes. `chelis fmt` prints their canonical decimal/string spelling; `fmt --check`
+rejects the resulting source diff. Malformed separators, a redundant leading zero on an
+integer body, invalid escapes, and semantic suffix/adoption changes remain errors.
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or
 the first argument of `cast`), bracket-literal elements adopt that element type. So
-`[1, 2, 3]` is `tensor[3, int32]` on its own, but takes the surrounding element type where
+`[1, 2, 3]` is `tensor[3, i32]` on its own, but takes the surrounding element type where
 one is imposed.
 
 ## Operators
@@ -205,6 +214,13 @@ sorted_values = sort(diag, 0).0
 sorted_indices = sort(diag, 0).1
 ```
 
+When projecting through nested tuples, group the inner numeric projection so
+the next suffix cannot merge with it as a float:
+
+```chelis-surf-fragment
+first = (nested.0).0
+```
+
 ## Control flow
 
 `if` is an expression and `else` is mandatory:
@@ -221,7 +237,7 @@ type Activation =
   | Relu
   | Sigmoid
 
-def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
+def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
     | Sigmoid => sigmoid(x)
@@ -311,21 +327,22 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0
 ## Effects and handlers
 
 A function's effects can be annotated with a `! { ... }` suffix on the signature or the
-`def`. The handled effects are `Random` and `Resource("device")`; `IO` is inferred from
-host operations such as `print`. Handlers are introduced by `with`:
+`def`. The handled effect is `Resource("device")`; `IO` is inferred from host operations
+such as `print`. Randomness is not an effect: a draw takes a `key`. Handlers are introduced
+by `with`:
 
 An explicit empty effect row `! {}` declares a pure upper bound. It is distinct
 from omitting the clause, which leaves effects inferred.
 
 ```chelis-surf-fragment
-with seed(42i64) {
-  dropout(x, 0.5)
+with device("gpu:0") {
+  dropout(key_from_seed(42i64), x, 0.5)
 }
 ```
 
-`with seed(...)` takes an int64-suffixed integer literal (`42i64`; an unsuffixed literal is a
-type error) and `with device("...")` takes a string literal. See
-[Effects and Handlers](effects.md) for the full model.
+`with device("...")` takes a string literal. `with seed(...)` and a `Random` effect are
+retired spellings that the parser rejects. See [Effects and Handlers](effects.md) for the
+full model.
 
 ## Transforms
 

@@ -15,7 +15,11 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from kache_toolchain_smoke import REPO_ROOT, validate_environment
+from kache_toolchain_smoke import (
+    REPO_ROOT,
+    validate_environment,
+    write_isolated_kache_config,
+)
 
 
 class ReportFailure(RuntimeError):
@@ -58,21 +62,6 @@ def kache_store(cache_dir: Path) -> Path:
     return cache_dir / "store"
 
 
-def write_isolated_kache_config(
-    policy: str, destination: Path, cache_dir: Path
-) -> None:
-    """Preserve repository policy while binding its store to the probe."""
-
-    if re.search(r"^\s*local_store\s*=", policy, re.MULTILINE):
-        raise ReportFailure("repository Kache policy already sets local_store")
-    lines = policy.splitlines(keepends=True)
-    cache_headers = [index for index, line in enumerate(lines) if line.strip() == "[cache]"]
-    if cache_headers != [0]:
-        raise ReportFailure("repository Kache policy must contain one leading [cache] table")
-    lines.insert(1, f"local_store = {json.dumps(str(cache_dir))}\n")
-    destination.write_text("".join(lines), encoding="utf-8")
-
-
 def validate_warm_report(report: dict[str, Any]) -> None:
     local_hits = int(report.get("summary", {}).get("local_hits", 0))
     if local_hits == 0:
@@ -87,7 +76,9 @@ def validate_warm_report(report: dict[str, Any]) -> None:
         if "cache_executables=false" in str(reason.get("reason", ""))
     ]
     if uncached:
-        raise ReportFailure(f"warm report contains executable bypass rows: {uncached!r}")
+        raise ReportFailure(
+            f"warm report contains executable bypass rows: {uncached!r}"
+        )
 
 
 def validate_legacy_namespace_report(report: dict[str, Any]) -> None:
@@ -179,8 +170,7 @@ def run_schema_transition_probe(
     seed.mkdir(parents=True)
     (seed / "src").mkdir()
     (seed / "Cargo.toml").write_text(
-        '[package]\nname = "kache_schema_probe"\nversion = "0.1.0"\n'
-        'edition = "2021"\n',
+        '[package]\nname = "kache_schema_probe"\nversion = "0.1.0"\nedition = "2021"\n',
         encoding="utf-8",
     )
     (seed / "src/lib.rs").write_text(
@@ -312,7 +302,10 @@ def restored_executable_candidates(
             continue
         cache_key = event.get("cache_key")
         crate_name = event.get("crate_name")
-        if not isinstance(cache_key, str) or CACHE_KEY_PATTERN.fullmatch(cache_key) is None:
+        if (
+            not isinstance(cache_key, str)
+            or CACHE_KEY_PATTERN.fullmatch(cache_key) is None
+        ):
             raise ReportFailure(f"local-hit cache key is invalid: {cache_key!r}")
         if not isinstance(crate_name, str) or not crate_name:
             raise ReportFailure(f"local-hit crate name is invalid: {crate_name!r}")
@@ -326,7 +319,9 @@ def restored_executable_candidates(
                 f"local-hit cache metadata is unreadable: {meta_path}: {error}"
             ) from error
         if not isinstance(metadata, dict):
-            raise ReportFailure(f"local-hit cache metadata is not an object: {meta_path}")
+            raise ReportFailure(
+                f"local-hit cache metadata is not an object: {meta_path}"
+            )
         if metadata.get("cache_key") != cache_key:
             raise ReportFailure(f"local-hit cache metadata key mismatch: {meta_path}")
         if metadata.get("key_schema") != EXPECTED_KACHE_KEY_SCHEMA:
@@ -339,7 +334,9 @@ def restored_executable_candidates(
             raise ReportFailure(f"local-hit cache metadata crate mismatch: {meta_path}")
         files = metadata.get("files")
         if not isinstance(files, list):
-            raise ReportFailure(f"local-hit cache metadata files are invalid: {meta_path}")
+            raise ReportFailure(
+                f"local-hit cache metadata files are invalid: {meta_path}"
+            )
         for artifact in files:
             if not isinstance(artifact, dict):
                 raise ReportFailure(
@@ -638,7 +635,9 @@ def main() -> int:
             "schema_transition": schema_transition,
         }
         arguments.report.parent.mkdir(parents=True, exist_ok=True)
-        arguments.report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        arguments.report.write_text(
+            json.dumps(result, indent=2) + "\n", encoding="utf-8"
+        )
         print(json.dumps(result, indent=2))
     return 0
 

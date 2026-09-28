@@ -1,0 +1,1872 @@
+==== round1/n1
+def a[p: Numeric](x: p) -> p = b(x)
+
+def b(y) = if gt(y, y) then a(y) else sqrt(y)
+==== round1/o1
+def a(n: i32) = if eq(n, 0) then 0i32 else b(n - 1)
+
+def b(n: i32) -> i32 = if eq(a(n), a(n)) then 1i32 else 0i32
+==== round1/o3
+def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))
+
+def b(n: i32) = if a(n) then 0i32 else 1i32
+==== round1/q1
+def keep(x: _, n: i32) = if eq(n, 0) then x else keep(x, n - 1)
+
+def main() -> (i32, string) = (keep(3i32, 2), keep("s", 1))
+==== round1/q2
+def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), 0i32)
+
+def b(n: i32) = if a(n) then take([1i32], 1i64) else [2i32]
+==== round1/q3
+def a(n: i32) -> i64 = if eq(n, 0) then 0i64 else numel(b(n - 1))
+
+def b(n: i32) = if eq(a(n), 0i64) then "s" else "t"
+==== round1/q4
+def a(n: i32) -> i32 = if eq(n, 0) then 0i32 else b(n - 1).0
+
+def b(n: i32) = (a(n), 1i32)
+
+def c(k) -> bool = eq(k, k)
+==== round1/q5
+def step[p: Float](n: i32, x: p) = if eq(n, 0) then (x, x) else {
+  (u, v) = step(n - 1, x)
+  (v, u)
+}
+
+def main() -> f64 = step(3, 1.5f64).0
+==== round1/q6
+def step[p: Numeric](n: i32, x: p) = if eq(n, 0) then x else sqrt(step(n - 1, x))
+==== round1/r2
+def f() -> Result[i32, string] = f()
+==== round1/rec1
+def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))
+
+def b(n: i32) = if a(n) then 0 else 1
+==== round1/rec1e
+def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), b(n - 1))
+
+def b(n: i32) = if a(n) then 0 else 1
+
+def main() -> bool = a(3)
+==== round1/rec1g
+def a(n: i32) -> bool = if eq(n, 0) then true else eq(b(n - 1), 1)
+
+def b(n: i32) = if a(n) then 0 else 1
+==== round1/rec2
+def a(n: i32) -> i32 = if eq(n, 0) then 0 else len(take(b(n - 1), 1))
+
+def b(n: i32) = if eq(a(n), 0) then [1, 2] else [3]
+==== round1/rec4
+def a(n) = if eq(n, 0) then 0 else sz(b(n - 1))
+
+def b(n) = if eq(a(n), 0) then [1, 2] else [3]
+
+def sz(xs: List[i32]) -> i32 = len(xs)
+==== round1/t1
+def a(n: i32) -> i32 = if eq(n, 0) then 0i32 else b(n - 1).0
+
+def b(n: i32) = (a(n), 1i32)
+
+def main() -> i32 = a(3)
+==== round1/t10
+type Pt =
+  | Pt { x: i32, y: i32 }
+
+def walk(n: i32) = if eq(n, 0) then Pt { x: 0i32, y: 0i32 } else {
+  p = walk(n - 1)
+  Pt { x: p.x + 1i32, y: p.y }
+}
+
+def main() -> i32 = walk(3).x
+==== round1/t2
+def step(n: i32) = if eq(n, 0) then (0i32, 1i32) else {
+  (x, y) = step(n - 1)
+  (y, x + y)
+}
+
+def main() -> i32 = step(5).0
+==== round1/t3
+def step(n: i32) -> (i32, i32) = if eq(n, 0) then (0i32, 1i32) else {
+  (x, y) = step(n - 1)
+  (y, x + y)
+}
+
+def main() -> i32 = step(5).0
+==== round1/t4
+def f(n: i32) = if eq(n, 0) then [1i32] else take(f(n - 1), 1i64)
+
+def main() -> List[i32] = f(2)
+==== round1/t5
+def f(n: i32) = if eq(n, 0) then [1i32] else {
+  xs = f(n - 1)
+  if eq(xs, xs) then xs else xs
+}
+==== round1/t6
+def f(n: i32) = if eq(n, 0) then 1i32 else numel(to_tensor([f(n - 1)]))
+==== round1/t7
+def f(n) = if eq(n, 0i32) then (0i32, 1i32) else {
+  (x, y) = f(n - 1i32)
+  (y, x + y)
+}
+==== round1/t8
+def step(n: i32) = if eq(n, 0) then 5i32 else step(n - 1).0
+
+def main() -> i32 = step(2)
+==== round1/t9
+def fib2(n: i32) = if eq(n, 0) then (0i32, 1i32) else {
+  prev = fib2(n - 1)
+  (prev.1, add(prev.0, prev.1))
+}
+
+def main() -> i32 = fib2(10).0
+==== round2/an1
+def f[a](x: a, n: i32) = if eq(n, 0) then x else {
+  w = (g(x, n - 1) : a)
+  w
+}
+
+def g[b](y: b, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string) = (f(1i32, 2), g("s", 3))
+==== round2/an2
+def f[n](x: tensor[n, f32], k: i32) = if eq(k, 0) then x else {
+  h = fn (t: tensor[n, f32]) -> t
+  h(g(x, k - 1))
+}
+
+def g[m](y: tensor[m, f32], k: i32) = if eq(k, 0) then y else f(y, k - 1)
+
+def main() -> (tensor[3, f32], tensor[2, f32]) = (f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 2), g(to_tensor([1.0f32, 2.0f32]), 3))
+==== round2/an3
+def f[a](x: a, n: i32) = if eq(n, 0) then x else {
+  w = (g(x, n - 1) : i32)
+  x
+}
+
+def g[b](y: b, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> string = f("s", 2)
+==== round2/bd1
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then x else g(x, cast(x, f32), n - 1)
+
+def g[q: Numeric](y: q, z: f32, n: i32) = if eq(n, 0) then y else {
+  w = f(z, n - 1)
+  y
+}
+
+def main() -> (f64, i32) = (f(1.5f64, 3), g(2i32, 1.5f32, 2))
+==== round2/bd2
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then x else g(x, cast(x, f32), n - 1)
+
+def g[q: Numeric](y: q, z: f32, n: i32) = if eq(n, 0) then exp(y) else {
+  w = f(z, n - 1)
+  y
+}
+
+def main() -> (f64, i32) = (f(1.5f64, 3), g(2i32, 1.5f32, 2))
+==== round2/bd4
+def f[p: Float](x: p, n: i32) -> p = if eq(n, 0) then x else g(x, cast(x, f32), n - 1)
+
+def g[q: Numeric](y: q, z: f32, n: i32) -> q = if eq(n, 0) then y else {
+  w = f(z, n - 1)
+  y
+}
+
+def main() -> (f64, i32) = (f(1.5f64, 3), g(2i32, 1.5f32, 2))
+==== round2/bd5
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then exp(x) else g(x, n - 1)
+
+def g[q: Numeric](y: q, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> i32 = g(2i32, 1)
+==== round2/bd7
+def f[p: Float](x: p, n: i32) -> p = if eq(n, 0) then exp(x) else g(x, n - 1)
+
+def g[q: Numeric](y: q, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> i32 = g(2i32, 1)
+==== round2/bd8
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then exp(x) else g(x, n - 1)
+
+def g[q: Numeric](y: q, n: i32) -> q = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> i32 = g(2i32, 1)
+==== round2/cc1
+def cnt[a](xs: List[a], n: i32) = if eq(n, 0) then len(xs) else cnt2(xs, n - 1)
+
+def cnt2[b](ys: List[b], n: i32) = if eq(n, 0) then len(ys) else cnt(ys, n - 1)
+
+def main() -> (i64, i64) = (cnt([1i32], 2), cnt2(["s", "t"], 1))
+==== round2/cc2
+def grow[a](xs: List[a], n: i32) = if eq(n, 0) then xs else grow2(append(xs, index(xs, 0i64)), n - 1)
+
+def grow2[b](ys: List[b], n: i32) = if eq(n, 0) then ys else grow(ys, n - 1)
+
+def main() -> (List[i32], List[string]) = (grow([1i32], 2), grow2(["s"], 1))
+==== round2/cc3
+def cnt(xs, n: i32) = if eq(n, 0) then len(xs) else cnt2(xs, n - 1)
+
+def cnt2(ys, n: i32) = if eq(n, 0) then len(ys) else cnt(ys, n - 1)
+
+def main() -> (i64, i64) = (cnt([1i32], 2), cnt2(["s", "t"], 1))
+==== round2/h1
+def keep[a](x: a, y, n: i32) = if eq(n, 0) then (y, x) else keep(x, y, n - 1)
+
+def main() -> ((string, i32), (f32, string)) = (keep(1i32, "s", 2), keep("t", 1.5f32, 1))
+==== round2/h2
+def up[a](x: a, y, n: i32) = if eq(n, 0) then y else down(x, y, n - 1)
+
+def down[b](x: b, y, n: i32) = if eq(n, 0) then y else up(x, y, n - 1)
+
+def main() -> (string, f32) = (up(1i32, "s", 2), down("t", 1.5f32, 1))
+==== round2/k1
+def a(n: i32) = if eq(n, 0) then 1.5f32 else {
+  g = fn (y) -> cast(y, f64)
+  cast(g(b(n - 1)), f32)
+}
+
+def b(n: i32) = if eq(n, 0) then 2.5f32 else a(n - 1)
+
+def main() -> f32 = a(3)
+==== round2/k2
+def a(n: i32) = if eq(n, 0) then 1.5f32 else {
+  g = fn (y) -> cast(y, f64)
+  cast(g(b(n - 1)), f32)
+}
+
+def b(n: i32) = if eq(n, 0) then "s" else pick(a(n - 1))
+
+def pick(x: f32) -> string = "p"
+
+def main() -> f32 = a(3)
+==== round2/k3
+def a[p: Float](n: i32, z: p) = if eq(n, 0) then z else {
+  g = fn (y) -> cast(y, p)
+  g(b(n - 1, z))
+}
+
+def b[q: Float](n: i32, z: q) = if eq(n, 0) then 2.5f32 else cast(a(n - 1, z), f32)
+
+def main() -> f64 = a(3, 1.5f64)
+==== round2/m1
+def a(n: i32) = if eq(n, 0) then 0i32 else match b(n - 1) with {
+  | 0 => 1i32
+  | _ => 2i32
+}
+
+def b(n: i32) = if eq(n, 0) then 0i32 else a(n - 1)
+
+def main() -> i32 = a(3)
+==== round2/m3
+def a(n: i32) = if eq(n, 0) then 0i32 else match b(n - 1) with {
+  | 0 => 1i32
+  | _ => 2i32
+}
+
+def b(n: i32) = if eq(n, 0) then "z" else pick(a(n - 1))
+
+def pick(x: i32) -> string = "p"
+
+def main() -> i32 = a(3)
+==== round2/mx1
+def f[a](x: a, n: i32) -> a = if eq(n, 0) then x else g(x, n - 1)
+
+def g[b](y: b, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string, string, i32) = (g(1i32, 2), g("s", 3), f("t", 2), f(4i32, 1))
+==== round2/mx2
+def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {
+  (u, v) = g(y, x, n - 1)
+  (v, u)
+}
+
+def g[c, d](z: c, w: d, n: i32) = if eq(n, 0) then (z, w) else f(z, w, n - 1)
+
+def main() -> ((i32, string), (string, i32), (f32, bool)) = (f(1i32, "s", 3), g("s", 1i32, 2), g(1.5f32, true, 1))
+==== round2/mx3
+def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))
+
+def g[c](z: c, n: i32) = if eq(n, 0) then z else f(z, z, n - 1).0
+
+def main() -> (i32, string) = f(3i32, "s", 2)
+==== round2/mx4
+def f[a, b](x: a, y: b, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else g(x, y, n - 1)
+
+def g[c, d](z: c, w: d, n: i32) = if eq(n, 0) then (z, n) else f(w, z, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1).0
+==== round2/mx5
+def f[a, b](x: a, y: b, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else g(y, x, n - 1)
+
+def g[c, d](z: c, w: d, n: i32) = if eq(n, 0) then (w, n) else f(w, z, n - 1)
+
+def main() -> (i32, string) = (f(1i32, "s", 3).0, g(2i32, "t", 3).0)
+==== round2/mx6
+def f[n, m](x: tensor[n, f32], y: tensor[m, f32], k: i32) -> tensor[n, f32] = if eq(k, 0) then x else g(y, x, k - 1)
+
+def g[p, q](z: tensor[p, f32], w: tensor[q, f32], k: i32) = if eq(k, 0) then w else f(w, z, k - 1)
+
+def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([4.0f32, 5.0f32]), 3)
+==== round2/perm2u_0
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, n) else g(y, x, n - 1)
+
+def g[c, d](z: c, w: d, n: i32) = if eq(n, 0) then (z, n) else f(z, w, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1).0
+==== round2/perm3_0
+def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, n - 1)
+
+def g[b](y: b, n: i32) = if eq(n, 0) then (y, n) else h(y, n - 1)
+
+def h[c](z: c, n: i32) = if eq(n, 0) then (z, n) else f(z, n - 1)
+
+def main() -> (i32, string) = (f(3i32, 4).0, h("s", 3).0)
+==== round2/r1
+def f[a](x: a, n: i32) = if eq(n, 0) then x else g(x, n - 1)
+
+def g[b](y: b, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string) = (f(3i32, 4), g("s", 3))
+==== round2/r10
+def swap[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else {
+  (u, v) = swap(y, x, n - 1)
+  (v, u)
+}
+
+def main() -> (i32, string) = swap(3i32, "s", 2)
+==== round2/r10u
+def swap(x, y, n) = if eq(n, 0) then (x, y) else {
+  (u, v) = swap(y, x, n - 1)
+  (v, u)
+}
+
+def main() -> (i32, string) = swap(3i32, "s", 2)
+==== round2/r11
+def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))
+
+def g[c](z: c, n: i32) -> c = if eq(n, 0) then z else f(z, z, n - 1).0
+
+def main() -> (i32, string) = f(3i32, "s", 2)
+==== round2/r12
+def f[a](x: a, n: i32) = if eq(n, 0) then x else g(x, n - 1)
+
+def g[c](z: c, n: i32) = if eq(n, 0) then z else f(z, n - 1)
+
+def k[a, b](x: a, y: b, n: i32) -> (a, b) = (f(x, n), f(y, n))
+
+def main() -> (i32, string) = k(3i32, "s", 2)
+==== round2/r13
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else (id2(x, n - 1), id2(y, n - 1))
+
+def id2[c](z: c, n: i32) = if eq(n, 0) then z else id2(z, n - 1)
+
+def main() -> (i32, string) = f(3i32, "s", 2)
+==== round2/r14
+def walk[a](xs: List[a], acc: List[a], n: i32) = if eq(n, 0) then acc else hop(xs, acc, n - 1)
+
+def hop[b](ys: List[b], acc: List[b], n: i32) = if eq(n, 0) then acc else walk(ys, append(acc, index(ys, 0i64)), n - 1)
+
+def pairs[a, b](xs: List[a], ys: List[b]) = (walk(xs, [], 2), walk(ys, [], 2))
+
+def main() -> (List[i32], List[string]) = pairs([1i32, 2i32], ["s", "t"])
+==== round2/r15
+def both[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else (keep(x, n - 1), keep(y, n - 1))
+
+def keep[c](z: c, n: i32) = if eq(n, 0) then z else both(z, n, n - 1).0
+
+def main() -> (i32, string) = both(3i32, "s", 2)
+==== round2/r2
+def f[a](x: a, n: i32) -> a = if eq(n, 0) then x else g(x, n - 1)
+
+def g[b](y: b, n: i32) -> b = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string) = (f(3i32, 4), g("s", 3))
+==== round2/r3
+def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, n - 1)
+
+def g[b](y: b, n: i32) = if eq(n, 0) then (y, n) else h(y, n - 1)
+
+def h[c](z: c, n: i32) = if eq(n, 0) then (z, n) else f(z, n - 1)
+
+def main() -> (i32, i32) = (f(3i32, 4).1, h("s", 3).1)
+==== round2/r3c
+def f[a, d](x: a, w: d, n: i32) = if eq(n, 0) then (x, n) else g(w, x, n - 1)
+
+def g[b, e](y: b, v: e, n: i32) = if eq(n, 0) then (v, n) else f(v, y, n - 1)
+
+def main() -> (i32, string) = (f(3i32, "s", 4).0, g("s", 3i32, 3).0)
+==== round2/r4
+def f(x: i32, n: i32) = if eq(n, 0) then (x, n) else {
+  (u, v) = g(x, n - 1)
+  (v, u)
+}
+
+def g(y: i32, n: i32) = if eq(n, 0) then (y, n) else {
+  (u, v) = h(y, n - 1)
+  (u + 1, v)
+}
+
+def h(z: i32, n: i32) = if eq(n, 0) then (z, n) else {
+  (u, v) = f(z, n - 1)
+  (u, v + 1)
+}
+
+def main() -> i32 = f(3i32, 7).0
+==== round2/r6
+def f[n](x: tensor[n, f32], k: i32) = if eq(k, 0) then x else f(x, k - 1)
+
+def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 2)
+==== round2/r7
+def f[n](x: tensor[n, f32], k: i32) = if eq(k, 0) then x else g(x, k - 1)
+
+def g[m](y: tensor[m, f32], k: i32) = if eq(k, 0) then y else f(y, k - 1)
+
+def main() -> (tensor[3, f32], tensor[2, f32]) = (f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 2), g(to_tensor([1.0f32, 2.0f32]), 3))
+==== round2/r8
+def f[p: Float](x: p, k: i32) = if eq(k, 0) then x else g(x, k - 1)
+
+def g[q: Float](y: q, k: i32) = if eq(k, 0) then y else f(y, k - 1)
+
+def main() -> (f32, f64) = (f(1.5f32, 2), g(2.5f64, 3))
+==== round2/r9
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else (g(x, n - 1), g(y, n - 1))
+
+def g[c](z: c, n: i32) = if eq(n, 0) then z else f(z, z, n - 1).0
+
+def main() -> (i32, string) = f(3i32, "s", 2)
+==== round2/s1
+def a(x, n: i32) = if eq(n, 0) then numel(x) else b(x, n - 1)
+
+def b(y, n: i32) = a(y, n)
+
+def main() -> i64 = a(to_tensor([1.0f32]), 2)
+==== round2/s2
+def a(n: i32) = if eq(n, 0) then 0i64 else numel(b(n - 1))
+
+def b(n: i32) = if eq(n, 0) then [1i32] else c(n)
+
+def c(n: i32) = if eq(a(n - 1), 0i64) then [2i32] else b(n - 1)
+
+def main() -> i64 = a(2)
+==== round2/s3
+def a[p: Float](n: i32, z: p) = if eq(n, 0) then z else cast(b(n - 1, z), p)
+
+def b[q: Float](n: i32, z: q) = if eq(n, 0) then "s" else pick(a(n - 1, z))
+
+def pick[r: Float](v: r) -> string = "p"
+
+def main() -> f64 = a(3, 1.5f64)
+==== round2/s4
+def a(n: i32) = if eq(n, 0) then 0i32 else len(b(n - 1))
+
+def b(n: i32) = if eq(n, 0) then 5i32 else a(n - 1)
+
+def main() -> i32 = a(2)
+==== round2/u1
+def f[a](x: a, n: i32) = if eq(n, 0) then x else g(x, x, n - 1)
+
+def g[b, c](y: b, z: c, n: i32) -> c = if eq(n, 0) then z else f(y, n - 1)
+
+def main() -> string = g(1i32, "s", 1)
+==== round2/u3
+def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else g(x, x, n - 1)
+
+def g[b, c](y: b, z: c, n: i32) = if eq(n, 0) then (z, n) else f(y, n - 1)
+
+def main() -> string = g(1i32, "s", 1).0
+==== round2/u3d
+def f[a](x: a, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else g(x, x, n - 1)
+
+def g[b, c](y: b, z: c, n: i32) -> (c, i32) = if eq(n, 0) then (z, n) else f(y, n - 1)
+
+def main() -> string = g(1i32, "s", 1).0
+==== round2/u5
+def f[a](x: a, n: i32) = if eq(n, 0) then x else g(x, x, n - 1)
+
+def g[b, c](y: b, z: c, n: i32) = if eq(n, 0) then z else f(y, n - 1)
+
+def main() -> string = g(1i32, "s", 1)
+==== round2/u6
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1).0
+==== round2/u7
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then x else f(y, x, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1)
+==== round2/u7d
+def f[a, b](x: a, y: b, n: i32) -> a = if eq(n, 0) then x else f(y, x, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1)
+==== round2/u8
+def f[a, b](x: a, y: b, n: i32) -> (a, i32) = if eq(n, 0) then (x, n) else f(y, x, n - 1)
+
+def main() -> i32 = f(1i32, "s", 1).0
+==== round2/u9
+def f[n, m](x: tensor[n, f32], y: tensor[m, f32], k: i32) = if eq(k, 0) then x else f(y, x, k - 1)
+
+def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([4.0f32, 5.0f32]), 1)
+==== round2/u9d
+def f[n, m](x: tensor[n, f32], y: tensor[m, f32], k: i32) -> tensor[n, f32] = if eq(k, 0) then x else f(y, x, k - 1)
+
+def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([4.0f32, 5.0f32]), 1)
+==== round2/v1
+def pw(x: f32, n: i32) = if eq(n, 0) then x else mul(x, pw(x, n - 1))
+
+def loss(x: f32) -> f32 = pw(x, 2)
+
+def main() -> f32 = grad(loss)(2.0f32)
+==== round2/v2
+def up(x: tensor[3, f32], n: i32) = if eq(n, 0) then x else down(add(x, x), n - 1)
+
+def down(x: tensor[3, f32], n: i32) = if eq(n, 0) then x else up(x, n - 1)
+
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(up(x, 3), 0))
+
+def main() -> tensor[3, f32] = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+==== round2/v3
+def up(x: tensor[f32], n: i32) = if eq(n, 0) then (x, n) else {
+  (y, m) = down(add(x, x), n - 1)
+  (y, m + 1)
+}
+
+def down(x: tensor[f32], n: i32) = if eq(n, 0) then (x, n) else up(x, n - 1)
+
+def row(x: tensor[f32]) -> tensor[f32] = up(x, 3).0
+
+def main() -> tensor[2, f32] = vmap(row)(to_tensor([1.0f32, 2.0f32]))
+==== round2/v4
+def up(x: tensor[3, f32], n: i32) = if eq(n, 0) then (x, n) else {
+  (y, m) = down(add(x, x), n - 1)
+  (y, m + 1)
+}
+
+def down(x: tensor[3, f32], n: i32) = if eq(n, 0) then (x, n) else up(x, n - 1)
+
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(up(x, 3).0, 0))
+
+def main() -> tensor[3, f32] = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+==== round2/v5
+def a(x, n: i32) = if eq(n, 0) then x else b(x, n - 1)
+
+def b(y, n: i32) = if eq(n, 0) then y else c(y, n - 1)
+
+def c(z, n: i32) = if eq(n, 0) then z else a(z, n - 1)
+
+def main() -> (i32, string, tensor[2, f32]) = (a(1i32, 2), c("s", 3), b(to_tensor([1.0f32, 2.0f32]), 4))
+==== round2/v6
+def up[n](x: tensor[n, f32], k: i32) = if eq(k, 0) then (x, k) else {
+  (y, m) = down(add(x, x), k - 1)
+  (y, m + 1)
+}
+
+def down[m](x: tensor[m, f32], k: i32) = if eq(k, 0) then (x, k) else up(x, k - 1)
+
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(up(x, 3).0, 0))
+
+def main() -> tensor[3, f32] = grad(loss)(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+==== round2/w1
+def f[a, b](x: a, y: b, z, n: i32) -> i32 = {
+  w = eq(z, (x, n))
+  if eq(n, 0) then 0 else f(y, x, (y, n), n - 1)
+}
+
+def main() -> i32 = f(1i32, "s", (1i32, 2), 3)
+==== round2/w2
+def f[a, b](x: a, y: b, z, n: i32) -> i32 = {
+  r = if eq(n, 0) then 0 else f(y, x, (y, n), n - 1)
+  w = eq(z, (x, n))
+  r
+}
+
+def main() -> i32 = f(1i32, "s", (1i32, 2), 3)
+==== round2/w3
+def f[a, b](x: a, y: b, z: (a, i32), n: i32) -> i32 = {
+  r = if eq(n, 0) then 0 else f(y, x, (y, n), n - 1)
+  r
+}
+
+def main() -> i32 = f(1i32, "s", (1i32, 2), 3)
+==== round3-verify/chain
+def a(n: i32) = if eq(n, 0) then b(n) else b(n - 1)
+
+def b(n: i32) = if eq(n, 0) then c(n) else c(n - 1)
+
+def c(n: i32) = if eq(n, 0) then 7i32 else a(n - 1)
+
+def main() -> i32 = a(3)
+==== round3-verify/grow2
+def f(x, n: i32) = if eq(n, 0) then x else g(x, n - 1)
+
+def g(y, n: i32) = [f(y, n)]
+==== round3-verify/grow3
+def f(x, n: i32) = if eq(n, 0) then (x, x) else g(x, n - 1)
+
+def g(y, n: i32) = {
+  p = f((y, y), n)
+  p.0
+}
+==== round3-verify/gxy
+def g(x, y, n: i32) = if eq(n, 0) then (x, y) else (f(x, n), f(y, n))
+
+def f(z, n: i32) = if eq(n, 0) then z else g(z, z, n - 1).0
+
+def main() -> (i32, string) = g(1i32, "s", 2)
+==== round3-verify/gxy2
+def g(x, y, n: i32) = if eq(n, 0) then (x, y) else (f(x, n), f(y, n))
+
+def f(z, n: i32) = if eq(n, 0) then z else g(z, z, n - 1).0
+
+def main() -> (i32, i32) = g(1i32, 2i32, 2)
+==== round3-verify/letalias
+def f(x, n: i32) = if eq(n, 0) then x else {
+  g = f
+  k = g(3i32, n - 1)
+  x
+}
+
+def main() -> (string, i32) = (f("s", 2), f(1i32, 1))
+==== round3-verify/letalias2
+def f(x, n: i32) = if eq(n, 0) then x else {
+  g = f
+  k = g(3i32, n - 1)
+  m = g("t", n - 1)
+  x
+}
+
+def main() -> (string, i32) = (f("s", 2), f(1i32, 1))
+==== round3-verify/pickv
+def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)
+
+def main() -> string = pick("s", 2)
+==== round3-verify/pickv2
+def pick(x, n: i32) = if eq(n, 0) then x else pick(3i32, n - 1)
+
+def main() -> i32 = pick(4i32, 2)
+==== round3-verify/prec1
+def f(x, n: i32) = if eq(n, 0) then 0i32 else f([x], n - 1)
+
+def main() -> i32 = f(1i32, 2)
+==== round3-verify/swh
+def swap(x, y, n: i32) = if eq(n, 0) then (x, y) else {
+  (u, v) = swap(y, x, n - 1)
+  (v, u)
+}
+
+def main() -> (i32, string) = swap(3i32, "s", 2)
+==== round3-verify/swhd
+def swap[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {
+  (u, v) = swap(y, x, n - 1)
+  (v, u)
+}
+
+def main() -> (i32, string) = swap(3i32, "s", 2)
+==== round3-verify/use1
+def f(n: i32) = if eq(n, 0) then 1i32 else g(n - 1)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  k = add(f(n - 1), 1.0f32)
+  k
+}
+
+def main() -> f32 = g(2)
+==== round3/c2
+def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else f(y, x, n - 1)
+
+def main() -> (i32, string) = f(1i32, "s", 1)
+==== round3/cl/cl9
+def step(n: i32) = if eq(n, 0) then 5i32 else step(n - 1).0
+==== round3/g1
+def f[a](x: a, y, n: i32) -> (a, i32) = if eq(n, 0) then (x, 0i32) else g(x, y, n - 1)
+
+def g[b](u: b, v: i32, n: i32) = if eq(n, 0) then (u, v) else f(u, v, n - 1)
+
+def main() -> ((i32, i32), (string, i32)) = (f(1i32, 5i32, 3), g("s", 2i32, 2))
+==== round3/g2
+def f[a](x: a, n: i32) = if eq(n, 0) then x else h(x, n - 1)
+
+h = fn (y, m) -> f(y, m)
+
+def main() -> (i32, string) = (f(1i32, 2), h("s", 3))
+==== round3/g3
+def f[a, b](x: a, y: b, n: i32) = if eq(n, 0) then (x, y) else h(y, x, n - 1)
+
+h = fn (y, x, m) -> f(y, x, m)
+
+def main() -> (i32, string) = f(1i32, "s", 1)
+==== round3/g4
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then mul(x, x) else g(x, n - 1)
+
+def g[q: Float](y: q, n: i32) = if eq(n, 0) then y else {
+  d = grad(fn (z: q) -> f(z, 0))
+  d(y)
+}
+
+def main() -> f32 = f(3.0f32, 2)
+==== round3/g4b
+def f[p: Float](x: p, n: i32) = if eq(n, 0) then mul(x, x) else g(x, n - 1)
+
+def g[q: Float](y: q, n: i32) -> q = if eq(n, 0) then y else {
+  d = grad(fn (z: q) -> f(z, 0))
+  d(y)
+}
+
+def main() -> f32 = f(3.0f32, 2)
+==== round3/g4c
+def f(x: f32, n: i32) = if eq(n, 0) then mul(x, x) else g(x, n - 1)
+
+def g(y: f32, n: i32) = if eq(n, 0) then y else {
+  d = grad(fn (z: f32) -> f(z, 0))
+  d(y)
+}
+
+def main() -> f32 = f(3.0f32, 2)
+==== round3/g5
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else f(3i32, n - 1).1
+
+def f[a](x: a, n: i32) = if eq(n, 0) then (x, n) else (x, g(n - 1))
+
+def main() -> (string, i32) = f("s", 2)
+==== round3/g6
+sig f[a]: a -> i32 -> _
+
+def f(x, n) = if eq(n, 0) then x else f(x, n - 1)
+
+def main() -> (i32, string) = (f(1i32, 2), f("s", 1))
+==== round3/g7
+def f[a, b](x: a, y: b, n: i32) -> (a, b) = if eq(n, 0) then (x, y) else {
+  (p, q) = g(x, y, n - 1)
+  (r, s) = g(y, x, n - 1)
+  (p, q)
+}
+
+def g[c, d](x: c, y: d, n: i32) = if eq(n, 0) then (x, y) else f(x, y, n - 1)
+
+def main() -> (i32, string) = f(1i32, "s", 2)
+==== round3/g8
+def f[a, b](x: a, n: i32) = if eq(n, 0) then x else {
+  e: List[b] = []
+  f(x, n - 1)
+}
+
+def main() -> (i32, string) = (f(1i32, 2), f("s", 1))
+==== round3/mk1
+def mk(n: i32) = if eq(n, 0) then [] else {
+  xs = mk(n - 1)
+  ys = append(xs, 1i32)
+  []
+}
+
+def main() -> (List[i32], List[string]) = (mk(1), mk(2))
+==== round3/mk10
+def f[a](x: a, y, n: i32) = if eq(n, 0) then (x, y) else {
+  k = f(x, 3i32, n - 1)
+  (x, y)
+}
+
+def main() -> ((i32, string), (f32, i32)) = (f(1i32, "s", 2), f(1.5f32, 4i32, 1))
+==== round3/mk11
+def total(xs, n: i32) = if eq(n, 0) then xs else {
+  k = total([1i32], n - 1)
+  xs
+}
+
+def main() -> (List[string], List[i32]) = (total(["a"], 2), total([2i32], 1))
+==== round3/mk2
+def mk(n) = if eq(n, 0i32) then [] else {
+  xs = mk(n - 1i32)
+  ys = append(xs, 1i32)
+  []
+}
+
+def main() -> (List[i32], List[string]) = (mk(1i32), mk(2i32))
+==== round3/mk3
+def pick(x, n: i32) = if eq(n, 0) then x else {
+  k = pick(3i32, n - 1)
+  x
+}
+
+def main() -> (string, i32) = (pick("s", 2), pick(4i32, 1))
+==== round3/mk3b
+def pick(x, n: i32) = if eq(n, 0) then x else {
+  k = pick(3i32, n - 1)
+  x
+}
+
+def main() -> i32 = pick(4i32, 1)
+==== round3/mk4
+def pick(x, n) = if eq(n, 0i32) then x else {
+  k = pick(3i32, n - 1i32)
+  x
+}
+
+def main() -> (string, i32) = (pick("s", 2i32), pick(4i32, 1i32))
+==== round3/mk5
+def show(x, n: i32) = if eq(n, 0) then x else {
+  k = helper(n - 1)
+  x
+}
+
+def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)
+
+def main() -> (string, i32) = (show("a", 2), helper(2))
+==== round3/mk7
+def show[a](x: a, n: i32) -> a = if eq(n, 0) then x else {
+  k = helper(n - 1)
+  x
+}
+
+def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)
+
+def main() -> (string, i32) = (show("a", 2), helper(2))
+==== round3/mk8
+def show[a](x: a, n: i32) = if eq(n, 0) then x else {
+  k = helper(n - 1)
+  x
+}
+
+def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)
+
+def main() -> (string, i32) = (show("a", 2), helper(2))
+==== round3/mk9
+def show(x, n: i32) = if eq(n, 0) then x else {
+  k = helper(n - 1)
+  x
+}
+
+def helper(n: i32) -> i32 = if eq(n, 0) then 0i32 else show(1i32, n - 1)
+
+def main() -> i32 = helper(2)
+==== round3/o1
+def f(x, n) = if eq(n, 0i32) then mul(x, x) else g(x, n - 1i32)
+
+def g(y: f32, n: i32) = if eq(n, 0) then y else {
+  d = grad(fn (z: f32) -> f(z, 0i32))
+  d(y)
+}
+
+def main() -> f32 = f(3.0f32, 2i32)
+==== round3/ops/add_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = add(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/add_good_fg
+def f(n: i32) = if eq(n, 0) then 2i32 else {
+  k = g(n - 1)
+  2i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = add(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/append_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = append(f(n - 1), 1i32)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/append_good_fg
+def f(n: i32) = if eq(n, 0) then [1i32, 2i32] else {
+  k = g(n - 1)
+  [1i32, 2i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = append(f(n - 1), 1i32)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cast_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = cast(f(n - 1), f64)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cast_good_fg
+def f(n: i32) = if eq(n, 0) then 1.5f32 else {
+  k = g(n - 1)
+  1.5f32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = cast(f(n - 1), f64)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/concat_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = concat(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/concat_good_fg
+def f(n: i32) = if eq(n, 0) then [1i32, 2i32] else {
+  k = g(n - 1)
+  [1i32, 2i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = concat(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cond_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = if f(n - 1) then 1i32 else 2i32
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cond_good_fg
+def f(n: i32) = if eq(n, 0) then true else {
+  k = g(n - 1)
+  true
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = if f(n - 1) then 1i32 else 2i32
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cumsum_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = cumsum(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/cumsum_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = cumsum(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/dictof_bad_fg
+def f(n: i32) = if eq(n, 0) then [1i32] else {
+  k = g(n - 1)
+  [1i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = dict_of(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/dictof_good_fg
+def f(n: i32) = if eq(n, 0) then [("a", 1i32)] else {
+  k = g(n - 1)
+  [("a", 1i32)]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = dict_of(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/exp_bad_fg
+def f(n: i32) = if eq(n, 0) then 2i32 else {
+  k = g(n - 1)
+  2i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = exp(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/exp_good_fg
+def f(n: i32) = if eq(n, 0) then 1.5f32 else {
+  k = g(n - 1)
+  1.5f32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = exp(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/index_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = index(f(n - 1), 0i64)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/index_good_fg
+def f(n: i32) = if eq(n, 0) then [1i32, 2i32] else {
+  k = g(n - 1)
+  [1i32, 2i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = index(f(n - 1), 0i64)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/len_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = len(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/len_good_fg
+def f(n: i32) = if eq(n, 0) then [1i32, 2i32] else {
+  k = g(n - 1)
+  [1i32, 2i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = len(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/lt_bad_fg
+def f(n: i32) = if eq(n, 0) then [1i32] else {
+  k = g(n - 1)
+  [1i32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = lt(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/lt_good_fg
+def f(n: i32) = if eq(n, 0) then 2i32 else {
+  k = g(n - 1)
+  2i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = lt(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/matmul_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = matmul(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/matmul_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]) else {
+  k = g(n - 1)
+  to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = matmul(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/matmulv_bad_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = matmul(f(n - 1), f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/neg_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = neg(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/neg_good_fg
+def f(n: i32) = if eq(n, 0) then 1.5f32 else {
+  k = g(n - 1)
+  1.5f32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = neg(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/numel_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = numel(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/numel_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = numel(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/proj_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = f(n - 1).0
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/proj_good_fg
+def f(n: i32) = if eq(n, 0) then (1i32, 2i32) else {
+  k = g(n - 1)
+  (1i32, 2i32)
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = f(n - 1).0
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/reshape_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = reshape(f(n - 1), [3i64])
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/reshape_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = reshape(f(n - 1), [3i64])
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/reshapei_bad_fg
+def f(n: i32) = if eq(n, 0) then 3i32 else {
+  k = g(n - 1)
+  3i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = reshape(f(n - 1), [3i64])
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/shape_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = shape(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/shape_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = shape(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sqrt_bad_fg
+def f(n: i32) = if eq(n, 0) then 2i32 else {
+  k = g(n - 1)
+  2i32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sqrt(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sqrt_good_fg
+def f(n: i32) = if eq(n, 0) then 2.0f32 else {
+  k = g(n - 1)
+  2.0f32
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sqrt(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sum_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sum(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sum_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sum(f(n - 1), 0)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sumaxis_bad_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sum(f(n - 1), 1)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/sumaxis_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]) else {
+  k = g(n - 1)
+  to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = sum(f(n - 1), 1)
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/totensor_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = to_tensor(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/totensor_good_fg
+def f(n: i32) = if eq(n, 0) then [1.0f32, 2.0f32] else {
+  k = g(n - 1)
+  [1.0f32, 2.0f32]
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = to_tensor(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/tupl2_bad_fg
+def f(n: i32) = if eq(n, 0) then (1i32,) else {
+  k = g(n - 1)
+  (1i32,)
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = f(n - 1).1
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/tupl2_good_fg
+def f(n: i32) = if eq(n, 0) then (1i32, 2i32) else {
+  k = g(n - 1)
+  (1i32, 2i32)
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = f(n - 1).1
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/vmap_bad_fg
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = vmap(fn (r: f32) -> mul(r, 2.0f32))(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/ops/vmap_good_fg
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = vmap(fn (r: f32) -> mul(r, 2.0f32))(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/perm/bad3_0
+def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)
+
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else c(u, v, n - 1)
+
+def c(p, q, n: i32) = if eq(n, 0) then (p, q) else a(p, q, n - 1)
+
+def main() -> (i32, string) = a(1i32, "s", 3)
+==== round3/perm/nm3_0
+def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)
+
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else c(u, v, n - 1)
+
+def c(p, q, n: i32) = if eq(n, 0) then (p, q) else a(p, q, n - 1)
+
+def main() -> i32 = 0i32
+==== round3/perm/ok3_0
+def a(x, n: i32) = if eq(n, 0) then x else {
+  k = c(3i32, n - 1)
+  b(x, n - 1)
+}
+
+def b(y, n: i32) = if eq(n, 0) then y else c(y, n - 1)
+
+def c(z, n: i32) = if eq(n, 0) then z else a(z, n - 1)
+
+def main() -> (string, f32) = (a("s", 3), c(1.5f32, 2))
+==== round3/perm/sig3_0
+sig a: _ -> i32 -> _
+
+def a(x, n) = if eq(n, 0) then x else {
+  k = b(2.5f32, n - 1)
+  x
+}
+
+def b(y, n: i32) = if eq(n, 0) then y else {
+  k = a(y, n - 1)
+  y
+}
+
+def main() -> (string, i32) = (a("s", 2), b(4i32, 1))
+==== round3/perm/tw_0
+def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)
+
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else a(u, v, n - 1)
+
+def main() -> (i32, i32) = a(1i32, 2i32, 3)
+==== round3/perm/two_0
+def a(x, y, n: i32) = if eq(n, 0) then (x, y) else b(y, x, n - 1)
+
+def b(u, v, n: i32) = if eq(n, 0) then (u, v) else a(u, v, n - 1)
+
+def main() -> i32 = 0i32
+==== round3/rs2
+def f(n: i32) = if eq(n, 0) then "s" else f(n - 1)
+
+def main() -> i32 = {
+  r = reshape(f(2), [3i64])
+  0i32
+}
+==== round3/rs3
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = g(n - 1)
+  "s"
+}
+
+def g(n: i32) = if eq(n, 0) then reshape(to_tensor([1.0f32, 2.0f32, 3.0f32]), [3i64]) else reshape(f(n - 1), [3i64])
+
+def main() -> tensor[3, f32] = g(2)
+==== round3/rs4
+def f(n: i32) = if eq(n, 0) then "s" else {
+  k = f(n - 1)
+  r = reshape(k, [3i64])
+  "s"
+}
+
+def main() -> string = f(2)
+==== round3/rs5
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]) else {
+  k = f(n - 1)
+  reshape(k, [2i64, 2i64])
+}
+
+def main() -> tensor[2, 2, f32] = f(2)
+==== round3/v/hoist
+def swap(x, y, n: i32) = if eq(n, 0) then (x, y) else {
+  (u, v) = flip(y, x, n - 1)
+  (v, u)
+}
+
+def flip(a, b, n: i32) = swap(a, b, n)
+
+def main() -> (i32, string) = swap(3i32, "s", 2)
+==== round3/v/s1
+def f(n: i32) = if eq(n, 0) then [] else [f(n - 1)]
+
+def main() -> i32 = len(f(2))
+==== round3/v/s10
+def f(x, y, n: i32) = if eq(n, 0) then y else f(x, x, n - 1)
+
+def main() -> string = f(1i32, "b", 0)
+==== round3/v/s2
+def f(n: i32) = if eq(n, 0) then [] else [g(n - 1)]
+
+def g(n: i32) = if eq(n, 0) then [] else [f(n - 1)]
+
+def main() -> i32 = len(f(2))
+==== round3/v/s3
+def f(x, n: i32) = if eq(n, 0) then x else {
+  k = f(to_tensor([1.0f32]), n - 1)
+  x
+}
+
+def main() -> tensor[3, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), 2)
+==== round3/v/s4
+def f(x, n: i32) = if eq(n, 0) then x else {
+  k = h(3i32, n - 1)
+  x
+}
+
+h = fn (y, m) -> f(y, m)
+
+def main() -> (string, i32) = (f("s", 2), h(4i32, 1))
+==== round3/v/s5
+def f(x, n: i32) = if eq(n, 0) then (x, n) else {
+  k = f((x, x), n - 1)
+  (x, n)
+}
+
+def main() -> (i32, i32) = f(1i32, 2)
+==== round3/v/s6
+def f(x, n: i32) = if eq(n, 0) then x else {
+  k = f([x], n - 1)
+  x
+}
+
+def main() -> i32 = f(1i32, 2)
+==== round3/v/s7
+def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def f(x, n: i32) = if eq(n, 0) then x else {
+  k = g(3i32, n - 1)
+  g(x, n - 1)
+}
+
+def main() -> (string, f32) = (f("s", 3), g(1.5f32, 2))
+==== round3/v/s8
+def f(x, n: i32) = if eq(n, 0) then x else g(x, n - 1)
+
+def g(y, n: i32) = if eq(n, 0) then y else {
+  k = f(y, n - 1)
+  j = f(2.5f32, n - 1)
+  y
+}
+
+def main() -> (string, i32) = (f("s", 3), g(1i32, 2))
+==== round3/v/s9
+def f(x, y, n: i32) = if eq(n, 0) then y else f(x, x, n - 1)
+
+def main() -> (i32, string) = (f(1i32, 2i32, 2), f("a", "b", 1))
+==== round3/vm1
+def f(n: i32) -> tensor[3, f32] = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> i32 = if eq(n, 0) then 0i32 else {
+  r = vmap(fn (r: f32) -> mul(r, 2.0f32))(f(n - 1))
+  _ = debug(r)
+  0i32
+}
+
+def main() -> i32 = g(2)
+==== round3/vm3
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = g(n - 1)
+  to_tensor([1.0f32, 2.0f32, 3.0f32])
+}
+
+def g(n: i32) -> tensor[3, f32] = if eq(n, 0) then to_tensor([0.0f32, 0.0f32, 0.0f32]) else vmap(fn (r: f32) -> mul(r, 2.0f32))(f(n - 1))
+
+def main() -> tensor[3, f32] = g(2)
+==== round3/vm4
+def f(n: i32) = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = f(n - 1)
+  vmap(fn (r: f32) -> mul(r, 2.0f32))(k)
+}
+
+def main() -> tensor[3, f32] = f(2)
+==== round3/vm5
+def f(n) = if eq(n, 0i32) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = f(n - 1i32)
+  vmap(fn (r: f32) -> mul(r, 2.0f32))(k)
+}
+
+def main() -> tensor[3, f32] = f(2i32)
+==== round3/vm8
+def f(n: i32) -> tensor[3, f32] = if eq(n, 0) then to_tensor([1.0f32, 2.0f32, 3.0f32]) else {
+  k = f(n - 1)
+  vmap(fn (r: f32) -> mul(r, 2.0f32))(k)
+}
+
+def main() -> tensor[3, f32] = f(2)
+==== round4/bhm
+def f[a](x: a, y, n: i32) = if eq(n, 0) then (x, y) else {
+  k = f(x, x, n - 1)
+  (x, y)
+}
+
+def main() -> i32 = 0i32
+==== round4/dup
+def f(n: i32) = (g(n), g(n))
+
+def g(n: i32) = if eq(n, 0) then 1i32 else f(n - 1).0
+
+def main() -> (i32, i32) = f(2)
+==== round4/e12
+def f(n: i32) = if eq(n, 0) then ([], []) else {
+  (p, q) = f(n - 1)
+  (q, p)
+}
+
+def main() -> i32 = 0i32
+==== round4/e12m
+def f(n: i32) = if eq(n, 0) then ([], []) else g(n)
+
+def g(n: i32) = {
+  (p, q) = f(n - 1)
+  (q, p)
+}
+
+def main() -> i32 = 0i32
+==== round4/fwd
+def f(x, n: i32) = g(x, n)
+
+def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string) = (f(1i32, 2), g("s", 1))
+==== round4/fwd3
+def f(x, n: i32) = if eq(n, 0) then g(x, n) else g(x, n - 1)
+
+def g(y, n: i32) = if eq(n, 0) then y else f(y, n - 1)
+
+def main() -> (i32, string) = (f(1i32, 2), g("s", 1))
+==== round4/fwdd
+def f(n: i32) = {
+  (p, q) = g(n)
+  (p, q)
+}
+
+def g(n: i32) = if eq(n, 0) then (fn (e) -> (e, e))([]) else f(n - 1)
+
+def main() -> i32 = 0i32
+==== round4/lst
+def f(x, n: i32) = if eq(n, 0) then [x] else f(x, n - 1)
+
+def main() -> i64 = len(f(1i32, 2))
+==== round4/mrg
+def f(x, y, n: i32) = if eq(n, 0) then x else g(x, y, n - 1)
+
+def g(u, v, n: i32) = if eq(n, 0) then u else if eq(n, 1) then v else f(u, v, n - 1)
+
+def main() -> i32 = f(1i32, 2i32, 3)
+==== round4/gn-tup-lambda
+def fst2[a](p: (a, i32)) -> a = p.0
+
+def f(x, n) = {
+  k = fst2(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d((3.0f32, 1i32))
+  r.0
+}
+
+def h(n: i32) -> f32 = f((2.0f32, 1i32), n)
+
+def main() -> f32 = g(1)
+==== round4/gn-ten-lambda
+def first3[p](t: tensor[3, p]) -> tensor[3, p] = t
+
+def f(x, n) = {
+  k = first3(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d(to_tensor([1.0f32, 2.0f32, 3.0f32]))
+  tensor_to_scalar(sum(r, 0))
+}
+
+def h(n: i32) -> f32 = f(to_tensor([1.0f32, 2.0f32, 3.0f32]), n)
+
+def main() -> f32 = g(1)
+==== round4/gn-lst-lambda
+def firstl[a](xs: List[a]) -> List[a] = xs
+
+def f(x, n) = {
+  k = firstl(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z) -> f(z, 0i32))
+  r = d([3.0f32])
+  index(r, 0i64)
+}
+
+def h(n: i32) -> f32 = f([2.0f32], n)
+
+def main() -> f32 = g(1)
+==== round4/grad-local-both
+def fst2b[a, b](p: (a, b)) -> a = p.0
+
+def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (p) -> f(fst2b(p), 0i32))
+  r = d((2.0f32, 3.0f32))
+  add(r.0, r.1)
+}
+
+def h(n: i32) -> f32 = f(2.0f32, n)
+
+def main() -> f32 = g(1)
+==== round4/grad-linked-both
+def f(x, n) = if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(fn (z, w) -> f(z, 0i32))
+  k = fn (u) -> d((u, 1i32), u)
+  r = k(2.0f32)
+  add(r.0, r.1)
+}
+
+def h(n: i32) -> f32 = f((2.0f32, 1i32), n)
+
+def main() -> f32 = g(1)
+==== round4/vm-three-members
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else add(g(n - 1i32), h(n - 1i32))
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  v = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  tensor_to_scalar(sum(v, 0))
+}
+
+def h(n: i32) = f(to_tensor([1.0f32, 1.0f32, 1.0f32]), n)
+
+def main() -> f32 = g(1)
+==== round5/adt
+type Box[a] =
+  | Box { v: a }
+
+def unbox[a](b: Box[a]) -> a = b.v
+
+def f(x, n) = {
+  k = unbox(x)
+  if eq(n, 0i32) then 1.0f32 else add(g(n - 1i32), h(n - 1i32))
+}
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  d = grad(f)
+  r = d(Box { v: 2.0f32 }, 0i32)
+  r.v
+}
+
+def h(n: i32) -> f32 = f(Box { v: 2.0f32 }, n)
+
+def main() -> f32 = g(1)
+==== round5/ctl_after
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else f(to_tensor([1.0f32]), n)
+
+def main() -> tensor[2, f32] = vmap(fn (row: tensor[3, f32]) -> f(row, 0i32))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+==== round5/ctl_nongroup_in_group
+def s(x) = tensor_to_scalar(sum(x, 0))
+
+def f(x: tensor[3, f32], n: i32) -> f32 = if eq(n, 0i32) then s(x) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  v = vmap(fn (row: tensor[3, f32]) -> s(row))(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  add(tensor_to_scalar(sum(v, 0)), f(to_tensor([1.0f32, 2.0f32, 3.0f32]), n - 1))
+}
+
+def main() -> f32 = g(1)
+==== round5/ctl_shadow
+def f(x, n) = if eq(n, 0i32) then tensor_to_scalar(sum(x, 0)) else g(n - 1i32)
+
+def g(n: i32) -> f32 = if eq(n, 0) then 0.0f32 else {
+  f = fn (row: tensor[3, f32]) -> tensor_to_scalar(sum(row, 0))
+  v = vmap(f)(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]))
+  tensor_to_scalar(sum(v, 0))
+}
+
+def main() -> f32 = g(1)

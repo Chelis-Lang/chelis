@@ -56,8 +56,11 @@
 //! ## Deserialization boundary
 //!
 //! Decode validates the checked library without another type-inference session.
-//! It reruns the remaining semantic checks and the lower phase. The canonical
-//! lower result must match the cache payload before contextual code can use it.
+//! When the entry carries a lowering it reruns the lower phase, and the
+//! canonical lower result must match the cache payload before contextual code
+//! can use it; the stored effect and linearity results are then adopted
+//! (chelis#2558). An entry without a lowering reruns the effect and linearity
+//! checkers instead.
 
 use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_types::{CheckedProgram, StructuralStats, TypeEnv};
@@ -93,7 +96,15 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// the serialized `Subst`: under `spec/04-type-system.md` section 4.7.2
 /// nothing is deferred, so a V12 entry carries two fields where the
 /// following ones are now expected.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 13;
+// V14: opaque producer annotations use an explicit data wire variant.
+// V15: declared literal results and call-witness payloads are retained.
+// V17: authored program signatures and checked extent carriers are mandatory.
+// V16: scalar/storage payloads use the exact dtype-tagged bit codecs;
+// the changed key rejects previous positional payloads before decode.
+// V23 retains checker-owned local tensor-ascription obligations.
+// V24 retains TypeEnv callable provenance for contextual grad selectors.
+const STDLIB_CACHE_FORMAT_VERSION: u32 =
+    <StdLibContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -181,9 +192,16 @@ impl<'de> Deserialize<'de> for StdLibContext {
     {
         let wire = StdLibContextWire::deserialize(deserializer)?;
         let _linked = chelis_types::install_linked_program_guard();
-        let library =
+        // The stored effect and linearity results are adopted only when a
+        // stored lowering is re-derived and compared below; without one the
+        // program has nothing else to disagree with, so the checkers rerun
+        // (chelis#2558).
+        let library = if wire.library_dag.is_some() {
+            chelis_pipeline_core::bind_cached_library(wire.type_env, wire.library_checked)
+        } else {
             chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
-                .map_err(serde::de::Error::custom)?;
+        }
+        .map_err(serde::de::Error::custom)?;
         let library_dag = match wire.library_dag {
             Some(cached) => {
                 if cached.library_proof_id() != library.program().library_proof_id() {
@@ -287,7 +305,7 @@ fn visit_stdlib_cache_key_inputs(
     format_version: u32,
     mut append: impl FnMut(&[u8]),
 ) {
-    append(b"chelis_std_typecheck_v");
+    append(<StdLibContext as cache_envelope::CachePayload>::KEY_DOMAIN);
     append(&format_version.to_le_bytes());
     // Compiler build identity. `STDLIB_CACHE_FORMAT_VERSION` only guards
     // the on-disk struct SHAPE; it does not change when the compiler's
@@ -392,17 +410,31 @@ fn non_empty_env(name: &str) -> Option<String> {
     }
 }
 
-/// The on-disk path for the bundled chelis-std's cache entry.
+/// The on-disk path for a chelis-std typecheck cache entry.
 ///
-/// `pub(crate)` so [`crate::library_cache::evict_typecheck_cache`] can tell the
-/// RUNNING build's Layer-1 entry apart from the entries other builds left
-/// behind (chelis#1156 made Layer 1 one-per-compiler-build, not one-per-stdlib).
+/// Layer 1 holds one entry per compiler build (chelis#1156) and linked
+/// chelis-std module set (chelis#2558). The name starts with
+/// [`running_build_stdlib_cache_prefix`], so
+/// [`crate::library_cache::evict_typecheck_cache`] can tell every entry the
+/// RUNNING build can still read apart from the entries other builds left
+/// behind.
 pub(crate) fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
     cache_dir.join(format!(
-        "chelis-std-{}-{}.tc",
-        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        "{}{}.tc",
+        running_build_stdlib_cache_prefix(),
         hex_prefix(&key, 8),
     ))
+}
+
+/// The file-name prefix shared by every Layer-1 entry the running compiler
+/// build writes: the bundled chelis-std version and a tag of
+/// [`crate::build_fingerprint`], which the key itself also folds.
+pub(crate) fn running_build_stdlib_cache_prefix() -> String {
+    format!(
+        "chelis-std-{}-{}-",
+        chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
+        hex_prefix(&Sha256::digest(crate::build_fingerprint().as_bytes()), 8),
+    )
 }
 
 /// Whether the disk cache is disabled for this process.
@@ -410,6 +442,46 @@ pub fn cache_disabled() -> bool {
     std::env::var_os("CHELIS_STDLIB_CACHE_DISABLE")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// What probing a typecheck cache file found (chelis#2617).
+pub(crate) enum TypecheckCacheLoad<T> {
+    /// A valid entry under the expected key.
+    Hit(T),
+    /// No file, or a valid file under a different key.
+    Miss,
+    /// Cancellation was requested and the payload decode did not complete.
+    /// Each cache site polls the cancel token before calling
+    /// `cache_envelope::load`, and inside the decode a stdlib payload's
+    /// re-lowering and a dependency payload's effect and linearity reruns poll
+    /// it again, so an abandoned load says nothing about the file.
+    /// `cache_envelope` itself does not poll: the capacity census compiles it
+    /// against a fixed crate set that excludes `chelis_types` (chelis#2673). The caller propagates the
+    /// cancellation and leaves the file in place.
+    Cancelled,
+    /// The bytes are present but cannot be used; the caller warns, rebuilds
+    /// and overwrites.
+    Unusable(cache_envelope::CacheError),
+}
+
+/// Classify the result of a typecheck cache load, separating a load abandoned
+/// by cancellation from an unusable file.
+///
+/// Each cache site calls `cache_envelope::load` for its own payload type and
+/// passes the result here, so the serialization edge stays at the site that
+/// owns the payload (the capacity census attributes it there) and this
+/// classifier performs no serialization.
+pub(crate) fn classify_typecheck_cache_load<T>(
+    loaded: Result<Option<T>, cache_envelope::CacheError>,
+) -> TypecheckCacheLoad<T> {
+    match loaded {
+        Ok(Some(payload)) => TypecheckCacheLoad::Hit(payload),
+        Ok(None) => TypecheckCacheLoad::Miss,
+        Err(cache_envelope::CacheError::Decode(_)) if chelis_types::cancellation_requested() => {
+            TypecheckCacheLoad::Cancelled
+        }
+        Err(error) => TypecheckCacheLoad::Unusable(error),
+    }
 }
 
 /// Load the bundled chelis-std's [`StdLibContext`] from disk if a fresh
@@ -444,10 +516,21 @@ pub fn load_or_build_stdlib_context(
     };
     let cache_path = stdlib_cache_path(&cache_dir, key);
 
-    match cache_envelope::load::<StdLibContext>(&cache_path, key) {
-        Ok(Some(ctx)) => return Ok(ctx),
-        Ok(None) => {}
-        Err(e) => {
+    // Observe a cancelled caller before the payload decode (chelis#2617).
+    if chelis_types::cancellation_requested() {
+        return Err(crate::compiler::cancelled_stage_error(
+            "chelis-std typecheck cache",
+        ));
+    }
+    match classify_typecheck_cache_load(cache_envelope::load::<StdLibContext>(&cache_path, key)) {
+        TypecheckCacheLoad::Hit(ctx) => return Ok(ctx),
+        TypecheckCacheLoad::Miss => {}
+        TypecheckCacheLoad::Cancelled => {
+            return Err(crate::compiler::cancelled_stage_error(
+                "chelis-std typecheck cache",
+            ));
+        }
+        TypecheckCacheLoad::Unusable(e) => {
             eprintln!(
                 "chelis: chelis-std typecheck cache at {} unusable ({e}); \
                  rebuilding and overwriting",
@@ -510,20 +593,16 @@ fn library_rejection_to_compiler_error(
     rejection: crate::pipeline::LibraryRejection,
 ) -> CompilerError {
     match rejection {
-        crate::pipeline::LibraryRejection::Type { report } => CompilerError {
-            stage: "check".to_string(),
-            errors: report
-                .errors
-                .iter()
-                .map(crate::compiler::check_error_diagnostic)
-                .collect(),
-        },
+        crate::pipeline::LibraryRejection::Type { report } => {
+            crate::compiler::check_errors_to_compiler_error("check", &report.errors)
+        }
         crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
+            transcript: Vec::new(),
             stage: "check".to_string(),
             errors: vec![Diagnostic::general(
                 GeneralKind::Other,
                 "the library type environment does not match its checked program".to_string(),
-                1.0,
+                crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
             )],
         },
         crate::pipeline::LibraryRejection::Effects { errors } => {
@@ -546,47 +625,49 @@ mod tests {
     const TEST_SOURCE_DIGEST: [u8; 32] = [0x5a; 32];
 
     #[test]
-    fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 13);
+    fn cache_format_version_tracks_the_key_operand_random_nodes() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 35);
     }
 
     #[test]
-    fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 13);
-    }
-
-    #[test]
-    fn preceding_payload_version_is_a_clean_cache_miss() {
-        let decls = sample_decls("preceding_version");
+    fn different_format_key_is_a_clean_cache_miss() {
+        let decls = sample_decls("different_key");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 10);
-        assert_ne!(current_key, preceding_key);
-
         let dir = tempfile::tempdir().expect("tempdir");
         let context = build_stdlib_context(&decls).expect("sample context must build");
-        let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
-        cache_envelope::save(&preceding_path, preceding_key, &context)
-            .expect("preceding-version fixture must save");
-
         let current_path = stdlib_cache_path(dir.path(), current_key);
-        let loaded: Option<StdLibContext> = cache_envelope::load(&current_path, current_key)
-            .expect("a preceding-version fixture must be a clean miss");
-        assert!(loaded.is_none());
-        assert!(
-            preceding_path.exists(),
-            "negative-control fixture must exist"
-        );
-        assert_ne!(current_path, preceding_path);
+        for version in [19, 20, 21, 23] {
+            let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, version);
+            assert_ne!(current_key, preceding_key);
+            let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
+            cache_envelope::save(&preceding_path, preceding_key, &context)
+                .expect("different-key fixture must save");
+            // Corrupt the final encoded payload byte. The obsolete key must
+            // miss before the integrity check or inner payload decoder runs.
+            let mut bytes = std::fs::read(&preceding_path).expect("read old-key fixture");
+            *bytes.last_mut().expect("nonempty encoded payload") ^= 0x01;
+            std::fs::write(&preceding_path, bytes).expect("corrupt old-key payload");
+            let loaded: Option<StdLibContext> = cache_envelope::load(&preceding_path, current_key)
+                .expect("obsolete key is rejected before its payload is decoded");
+            assert!(loaded.is_none(), "obsolete version {version}");
+            assert!(
+                preceding_path.exists(),
+                "negative-control fixture must exist"
+            );
+            assert_ne!(current_path, preceding_path);
+        }
+        cache_envelope::save(&current_path, current_key, &context).expect("current fixture saves");
+        let current: Option<StdLibContext> =
+            cache_envelope::load(&current_path, current_key).expect("current fixture loads");
+        assert!(current.is_some(), "current producer and consumer must hit");
     }
 
     /// A minimal well-formed `Decl` slice for key-stability tests. The
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(&format!(
-            "module Sample\ndef {marker}_value() -> int32 = 1\n"
-        ))
-        .expect("sample decls must parse")
+        chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value() -> i32 = 1\n"))
+            .expect("sample decls must parse")
     }
 
     #[test]

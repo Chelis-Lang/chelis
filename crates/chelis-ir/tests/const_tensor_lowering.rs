@@ -12,7 +12,7 @@ use chelis_types::{check_linearity, check_typed_program};
 /// Full Surf-to-DAG pipeline.
 fn surf_to_dag(source: &str) -> Result<Dag, String> {
     let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -105,21 +105,21 @@ def main() -> tensor[2, bf16] =
 #[test]
 fn overflowing_negated_literal_raises_the_finalize_diagnostic() {
     let source = r#"
-(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} int8))))
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} i8))))
 
 (def {} main (fn {} (params {})
   (app {} (var {} to_tensor)
     (app {} (var {} Cons)
-      (app {} (var {} neg) (lit {type: (t-prim {} int8)} -128))
-      (app {} (var {} Cons) (lit {type: (t-prim {} int8)} 1) (var {} Nil))))))
+      (app {} (var {} neg) (lit {type: (t-prim {} i8)} -128))
+      (app {} (var {} Cons) (lit {type: (t-prim {} i8)} 1) (var {} Nil))))))
 "#;
     let err = deep_to_dag(source).expect_err("the literal must not lower");
     assert!(
-        err.contains("tensor literal does not finalize at its ascribed dtype `int8`"),
+        err.contains("tensor literal does not finalize at its ascribed dtype `i8`"),
         "expected the [04-NUM-1] finalize diagnostic, got: {err}"
     );
     assert!(
-        err.contains("overflow in const at int8"),
+        err.contains("overflow in const at i8"),
         "expected the overflow trap brand, got: {err}"
     );
 }
@@ -132,8 +132,8 @@ fn overflowing_negated_literal_raises_the_finalize_diagnostic() {
 #[test]
 fn mixed_cast_and_bare_integer_literal_lowers_to_const_tensor() {
     let source = r#"
-def main() -> tensor[2, int32] =
-  to_tensor([cast(1, int32), 1])
+def main() -> tensor[2, i32] =
+  to_tensor([cast(1, i32), 1])
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let data = dag
@@ -471,7 +471,7 @@ def main() -> tensor[3, f32] =
 #[test]
 fn const_tensor_integer_values() {
     let source = r#"
-def main() -> tensor[4, int32] =
+def main() -> tensor[4, i32] =
   to_tensor([10, 20, 30, 40])
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");

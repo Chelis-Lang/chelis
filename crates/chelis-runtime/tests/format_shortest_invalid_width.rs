@@ -8,7 +8,7 @@ use std::process::Command;
 
 use chelis_runtime::{
     chelis_scalar, chelis_scalar_from_bits, chelis_string_data, chelis_string_from_scalar,
-    chelis_string_release, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_I64,
+    chelis_string_release, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_I64, CHELIS_DTYPE_KEY,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_SCALAR_STRING_INVALID_CHILD_CASE";
@@ -20,7 +20,12 @@ fn invalid_scalar_child() {
     };
     let scalar = match case.as_str() {
         "invalid-dtype" => chelis_scalar {
-            dtype: 9,
+            dtype: 10,
+            reserved: [0; 7],
+            bits: 0,
+        },
+        "key" => chelis_scalar {
+            dtype: CHELIS_DTYPE_KEY,
             reserved: [0; 7],
             bits: 0,
         },
@@ -61,7 +66,8 @@ fn run_child(case: &str) -> (bool, String) {
 #[test]
 fn malformed_scalar_carriers_abort_before_rendering() {
     for (case, expected) in [
-        ("invalid-dtype", "invalid Chelis runtime dtype id: 9"),
+        ("invalid-dtype", "invalid Chelis runtime dtype id: 10"),
+        ("key", "a key is not a scalar carrier"),
         ("reserved", "scalar reserved bytes must be zero"),
         ("unused-bits", "scalar has nonzero unused bits"),
         (

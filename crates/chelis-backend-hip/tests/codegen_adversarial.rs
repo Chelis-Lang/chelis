@@ -4,7 +4,7 @@
 
 use chelis_backend_hip::HipCodegenResult;
 mod support;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{ComparisonKind, Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{RejectionAuthorityKind, Stage, Unsupported, UnsupportedKind};
 use support::codegen_hip;
@@ -43,8 +43,8 @@ fn vec_i64(n: usize) -> TensorType {
 
 fn assert_hip_dtype_rejection(error: Unsupported, dtype: &str, issue: u32) {
     assert_eq!(
-        error.what,
-        UnsupportedKind::Dtype(dtype.to_string()),
+        error.what.as_ref(),
+        &UnsupportedKind::Dtype(dtype.to_string()),
         "the rejection must carry the exact typed dtype"
     );
     assert_eq!(
@@ -95,26 +95,31 @@ fn tensor3_f32(a: usize, b: usize, c: usize) -> TensorType {
 #[test]
 fn rt1_load_permute_add_sum_chain() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![x],
         mat_f32(4, 3),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(4, 3).precision, 1.0),
         vec![],
         mat_f32(4, 3),
         None,
     );
-    let a = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
+    let a = dag.add_node(decl, RiscOp::Add, vec![p, c], mat_f32(4, 3), None);
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -128,21 +133,33 @@ fn rt1_load_permute_add_sum_chain() {
     let src = &result.c_source;
 
     // Verify the full chain is emitted
-    assert!(src.contains("chelis_host_to_device"), "Load must transfer");
     assert!(
-        src.contains("chelis_gpu_alloc_view"),
-        "Permute must be a view"
+        src.contains("chelis_device_tensor_copy_from_host(chelis_slot0, inputs[0])"),
+        "Load must transfer into its owned device slot"
+    );
+    assert!(
+        src.contains("chelis_metadata_plan *plan_t1 = chelis_metadata_plan_view")
+            && src.contains(
+                "chelis_device_tensor_owner *o_t1 = chelis_device_tensor_borrow(plan_t1, d_t0->data",
+            ),
+        "Permute must be a borrowed metadata view over the input owner"
     );
     assert!(src.contains("kernel_add"), "Add kernel present");
     assert!(src.contains("kernel_sum"), "Sum kernel present");
     // Verify permute stride reorder exists
     assert!(
-        src.contains("d_t1->strides[0] = d_t0->strides[1]"),
+        src.contains(
+            "plan_t1_strides[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(d_t0->strides[1])),",
+        ),
         "Permute must reorder strides: dim 0 gets old dim 1"
     );
     assert!(
-        src.contains("d_t1->strides[1] = d_t0->strides[0]"),
+        src.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(d_t0->strides[0])) };",),
         "Permute must reorder strides: dim 1 gets old dim 0"
+    );
+    assert!(
+        !src.contains("chelis_device_tensor_alloc(plan_t1)"),
+        "Permute must not allocate independent backing storage"
     );
 }
 
@@ -153,10 +170,24 @@ fn rt1_load_permute_add_sum_chain() {
 #[test]
 fn rt2_two_loads_store() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "result".into(),
         },
@@ -170,20 +201,22 @@ fn rt2_two_loads_store() {
 
     // Store should alias its input through a metadata wrapper, not by allocating fresh storage.
     assert!(
-        src.contains("chelis_gpu_alloc_view")
-            && src.contains("d_t2->data")
-            && src.contains("d_t2->storage_size"),
-        "Store must alias its input rather than owning a new slot"
+        src.contains("chelis_metadata_plan *plan_t3 = chelis_metadata_plan_view")
+            && src.contains(
+                "chelis_device_tensor_owner *o_t3 = chelis_device_tensor_borrow(plan_t3, d_t2->data",
+            )
+            && !src.contains("slot_plan3"),
+        "Store must borrow its input storage through a metadata owner, not allocate a new slot"
     );
     // Output labels should include the store name
     assert_eq!(result.output_labels, vec!["result"]);
     // Input labels should be x, y in order
     assert_eq!(result.input_labels, vec!["x", "y"]);
     // Repeated loads of different input labels still transfer once each.
-    let h2d_count = src.matches("chelis_host_to_device").count();
+    let h2d_count = src.matches("chelis_device_tensor_copy_from_host").count();
     assert_eq!(
         h2d_count, 2,
-        "Two loads should produce two host_to_device transfers"
+        "Two loads should produce two host-to-device transfers"
     );
 }
 
@@ -194,31 +227,42 @@ fn rt2_two_loads_store() {
 #[test]
 fn rt3_scalar_only_dag() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.125),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_scalar").unwrap();
     let src = &result.c_source;
 
-    // Scalar should be treated as ndim=1, size=1
+    // Scalars retain rank-0 metadata while the owner computes a logical count of one.
     assert!(
-        src.contains("chelis_gpu_alloc(1, (int[]){1}"),
-        "Scalar must be allocated as ndim=1 size=1"
+        src.contains(
+            "chelis_metadata_plan *slot_plan0 = chelis_metadata_plan_new(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(0)), NULL,",
+        ) && src.contains("chelis_device_metadata fill_size = d_t0->count;"),
+        "Scalar storage must use rank-0 metadata and launch over its runtime count"
+    );
+    assert!(
+        !src.contains("slot_plan0_shape"),
+        "A rank-0 scalar must not acquire a synthetic shape array"
     );
     // Grid should be derived from the runtime size even for scalar tensors.
     assert!(
-        src.contains("dim3((fill_size + 255) / 256)"),
+        src.contains(
+            "chelis_launch_kernel(mod_kernel_fill_f32, \"kernel_fill_f32\", (fill_size / 256 + (fill_size % 256 != 0)), (256), fill_args);",
+        ),
         "Scalar kernel launch should use the runtime size expression"
     );
 }
@@ -230,39 +274,46 @@ fn rt3_scalar_only_dag() {
 #[test]
 fn rt4_fanout_same_input_two_ops() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Add, vec![x, x], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Mul, vec![x, a], vec_f32(4), None);
+    let a = dag.add_node(decl, RiscOp::Add, vec![x, x], vec_f32(4), None);
+    let b = dag.add_node(decl, RiscOp::Mul, vec![x, a], vec_f32(4), None);
     dag.add_root(b);
     let result = codegen_hip(&dag, "test_fanout").unwrap();
     let src = &result.c_source;
 
     // x and the add intermediate should have their wrappers freed; backing slots free at end.
     assert!(
-        src.contains("chelis_gpu_free_view(d_t0)"),
+        src.contains("chelis_device_tensor_release(o_t0)"),
         "t0 wrapper should be freed"
     );
     assert!(
-        src.contains("chelis_gpu_free_view(d_t1)"),
+        src.contains("chelis_device_tensor_release(o_t1)"),
         "t1 wrapper should be freed"
+    );
+    assert!(
+        !src.contains("chelis_device_tensor_release(d_t0)")
+            && !src.contains("chelis_device_tensor_release(d_t1)"),
+        "Observed tensor views are non-owning and must never be released as owners"
     );
     // t0 should not be freed before it's used by both ops
     // Verify topological order: t0 defined before t1 (add) and t2 (mul)
     let t0_def = src
-        .find("d_t0 = chelis_gpu_alloc_view")
-        .expect("t0 wrapper alloc");
+        .find("o_t0 = chelis_device_tensor_borrow")
+        .expect("t0 owner wrapper");
     // Look for the actual kernel launch calls (not the static module cache)
     let t1_alloc = src
-        .find("d_t1 = chelis_gpu_alloc")
-        .expect("t1 alloc (add output)");
+        .find("o_t1 = chelis_device_tensor_borrow")
+        .expect("t1 owner wrapper (add output)");
     let t2_alloc = src
-        .find("d_t2 = chelis_gpu_alloc")
-        .expect("t2 alloc (mul output)");
+        .find("o_t2 = chelis_device_tensor_borrow")
+        .expect("t2 owner wrapper (mul output)");
     assert!(
         t0_def < t1_alloc && t1_alloc < t2_alloc,
         "Fan-out: t0 must be allocated before t1 (add) and t2 (mul)"
@@ -276,8 +327,16 @@ fn rt4_fanout_same_input_two_ops() {
 #[test]
 fn rt5_stride_op_multiplies_strides() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let _s = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![chelis_ir::dag::RtDim::Lit(2)],
         },
@@ -291,8 +350,16 @@ fn rt5_stride_op_multiplies_strides() {
     // The stride op MUST multiply strides by the stride factors.
     // If it just copies strides, every-other-element access is broken.
     assert!(
-        src.contains("* 2"),
-        "Stride op must multiply strides by factor 2, got just a copy:\n{src}"
+        src.contains(
+            "chelis_int_checked_mul(d_t0->strides[0], INT64_C(2), 64, \"numeric trap: overflow in stride at i64\")",
+        ) && src.contains("chelis_metadata_plan *plan_t1 = chelis_metadata_plan_view"),
+        "Stride op must checked-multiply the borrowed view stride by factor 2:\n{src}"
+    );
+    assert!(
+        !src.contains(
+            "plan_t1_strides[1] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(d_t0->strides[0])) };",
+        ),
+        "Stride op must not silently copy the source stride unchanged"
     );
 }
 
@@ -303,20 +370,24 @@ fn rt5_stride_op_multiplies_strides() {
 #[test]
 fn rt6_multiple_stores() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store_a = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "out_a".into(),
         },
@@ -324,8 +395,9 @@ fn rt6_multiple_stores() {
         vec_f32(4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![x, y], vec_f32(4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![x, y], vec_f32(4), None);
     let store_b = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "out_b".into(),
         },
@@ -339,11 +411,11 @@ fn rt6_multiple_stores() {
 
     assert_eq!(result.output_labels, vec!["out_a", "out_b"]);
     let src = &result.c_source;
-    // Both stores should produce device_to_host transfers
-    let d2h_count = src.matches("chelis_device_to_host").count();
+    // Both stores should produce device-to-host transfers.
+    let d2h_count = src.matches("chelis_device_tensor_copy_to_host").count();
     assert_eq!(
         d2h_count, 2,
-        "Two stores should produce two device_to_host transfers"
+        "Two stores should produce two device-to-host transfers"
     );
 }
 
@@ -354,13 +426,16 @@ fn rt6_multiple_stores() {
 #[test]
 fn rt7_different_reductions_different_kernels() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let sum_ax0 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -370,6 +445,7 @@ fn rt7_different_reductions_different_kernels() {
         None,
     );
     let sum_ax1 = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -405,15 +481,24 @@ fn rt8_load_as_output_with_store() {
     // The load-root output must use the correct input slot and must be an owned
     // tensor because host callers free every output slot.
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, c], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store {
             name: "computed".into(),
         },
@@ -452,13 +537,16 @@ fn rt8_load_as_output_with_store() {
 #[test]
 fn rt9_expand_sets_stride_zero() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(3).precision, 1.0),
         vec![],
         vec_f32(3),
         None,
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -471,27 +559,39 @@ fn rt9_expand_sets_stride_zero() {
     let result = codegen_hip(&dag, "test_expand_stride").unwrap();
     let src = &result.c_source;
 
-    // The expand must set stride[0] = 0
+    // The expand must encode stride[0] = 0 in a borrowed metadata view.
     assert!(
-        src.contains("strides[0] = 0"),
-        "Expand must explicitly set stride to 0 on the expanded axis"
+        src.contains(
+            "plan_t1_strides[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(0)),",
+        ) && src.contains("chelis_metadata_plan *plan_t1 = chelis_metadata_plan_view")
+            && src.contains(
+                "chelis_device_tensor_owner *o_t1 = chelis_device_tensor_borrow(plan_t1, d_t0->data",
+            ),
+        "Expand must encode a zero stride on the expanded axis while borrowing input storage"
+    );
+    assert!(
+        !src.contains("slot_plan1"),
+        "Expand is a view and must not allocate independent backing storage"
     );
 }
 
 // ===========================================================================
-// RT10: Reshape view does NOT copy strides (it inherits data pointer only)
+// RT10: Reshape materializes with checked source and destination metadata
 // ===========================================================================
 
 #[test]
 fn rt10_reshape_view_correct() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let r = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
@@ -503,12 +603,25 @@ fn rt10_reshape_view_correct() {
     let result = codegen_hip(&dag, "test_reshape").unwrap();
     let src = &result.c_source;
 
-    // Reshape creates a view with the new shape
-    assert!(src.contains("chelis_gpu_alloc_view"));
-    // The view shares the data pointer
+    // Reshape validates equal element counts before allocating and launching a logical copy.
     assert!(
-        src.contains("d_t0->data"),
-        "Reshape view must share data pointer with input"
+        src.contains(
+            "if (chelis_metadata_plan_count(reshape_input1) != chelis_metadata_plan_count(reshape_output1))",
+        ) && src.contains(
+            "if (d_t1->count != d_t0->count) chelis_numeric_trap(\"numeric trap: domain in materialize at i64\");",
+        ),
+        "Reshape must validate source and destination element counts"
+    );
+    assert!(
+        src.contains("chelis_device_tensor_alloc(slot_plan1)")
+            && src.contains("kernel_reshape_CHELIS_DTYPE_F32"),
+        "Reshape must materialize the new layout into an independently owned output slot"
+    );
+    assert!(
+        !src.contains(
+            "chelis_device_tensor_owner *o_t1 = chelis_device_tensor_borrow(plan_t1, d_t0->data",
+        ) && !src.contains("chelis_metadata_plan *plan_t1 = chelis_metadata_plan_view"),
+        "Reshape materialization must not alias the input data or preserve its old strides"
     );
 }
 
@@ -519,20 +632,24 @@ fn rt10_reshape_view_correct() {
 #[test]
 fn rt11_store_no_double_free() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
     let store = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![add],
         vec_f32(4),
@@ -544,13 +661,27 @@ fn rt11_store_no_double_free() {
 
     // The store aliases the add result through a metadata wrapper, so the output copy must
     // happen before the backing slot is released.
-    let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
+    let d2h_pos = src
+        .find("chelis_device_tensor_copy_to_host(output_guard_0, o_t3)")
+        .expect("device-to-host copy present");
+    let free_alias = src
+        .find("chelis_device_tensor_release(o_t3)")
+        .expect("store alias owner released");
     let free_slot = src
-        .find("chelis_gpu_free(chelis_slot2)")
+        .find("chelis_device_tensor_release(chelis_slot2)")
         .expect("aliased slot freed");
     assert!(
-        d2h_pos < free_slot,
-        "device_to_host must happen before freeing the aliased backing slot"
+        d2h_pos < free_alias && free_alias < free_slot,
+        "device-to-host copy must precede releasing the store alias and its backing slot"
+    );
+    assert_eq!(
+        src.matches("chelis_device_tensor_release(o_t3)").count(),
+        2,
+        "the host and device entrypoints must each release their store alias exactly once"
+    );
+    assert!(
+        !src.contains("chelis_device_tensor_release(d_t3)"),
+        "the non-owning observed store view must never be released directly"
     );
 }
 
@@ -561,13 +692,16 @@ fn rt11_store_no_double_free() {
 #[test]
 fn rt12_cast_emits_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F64,
         },
@@ -596,13 +730,16 @@ fn rt12_cast_emits_kernel() {
 #[test]
 fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Bool,
         },
@@ -623,8 +760,16 @@ fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
 #[test]
 fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -646,8 +791,15 @@ fn rt12b_cast_from_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_copy_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let copy = dag.add_node(decl, RiscOp::Copy, vec![x], vec_bool(4), None);
     dag.add_root(copy);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_copy_bool"),
@@ -661,9 +813,16 @@ fn rt12b_copy_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_realize_bool_carries_the_bool_family_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_bool(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_bool(4), None);
+    let realize = dag.add_node(decl, RiscOp::Realize, vec![owned], vec_bool(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_bool"),
@@ -678,8 +837,15 @@ fn rt12b_realize_bool_carries_the_bool_family_authority() {
 #[test]
 fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_bool(4), None);
-    let neg = dag.add_node(RiscOp::Neg, vec![x], vec_bool(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_bool(4),
+        None,
+    );
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![x], vec_bool(4), None);
     dag.add_root(neg);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_neg_bool"),
@@ -693,45 +859,54 @@ fn rt12b_unrelated_bool_numeric_op_retains_generic_authority() {
 #[test]
 fn rt12b_non_bool_materialization_retains_generic_authority() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
-    let owned = dag.add_node(RiscOp::Copy, vec![x], vec_i64(4), None);
-    let realize = dag.add_node(RiscOp::Realize, vec![owned], vec_i64(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_i64(4),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_i64(4), None);
+    let realize = dag.add_node(decl, RiscOp::Realize, vec![owned], vec_i64(4), None);
     dag.add_root(realize);
     let error = expect_hip_codegen_rejection(
         codegen_hip(&dag, "test_realize_i64"),
-        "int64 realize has no generic HIP arithmetic family",
+        "i64 realize has no generic HIP arithmetic family",
     );
-    assert_hip_dtype_rejection(error, "int64", 689);
+    assert_hip_dtype_rejection(error, "i64", 689);
 }
 
-/// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and
-/// it reached `kernel_cmplt_f32` the same way. Reproducible from two lines of
-/// Surf (`x < y`), so this is the shape that mattered most in practice.
+/// chelis#1360 companion: direct `Compare(CmpLt)` uses one-byte Bool storage.
 #[test]
-fn rt12c_cmplt_to_bool_is_rejected_not_emitted_as_f32() {
+fn rt12c_cmplt_to_bool_is_not_emitted_at_operand_width() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let c = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_bool(4), None);
-    dag.add_root(c);
-    let error = match codegen_hip(&dag, "test_cmplt_bool") {
-        Err(error) => error,
-        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
-    };
-    assert!(
-        format!("{error:?}").contains("bool"),
-        "the rejection must name the offending dtype; got: {error:?}"
+    let c = dag.add_node(
+        decl,
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![a, b],
+        vec_bool(4),
+        None,
     );
+    dag.add_root(c);
+    let source = codegen_hip(&dag, "test_cmplt_bool").unwrap().c_source;
+    assert!(source.contains("unsigned char *out"), "{source}");
+    assert!(!source.contains("float *out"), "{source}");
 }
 
 // ===========================================================================
@@ -753,13 +928,16 @@ fn rt13_zero_size_grid() {
 #[test]
 fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(1024).precision, 1.0),
         vec![],
         vec_f32(1024),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -787,19 +965,23 @@ fn rt14_staged_scalar_reduction_allocates_inline_scratch() {
 #[test]
 fn rt15_matmul_specialization_respects_contiguity() {
     let mut contiguous = Dag::new();
+    let contiguous_decl = contiguous.declare("test");
     let a = contiguous.add_node(
+        contiguous_decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let b = contiguous.add_node(
+        contiguous_decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -809,6 +991,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let eb = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -817,8 +1000,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = contiguous.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = contiguous.add_node(
+        contiguous_decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
     let sum = contiguous.add_node(
+        contiguous_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -837,25 +1027,30 @@ fn rt15_matmul_specialization_respects_contiguity() {
     );
 
     let mut fallback = Dag::new();
+    let fallback_decl = fallback.declare("test");
     let base_a = fallback.add_node(
+        fallback_decl,
         RiscOp::synth_const(mat_f32(3, 2).precision, 1.0),
         vec![],
         mat_f32(3, 2),
         None,
     );
     let a_perm = fallback.add_node(
+        fallback_decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
         None,
     );
     let b = fallback.add_node(
+        fallback_decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = fallback.add_node(
+        fallback_decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -865,6 +1060,7 @@ fn rt15_matmul_specialization_respects_contiguity() {
         None,
     );
     let eb = fallback.add_node(
+        fallback_decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -873,8 +1069,15 @@ fn rt15_matmul_specialization_respects_contiguity() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = fallback.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = fallback.add_node(
+        fallback_decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        tensor3_f32(2, 3, 4),
+        None,
+    );
     let sum = fallback.add_node(
+        fallback_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,

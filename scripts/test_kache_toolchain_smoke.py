@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import unittest
@@ -11,7 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from kache_toolchain_smoke import ContractFailure, validate_environment
+from kache_toolchain_smoke import (
+    ContractFailure,
+    validate_environment,
+    write_isolated_kache_config,
+)
 
 
 class KacheEnvironmentTests(unittest.TestCase):
@@ -92,6 +95,16 @@ class KacheEnvironmentTests(unittest.TestCase):
                         "KACHE_DISABLED": "1",
                     },
                     wrapper,
+                )
+
+    def test_isolated_config_rejects_an_existing_local_store(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            with self.assertRaises(ContractFailure):
+                write_isolated_kache_config(
+                    '[cache]\nlocal_store = "/host/cache"\n',
+                    root / "probe-kache.toml",
+                    root / "cache",
                 )
 
 

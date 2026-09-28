@@ -1,13 +1,12 @@
 //! Exact-capacity planner regressions for chelis#888.
 //!
 //! The companion at `crates/chelis-ir/tests/issue_888_capacity_collision.rs`
-//! pins the same defect one level down, at `DimExpr::normalized_key`. That
-//! test retains the old lossy-key collision as the defect premise. This
-//! suite proves the shared planner no longer lets that collision affect
-//! storage placement.
+//! pins the exact shared-plan outcome. The private CapacityKey suite retains
+//! the key-level witness; no lossy production API remains for that premise.
+//! This suite proves the C adapter preserves the exact storage placement.
 //!
-//! Mechanism, in one paragraph. `DimExprKey` folds concrete dimension factors
-//! with `saturating_mul` (`chelis_ir::dag`), and saturation is not injective:
+//! Historical mechanism: `DimExprKey` folded concrete dimension factors
+//! with `saturating_mul`, and saturation is not injective:
 //! two products that both exceed `usize::MAX` clamp to the same
 //! `usize::MAX`. The retired backend-local planners compared that lossy key
 //! when a symbolic capacity was not concrete, allowing distinct capacities
@@ -15,7 +14,7 @@
 //! `CapacityKey` plan from `chelis-ir`.
 
 use chelis_backend_c::memory::{MemoryPlan, NodeMemoryKind};
-use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::ownership::plan_c_storage;
 use chelis_types::types::Prim;
 mod support;
@@ -89,14 +88,16 @@ fn chain_plan(
     c_type: TensorType,
 ) -> (MemoryPlan, NodeId, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(a_type.precision, 1.0),
         vec![],
         a_type,
         None,
     );
-    let b = dag.add_node(RiscOp::Neg, vec![a], b_type, None);
-    let c = dag.add_node(RiscOp::Neg, vec![b], c_type, None);
+    let b = dag.add_node(decl, RiscOp::Neg, vec![a], b_type, None);
+    let c = dag.add_node(decl, RiscOp::Neg, vec![b], c_type, None);
     dag.add_root(c);
     let verified = support::verified_dag(&dag, chelis_backend_c::CodegenOptions::default());
     let shared = plan_c_storage(verified).expect("exact C storage plan");
@@ -156,19 +157,6 @@ fn exact_planner_separates_saturated_legacy_key_collision() {
         logical_elements(&large),
         "the two capacities are structurally distinct expressions"
     );
-
-    // Historical premise: the retired lossy keys collide. This equality is
-    // evidence for the regression and is no longer storage authority.
-    let small_capacity = logical_elements(&small);
-    let large_capacity = logical_elements(&large);
-    assert_eq!(small_capacity.as_concrete(), None);
-    assert_eq!(large_capacity.as_concrete(), None);
-    let saturated = DimExprKey::Mul(vec![
-        DimExprKey::Concrete(usize::MAX),
-        DimExprKey::Sym("n".to_string()),
-    ]);
-    assert_eq!(small_capacity.normalized_key(), saturated);
-    assert_eq!(large_capacity.normalized_key(), saturated);
 }
 
 /// Negative parity for the case above, and the proof that saturation is the

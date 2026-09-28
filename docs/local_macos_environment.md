@@ -166,7 +166,7 @@ In order of preference:
    ```
 
 3. **Avoid mass first-exec bursts.** Do not run full-workspace nextest
-   locally during heavy agent sessions on this machine; the macOS Smoke CI
+   locally during heavy agent sessions on this machine; the Mac nightly CI
    job is the workspace oracle (next section). Single-binary work
    (`chelis` CLI on an already-assessed build, clippy, fmt, lint) is
    unaffected.
@@ -233,19 +233,23 @@ In order of preference:
 ## CI Is the Fallback Oracle
 
 When local exec is wedged, do not block on the local run. The
-`macos-workspace-shard` matrix runs the full workspace test suite on
+`macos-workspace-shard` matrix runs the default-feature workspace test suite on
 macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
-probe. The stable `macos-smoke` aggregate requires both shards and serves as
-the macOS signal. Push the branch and let CI serve as the oracle, noting in
+probe. The `macos-ownership-ledger` job runs the ownership-ledger targets, which
+require their packages' `ownership-ledger` feature. The stable `macos-smoke`
+aggregate requires both shards and that job, and serves as the macOS signal in
+`.github/workflows/macos-nightly.yml` (daily 04:17 UTC and
+manual dispatch only). Push the branch and dispatch this workflow on that branch
+for a Mac validation result; ordinary PR CI does not run it. Note in
 the PR or phase docs that local validation was blocked by this failure mode.
 
 ## Gate Preflight
 
-`python3 scripts/gate.py --fast` and `python3 scripts/gate.py --local` run the
+`python3 scripts/gate.py --fast` and `python3 scripts/gate.py --validation` run the
 probe below automatically on macOS, as a subprocess, before their first
 command. Probe exit 0 proceeds. Exit 1 (the wedge classification) stops the
 gate with exit 3 and the termination class `preflight-stop`, naming this
-runbook; push and let macOS Smoke serve as the oracle. Exit 3 (slow admission)
+runbook; push and manually dispatch `macos-nightly.yml` as the Mac oracle. Exit 3 (slow admission)
 and exit 2 (the probe could not run) print a warning and continue. The
 verdict, exit code, and first output line are recorded under `preflight.probe`
 in the run's summary JSON (`target/gate-reports/<timestamp>-<pid>-<mode>.json`),
@@ -272,7 +276,7 @@ runbook. It:
   failed, the probe binary was not executable, or it exited non-zero) — an
   environment problem, not a degradation verdict;
 - always cleans up its temp dir, so it is safe to run from anywhere;
-- is invoked automatically by the gate's preflight (`--fast`, `--local`, and
+- is invoked automatically by the gate's preflight (`--fast`, `--validation`, and
   the bare full gate) on macOS, with the exit mapping in Gate Preflight above.
 
 Tests: `scripts/test_preflight_exec_probe.py`

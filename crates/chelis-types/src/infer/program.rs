@@ -87,6 +87,9 @@ fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
         && left.tvar_restrictions == right.tvar_restrictions
         && left.dvars == right.dvars
         && left.rvars == right.rvars
+        // chelis#1654: an obligation is part of the scheme, so two schemes
+        // that differ only there are not the same scheme.
+        && left.constraints == right.constraints
         && left.body == right.body
 }
 
@@ -129,6 +132,7 @@ impl ComponentLevelScope {
     /// bindings: completed generalized member schemes replace them below.
     fn complete(mut self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
         self.remove_temporary_bindings(env);
+        env.end_holed_group();
         let _finished_component = env
             .replace_active_top_level_component(std::mem::take(&mut self.prior_active_component));
         subst.leave_level(self.level, var_gen);
@@ -139,6 +143,7 @@ impl ComponentLevelScope {
         let prior_members = self.members.clone();
         super::recursion::abort_group();
         self.remove_temporary_bindings(env);
+        env.end_holed_group();
         for (name, prior) in self.members {
             if let Some(scheme) = prior {
                 env.bind(name, scheme);
@@ -175,6 +180,203 @@ impl ComponentLevelScope {
     }
 }
 
+/// Re-infer one clean cyclic component against its prior complete schemes so
+/// contracts returned across sibling edges travel through the ordinary
+/// instantiate/application/generalize lifecycle. Each batch sweep sees only
+/// the preceding batch, and a component of N members therefore gets at most N
+/// further sweeps.
+#[allow(clippy::too_many_arguments)]
+fn sweep_recursive_collection_contracts(
+    recursive_function_indices: &[usize],
+    items: &[(Option<String>, &deep::Expr)],
+    cycle_precedence_names: &[String],
+    env: &mut Env,
+    var_gen: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    user_def_names: &UnordSet<String>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
+) {
+    let members = recursive_function_indices
+        .iter()
+        .filter_map(|&index| {
+            let expr = items[index].1;
+            matches!(stamped_parts(expr), Some((DeepTag::Def, _, _)))
+                .then(|| top_level_decl_name(expr).map(|name| (index, name.to_string())))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    // The function-plan projection is authoritative. A cyclic full-reference
+    // component with no recursive function component, including eager/mixed
+    // value cycles, retains its existing one-pass schedule.
+    if members.is_empty() || members.len() != recursive_function_indices.len() {
+        return;
+    }
+
+    let mut prior_schemes = UnordMap::new();
+    for (_, name) in &members {
+        let Some(scheme) = env.lookup(name).cloned() else {
+            return;
+        };
+        prior_schemes.insert(name.clone(), scheme);
+    }
+    // [04-INF-9] forbids manufacturing a checked operation contract from an
+    // authored body. The sweep only closes transport edges from an already
+    // checked seed, so the overwhelmingly common seedless recursive SCC needs
+    // no replay.
+    if prior_schemes
+        .to_sorted()
+        .into_iter()
+        .map(|(_, scheme)| scheme)
+        .all(|scheme| scheme.constraints.is_empty())
+    {
+        return;
+    }
+
+    for sweep_index in 0..members.len() {
+        let final_confirmation = sweep_index + 1 == members.len();
+        let sweep_checkpoint = errors.checkpoint();
+        let component_scope = ComponentLevelScope::enter(
+            recursive_function_indices,
+            items,
+            cycle_precedence_names,
+            env,
+            var_gen,
+            subst,
+        );
+        super::recursion::begin_group(
+            members.iter().map(|(_, name)| {
+                let authored = declared_signatures
+                    .get(name)
+                    .is_some_and(|metadata| !metadata.binders.is_empty());
+                (name.as_str(), authored)
+            }),
+            env,
+        );
+        let mut scratch = InferenceProduct::default();
+        scratch.type_headers = adt_reg.resolution_env().clone();
+        scratch.adt_registry = adt_reg.clone();
+        let mut deferred_bindings = Vec::with_capacity(members.len());
+        let mut diagnosed = false;
+
+        for (declaration_index, name) in &members {
+            if crate::cancel::cancellation_requested() {
+                component_scope.abort(env, var_gen, subst);
+                return;
+            }
+            let (module, expr) = &items[*declaration_index];
+            scratch.begin_root(expr);
+            crate::opacity::set_current_item(
+                crate::opacity::module_key_for_item(module.as_deref(), Some(name)),
+                Some(name.clone()),
+            );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(*declaration_index)
+                .and_then(Option::as_ref);
+            env.set_current_declaration_ordinal(Some(*declaration_index));
+            let expected = prior_schemes
+                .get(name)
+                .expect("recursive sweep snapshots every member scheme");
+            if let Some(binding) = infer_top_level(
+                expr,
+                env,
+                var_gen,
+                subst,
+                adt_reg,
+                errors,
+                &mut scratch,
+                None,
+                Some(recursion::RecursiveExpected::Published(expected)),
+                true,
+                user_def_names,
+                declared_signatures,
+                declaration_diagnostic_owner,
+            ) {
+                deferred_bindings.push(binding);
+            }
+            close_declaration(
+                &mut scratch,
+                CloseScope::Declaration,
+                env,
+                var_gen,
+                subst,
+                adt_reg,
+                errors,
+            );
+            if errors.iter_since(sweep_checkpoint).next().is_some() {
+                diagnosed = true;
+                break;
+            }
+        }
+
+        if diagnosed || deferred_bindings.len() != members.len() {
+            component_scope.abort(env, var_gen, subst);
+            return;
+        }
+
+        super::recursion::finish_group(subst, errors);
+        if errors.iter_since(sweep_checkpoint).next().is_some() {
+            component_scope.abort(env, var_gen, subst);
+            return;
+        }
+        component_scope.complete(env, var_gen, subst);
+        let schemes = deferred_bindings
+            .into_iter()
+            .map(|binding| generalize_deferred_recursive_binding(binding, env, subst))
+            .collect::<Vec<_>>();
+        debug_assert!(schemes.iter().all(|(name, scheme)| {
+            scheme.constraints.len()
+                >= prior_schemes
+                    .get(name)
+                    .expect("recursive sweep retains every member")
+                    .constraints
+                    .len()
+        }));
+        let changed = schemes.iter().any(|(name, scheme)| {
+            scheme.constraints.len()
+                > prior_schemes
+                    .get(name)
+                    .expect("recursive sweep retains every member")
+                    .constraints
+                    .len()
+        });
+        if final_confirmation && changed {
+            for (name, scheme) in prior_schemes.to_sorted() {
+                env.bind(name.clone(), scheme.clone());
+            }
+            errors.push(CheckError::new(
+                CheckErrorKind::Other,
+                format!(
+                    "internal: recursive collection-contract closure for [{}] added a relation \
+                     on its final member-count confirmation sweep",
+                    members
+                        .iter()
+                        .map(|(_, name)| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                vec![
+                    "The checker rejected this program rather than publishing an incomplete \
+                     recursive operation contract closure."
+                        .to_string(),
+                ],
+            ));
+            return;
+        }
+        let mut published_schemes = UnordMap::new();
+        for (name, scheme) in schemes {
+            env.bind(name.clone(), scheme.clone());
+            published_schemes.insert(name, scheme);
+        }
+        if !changed {
+            return;
+        }
+        prior_schemes = published_schemes;
+    }
+}
+
 /// Front-end cancellation gate for a check unit (chelis#930).
 ///
 /// Placed between the passes of every public check entry. When the thread's
@@ -192,7 +394,13 @@ fn bind_library_products(
     mut checked: CheckedProgram,
     context_library_proof_id: Option<LibraryProofId>,
 ) -> (TypeEnv, CheckedProgram) {
-    let proof_id = LibraryProofId::for_library(checked.exprs(), context_library_proof_id);
+    let selector_context_digest =
+        selector_callable_context_digest(&type_env.inner().selector_callables);
+    let proof_id = LibraryProofId::for_library(
+        checked.exprs(),
+        context_library_proof_id,
+        selector_context_digest,
+    );
     type_env.bind_library_proof(proof_id);
     checked.bind_library_proof(proof_id);
     checked.bind_context_library_proof(context_library_proof_id);
@@ -200,12 +408,16 @@ fn bind_library_products(
 }
 
 fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
-    if crate::cancel::cancellation_requested() {
-        errors.push(crate::cancel::cancellation_check_error());
-        true
-    } else {
-        false
+    if !crate::cancel::cancellation_requested() {
+        return false;
     }
+    if !errors
+        .iter()
+        .any(|error| crate::cancel::is_cancellation(&error.message))
+    {
+        errors.push(crate::cancel::cancellation_check_error());
+    }
+    true
 }
 
 /// Run type inference on a list of top-level Deep expressions.
@@ -220,7 +432,7 @@ pub(crate) fn infer_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    let normalized = normalize_nodes_to_lists(exprs);
+    let normalized = normalize_program_input(exprs);
     infer_program_with_product_in_session(&normalized, errors).stats()
 }
 
@@ -249,7 +461,16 @@ pub(super) fn infer_program_with_product_in_session(
     // `(module {} name ...)` wrappers so declarations in every idiomatic
     // Surf source (every .ch starts with `module X`) get collected.
     let items = top_level_decl_items_with_modules(exprs);
-    collect_all_declarations(&items, &mut env, &mut vg, &mut subst, &mut adt_reg, errors);
+    let declaration_diagnostic_owners = declaration_diagnostic_owner_plan(exprs);
+    collect_all_declarations(
+        &items,
+        &declaration_diagnostic_owners,
+        &mut env,
+        &mut vg,
+        &mut subst,
+        &mut adt_reg,
+        errors,
+    );
     product.type_headers = adt_reg.resolution_env().clone();
     product.adt_registry = adt_reg.clone();
 
@@ -268,7 +489,17 @@ pub(super) fn infer_program_with_product_in_session(
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
     let external_input_types = collect_literal_external_input_types(&items);
-    let metadata_prebound_names = UnordSet::new();
+    let (metadata_prebound_names, function_metadata_failures) =
+        prebind_defsig_less_function_body_types(
+            &items,
+            &declared_signatures,
+            &declaration_diagnostic_owners,
+            &mut env,
+            &mut vg,
+            &mut subst,
+            &adt_reg,
+            errors,
+        );
     let top_level_references = TopLevelReferenceGraph::build(&items);
     product.function_inference_plan =
         FunctionInferencePlan::build_from_reference_graph(&top_level_references);
@@ -289,6 +520,7 @@ pub(super) fn infer_program_with_product_in_session(
         if cancelled() {
             break;
         }
+        let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
         let cycle_precedence_names = if cyclic {
@@ -318,10 +550,19 @@ pub(super) fn infer_program_with_product_in_session(
                 &metadata_prebound_names,
                 &mut env,
                 &mut vg,
+                &subst,
             )
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
@@ -342,7 +583,7 @@ pub(super) fn infer_program_with_product_in_session(
             );
         }
         let mut deferred_bindings = Vec::new();
-        for declaration_index in group.indices {
+        for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut env, &vg, &mut subst);
@@ -356,18 +597,25 @@ pub(super) fn infer_program_with_product_in_session(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref);
             env.set_current_declaration_ordinal(Some(declaration_index));
             let external_input_failure = prebind_literal_external_input_for_declaration(
                 declaration_index,
                 expr,
                 &external_input_types,
                 &declared_signatures,
+                declaration_diagnostic_owner,
                 &mut env,
                 &mut vg,
                 &mut subst,
                 &adt_reg,
                 errors,
             );
+            let prebound_type_failure = external_input_failure
+                .as_ref()
+                .or_else(|| function_metadata_failures.get(&declaration_index));
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut env,
@@ -376,27 +624,29 @@ pub(super) fn infer_program_with_product_in_session(
                 &adt_reg,
                 errors,
                 &mut product,
-                external_input_failure.as_ref(),
-                provisional_types.get(&declaration_index),
+                prebound_type_failure,
+                provisional_types
+                    .get(&declaration_index)
+                    .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner,
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(&mut vg, &mut subst, errors);
-            product.finish_root(&subst, errors);
-            // Issue #256 round 2: re-check each deferred borrow against the
-            // now-complete substitution (see `validate_deferred_borrow_vars`).
-            validate_deferred_borrow_vars(
-                &subst,
+            // chelis#1489: one close per declaration. An earlier revision had
+            // a second, whole-program phase that three library lanes never
+            // reached.
+            close_declaration(
+                &mut product,
+                close_scope(cyclic),
+                &env,
+                &mut vg,
+                &mut subst,
                 &adt_reg,
-                env.active_declared_type_names(),
                 errors,
             );
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&subst, &adt_reg, errors);
             #[cfg(test)]
             if cyclic {
                 primary_recursive_member_finished_for_test();
@@ -409,6 +659,14 @@ pub(super) fn infer_program_with_product_in_session(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut env,
+                &mut vg,
+                &mut subst,
+                &adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -420,37 +678,65 @@ pub(super) fn infer_program_with_product_in_session(
                 .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty)| {
-                    let scheme = env.generalize(&ty, &subst);
-                    (name, scheme)
-                })
+                .map(|binding| generalize_deferred_recursive_binding(binding, &env, &subst))
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 env.bind(name, scheme);
+            }
+            if recursion_active
+                && errors
+                    .iter_since(component_diagnostic_checkpoint)
+                    .next()
+                    .is_none()
+            {
+                sweep_recursive_collection_contracts(
+                    &group.recursive_function_indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut env,
+                    &mut vg,
+                    &mut subst,
+                    &adt_reg,
+                    errors,
+                    &user_def_names,
+                    &declared_signatures,
+                    &declaration_diagnostic_owners,
+                );
             }
         }
     }
     crate::opacity::set_current_item(None, None);
     env.set_current_declaration_ordinal(None);
 
-    if cancelled() {
-        errors.push(crate::cancel::cancellation_check_error());
+    if cancellation_gate(errors) {
         return product;
     }
     product.resolve_owner_types(&subst);
 
-    // Third pass: reject tensor types whose element precision isn't supported
+    // PP9 / [04-TOT-5]: every public entry reaches one ordered semantic pass
+    // protocol after inference. Build the same declaration-type view the IR
+    // entries supply; stamped input stays stamped and every reader below must
+    // handle that carrier directly.
+    let semantic_type_env = build_ir_type_env(exprs);
+    validate_semantic_program(
+        exprs,
+        &semantic_type_env,
+        &top_level_references,
+        &SelectorCallableContext::default(),
+        errors,
+    );
+    if cancellation_gate(errors) {
+        stack_scope.drain_into(errors);
+        product.top_level_references = top_level_references;
+        return product;
+    }
+
+    // Final shared checks: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
     // precision promotion" rule. f64 is supported as of v0.2.3.
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
-
-    // WS-A8 cross-row enforcement: reject `matmul`/transcendental ops that
-    // are reached through a polymorphic-precision sig instantiated at a
-    // dtype the spec rules forbid (§5.7.2 / §5.4).
-    let local_ir_env = build_ir_type_env(exprs);
-    validate_polymorphic_op_constraints(exprs, &local_ir_env, errors);
 
     // If any walker bailed on a nearly-exhausted stack during this run,
     // surface it as a hard located failure (covered-or-rejected).
@@ -483,8 +769,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     library_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<TypeEnv, InferStats> {
-    // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(library_exprs);
+    let normalized = normalize_program_input(library_exprs);
     let library_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained below
     // before the empty-errors gate (covered-or-rejected on deep input).
@@ -511,13 +796,7 @@ pub(crate) fn build_type_env_from_library_in_session(
     let library_ir = build_ir_type_env(library_exprs);
     log_sub("build_ir_type_env_initial", &mut sub_t);
 
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        /* combined_ir_for_validate = */ &library_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: inference may have abandoned its schedule. Stop before the
@@ -526,18 +805,17 @@ pub(crate) fn build_type_env_from_library_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
+        &SelectorCallableContext::default(),
         errors,
     );
-    log_sub("validate_ir_program", &mut sub_t);
+    log_sub("validate_semantic_program", &mut sub_t);
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
-    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     // Surface a stack-exhaustion bail from the passes above as a hard
     // located error before the gate (and before the errors drain below).
     stack_scope.drain_into(errors);
@@ -549,9 +827,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     // suppression to distinguish library refs from new-code refs.
     let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -590,6 +867,8 @@ pub(crate) fn build_type_env_from_library_in_session(
     if !errors.is_empty() {
         return Err(stats);
     }
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     Ok(TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -598,6 +877,7 @@ pub(crate) fn build_type_env_from_library_in_session(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated,
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     }))
 }
@@ -629,7 +909,7 @@ pub(crate) fn build_type_env_from_library_in_session(
 /// Internal sequencing:
 /// 1. Build the per-decl `IrTypeEnv` from un-annotated source.
 /// 2. Run `infer_ir_program_with_state` once, populating `state`.
-/// 3. Run all validators (`validate_ir_program`,
+/// 3. Run all validators (`validate_semantic_program`,
 ///    `validate_tensor_precisions_in_program`).
 /// 4. Annotate the library exprs once using the populated `state.env`.
 /// 5. Build `library_ir_annotated` from the annotated exprs.
@@ -651,6 +931,13 @@ pub(crate) fn build_compiled_library_context_in_session(
     // annotation pass) so a deep-input stack bail on the library-compile path
     // always fails the check rather than returning a silent green / partial
     // CheckedProgram. Mirrors `check_ir_with_signature_context`.
+    // chelis#1923: fold every pipe into the application it denotes before
+    // anything reads this program. This entry annotates `library_exprs`
+    // directly rather than through a checked-program call, so without the
+    // fold here a library's pipe would reach `annotated_exprs` unfolded and
+    // the lowerer would refuse it.
+    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Mirror `build_type_env_from_library` up through the validators so the
     // type_env half stays bit-compatible with the existing public API.
@@ -659,28 +946,22 @@ pub(crate) fn build_compiled_library_context_in_session(
 
     let library_ir = build_ir_type_env(library_exprs);
 
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        /* combined_ir_for_validate = */ &library_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &library_ir,
         &product.top_level_references,
+        &SelectorCallableContext::default(),
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    validate_polymorphic_op_constraints(library_exprs, &library_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -691,9 +972,8 @@ pub(crate) fn build_compiled_library_context_in_session(
     // Capture library def names before consuming `state` into `TypeEnv`.
     let mut library_def_names = chelis_unord::UnordSet::new();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -721,6 +1001,8 @@ pub(crate) fn build_compiled_library_context_in_session(
         return Err(stats);
     }
     let library_ir_annotated = build_ir_type_env(&library_annotated);
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &SelectorCallableContext::default());
 
     let type_env = TypeEnv::from_inner(TypeEnvInner {
         env: state.env,
@@ -729,6 +1011,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         adt_reg: state.adt_reg,
         ir_types: library_ir_annotated.clone(),
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     });
 
@@ -804,6 +1087,13 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // library-compile path always fails the check rather than returning a
     // silent green / partial CheckedProgram. Mirrors
     // `check_ir_with_signature_context`.
+    // chelis#1923: fold every pipe into the application it denotes before
+    // anything reads this program. This entry annotates `library_exprs`
+    // directly rather than through a checked-program call, so without the
+    // fold here a library's pipe would reach `annotated_exprs` unfolded and
+    // the lowerer would refuse it.
+    let folded = chelis_deep::pipe::fold_program_pipes(library_exprs);
+    let library_exprs = &folded[..];
     let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
     let mut state = base.resume_for_new_check();
@@ -822,28 +1112,22 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `library_exprs`' own declared types (base schemes are already in
     // `state.env`); the combined IR env is supplied to the validators so
     // `(var basefoo)` references resolve to the base's declared type.
-    let product = infer_ir_program_with_state(
-        library_exprs,
-        &mut state,
-        &combined_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let product = infer_ir_program_with_state(library_exprs, &mut state, errors);
     let stats = product.stats();
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
     // the validators if inference abandoned its schedule.
     if cancellation_gate(errors) {
         return Err(stats);
     }
-    validate_ir_program(
+    validate_semantic_program(
         library_exprs,
         &combined_ir,
         &product.top_level_references,
+        &base.inner().selector_callables,
         errors,
     );
     validate_tensor_precisions_in_program(library_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(library_exprs, errors);
-    validate_polymorphic_op_constraints(library_exprs, &combined_ir, errors);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -856,9 +1140,8 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // distinguishes library refs (base + this layer) from new-code refs.
     let mut library_def_names = base.inner().library_def_names.clone();
     for expr in top_level_decl_items(library_exprs) {
-        if let deep::Expr::List(list, _) = expr
-            && get_tag(list) == Some(DeepTag::Def)
-            && let Some(name) = children(list).first().and_then(symbol_name)
+        if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(symbol_name)
         {
             library_def_names.insert(name.to_string());
         }
@@ -883,6 +1166,8 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         return Err(stats);
     }
     let new_ir_annotated = build_ir_type_env(&library_annotated);
+    let selector_callables =
+        extend_selector_callable_context(&library_annotated, &base.inner().selector_callables);
 
     // The returned TypeEnv's `ir_types` is the union: base declared types
     // plus this layer's, this layer winning on shadow.
@@ -900,6 +1185,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         adt_reg: state.adt_reg,
         ir_types: combined_ir_annotated,
         library_def_names,
+        selector_callables,
         opacity: state.opacity,
     });
 
@@ -983,8 +1269,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     new_exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<CheckedProgram, InferStats> {
-    // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(new_exprs);
+    let normalized = normalize_program_input(new_exprs);
     let new_exprs = &normalized;
     // Reset the stack-exhaustion flag for this check unit; drained into the
     // error vector below before the empty-errors gate so a deep-input stack
@@ -1019,13 +1304,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let mut product = infer_ir_program_with_state(
-        new_exprs,
-        &mut state,
-        &combined_ir,
-        /* run_validate_passes_on = */ None,
-        errors,
-    );
+    let mut product = infer_ir_program_with_state(new_exprs, &mut state, errors);
     let stats = product.stats();
     log_sub("infer_ir_program_with_state", &mut sub_t);
     // chelis#930: see `build_type_env_from_library_in_session` — stop before
@@ -1037,18 +1316,17 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.
-    validate_ir_program(
+    validate_semantic_program(
         new_exprs,
         &combined_ir,
         &product.top_level_references,
+        &context.inner().selector_callables,
         errors,
     );
-    log_sub("validate_ir_program", &mut sub_t);
+    log_sub("validate_semantic_program", &mut sub_t);
     validate_tensor_precisions_in_program(new_exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(new_exprs, errors);
     log_sub("validate_tensor_precisions", &mut sub_t);
-    validate_polymorphic_op_constraints(new_exprs, &combined_ir, errors);
-    log_sub("validate_polymorphic_op_constraints", &mut sub_t);
     // Surface any stack-exhaustion bail from the passes above as a hard
     // located error (covered-or-rejected) before the empty-errors gate.
     stack_scope.drain_into(errors);
@@ -1112,21 +1390,24 @@ pub(crate) fn check_typed_program_in_session(
     // and the annotation pass below, so a bail in either surfaces as a hard
     // located failure rather than a partially-annotated `Ok`.
     let stack_scope = StackExhaustionScope::enter();
+    // One tree for inference and annotation: the pipe fold, and nothing else
+    // (chelis#1023 pins that the checker's output keeps its input's nodes).
+    let exprs = &chelis_deep::pipe::fold_program_pipes(exprs)[..];
     let product = infer_program_with_product_in_session(exprs, errors);
-    // [04-INF-4] makes eager value cycles an ingress-independent checker
-    // error. Reuse the canonical graph that scheduled inference rather than
-    // repeating its lexical walk. Keep reporting after inference to preserve
-    // the shared diagnostic order: body-inference errors first, then
-    // `CycleDetected`.
-    product
-        .top_level_references
-        .report_initialization_errors(errors);
     let stats = product.stats();
     if errors.is_empty() {
         let annotated_exprs = annotate_ir_program(exprs, &product, errors);
         let annotated_type_env = build_ir_type_env(&annotated_exprs);
         // Annotation recurses; reject if it bailed on low stack.
         stack_scope.drain_into(errors);
+        if !errors.is_empty() {
+            return Err(stats);
+        }
+        // spec/06 §3.7: an extent derived from vmapped tensor elements is a
+        // check-time `batch_varying_extent` type error at every source
+        // ingress. IR reaches this validator before annotation; typed Surf
+        // supplies the equivalent canonical annotated type environment here.
+        validate_vmap_extent_dependencies(&annotated_exprs, &annotated_type_env, errors);
         if !errors.is_empty() {
             return Err(stats);
         }
@@ -1163,8 +1444,7 @@ pub(crate) fn infer_ir_program_in_session(
     exprs: &[deep::Expr],
     errors: &mut DiagnosticSink<'_>,
 ) -> InferStats {
-    // Normalize Node/BareList → List (#908 producer switch).
-    let normalized = normalize_nodes_to_lists(exprs);
+    let normalized = normalize_program_input(exprs);
     let exprs = &normalized;
     let stack_scope = StackExhaustionScope::enter();
     let type_env = build_ir_type_env(exprs);
@@ -1181,10 +1461,19 @@ pub(crate) fn infer_ir_program_in_session(
         stack_scope.drain_into(errors);
         return stats;
     }
-    validate_ir_program(exprs, &type_env, &product.top_level_references, errors);
+    validate_semantic_program(
+        exprs,
+        &type_env,
+        &product.top_level_references,
+        &SelectorCallableContext::default(),
+        errors,
+    );
+    if cancellation_gate(errors) {
+        stack_scope.drain_into(errors);
+        return stats;
+    }
     validate_tensor_precisions_in_program(exprs, errors);
     crate::invariants::validate_type_invariants_in_program_with_sink(exprs, errors);
-    validate_polymorphic_op_constraints(exprs, &type_env, errors);
     // Surface any walker stack bail as a hard located error.
     stack_scope.drain_into(errors);
     stats
@@ -1192,32 +1481,30 @@ pub(crate) fn infer_ir_program_in_session(
 
 pub(super) fn infer_ir_program_with_env(
     exprs: &[deep::Expr],
-    type_env: &IrTypeEnv,
+    _type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
-    // Backwards-compat wrapper. Callers (like `infer_ir_program` and
-    // `check_typed_program` callers) run `validate_ir_program`
-    // separately, so we pass `None` here to skip the embedded validate.
+    // Backwards-compat wrapper. Public callers run the shared semantic pass
+    // protocol after this driver returns.
     let empty_inner = crate::context::TypeEnv::empty();
     let mut state = empty_inner.inner().clone();
-    infer_ir_program_with_state(
-        exprs, &mut state, type_env, /* run_validate_passes_on = */ None, errors,
-    )
+    let mut product = infer_ir_program_with_state(exprs, &mut state, errors);
+    product.resolve_owner_types(&state.subst);
+    product
 }
 
 /// Run the inference / IR binding / shape-validation passes against
 /// `state`, mutating it as it goes. Library state should be supplied by
-/// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic
-/// path. Source IR types are collected with their exact final declaration
-/// origins and bound into `state.env` here; the
-/// `combined_ir` is what `validate_ir_program` consults so
-/// new-code shape validation can look up declared types of library
-/// references.
+/// pre-cloning a snapshot; pass `&[]`-derived state for the monolithic path.
+/// Declaration-local external-input ascriptions are prebound while their
+/// declaration is checked. A compiler-authored function body stamp may supply
+/// a defsig-less callable header, but body stamps never create eager-value
+/// scope. Callers supply their complete declaration-type view to
+/// `validate_semantic_program` after this driver returns so layered new code
+/// can resolve library references without changing inference scope.
 pub(super) fn infer_ir_program_with_state(
     exprs: &[deep::Expr],
     state: &mut TypeEnvInner,
-    combined_ir: &IrTypeEnv,
-    run_validate_passes_on: Option<&[deep::Expr]>,
     errors: &mut DiagnosticSink<'_>,
 ) -> InferenceProduct {
     let mut product = InferenceProduct::default();
@@ -1234,8 +1521,10 @@ pub(super) fn infer_ir_program_with_state(
     // Surf source wraps its declarations in `module X`, and without
     // flattening none of the walkers below see any def/defsig/deftype.
     let items = top_level_decl_items_with_modules(exprs);
+    let declaration_diagnostic_owners = declaration_diagnostic_owner_plan(exprs);
     collect_all_declarations(
         &items,
+        &declaration_diagnostic_owners,
         &mut state.env,
         &mut state.var_gen,
         &mut state.subst,
@@ -1255,71 +1544,6 @@ pub(super) fn infer_ir_program_with_state(
         crate::opacity::OpacityContextData::from_meta(state.opacity.clone()),
     );
 
-    // The canonical collector returns each final name-keyed IR type together
-    // with the exact flattened declaration ordinal that produced it. Duplicate
-    // names intentionally retain last-declaration-wins semantics, while the
-    // origin keeps an owning witness from leaking into an earlier body.
-    let collected_ir_types = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
-
-    // chelis#1124: names that carry an explicit `(defsig {} name ...)` in this
-    // check unit already had their AUTHORITATIVE declared type bound into
-    // `state.env` by `collect_all_declarations` above. The prebind below reads
-    // each def's own BODY type stamp (via `collect_ir_types_with_origins`) and
-    // rebinds the name to it — the mechanism that lets a `defsig`-less def be
-    // resolved by cross-references before its body is inferred. It may bind an
-    // eager value's name too: chelis#1134 scope is decided by
-    // `Env::top_level_value_visibility`, so a binding that exists early can no
-    // longer make a later value readable, and the two ingresses stay in
-    // agreement without this ingress withholding anything. Letting a body stamp
-    // overwrite a defsig binding replaces the declared signature with the
-    // body's own type, so `infer_top_level`'s body-vs-defsig
-    // unification (which the IR ingress DOES run) then compares the body
-    // against itself and silently accepts a `defsig`/body mismatch. The typed
-    // ingress (`infer_program_with_product_in_session`) has no such rebind and
-    // rejects the mismatch; keeping the defsig binding here restores parity.
-    // For every well-typed program the defsig type and the body stamp agree, so
-    // this skip is a no-op except on exactly the mismatch that must be rejected.
-    let defsig_names: chelis_unord::UnordSet<&str> = items
-        .iter()
-        .filter_map(|(_, expr)| match stamped_parts(expr) {
-            Some((DeepTag::Defsig, _, kids)) => kids.first().and_then(symbol_name),
-            _ => None,
-        })
-        .collect();
-
-    let mut prebound_type_failures = UnordMap::new();
-    for (name, ty_expr) in &collected_ir_types.type_env {
-        let metadata_level = state.subst.enter_level(&state.var_gen);
-        let resolved = resolve_deep_type(
-            ty_expr,
-            &mut state.var_gen,
-            &state.adt_reg,
-            TypeUseSite::CompilerMetadata,
-            BinderMode::TrustedCompilerMetadata,
-            errors,
-        );
-        state.subst.leave_level(metadata_level, &state.var_gen);
-        match resolved {
-            Ok(ty) => {
-                if defsig_names.contains(name.as_str()) {
-                    // Preserve the defsig-derived binding (chelis#1124); do not
-                    // overwrite the declared signature with the body's stamp.
-                    continue;
-                }
-                let scheme = state.env.generalize(&ty, &state.subst);
-                state.env.bind(name.clone(), scheme);
-            }
-            Err(witness) => {
-                // The prebinding pass owns this diagnostic. Carry its witness
-                // into the matching def-body pass so a literal/ascription
-                // consumer propagates the same failure instead of resolving
-                // the cloned metadata and reporting it a second time.
-                let declaration_index = collected_ir_types.final_origin_by_name[name];
-                prebound_type_failures.insert(declaration_index, witness);
-            }
-        }
-    }
-
     // Per-decl profile: when CHELIS_PROFILE_COMPILE_CONTEXT_DETAIL=1, emit
     // one stderr line per top-level decl with its name and inference time.
     // Aggregated by name in caller scripts to attribute cost per module.
@@ -1329,11 +1553,23 @@ pub(super) fn infer_ir_program_with_state(
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     validate_binder_literal_adoption_in_program(&items, &declared_signatures, errors);
-    let metadata_prebound_names = collected_ir_types
-        .type_env
-        .keys()
-        .cloned()
-        .collect::<UnordSet<_>>();
+    // PP9 uses the same two bounded prebind capabilities at both entries:
+    // [04-INF-4] external-input ascriptions are declaration-local, while a
+    // defsig-less function body stamp supplies the callable header that
+    // [04-INF-2]/[04-INF-3] make forward-visible. Eager values are never
+    // prebound from body metadata, preserving #1134's source-order rule.
+    let external_input_types = collect_literal_external_input_types(&items);
+    let (metadata_prebound_names, function_metadata_failures) =
+        prebind_defsig_less_function_body_types(
+            &items,
+            &declared_signatures,
+            &declaration_diagnostic_owners,
+            &mut state.env,
+            &mut state.var_gen,
+            &mut state.subst,
+            &state.adt_reg,
+            errors,
+        );
     let top_level_references = TopLevelReferenceGraph::build(&items);
     product.function_inference_plan =
         FunctionInferencePlan::build_from_reference_graph(&top_level_references);
@@ -1353,14 +1589,19 @@ pub(super) fn infer_ir_program_with_state(
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
     'schedule: for group in inference_groups {
+        let component_diagnostic_checkpoint = errors.checkpoint();
         let cyclic = group.cyclic;
         let recursion_active = !group.recursive_function_indices.is_empty();
-        let mut component_scope = cyclic.then(|| {
-            let cycle_precedence_names = top_level_references
+        let cycle_precedence_names = if cyclic {
+            top_level_references
                 .cycle_precedence_targets(&group.indices)
                 .into_iter()
                 .map(|target| top_level_references.definition(target).name.clone())
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut component_scope = cyclic.then(|| {
             ComponentLevelScope::enter(
                 &group.indices,
                 &items,
@@ -1378,10 +1619,19 @@ pub(super) fn infer_ir_program_with_state(
                 &metadata_prebound_names,
                 &mut state.env,
                 &mut state.var_gen,
+                &state.subst,
             )
         } else {
             UnordMap::new()
         };
+        product.record_group_provisional_types(
+            provisional_types
+                .to_sorted()
+                .into_iter()
+                .filter_map(|(index, ty)| {
+                    top_level_decl_name(items[*index].1).map(|name| (name.to_string(), ty.clone()))
+                }),
+        );
         // spec/04 §3.1.1: recursive-instantiation validation remains the
         // function-plan projection. A mixed reference cycle alone must not
         // activate it.
@@ -1402,7 +1652,7 @@ pub(super) fn infer_ir_program_with_state(
             );
         }
         let mut deferred_bindings = Vec::new();
-        for declaration_index in group.indices {
+        for &declaration_index in &group.indices {
             if cancelled() {
                 if let Some(scope) = component_scope.take() {
                     scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
@@ -1421,15 +1671,27 @@ pub(super) fn infer_ir_program_with_state(
                 crate::opacity::module_key_for_item(module.as_deref(), decl_name),
                 decl_name.map(str::to_string),
             );
+            let declaration_diagnostic_owner = declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref);
             state
                 .env
                 .set_current_declaration_ordinal(Some(declaration_index));
-            // An explicitly typed self-reference (`x = (x : T)`) needs no
-            // separate external-input prebind at this ingress: its body stamp
-            // is in `collected_ir_types`, so the loop above already bound it
-            // or recorded its resolution failure. Resolving the same type
-            // expression again here would report that failure twice and
-            // split the ingresses on exactly the input [04-INF-4] aligns.
+            let external_input_failure = prebind_literal_external_input_for_declaration(
+                declaration_index,
+                expr,
+                &external_input_types,
+                &declared_signatures,
+                declaration_diagnostic_owner,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
+            let prebound_type_failure = external_input_failure
+                .as_ref()
+                .or_else(|| function_metadata_failures.get(&declaration_index));
             if let Some(binding) = infer_top_level(
                 expr,
                 &mut state.env,
@@ -1438,34 +1700,31 @@ pub(super) fn infer_ir_program_with_state(
                 &state.adt_reg,
                 errors,
                 &mut product,
-                prebound_type_failures.get(&declaration_index),
-                provisional_types.get(&declaration_index),
+                prebound_type_failure,
+                provisional_types
+                    .get(&declaration_index)
+                    .map(recursion::RecursiveExpected::Provisional),
                 cyclic,
                 &user_def_names,
                 &declared_signatures,
+                declaration_diagnostic_owner,
             ) {
                 deferred_bindings.push(binding);
             }
-            product.finish_deferred_shape_checks(&mut state.var_gen, &mut state.subst, errors);
-            product.finish_root(&state.subst, errors);
+            close_declaration(
+                &mut product,
+                close_scope(cyclic),
+                &state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();
                 let name = top_level_decl_name(expr).unwrap_or("<anon>");
                 eprintln!("infer_ir_decl: {:>8.4}s {}", elapsed.as_secs_f64(), name);
             }
-            // Issue #256 round 2: drain the deferred-borrow ledger for this
-            // def and re-check each recorded variable against the now-complete
-            // substitution. Draining per-def keeps error attribution local and
-            // prevents one def's deferrals from leaking into the next.
-            validate_deferred_borrow_vars(
-                &state.subst,
-                &state.adt_reg,
-                state.env.active_declared_type_names(),
-                errors,
-            );
-            // D-CHECK: drain the per-def deferred-access ledger (see
-            // `validate_deferred_opaque_uses`).
-            validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
         if cancelled() {
             if let Some(scope) = component_scope.take() {
@@ -1474,6 +1733,14 @@ pub(super) fn infer_ir_program_with_state(
             break 'schedule;
         }
         if cyclic {
+            close_component(
+                &mut product,
+                &mut state.env,
+                &mut state.var_gen,
+                &mut state.subst,
+                &state.adt_reg,
+                errors,
+            );
             // Function-recursion validation, when independently active, must
             // clear its pins before component-wide generalization.
             if recursion_active {
@@ -1485,13 +1752,32 @@ pub(super) fn infer_ir_program_with_state(
                 .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
-                .map(|(name, ty)| {
-                    let scheme = state.env.generalize(&ty, &state.subst);
-                    (name, scheme)
+                .map(|binding| {
+                    generalize_deferred_recursive_binding(binding, &state.env, &state.subst)
                 })
                 .collect::<Vec<_>>();
             for (name, scheme) in schemes {
                 state.env.bind(name, scheme);
+            }
+            if recursion_active
+                && errors
+                    .iter_since(component_diagnostic_checkpoint)
+                    .next()
+                    .is_none()
+            {
+                sweep_recursive_collection_contracts(
+                    &group.recursive_function_indices,
+                    &items,
+                    &cycle_precedence_names,
+                    &mut state.env,
+                    &mut state.var_gen,
+                    &mut state.subst,
+                    &state.adt_reg,
+                    errors,
+                    &user_def_names,
+                    &declared_signatures,
+                    &declaration_diagnostic_owners,
+                );
             }
         }
     }
@@ -1504,24 +1790,6 @@ pub(super) fn infer_ir_program_with_state(
         // program and spend the phase's remaining budget doing it. The caller's
         // `cancellation_gate` turns this early return into a hard failure.
         return product;
-    }
-
-    for warning in chelis_deep::validate::validate(exprs) {
-        errors.push(
-            CheckError::new(
-                match warning.kind {
-                    chelis_deep::validate::WarningKind::Arity => CheckErrorKind::ArityMismatch,
-                    _ => CheckErrorKind::Other,
-                },
-                warning.message,
-                vec!["Use canonical Deep 3-tuple forms from spec/03".to_string()],
-            )
-            .at_offset(warning.offset),
-        );
-    }
-
-    if let Some(target_exprs) = run_validate_passes_on {
-        validate_ir_program(target_exprs, combined_ir, &top_level_references, errors);
     }
 
     product.top_level_references = top_level_references;
@@ -1611,7 +1879,6 @@ fn deep_type_contains_hole(expr: &deep::Expr) -> bool {
         return kids.iter().any(deep_type_contains_hole);
     }
     match expr {
-        deep::Expr::List(list, _) => list.elements.iter().any(deep_type_contains_hole),
         deep::Expr::BareList(elements, _) => elements.iter().any(deep_type_contains_hole),
         deep::Expr::MetaExpr(meta, _) => deep_type_contains_hole(&meta.expr),
         _ => false,
@@ -1643,7 +1910,7 @@ fn scan_declared_signatures(items: &[(Option<String>, &deep::Expr)]) -> Declared
             continue;
         };
         signed.insert(name.to_string());
-        if kids.get(1).is_some_and(deep_type_contains_hole) {
+        if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_contains_hole(type_expr)) {
             holed.insert(name.to_string());
         }
     }
@@ -1961,10 +2228,26 @@ pub(super) fn primary_inference_groups_for_schedule(
     groups
 }
 
+/// A cyclic component's members decide their obligations together, when the
+/// component completes (chelis#2584); every other declaration at its own close.
+fn close_scope(cyclic: bool) -> CloseScope {
+    if cyclic {
+        CloseScope::ComponentMember
+    } else {
+        CloseScope::Declaration
+    }
+}
+
 /// Install monomorphic types for the un-signed members of one cyclic
 /// full-reference component. Functions receive arity-shaped function types;
 /// eager values receive one fresh type variable. The component is removed and
 /// generalized as a unit after every body has unified with its provisional.
+///
+/// A member's body and its own references are typed at its provisional type.
+/// A sibling's reference is typed at a fresh copy of it, which the component's
+/// completion unifies with it (`group_link::sibling_instance`): no reference
+/// observes a member's type before the group has determined it ([04-INF-5]),
+/// so nothing a body infers depends on which sibling was inferred first.
 pub(super) fn prebind_cyclic_component_schemes(
     indices: &[usize],
     items: &[(Option<String>, &deep::Expr)],
@@ -1972,8 +2255,10 @@ pub(super) fn prebind_cyclic_component_schemes(
     metadata_prebound_names: &UnordSet<String>,
     env: &mut Env,
     vg: &mut VarGen,
+    subst: &Subst,
 ) -> UnordMap<usize, Type> {
     let mut provisional = UnordMap::new();
+    env.begin_group_level(subst.current_level());
     for index in indices {
         let expr = items[*index].1;
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -1982,7 +2267,14 @@ pub(super) fn prebind_cyclic_component_schemes(
         let (Some(name), Some(body)) = (kids.first().and_then(symbol_name), kids.get(1)) else {
             continue;
         };
-        if declared_signatures.contains_key(name) || metadata_prebound_names.contains(name) {
+        if metadata_prebound_names.contains(name) {
+            continue;
+        }
+        // A declared header is the member's scheme already, unless it omits a
+        // type: then the group types the member at its provisional type
+        // ([04-INF-5], [04-INF-2], chelis#2590).
+        if declared_signatures.contains_key(name) {
+            env.bind_holed_group_member(name, vg, subst);
             continue;
         }
         let ty = match tagged_children(body, DeepTag::Fn) {
@@ -1993,9 +2285,6 @@ pub(super) fn prebind_cyclic_component_schemes(
                 let arity = match params {
                     deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => {
                         node.child_count()
-                    }
-                    deep::Expr::List(params, _) if get_tag(params) == Some(DeepTag::Params) => {
-                        children(params).len()
                     }
                     deep::Expr::BareList(elements, _) => elements.len(),
                     _ => continue,
@@ -2044,6 +2333,68 @@ fn collect_literal_external_input_types(
         .collect()
 }
 
+/// Prebind the compiler-authored type stamp of each defsig-less function at
+/// both checker entries.
+///
+/// [04-INF-2]/[04-INF-3] make function declarations forward-visible, and a
+/// defsig-less serialized function has no other callable header. Restricting
+/// this prebind to function bodies keeps [04-INF-4]'s eager-value scope
+/// source-ordered. An explicit `defsig` remains authoritative and is never
+/// overwritten by body metadata (#1124).
+#[allow(clippy::too_many_arguments)]
+fn prebind_defsig_less_function_body_types(
+    items: &[(Option<String>, &deep::Expr)],
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owners: &[Option<DeclarationDiagnosticOwner>],
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) -> (UnordSet<String>, UnordMap<usize, ErrorWitness>) {
+    let CollectedIrTypes {
+        type_env,
+        final_origin_by_name,
+    } = collect_ir_types_with_origins(items.iter().map(|(_, expr)| *expr));
+    let mut prebound_names = UnordSet::new();
+    let mut failures = UnordMap::new();
+    for (name, ty_expr) in type_env {
+        let Some(&declaration_index) = final_origin_by_name.get(&name) else {
+            continue;
+        };
+        if declared_signatures.contains_key(&name)
+            || !definition_owns_function_metadata_prebind(items[declaration_index].1)
+        {
+            continue;
+        }
+        prebound_names.insert(name.clone());
+        let metadata_level = subst.enter_level(vg);
+        let resolved = resolve_deep_type_with_diagnostic_owner(
+            &ty_expr,
+            vg,
+            adt_reg,
+            TypeUseSite::CompilerMetadata,
+            BinderMode::TrustedCompilerMetadata,
+            declaration_diagnostic_owners
+                .get(declaration_index)
+                .and_then(Option::as_ref),
+            errors,
+        );
+        subst.leave_level(metadata_level, vg);
+        match resolved {
+            Ok(ty) => {
+                let scheme = env.generalize(&ty, subst);
+                subst.name_generic_parameters(&scheme, &name, &UnordMap::new());
+                env.bind(name, scheme);
+            }
+            Err(witness) => {
+                failures.insert(declaration_index, witness);
+            }
+        }
+    }
+    (prebound_names, failures)
+}
+
 /// [04-INF-4]'s typed literal self-reference declares an external input. Its
 /// own type must therefore be visible while that declaration is inferred,
 /// but never to an earlier declaration. Bind exactly the current ordinal just
@@ -2055,6 +2406,7 @@ fn prebind_literal_external_input_for_declaration(
     expr: &deep::Expr,
     external_input_types: &UnordMap<usize, deep::Expr>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -2067,18 +2419,20 @@ fn prebind_literal_external_input_for_declaration(
         return None;
     }
     let metadata_level = subst.enter_level(vg);
-    let resolved = resolve_deep_type(
+    let resolved = resolve_deep_type_with_diagnostic_owner(
         ty_expr,
         vg,
         adt_reg,
         TypeUseSite::CompilerMetadata,
         BinderMode::TrustedCompilerMetadata,
+        declaration_diagnostic_owner,
         errors,
     );
     subst.leave_level(metadata_level, vg);
     match resolved {
         Ok(ty) => {
             let scheme = env.generalize(&ty, subst);
+            subst.name_generic_parameters(&scheme, name, &UnordMap::new());
             env.bind(name.to_string(), scheme);
             None
         }
@@ -2113,204 +2467,27 @@ pub(super) fn collect_ir_types_with_origins<'a>(
     }
 }
 
-/// Iteratively convert `Expr::Node` → `Expr::List` and `Expr::BareList` →
-/// `Expr::List` so the pointer-keyed type-stamp system and existing
-/// List-based inference dispatch work on a single representation. The
-/// explicit heap worklist is required because this boundary runs before the
-/// guarded inference walkers: native recursion here would abort on the same
-/// deep input those walkers must reject with a typed diagnostic. This is the
-/// transitional normalization boundary for the #908 producer switch; once
-/// all inference functions are migrated to accept Node directly, this becomes
-/// dead code.
-fn normalize_nodes_to_lists(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
-    exprs.iter().map(normalize_node_to_list).collect()
+/// The checker's input normalization: pipes folded into the applications they
+/// denote. Every checker entry otherwise sees exactly the tree it was given.
+///
+/// chelis#1923: `spec/02-surf-syntax.md` §0.1 makes a pipe notation for
+/// first-argument insertion, and every consumer that reconstructed the
+/// application for itself was re-deriving that sentence. The checker folds
+/// once, here, so inference and the annotation pass that follows it see one
+/// tree. Folding only inside inference would leave the ANNOTATED tree, which
+/// is the checker's output and what the lowerer, linearity, the effect pass
+/// and the caches all read, still carrying the `Pipe` node.
+fn normalize_program_input(exprs: &[deep::Expr]) -> Vec<deep::Expr> {
+    chelis_deep::pipe::fold_program_pipes(exprs)
 }
 
-fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
-    enum Action<'a> {
-        Visit(&'a deep::Expr),
-        FinishList {
-            element_count: usize,
-            span: Span,
-        },
-        FinishMap {
-            map: &'a deep::MetaMap,
-            span: Span,
-        },
-        FinishMetaExpr {
-            meta: &'a deep::MetaExpr,
-            span: Span,
-        },
-        FinishNode {
-            tag: DeepTag,
-            meta: &'a deep::MetaMap,
-            child_count: usize,
-            span: Span,
-        },
-        FinishUnknownForm(&'a deep::UnknownFormData),
-    }
-
-    fn split_tail(values: &mut Vec<deep::Expr>, count: usize) -> Vec<deep::Expr> {
-        let start = values
-            .len()
-            .checked_sub(count)
-            .expect("normalization action/value stacks remain balanced");
-        values.split_off(start)
-    }
-
-    let mut actions = vec![Action::Visit(expr)];
-    let mut values = Vec::new();
-
-    while let Some(action) = actions.pop() {
-        match action {
-            Action::Visit(expr) => match expr {
-                deep::Expr::Atom(atom, span) => {
-                    values.push(deep::Expr::Atom(atom.clone(), *span));
-                }
-                deep::Expr::List(list, span) => {
-                    actions.push(Action::FinishList {
-                        element_count: list.elements.len(),
-                        span: *span,
-                    });
-                    actions.extend(list.elements.iter().rev().map(Action::Visit));
-                }
-                deep::Expr::Map(map, span) => {
-                    actions.push(Action::FinishMap { map, span: *span });
-                    actions.extend(
-                        map.entries
-                            .iter()
-                            .rev()
-                            .map(|(_, value)| Action::Visit(value)),
-                    );
-                }
-                deep::Expr::MetaExpr(meta, span) => {
-                    actions.push(Action::FinishMetaExpr { meta, span: *span });
-                    actions.push(Action::Visit(&meta.expr));
-                    actions.extend(
-                        meta.entries
-                            .iter()
-                            .rev()
-                            .map(|(_, value)| Action::Visit(value)),
-                    );
-                }
-                deep::Expr::Node(node, span) => {
-                    actions.push(Action::FinishNode {
-                        tag: node.tag(),
-                        meta: node.meta(),
-                        child_count: node.child_count(),
-                        span: *span,
-                    });
-                    actions.extend(node.children_slice().iter().rev().map(Action::Visit));
-                    actions.extend(
-                        node.meta()
-                            .entries
-                            .iter()
-                            .rev()
-                            .map(|(_, value)| Action::Visit(value)),
-                    );
-                }
-                deep::Expr::BareList(elements, span) => {
-                    actions.push(Action::FinishList {
-                        element_count: elements.len(),
-                        span: *span,
-                    });
-                    actions.extend(elements.iter().rev().map(Action::Visit));
-                }
-                deep::Expr::UnknownForm(data) => {
-                    actions.push(Action::FinishUnknownForm(data));
-                    actions.extend(data.children.iter().rev().map(Action::Visit));
-                    actions.extend(
-                        data.meta
-                            .entries
-                            .iter()
-                            .rev()
-                            .map(|(_, value)| Action::Visit(value)),
-                    );
-                }
-            },
-            Action::FinishList {
-                element_count,
-                span,
-            } => {
-                let elements = split_tail(&mut values, element_count);
-                values.push(deep::Expr::List(deep::List { elements }, span));
-            }
-            Action::FinishMap { map, span } => {
-                let normalized_values = split_tail(&mut values, map.entries.len());
-                let entries = map
-                    .entries
-                    .iter()
-                    .zip(normalized_values)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                values.push(deep::Expr::Map(deep::MetaMap { entries }, span));
-            }
-            Action::FinishMetaExpr { meta, span } => {
-                let mut normalized = split_tail(&mut values, meta.entries.len() + 1);
-                let normalized_expr = normalized
-                    .pop()
-                    .expect("MetaExpr normalization visits its expression");
-                let entries = meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                values.push(deep::Expr::MetaExpr(
-                    deep::MetaExpr {
-                        entries,
-                        expr: Box::new(normalized_expr),
-                    },
-                    span,
-                ));
-            }
-            Action::FinishNode {
-                tag,
-                meta,
-                child_count,
-                span,
-            } => {
-                let mut normalized = split_tail(&mut values, meta.entries.len() + child_count);
-                let children = normalized.split_off(meta.entries.len());
-                let entries = meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                let mut elements = Vec::with_capacity(child_count + 2);
-                elements.push(deep::Expr::Atom(deep::Atom::Tag(tag), span));
-                elements.push(deep::Expr::Map(deep::MetaMap { entries }, span));
-                elements.extend(children);
-                values.push(deep::Expr::List(deep::List { elements }, span));
-            }
-            Action::FinishUnknownForm(data) => {
-                let mut normalized =
-                    split_tail(&mut values, data.meta.entries.len() + data.children.len());
-                let children = normalized.split_off(data.meta.entries.len());
-                let entries = data
-                    .meta
-                    .entries
-                    .iter()
-                    .zip(normalized)
-                    .map(|((key, _), value)| (key.clone(), value))
-                    .collect();
-                values.push(deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
-                    head: data.head.clone(),
-                    meta: deep::MetaMap { entries },
-                    children,
-                    span: data.span,
-                })));
-            }
-        }
-    }
-
-    assert_eq!(
-        values.len(),
-        1,
-        "one normalization root produces exactly one expression"
-    );
-    values.pop().expect("normalization produced its root")
+#[cfg(test)]
+pub(crate) fn builtin_selection_probe(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<crate::builtin_discovery::BuiltinCaseSelection> {
+    let normalized = normalize_program_input(exprs);
+    infer_program_with_product_in_session(&normalized, errors).builtin_selections
 }
 
 #[cfg(test)]
@@ -2372,6 +2549,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         for (_, ty) in provisional.to_sorted() {
             for var in crate::env::free_tvars(ty) {
@@ -2442,6 +2620,7 @@ mod component_level_scope_tests {
             &UnordSet::new(),
             &mut env,
             &mut var_gen,
+            &subst,
         );
         super::super::recursion::begin_group(
             ["left", "right"].into_iter().map(|name| (name, false)),
@@ -2496,8 +2675,8 @@ mod component_level_scope_tests {
     #[test]
     fn primary_driver_mid_scc_cancellation_aborts_before_return() {
         let exprs = chelis_deep::parser::parse_str(
-            "(defsig {} left (t-fn {} (t-prim {} int32) (t-prim {} int32)))
-             (defsig {} right (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+            "(defsig {} left (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+             (defsig {} right (t-fn {} (t-prim {} i32) (t-prim {} i32)))
              (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
              (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
         )

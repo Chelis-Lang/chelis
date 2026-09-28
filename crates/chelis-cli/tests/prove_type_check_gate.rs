@@ -60,9 +60,9 @@ fn to_deep(surf: &str) -> String {
     String::from_utf8(out.stdout).expect("utf8 deep")
 }
 
-/// `def bad(x: int32) -> f32 = x` -- an int32 body where f32 is declared: a
+/// `def bad(x: i32) -> f32 = x` -- an i32 body where f32 is declared: a
 /// hard type error, no opaque type or invariant involved.
-const TYPE_BROKEN: &str = "module M\nexport (bad)\ndef bad(x: int32) -> f32 = x\n";
+const TYPE_BROKEN: &str = "module M\nexport (bad)\ndef bad(x: i32) -> f32 = x\n";
 
 #[test]
 fn type_broken_surf_module_errors_not_silent_pass() {

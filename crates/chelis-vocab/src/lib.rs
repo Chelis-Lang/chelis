@@ -34,6 +34,7 @@ pub enum DiagnosticKind {
     LowerError,
     ReefError,
     EvalError,
+    NumericTrap,
     Cancelled,
     GradError,
     ValidationError,
@@ -58,6 +59,7 @@ pub enum DiagnosticKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    KeyReuse,
     CycleDetected,
     UnsupportedTensorPrecision,
     DuplicateDefinition,
@@ -76,10 +78,17 @@ pub enum DiagnosticKind {
     InvalidHandler,
     BuildTargetMismatch,
     TypeTotality,
+    // chelis#1678: directory mode's two failures that belong to no single
+    // file (spec/04 [04-FIT-23] and [04-FIT-24]).
+    DirectoryWalkError,
+    EmptyCorpus,
+    // chelis#1825: a completed ordinary `chelis test` run selected no
+    // runnable test (spec/04 [04-TEST-1..3]).
+    EmptyTestSelection,
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 57] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -94,6 +103,7 @@ impl DiagnosticKind {
         Self::LowerError,
         Self::ReefError,
         Self::EvalError,
+        Self::NumericTrap,
         Self::Cancelled,
         Self::GradError,
         Self::ValidationError,
@@ -118,6 +128,7 @@ impl DiagnosticKind {
         Self::UseAfterConsume,
         Self::UnconsumedLinear,
         Self::InvalidBorrow,
+        Self::KeyReuse,
         Self::CycleDetected,
         Self::UnsupportedTensorPrecision,
         Self::DuplicateDefinition,
@@ -132,6 +143,9 @@ impl DiagnosticKind {
         Self::InvalidHandler,
         Self::BuildTargetMismatch,
         Self::TypeTotality,
+        Self::DirectoryWalkError,
+        Self::EmptyCorpus,
+        Self::EmptyTestSelection,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -150,6 +164,7 @@ impl DiagnosticKind {
             Self::LowerError => "lower_error",
             Self::ReefError => "reef_error",
             Self::EvalError => "eval_error",
+            Self::NumericTrap => "numeric_trap",
             Self::Cancelled => "cancelled",
             Self::GradError => "grad_error",
             Self::ValidationError => "validation_error",
@@ -174,6 +189,7 @@ impl DiagnosticKind {
             Self::UseAfterConsume => "UseAfterConsume",
             Self::UnconsumedLinear => "UnconsumedLinear",
             Self::InvalidBorrow => "InvalidBorrow",
+            Self::KeyReuse => "KeyReuse",
             Self::CycleDetected => "CycleDetected",
             Self::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             Self::DuplicateDefinition => "DuplicateDefinition",
@@ -188,6 +204,9 @@ impl DiagnosticKind {
             Self::InvalidHandler => "InvalidHandler",
             Self::BuildTargetMismatch => "BuildTargetMismatch",
             Self::TypeTotality => "TypeTotality",
+            Self::DirectoryWalkError => "directory_walk_error",
+            Self::EmptyCorpus => "empty_corpus",
+            Self::EmptyTestSelection => "empty_test_selection",
         }
     }
 
@@ -224,16 +243,14 @@ pub enum EffectKindInput<'a> {
 /// A closed effect vocabulary for all semantic consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EffectKind {
-    Random,
     Resource,
 }
 
 impl EffectKind {
-    pub const ALL: [Self; 2] = [Self::Random, Self::Resource];
+    pub const ALL: [Self; 1] = [Self::Resource];
 
     pub const fn symbol(self) -> &'static str {
         match self {
-            Self::Random => "random",
             Self::Resource => "resource",
         }
     }
@@ -242,8 +259,8 @@ impl EffectKind {
         match input {
             EffectKindInput::Missing => Err(EffectKindDecodeError::Missing),
             EffectKindInput::Malformed => Err(EffectKindDecodeError::Malformed),
-            EffectKindInput::Symbol("random") => Ok(Self::Random),
             EffectKindInput::Symbol("resource") => Ok(Self::Resource),
+            EffectKindInput::Symbol("random") => Err(EffectKindDecodeError::RetiredRandom),
             EffectKindInput::Symbol(symbol) => Err(EffectKindDecodeError::Unknown { symbol }),
         }
     }
@@ -257,7 +274,13 @@ impl EffectKind {
 pub enum EffectKindDecodeError<'a> {
     Missing,
     Malformed,
-    Unknown { symbol: &'a str },
+    Unknown {
+        symbol: &'a str,
+    },
+    /// The `random` handler kind, retired with the counter stream (#2413):
+    /// randomness has no handler or effect, and a random primitive takes an
+    /// explicit key.
+    RetiredRandom,
 }
 
 impl fmt::Display for EffectKindDecodeError<'_> {
@@ -266,6 +289,11 @@ impl fmt::Display for EffectKindDecodeError<'_> {
             Self::Missing => f.write_str("missing effect kind"),
             Self::Malformed => f.write_str("malformed effect kind"),
             Self::Unknown { symbol } => write!(f, "unknown effect kind `{symbol}`"),
+            Self::RetiredRandom => f.write_str(
+                "effect kind `random` is retired: randomness has no handler or effect, and a \
+                 random primitive takes an explicit key made by `key_from_seed` and derived by \
+                 `split_key`, `split_keys` or `fold_in` (spec/04-type-system.md section 1.1)",
+            ),
         }
     }
 }
@@ -288,10 +316,13 @@ pub enum Repr {
     TwosComplement64,
     /// A canonical boolean in one byte: `0` is false and `1` is true.
     Bool8,
+    /// An opaque 64-bit word with no numeric meaning: a random key
+    /// ([05-RNG-2]). Every bit pattern is a key.
+    Word64,
 }
 
 impl Repr {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Ieee754Binary16,
         Self::Ieee754Binary32,
         Self::Ieee754Binary64,
@@ -301,6 +332,7 @@ impl Repr {
         Self::TwosComplement32,
         Self::TwosComplement64,
         Self::Bool8,
+        Self::Word64,
     ];
 
     pub const fn byte_width(self) -> usize {
@@ -308,7 +340,7 @@ impl Repr {
             Self::TwosComplement8 | Self::Bool8 => 1,
             Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
             Self::Ieee754Binary32 | Self::TwosComplement32 => 4,
-            Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
+            Self::Ieee754Binary64 | Self::TwosComplement64 | Self::Word64 => 8,
         }
     }
 
@@ -324,7 +356,8 @@ impl Repr {
             | Self::TwosComplement16
             | Self::TwosComplement32
             | Self::TwosComplement64
-            | Self::Bool8 => false,
+            | Self::Bool8
+            | Self::Word64 => false,
         }
     }
 }
@@ -344,6 +377,9 @@ pub enum RuntimeDType {
     F16 = 6,
     I8 = 7,
     I16 = 8,
+    /// A random key ([05-RNG-2]): structurally non-numeric, with no
+    /// arithmetic representation.
+    Key = 9,
 }
 
 /// The representation used while computing, before storage finalization
@@ -409,7 +445,7 @@ impl DTypeContract {
 }
 
 impl RuntimeDType {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::F32,
         Self::F64,
         Self::I32,
@@ -419,6 +455,7 @@ impl RuntimeDType {
         Self::F16,
         Self::I8,
         Self::I16,
+        Self::Key,
     ];
 
     pub const fn id(self) -> i32 {
@@ -436,6 +473,7 @@ impl RuntimeDType {
             Self::F16 => "f16",
             Self::I8 => "int8",
             Self::I16 => "int16",
+            Self::Key => "key",
         }
     }
 
@@ -450,11 +488,13 @@ impl RuntimeDType {
             Self::F16 => "CHELIS_DTYPE_F16",
             Self::I8 => "CHELIS_DTYPE_I8",
             Self::I16 => "CHELIS_DTYPE_I16",
+            Self::Key => "CHELIS_DTYPE_KEY",
         }
     }
 
     /// Selects stored and arithmetic representation together, exactly as
-    /// [04-NUM-8] declares. Bool has no arithmetic representation ([04-NUM-4]).
+    /// [04-NUM-8] declares. Bool has no arithmetic representation ([04-NUM-4]),
+    /// and neither has a key (spec/04 §1.1).
     pub const fn contract(self) -> DTypeContract {
         use ArithmeticRepr as A;
         let (repr, arithmetic) = match self {
@@ -467,6 +507,7 @@ impl RuntimeDType {
             Self::F16 => (Repr::Ieee754Binary16, Some(A::Ieee754Binary32)),
             Self::I8 => (Repr::TwosComplement8, Some(A::ExactTwosComplement8)),
             Self::I16 => (Repr::TwosComplement16, Some(A::ExactTwosComplement16)),
+            Self::Key => (Repr::Word64, None),
         };
         DTypeContract {
             dtype: self,
@@ -496,6 +537,7 @@ impl RuntimeDType {
             6 => Ok(Self::F16),
             7 => Ok(Self::I8),
             8 => Ok(Self::I16),
+            9 => Ok(Self::Key),
             id => Err(RuntimeDTypeDecodeError::InvalidId { id }),
         }
     }

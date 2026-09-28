@@ -16,7 +16,7 @@
 //! same Phase 2 helper used by shipped roots. The byte-equal-or-table-
 //! bounded decision then comes only from `chelis_types::agreement`.
 //!
-//! This file deliberately gains no int64-above-2^53 row: at this DAG level
+//! This file deliberately gains no i64-above-2^53 row: at this DAG level
 //! `RiscOp::Const { value: f64 }` cannot express it (chelis#684), so that
 //! row would test the wrong layer. The exact-integer cross-lane oracle is:
 //! `crates/chelis-cli/tests/precision_matrix.rs` (`eval_lane_str` /
@@ -65,67 +65,6 @@ fn vec_ty(n: usize, prec: Prim) -> TensorType {
     }
 }
 
-fn runtime_src_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("chelis-runtime")
-        .join("include")
-}
-
-/// Resolve the workspace `target/` directory from the running test binary
-/// rather than a `CARGO_MANIFEST_DIR`-relative path, so an external
-/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
-/// `target/agents/<name>`) is honored. The binary lives at
-/// `<target>/<profile>/deps/<test-bin>`; strip a trailing `deps` component if
-/// present, then drop the profile component to reach `<target>`. See
-/// chelis#747.
-fn target_dir_from_current_exe() -> PathBuf {
-    let exe = std::env::current_exe().expect("could not determine current test executable");
-    let mut profile_dir = exe
-        .parent()
-        .expect("test executable should have a parent directory");
-    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        profile_dir = profile_dir
-            .parent()
-            .expect("`deps` directory should have a parent");
-    }
-    profile_dir
-        .parent()
-        .map(PathBuf::from)
-        .expect("profile directory should have a parent target directory")
-}
-
-fn runtime_library_path() -> PathBuf {
-    let target_dir = target_dir_from_current_exe();
-    for path in [
-        target_dir.join("debug/libchelis_runtime.a"),
-        target_dir.join("release/libchelis_runtime.a"),
-    ] {
-        if path.exists() {
-            return path;
-        }
-    }
-    for dir in [
-        target_dir.join("debug/deps"),
-        target_dir.join("release/deps"),
-    ] {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-                {
-                    return path;
-                }
-            }
-        }
-    }
-    panic!("runtime lib not found");
-}
-
 fn gcc_available() -> bool {
     Command::new(chelis_backend_c::toolchain::c_compiler())
         .arg("--version")
@@ -166,9 +105,9 @@ fn c_render_result(prim: Prim) -> &'static str {
         | Prim::Bool => {
             "chelis_scalar scalar = chelis_tensor_to_scalar(outputs[0]); \
              chelis_string text = chelis_string_from_scalar(scalar); \
-             printf(\"%s\", chelis_string_data(text)); chelis_string_release(text);"
+             chelis_print_string(text); chelis_string_release(text);"
         }
-        Prim::F8e4m3 | Prim::String => {
+        Prim::F8e4m3 | Prim::String | Prim::Key => {
             panic!("eval agreement has no C renderer for {}", prim.name())
         }
     }
@@ -190,22 +129,8 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let result = chelis_backend_c::codegen(verified, func_name).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
-    let rt_dir = runtime_src_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = std::fs::read_to_string(rt_dir.join(header)).unwrap();
-        write_temp_file(tmp.path(), header, &src);
-    }
-    std::fs::copy(
-        runtime_library_path(),
-        tmp.path().join("libchelis_runtime.a"),
-    )
-    .unwrap();
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.c", &result.c_source);
 
     let prim = dag
@@ -242,8 +167,7 @@ int main(void) {{
     cmd.args(&toolchain.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-    cmd.arg(format!("-L{}", tmp.path().display()));
-    cmd.arg("-lchelis_runtime");
+    cmd.arg(&staged.archive);
     cmd.args(&toolchain.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());
@@ -319,7 +243,15 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
-        | RiscOp::CmpLt
+        | RiscOp::Mod
+        | RiscOp::Bitwise(_)
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
+        // chelis#1464 / [05-OP-68]: the guard carries the fallback's stored
+        // bits unchanged when it does not fire, so it is exact by
+        // construction; when it does fire there is no value to compare.
+        | RiscOp::GuardedFail { .. }
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
@@ -331,8 +263,19 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        // [05-RNG-1] makes every random result bit-identical across lanes,
+        // a draw key is a word no lane observes as a result, and [05-RNG-2]
+        // defines every key derivation bit for bit; a branch's join selects
+        // one of two such keys.
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
         | RiscOp::Sum { .. }
         | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }
@@ -350,6 +293,9 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Shrink { .. }
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
         | RiscOp::Load { .. }
@@ -455,7 +401,9 @@ fn agreement_compiled_observation_reaches_comparator() {
         panic!("Phase 3 compiled-observation canary requires a host C compiler");
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::Int32, 7.0),
         vec![],
         scalar_ty(Prim::Int32),
@@ -555,19 +503,22 @@ fn agreement_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 4.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_add", "add(3,4)");
     assert_expected("add(3,4) expected", &result, "7.0");
@@ -580,19 +531,22 @@ fn agreement_mul() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 5.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 6.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_mul", "mul(5,6)");
     assert_expected("mul(5,6) expected", &result, "30.0");
@@ -605,13 +559,15 @@ fn agreement_neg() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 7.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Neg, vec![a], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Neg, vec![a], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_neg", "neg(7)");
     assert_expected("neg(7) expected", &result, "-7.0");
@@ -627,13 +583,15 @@ fn agreement_relu() {
     // Dedicated ReLU identity with negative input.
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_neg", "relu(-2)");
         assert_expected("relu(-2) expected", &result, "0.0");
@@ -642,13 +600,15 @@ fn agreement_relu() {
     // relu with positive input
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 3.0),
             vec![],
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Relu, vec![x], scalar_f32(), None);
+        dag.add_node(decl, RiscOp::Relu, vec![x], scalar_f32(), None);
 
         let result = assert_agrees(&dag, "test_relu_pos", "relu(3)");
         assert_expected("relu(3) expected", &result, "3.0");
@@ -662,13 +622,15 @@ fn agreement_exp() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 0.0),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(RiscOp::Exp, vec![a], scalar_f32(), None);
+    dag.add_node(decl, RiscOp::Exp, vec![a], scalar_f32(), None);
 
     let result = assert_agrees(&dag, "test_exp", "exp(0)");
     assert_expected("exp(0) expected", &result, "1.0");
@@ -680,13 +642,15 @@ fn assert_unary_transcendental(op: RiscOp, op_name: &str, input: f64, expected: 
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let argument = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, input),
         vec![],
         scalar_f32(),
         None,
     );
-    dag.add_node(op, vec![argument], scalar_f32(), None);
+    dag.add_node(decl, op, vec![argument], scalar_f32(), None);
     let func_name = format!("test_{op_name}");
     let label = format!("{op_name}({input})");
     let result = assert_agrees(&dag, &func_name, &label);
@@ -732,19 +696,22 @@ fn agreement_bf16_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = assert_agrees(&dag, "test_bf16_add", "bf16 add(1.5, 2.5)");
     assert_expected("bf16 add expected", &result, "4.0");
 }
@@ -756,19 +723,22 @@ fn agreement_f16_add() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
     let result = assert_agrees(&dag, "test_f16_add", "f16 add(1.5, 2.5)");
     assert_expected("f16 add expected", &result, "4.0");
 }
@@ -783,14 +753,16 @@ fn agreement_bf16_reduce_sum_matches_eval_exactly() {
     // self-contained (no Load to thread inputs through the runtime).
     let n = 8;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 0.25),
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let sum = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
-    dag.add_node(sum, vec![c], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum, vec![c], scalar_ty(Prim::F32), None);
     let result = assert_agrees(&dag, "test_bf16_sum_const", "bf16 reduce_sum(0.25 x 8)");
     assert_expected("bf16 reduce_sum expected", &result, "2.0");
 }

@@ -15,6 +15,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from generate_rejection_registries import ProductionSource, discover_production_sources
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
@@ -45,6 +46,8 @@ EXPECTED_PUBLIC_FUNCTIONS = Counter(
         "new": 1,
         "compiled_host_only_builtin": 1,
         "with_span": 1,
+        "with_supported_alternative": 1,
+        "identity": 1,
     }
 )
 DIRECT_BUILDER = re.compile(
@@ -160,18 +163,15 @@ def validate_usage_source(path: str, source: str) -> list[str]:
     return errors
 
 
-def validate_production_usage(root: Path = ROOT) -> list[str]:
+def validate_production_usage(
+    root: Path = ROOT, sources: list[ProductionSource] | None = None
+) -> list[str]:
+    """Validate the exact shared production source graph."""
     errors: list[str] = []
-    crates = root / "crates"
-    for path in sorted(crates.rglob("*.rs")):
-        relative = path.relative_to(root)
-        if "tests" in relative.parts or relative.as_posix().endswith(
-            "chelis-types/src/unsupported.rs"
-        ):
-            continue
+    for source in sources if sources is not None else discover_production_sources(root):
         errors.extend(
             validate_usage_source(
-                relative.as_posix(), path.read_text(encoding="utf-8")
+                source.path.as_posix(), source.source
             )
         )
     return errors

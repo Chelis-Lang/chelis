@@ -22,159 +22,13 @@ use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
 
 const BF16_TOL: f64 = 1e-2;
 const F16_TOL: f64 = 1e-3;
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    // Use a PID-suffixed tmp filename so concurrent test binaries (this
-    // file and exec_compile.rs both call into this helper, and nextest
-    // runs them in parallel) do not race on a shared tmp path. Each
-    // process writes its own tmp and renames into the shared canonical
-    // location; last writer wins, but the content is identical so the
-    // race is harmless. Without the PID, two processes that interleave
-    // `fs::copy` and `fs::rename` produce an ENOENT on the second
-    // rename because the first rename moved the shared tmp away.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    // The rename can still race with another process renaming its own
-    // unique tmp into the same canonical path. On POSIX, rename onto an
-    // existing file is atomic, so this is fine. If a peer beat us to
-    // it, treat NotFound from a follow-up cleanup as benign.
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = match fs::read_dir(deps_dir) {
-        Ok(it) => it,
-        // Truly cold target dirs may not have `deps/` yet; let the
-        // caller fall through to the explicit `cargo build` fallback.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
-
-fn gcc_available() -> bool {
-    Command::new("gcc")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn cblas_available() -> bool {
-    // Probe by linking a trivial program that references `cblas_sgemm`.
-    // If the OS does not ship libcblas the matmul tests early-return
-    // gracefully (the agreement tests still cover this via the e2e
-    // suite under a unified cblas guard).
-    let probe = common::probe_dir("bf16_cblas_probe");
-    let dir = probe.path().to_path_buf();
-    let probe_source = dir.join("probe.c");
-    fs::write(
-        &probe_source,
-        r#"
-extern void cblas_sgemm();
-int main(void) { (void)cblas_sgemm; return 0; }
-"#,
-    )
-    .unwrap();
-    let out = dir.join("probe_bin");
-    Command::new("gcc")
-        .args([
-            probe_source.to_str().unwrap(),
-            "-lcblas",
-            "-o",
-            out.to_str().unwrap(),
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Build a C source + main harness, gcc-compile, run, return stdout.
 /// Panics on compile or runtime failure with the generated C attached.
@@ -189,20 +43,11 @@ fn compile_and_run_kernel(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let mut args: Vec<String> = vec![
         "-O2".into(),
         "-std=c11".into(),
@@ -214,13 +59,15 @@ fn compile_and_run_kernel(
         bin.to_str().unwrap().into(),
         runtime_lib.to_str().unwrap().into(),
     ];
-    if needs_cblas {
-        args.push("-lcblas".into());
-    }
-    args.push("-lm".into());
-    args.push("-lpthread".into());
-    args.push("-ldl".into());
-    let compile = Command::new("gcc")
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: needs_cblas,
+        },
+    );
+    args.extend(toolchain.compile_flags);
+    args.extend(toolchain.link_flags);
+    let compile = Command::new(toolchain.compiler)
         .args(&args)
         .output()
         .expect("failed to invoke gcc");
@@ -324,10 +171,6 @@ fn mat_ty(rows: usize, cols: usize, prec: Prim) -> TensorType {
 
 #[test]
 fn bf16_const_fill_produces_exact_bit_pattern() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     // Each (value, expected bf16 bit pattern) pair the plan pins for
     // the Const-fill emit path.
     let cases: &[(f32, u16)] = &[
@@ -338,8 +181,10 @@ fn bf16_const_fill_produces_exact_bit_pattern() {
     ];
     for &(value, expected) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let n = 4;
         dag.add_node(
+            decl,
             RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::Bf16),
@@ -377,10 +222,6 @@ int main(void) {{
 
 #[test]
 fn f16_const_fill_produces_exact_bit_pattern() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let cases: &[(f32, u16)] = &[
         (1.5_f32, 0x3E00),
         (2.5_f32, 0x4100),
@@ -389,8 +230,10 @@ fn f16_const_fill_produces_exact_bit_pattern() {
     ];
     for &(value, expected) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let n = 4;
         dag.add_node(
+            decl,
             RiscOp::synth_const(vec_ty(n, Prim::F16).precision, value as f64),
             vec![],
             vec_ty(n, Prim::F16),
@@ -442,24 +285,23 @@ fn eval_scalar(dag: &Dag) -> f64 {
 
 #[test]
 fn bf16_add_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.5),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = codegen(&dag, "bf16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -486,24 +328,23 @@ int main(void) {{
 
 #[test]
 fn f16_add_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.5),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_ty(Prim::F16), None);
     let result = codegen(&dag, "f16_add").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -530,24 +371,23 @@ int main(void) {{
 
 #[test]
 fn bf16_mul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 3.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 2.0),
         vec![],
         scalar_ty(Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_ty(Prim::Bf16), None);
     let result = codegen(&dag, "bf16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -573,24 +413,23 @@ int main(void) {{
 
 #[test]
 fn f16_mul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 3.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 2.0),
         vec![],
         scalar_ty(Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], scalar_ty(Prim::F16), None);
     let result = codegen(&dag, "f16_mul").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -625,20 +464,18 @@ int main(void) {{
 ///     (not coincidentally producing the right answer).
 #[test]
 fn bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 1024;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let sum_op = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
-    dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum_op, vec![load], scalar_ty(Prim::F32), None);
     let result = codegen(&dag, "bf16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -686,20 +523,18 @@ int main(void) {{
 
 #[test]
 fn f16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 1024;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     let sum_op = RiscOp::sum_default(0, Prim::F16).expect("sum constructs");
-    dag.add_node(sum_op, vec![load], scalar_ty(Prim::F32), None);
+    dag.add_node(decl, sum_op, vec![load], scalar_ty(Prim::F32), None);
     let result = codegen(&dag, "f16_sum_1024").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -746,19 +581,18 @@ int main(void) {{
 
 #[test]
 fn bf16_reduce_max_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::Bf16),
@@ -793,19 +627,18 @@ int main(void) {{
 
 #[test]
 fn f16_reduce_max_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::F16),
@@ -844,13 +677,16 @@ int main(void) {{
 
 fn build_bf16_matmul_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -864,19 +700,22 @@ fn build_bf16_matmul_dag() -> Dag {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs");
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
     dag
 }
 
 fn build_f16_matmul_dag() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::F16),
@@ -890,7 +729,7 @@ fn build_f16_matmul_dag() -> Dag {
         Prim::F16,
     )
     .expect("f16 matmul constructs");
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F16), None);
     dag
 }
 
@@ -945,14 +784,6 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
 
 #[test]
 fn bf16_matmul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
-    if !cblas_available() {
-        eprintln!("skipping: libcblas not available");
-        return;
-    }
     let dag = build_bf16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_exec").unwrap();
@@ -1013,14 +844,6 @@ int main(void) {{
 
 #[test]
 fn f16_matmul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
-    if !cblas_available() {
-        eprintln!("skipping: libcblas not available");
-        return;
-    }
     let dag = build_f16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_exec").unwrap();

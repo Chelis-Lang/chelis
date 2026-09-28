@@ -32,6 +32,15 @@ fn append(path: &Path, extra: &str) {
     std::fs::write(path, t).unwrap();
 }
 
+#[test]
+fn new_scaffold_uses_the_current_reef_manifest_schema() {
+    let (_tmp, root) = green_shell();
+    let manifest = std::fs::read_to_string(root.join("reef.toml")).unwrap();
+
+    assert!(manifest.starts_with("schema = \"3\"\n\n[package]\n"));
+    assert!(manifest.contains("resolver = \"2\""));
+}
+
 // ---------------------------------------------------------------- #651 allowlist
 
 #[test]
@@ -50,14 +59,10 @@ fn declared_local_skill_survives_sync_and_audit() {
         audit::Verdict::Fail
     );
 
-    // Declare it; now §8 exempts it and sync preserves it.
+    // Declare it; sync preserves it and both agent symlinks expose it.
     append(
         &root.join("reef.toml"),
         "\n[conform]\nlocal_skills = [\"chelis-std\"]\n",
-    );
-    assert!(
-        audit::audit(&root).ok(),
-        "declared local skill must not fail §8"
     );
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
@@ -68,6 +73,8 @@ fn declared_local_skill_survives_sync_and_audit() {
         !notices.iter().any(|n| n.contains("chelis-std")),
         "a declared local skill must not warn as pruned: {notices:?}"
     );
+    assert!(root.join(".claude/skills/chelis-std/SKILL.md").exists());
+    assert!(root.join(".codex/skills/chelis-std/SKILL.md").exists());
     assert!(audit::audit(&root).ok());
 }
 
@@ -105,6 +112,13 @@ fn local_skills_may_not_shadow_a_shared_skill() {
 // ------------------------------------------------------------- #653 shell-local
 
 const BLOCK: &str = "<!-- shell-local:begin -->\n## School override\nexamples/ is a reef source root.\n<!-- shell-local:end -->\n";
+const SUBTRACTIVE_BLOCK: &str = "<!-- shell-local:begin -->\n\
+<!-- shell-local:exclude:begin -->\n\
+<!-- ## Verification -->\n\
+<!-- shell-local:exclude:end -->\n\n\
+## School override\n\
+Use the shell's own example gate.\n\
+<!-- shell-local:end -->\n";
 
 #[test]
 fn shell_local_block_passes_audit_and_survives_sync() {
@@ -112,12 +126,8 @@ fn shell_local_block_passes_audit_and_survives_sync() {
     let skill = root.join("agent-skills/example-corpus/SKILL.md");
     append(&skill, &format!("\n{BLOCK}"));
 
-    assert!(
-        audit::audit(&root).ok(),
-        "a well-formed shell-local block is exempt from §8"
-    );
-
-    // Sync regenerates the managed span but keeps the block verbatim.
+    // Sync regenerates the managed span, keeps the block verbatim, and updates
+    // both agent-surface symlinks before audit accepts the tree.
     let notices = scaffold::materialize_skills(&root).unwrap();
     assert!(
         notices.is_empty(),
@@ -129,6 +139,88 @@ fn shell_local_block_passes_audit_and_survives_sync() {
         "sync dropped the block"
     );
     assert!(audit::audit(&root).ok());
+}
+
+#[test]
+fn shell_local_exclusion_removes_an_upstream_section_and_survives_sync() {
+    let (_tmp, root) = green_shell();
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    append(&skill, &format!("\n{SUBTRACTIVE_BLOCK}"));
+
+    assert!(
+        !audit::audit(&root).ok(),
+        "the section is still present until sync applies the exclusion"
+    );
+    scaffold::materialize_skills(&root).expect("sync subtractive override");
+    let after = std::fs::read_to_string(&skill).unwrap();
+    assert!(after.contains("## Policy") && after.contains("## Rules"));
+    assert!(
+        !after.contains("For executable examples:"),
+        "the selected Verification section must be absent: {after}"
+    );
+    assert!(
+        after.contains("<!-- ## Verification -->"),
+        "the selector remains in the block"
+    );
+    assert!(after.contains("Use the shell's own example gate."));
+    assert!(audit::audit(&root).ok());
+
+    scaffold::materialize_skills(&root).expect("repeat sync");
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), after);
+}
+
+#[test]
+fn removing_a_shell_local_exclusion_restores_the_current_upstream_section() {
+    let (_tmp, root) = green_shell();
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    append(&skill, &format!("\n{SUBTRACTIVE_BLOCK}"));
+    scaffold::materialize_skills(&root).expect("exclude section");
+
+    let filtered = std::fs::read_to_string(&skill).unwrap();
+    let directive = "<!-- shell-local:exclude:begin -->\n<!-- ## Verification -->\n<!-- shell-local:exclude:end -->\n\n";
+    std::fs::write(&skill, filtered.replace(directive, "")).unwrap();
+    scaffold::materialize_skills(&root).expect("restore section");
+
+    let restored = std::fs::read_to_string(&skill).unwrap();
+    assert!(restored.contains("For executable examples:"));
+    assert!(restored.contains("Use the shell's own example gate."));
+    assert!(audit::audit(&root).ok());
+}
+
+#[test]
+fn unknown_shell_local_exclusion_heading_fails_audit_and_sync() {
+    let (_tmp, root) = green_shell();
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    let block = SUBTRACTIVE_BLOCK.replace("## Verification", "## Not Upstream");
+    append(&skill, &format!("\n{block}"));
+
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, audit::Verdict::Fail);
+    assert!(r.diagnostic.contains("## Not Upstream"), "{}", r.diagnostic);
+    let err = scaffold::materialize_skills(&root).unwrap_err();
+    assert!(err.contains("## Not Upstream"), "{err}");
+}
+
+#[test]
+fn malformed_shell_local_exclusion_block_fails_audit_and_sync() {
+    let (_tmp, root) = green_shell();
+    let skill = root.join("agent-skills/example-corpus/SKILL.md");
+    append(
+        &skill,
+        "\n<!-- shell-local:begin -->\n<!-- shell-local:exclude:begin -->\n<!-- ## Verification -->\n<!-- shell-local:end -->\n",
+    );
+
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, audit::Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("shell-local:exclude:end"),
+        "{}",
+        r.diagnostic
+    );
+    let err = scaffold::materialize_skills(&root).unwrap_err();
+    assert!(err.contains("shell-local:exclude:end"), "{err}");
 }
 
 #[test]

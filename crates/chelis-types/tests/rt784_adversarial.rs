@@ -2,9 +2,9 @@
 //!
 //! Two properties of the #784 hotfix guard (`shape_override_operand_error`):
 //!
-//!  A. GUARD BREADTH — the annotation-writeback clobber the conv2d test pins
+//!  A. GUARD BREADTH — the annotation-writeback clobber the conv test pins
 //!     must not reproduce for the *other* guarded shape-computed builtins.
-//!     Same shape as the conv2d fixture (three top-level defs; the operands
+//!     Same shape as the conv fixture (three top-level defs; the operands
 //!     are separate defs and thus unbound → `Error` in the consuming def's
 //!     body-annotation scope), for `matmul`, `sum`, and 3-arg `expand`: the
 //!     app node's written-back `type:` must stay the concrete `t-tensor`,
@@ -16,7 +16,7 @@
 //!     builtin fed one unbound (reported-error) operand in normal position
 //!     must STILL be rejected (never check clean) with EXACTLY ONE diagnostic
 //!     (the unbound var), and never ICE. Covers all five signature checkers:
-//!     matmul, conv2d, a reduction (sum), expand, layer_norm.
+//!     matmul, conv, a reduction (sum), expand, layer_norm.
 
 use chelis_deep::parser::parse_str;
 use chelis_deep::{Atom, Expr};
@@ -26,43 +26,34 @@ use chelis_types::{InferResult, check_ir_program};
 
 // ── Part A helpers (Deep source, mirror issue_778 clobber test) ───────────
 
-fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+fn node_tag(expr: &Expr) -> Option<&str> {
     // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    // head string.
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return None;
-    };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    node.meta().ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
+    if node_tag(expr) != Some("app") {
         return None;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(app, _) = expr else {
         return None;
     };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
+    let callee = app.children_slice().first()?;
+    if node_tag(callee) != Some("var") {
         return None;
     }
-    let Expr::List(var_list, _) = callee else {
+    let Expr::Node(var, _) = callee else {
         return None;
     };
-    match var_list.elements.get(2) {
+    match var.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -71,26 +62,17 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                visit(child, f);
-            }
-        }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                visit(value, f);
-            }
+            map.visit_expressions(&mut |value, _| visit(value, f));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                visit(value, f);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| visit(value, f));
             visit(&meta.expr, f);
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                visit(value, f);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| visit(value, f));
             for child in node.children_iter() {
                 match child {
                     chelis_deep::node::ChildRef::Expr(expr)
@@ -109,9 +91,7 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                visit(value, f);
-            }
+            data.meta.visit_expressions(&mut |value, _| visit(value, f));
             for child in &data.children {
                 visit(child, f);
             }
@@ -131,7 +111,7 @@ fn writeback_type_tags(src: &str, callee: &str) -> Vec<String> {
             if app_callee_name(node) == Some(callee)
                 && let Some(ty) = node_type_meta(node)
             {
-                tags.push(list_tag(ty).unwrap_or("<none>").to_string());
+                tags.push(node_tag(ty).unwrap_or("<none>").to_string());
             }
         });
     }
@@ -199,7 +179,7 @@ fn insert_error_operand_does_not_clobber_concrete_annotation() {
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -248,37 +228,30 @@ fn matmul_unbound_operand_single_diagnostic_no_accept() {
 }
 
 #[test]
-fn conv2d_unbound_operand_rejected_no_accept_no_ice() {
-    // conv2d additionally carries a pre-existing IR-fitness validator
-    // (`validate_conv2d`, issue #186) that fires on non-concrete argument
-    // metadata, independent of and untouched by the #784 guard. So the
-    // correct rejection here is TWO diagnostics: the unbound var plus the
-    // conv2d metadata validator. Not a flood, not a silent accept, no ICE.
+fn conv_unbound_operand_rejected_no_accept_no_ice() {
+    // PP9 removes the backend-only concrete-metadata refusal from the
+    // language checker. The authored unbound operand remains one loud error;
+    // the old capability diagnostic must not survive as a cascade.
     let msgs = reject_messages(
-        "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv2d(missing_x, k, 1, 0)\n  cast(0.0, f32)\n}\n",
-        "conv2d main-pass",
+        "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv(missing_x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n  cast(0.0, f32)\n}\n",
+        "conv main-pass",
     );
     assert!(
         msgs.iter()
             .any(|m| m.contains("unbound variable") && m.contains("missing_x")),
-        "conv2d main-pass: must report the unbound var; got {msgs:?}",
+        "conv main-pass: must report the unbound var; got {msgs:?}",
     );
-    let non_unbound: Vec<_> = msgs
-        .iter()
-        .filter(|m| !m.contains("unbound variable"))
-        .collect();
     assert!(
-        non_unbound
+        !msgs
             .iter()
-            .all(|m| m.contains("conv2d") && m.contains("concrete tensor argument metadata")),
-        "conv2d main-pass: the only non-unbound diagnostic must be the #186 metadata \
-         validator (no flood, no leaked bare-var cascade); got {msgs:?}",
+            .any(|m| m.contains("concrete tensor argument metadata")),
+        "conv main-pass: a backend capability restriction must not leak into checking; got {msgs:?}",
     );
     assert!(
         !msgs
             .iter()
             .any(|m| m.to_lowercase().contains("internal compiler error")),
-        "conv2d main-pass: never an ICE; got {msgs:?}",
+        "conv main-pass: never an ICE; got {msgs:?}",
     );
 }
 
@@ -309,7 +282,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
+        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = insert(x, 0, add(missing_v, cast(1, i64)))\n  cast(0.0, f32)\n}\n",
         "missing_v",
         "expand error-size main-pass",
     );
@@ -318,7 +291,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
 #[test]
 fn layer_norm_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b)\n  cast(0.0, f32)\n}\n",
+        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b, 0.00001f32)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "layer_norm main-pass",
     );

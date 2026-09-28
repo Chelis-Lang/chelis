@@ -73,6 +73,7 @@ fn deep(source: &str) -> Vec<chelis_deep::Expr> {
     desugar_program(&parse_surf(source).unwrap_or_else(|error| {
         panic!("fixture must parse as Surf: {error:?}\n{source}");
     }))
+    .expect("Surf fixture must desugar")
 }
 
 fn messages(errors: &[CheckError]) -> Vec<String> {
@@ -156,7 +157,7 @@ fn assert_accepts(source: &str, label: &str) {
 fn insert_built(rhs: &str) -> String {
     format!(
         "module Repro.RankAgreement\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = insert(x, 0i32, 2i64)\n\
@@ -170,7 +171,7 @@ fn insert_built(rhs: &str) -> String {
 fn expand_built(rhs: &str) -> String {
     format!(
         "module Repro.ExpandControl\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = expand(x, 0i32, 2i64)\n\
@@ -293,8 +294,8 @@ fn a_declared_rank_two_user_def_result_is_refused_in_both_orders() {
     let program = |rhs: &str| {
         format!(
             "module Repro.UserDef\n\
-             def g(y: tensor[a, b, f32]) -> tensor[a, b, f32] = y\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             def g[a, b](y: tensor[a, b, f32]) -> tensor[a, b, f32] = y\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {{\n\
                s = stride(x, 2i64)\n\
                e = insert(x, 0i32, 2i64)\n\
@@ -320,12 +321,12 @@ fn a_declared_rank_two_user_def_result_is_refused_in_both_orders() {
 #[test]
 fn a_rank_zero_reduction_result_is_refused_beside_its_rank_one_input() {
     assert_rejects_with(
-        "module Repro.ReduceA\ndef f(x: tensor[n, f32]) = add(sum(x, 0i32), x)\n",
+        "module Repro.ReduceA\ndef f[n](x: tensor[n, f32]) = add(sum(x, 0i32), x)\n",
         "tensor rank mismatch: 0 dims vs 1 dims",
         "add(sum(x, 0), x)",
     );
     assert_rejects_with(
-        "module Repro.ReduceB\ndef f(x: tensor[n, f32]) = add(x, sum(x, 0i32))\n",
+        "module Repro.ReduceB\ndef f[n](x: tensor[n, f32]) = add(x, sum(x, 0i32))\n",
         "tensor rank mismatch: 1 dims vs 0 dims",
         "add(x, sum(x, 0))",
     );
@@ -349,25 +350,25 @@ fn a_scalar_beside_a_tensor_is_refused_by_add_and_max_elem() {
             "add",
             "1.5f32",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
-            "type mismatch: f32 vs tensor[3, f32]",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "add",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
             "1.5f32",
-            "type mismatch: tensor[3, f32] vs f32",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "max_elem",
             "1.5f32",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
-            "type mismatch: f32 vs tensor[3, f32]",
+            "does not admit a scalar beside a tensor",
         ),
         (
             "max_elem",
             "to_tensor([1.0f32, 2.0f32, 3.0f32])",
             "1.5f32",
-            "type mismatch: tensor[3, f32] vs f32",
+            "does not admit a scalar beside a tensor",
         ),
     ] {
         assert_rejects_with(
@@ -386,9 +387,14 @@ fn a_scalar_beside_a_tensor_is_refused_by_add_and_max_elem() {
 /// once from the identity-rank validator, which D5 records as a cascade.
 #[test]
 fn a_rank_two_where_branch_is_reported_once_by_wheres_own_rule() {
+    // The condition is a bool-tensor parameter rather than `gt(x, 0.0f32)`.
+    // That comparison was incidental scaffolding, and chelis#1506 makes a
+    // scalar beside a tensor a type error, which would add a second diagnostic
+    // and destroy the count this row asserts. The subject is unchanged: one
+    // mismatched `where` call, one diagnostic.
     let source = "module Repro.Where\n\
-                  def f(x: tensor[n, f32], y: tensor[a, b, f32]) = \
-                  where(gt(x, 0.0f32), x, y)\n";
+                  def f[n, a, b](c: tensor[n, bool], x: tensor[n, f32], y: tensor[a, b, f32]) = \
+                  where(c, x, y)\n";
     let diagnostics = agreed_diagnostics(source, "where with a rank-2 alternative");
     assert_eq!(
         diagnostics.len(),
@@ -410,7 +416,7 @@ fn a_rank_two_where_branch_is_reported_once_by_wheres_own_rule() {
 fn a_rebinding_to_a_divergent_rank_is_still_refused() {
     assert_rejects_with(
         "module Repro.RebindNegative\n\
-         def f(x: tensor[n, f32]) = {\n\
+         def f[n](x: tensor[n, f32]) = {\n\
            a = insert(x, 0i32, 2i64)\n\
            a = stride(x, 2i64)\n\
            b = insert(x, 0i32, 2i64)\n\
@@ -505,8 +511,8 @@ fn the_expand_reproducer_stamps_rank_one_at_both_ingresses() {
 fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
     assert_accepts(
         "module Repro.ShadowedIdentity\n\
-         def lift(x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
-         def apply(\n\
+         def lift[n](x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
+         def apply[n](\n\
            floor_div: (tensor[n, f32] -> tensor[2, n, f32]),\n\
            x: tensor[n, f32],\n\
          ) -> tensor[2, n, f32] = {\n\
@@ -525,15 +531,15 @@ fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
 /// DISPOSITION LOCK. The stale-fact bug it was written for was reachable only
 /// through the rank comparison this pull request deletes, so the row can no
 /// longer go red the way it originally did. It stays because the environment
-/// it exercises still feeds the exact-shape `conv2d` validators, where a stale
+/// it exercises still feeds the exact-shape `conv` validators, where a stale
 /// entry would be the same defect with a different consumer.
 #[test]
 fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
     assert_accepts(
         "module Repro.Rebind\n\
-         def f(x: tensor[n, f32]) = {\n\
+         def f[n](x: tensor[n, f32]) = {\n\
            a = stride(x, 2i64)\n\
-           a = normalize(insert(x, 0i32, 2i64))\n\
+           a = relu(insert(x, 0i32, 2i64))\n\
            b = insert(x, 0i32, 2i64)\n\
            add(a, b)\n\
          }\n",
@@ -548,7 +554,7 @@ fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
 /// prove that a private `RankOnly` fact could not be forged from Deep syntax.
 /// With no private carrier left there is nothing to forge, and what it now
 /// locks is the weaker, still-worth-holding property that an unusual
-/// `d-name` does not perturb the exact-shape `conv2d` derivation.
+/// `d-name` does not perturb the exact-shape `conv` derivation.
 #[test]
 fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
     assert_accepts(
@@ -556,7 +562,7 @@ fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
          def convolve(\n\
            x: tensor[__chelis_rank_only_axis_0, 3, 8, 8, f32],\n\
            k: tensor[8, 3, 3, 3, f32],\n\
-         ) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv2d(&x, &k, 1i32, 0)\n",
+         ) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n",
         "an authored `__chelis_rank_only_axis_0` dimension",
     );
 }

@@ -44,6 +44,11 @@ pub(crate) enum HostAbiType {
     Float64,
     Bool,
     String,
+    /// A scalar random key ([05-OP-69]..[05-OP-72]): the C value
+    /// `chelis_key`, `typedef struct { uint64_t bits; } chelis_key;`, whose
+    /// `bits` are the key's 64 bits. It is never an integer: it has no
+    /// arithmetic, cast or comparison (spec/04 section 1.1).
+    Key,
     /// A typed C function-pointer parameter or direct callback argument.
     ///
     /// This is deliberately not a general value representation.  The only
@@ -167,6 +172,7 @@ impl HostAbiType {
                     ),
                 ));
             }
+            ConcreteHostType::Scalar(Prim::Key) => Self::Key,
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
@@ -223,6 +229,7 @@ impl HostAbiType {
             Self::Float64 => Some("double"),
             Self::Bool => Some("bool"),
             Self::String => Some("chelis_string"),
+            Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
@@ -232,6 +239,38 @@ impl HostAbiType {
             Self::MappedFile => Some("chelis_mapped_file*"),
             Self::Option(_) => Some("chelis_option*"),
             Self::Unit => Some("int"),
+        }
+    }
+
+    /// Return the C value a local of this ABI holds once the owner it
+    /// aliased has been released, so the alias never carries a freed handle.
+    ///
+    /// `None` for an ABI whose C value carries no handle. The match names
+    /// every variant so a new heap ABI must choose its cleared spelling: a
+    /// `string` is a struct, and a pointer `NULL` does not convert to it.
+    pub(crate) fn c_released_value(&self) -> Option<&'static str> {
+        match self {
+            Self::Int8
+            | Self::Int16
+            | Self::Int32
+            | Self::Int64
+            | Self::Float16
+            | Self::BFloat16
+            | Self::Float32
+            | Self::Float64
+            | Self::Bool
+            // A `chelis_key` is its 64 bits by value and owns no heap handle.
+            | Self::Key
+            | Self::Unit
+            | Self::Callback(_, _) => None,
+            Self::String => Some("(chelis_string){ NULL }"),
+            Self::Adt(_, _)
+            | Self::List(_)
+            | Self::Dict(_, _)
+            | Self::Tuple(_)
+            | Self::Tensor(_)
+            | Self::MappedFile
+            | Self::Option(_) => Some("NULL"),
         }
     }
 
@@ -279,6 +318,14 @@ pub(crate) fn project_program(
             .map(|function| project_function(function, &declared_callbacks))
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: emission.summary_rejections().to_vec(),
+        adt_layouts: emission
+            .adt_layouts()
+            .iter()
+            .map(project_adt_layout)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
     };
     let sites = emission.sites().map(project_site).collect();
     let root_sites = emission.root_sites().map(project_site).collect();
@@ -313,6 +360,59 @@ pub(crate) fn project_program(
     })
 }
 
+/// Project one parameter ADT layout for entry validation.
+///
+/// A layout whose ADT type has no C representation is dropped, since no
+/// parameter can carry it. A field that holds no tensor value, such as a
+/// function, is walked past, so it projects as `Unit` when its own type has
+/// no C representation; a field that holds a tensor must project exactly.
+fn project_adt_layout(
+    layout: &chelis_ir::host::HostAdtLayout<ConcreteHostType>,
+) -> Result<Option<chelis_ir::host::HostAdtLayout<HostAbiType>>, Unsupported> {
+    fn carries_tensor(ty: &ConcreteHostType) -> bool {
+        match ty {
+            ConcreteHostType::Tensor(_) => true,
+            ConcreteHostType::Adt(_, items) | ConcreteHostType::Tuple(items) => {
+                items.iter().any(carries_tensor)
+            }
+            ConcreteHostType::List(inner) | ConcreteHostType::Option(inner) => {
+                carries_tensor(inner)
+            }
+            ConcreteHostType::Dict(key, value) => carries_tensor(key) || carries_tensor(value),
+            _ => false,
+        }
+    }
+    let Ok(ty) = HostAbiType::try_from_concrete(&layout.ty) else {
+        return Ok(None);
+    };
+    let constructors = layout
+        .constructors
+        .iter()
+        .map(|constructor| {
+            let fields = constructor
+                .fields
+                .iter()
+                .map(|field| {
+                    let ty = match HostAbiType::try_from_concrete(&field.ty) {
+                        Ok(ty) => ty,
+                        Err(_) if !carries_tensor(&field.ty) => HostAbiType::Unit,
+                        Err(error) => return Err(error),
+                    };
+                    Ok(chelis_ir::host::HostAdtField {
+                        name: field.name.clone(),
+                        ty,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(chelis_ir::host::HostAdtConstructorLayout {
+                name: constructor.name.clone(),
+                fields,
+            })
+        })
+        .collect::<Result<Vec<_>, Unsupported>>()?;
+    Ok(Some(chelis_ir::host::HostAdtLayout { ty, constructors }))
+}
+
 fn project_site<'a>(site: chelis_ir::ownership::VerifiedHostSiteView<'a>) -> ProjectedHostSite<'a> {
     ProjectedHostSite {
         id: site.id(),
@@ -332,7 +432,11 @@ fn helper_metadata(helper: VerifiedHostTensorHelperView<'_>) -> HostTensorHelper
         && node.output_type == *helper.output()
         && helper.inputs().iter().any(|input| input.name == *name)
     {
+        // The metadata graph restates the helper's identity Load, so it
+        // belongs to a declaration of the helper's name.
+        let decl = dag.declare(verified.declaration(node.owner.decl).name.clone());
         let root = dag.add_node(
+            decl,
             chelis_ir::dag::RiscOp::Load { name: name.clone() },
             Vec::new(),
             node.output_type.clone(),
@@ -374,6 +478,7 @@ fn project_function(
         }
     }
     Ok(HostAbiFunction {
+        helper_result_claim_axes: function.helper_result_claim_axes().to_vec(),
         name: function.name().to_string(),
         params: function
             .params()
@@ -451,6 +556,17 @@ fn project_expr(
     allowed_callbacks: &UnordSet<String>,
 ) -> Result<HostAbiExpr, Unsupported> {
     let kind = match expr.kind {
+        ConcreteHostExprKind::ResultClaimScope { plan, body, ty } => {
+            HostAbiExprKind::ResultClaimScope {
+                plan,
+                body: Box::new(project_expr(*body, allowed_callbacks)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
+        ConcreteHostExprKind::FormalIngress { value, ty } => HostAbiExprKind::FormalIngress {
+            value: Box::new(project_expr(*value, allowed_callbacks)?),
+            ty: HostAbiType::try_from_concrete(&ty)?,
+        },
         ConcreteHostExprKind::Int(value) => HostAbiExprKind::Int(value),
         ConcreteHostExprKind::Float(value) => HostAbiExprKind::Float(value),
         ConcreteHostExprKind::Bool(value) => HostAbiExprKind::Bool(value),
@@ -514,6 +630,13 @@ fn project_expr(
                 ty: HostAbiType::try_from_concrete(&ty)?,
             }
         }
+        ConcreteHostExprKind::SignatureEntry { plan, args } => HostAbiExprKind::SignatureEntry {
+            plan,
+            args: args
+                .into_iter()
+                .map(|expr| project_expr(expr, allowed_callbacks))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
         ConcreteHostExprKind::Builtin { name, args, ty } => {
             if chelis_ir::host::is_host_unresolved_marker(&name) {
                 return Err(unsupported_callable_use(&name));
@@ -608,6 +731,16 @@ fn project_expr(
             body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
+        ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
+            HostAbiExprKind::RetainedInvocation {
+                bindings: bindings
+                    .into_iter()
+                    .map(|binding| project_binding(binding, allowed_callbacks))
+                    .collect::<Result<Vec<_>, _>>()?,
+                body: Box::new(project_expr(*body, allowed_callbacks)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::Map { callback, list, ty } => HostAbiExprKind::Map {
             callback: project_callback(callback, allowed_callbacks)?,
             list: Box::new(project_expr(*list, allowed_callbacks)?),
@@ -648,11 +781,6 @@ fn project_expr(
         ConcreteHostExprKind::FlatMap { callback, list, ty } => HostAbiExprKind::FlatMap {
             callback: project_callback(callback, allowed_callbacks)?,
             list: Box::new(project_expr(*list, allowed_callbacks)?),
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
-        ConcreteHostExprKind::WithSeed { seed, body, ty } => HostAbiExprKind::WithSeed {
-            seed: Box::new(project_expr(*seed, allowed_callbacks)?),
-            body: Box::new(project_expr(*body, allowed_callbacks)?),
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
         ConcreteHostExprKind::TensorCall { helper, args, ty } => HostAbiExprKind::TensorCall {

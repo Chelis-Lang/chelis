@@ -33,7 +33,7 @@ use chelis_types::{check_linearity, check_typed_program};
 
 fn linearity_errors(source: &str) -> Vec<chelis_types::errors::CheckError> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).expect_err("linearity check must error")
 }

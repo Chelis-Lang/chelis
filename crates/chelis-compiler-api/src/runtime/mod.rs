@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -11,14 +11,21 @@ use chelis_types::{
     types::Prim,
 };
 
-use crate::schema::{DictEntryValue, ExecutionValue, TensorElements, TensorValue};
+use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 mod csv;
 mod eval;
+mod frame;
+pub use frame::Frame;
+use frame::ResultProducer;
 mod host_ops;
 mod invariant;
 mod named_axis;
 mod numeric_text;
+mod program_scope;
+mod shared_values;
+use program_scope::ProgramScope;
+pub use shared_values::{Entries, Values};
 #[cfg(test)]
 mod tests;
 mod transforms;
@@ -105,17 +112,14 @@ pub enum TransformKind {
 /// `finalize_scalar` / `scalar_from_*` chokepoints (the section C3
 /// privacy contract). The former in-crate `ScalarBits` enum and its
 /// wrapping `from_f64_as` / `from_i64_as` raw constructors are deleted.
+/// It never holds a key: [`RuntimeValue::from_scalar_value`], its one
+/// construction site, turns a key element into [`RuntimeValue::Key`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScalarPayload {
     value: chelis_types::ScalarValue,
 }
 
 impl ScalarPayload {
-    /// Wrap a module-finalized scalar.
-    pub(crate) fn from_value(value: chelis_types::ScalarValue) -> Self {
-        Self { value }
-    }
-
     /// Read the source-level dtype (the storage variant's own dtype).
     pub(crate) fn dtype(&self) -> Prim {
         self.value.prim()
@@ -128,7 +132,7 @@ impl ScalarPayload {
     }
 
     /// View any numeric scalar as f64. Exact for every float width and
-    /// for integers up to 2^53; int64 may lose precision past 2^53 (the
+    /// for integers up to 2^53; i64 may lose precision past 2^53 (the
     /// named-lossy read of the dtype-semantics contract).
     pub(crate) fn as_f64_lossy(&self) -> f64 {
         self.value.as_f64_lossy()
@@ -154,16 +158,23 @@ pub enum RuntimeValue {
     /// [`ScalarPayload`] (C1) so struct-literal initialization can no
     /// longer bypass the invariant. See `spec/04-type-system.md` §1.1.
     Scalar(ScalarPayload),
+    /// A scalar random key ([05-OP-69]..[05-OP-72]). It has no numeric
+    /// value, so it is its own variant rather than a [`Self::Scalar`]: no
+    /// numeric path can read it. A `tensor[n, key]` is a [`Self::Tensor`]
+    /// whose storage is a key buffer.
+    Key(chelis_types::RandomKey),
     Bool(bool),
     String(String),
-    List(Vec<RuntimeValue>),
-    Dict(Vec<(RuntimeValue, RuntimeValue)>),
-    Tuple(Vec<RuntimeValue>),
+    /// Container elements are shared, so a clone is one count increment and
+    /// a release drains nested values iteratively (chelis#2567).
+    List(Values),
+    Dict(Entries),
+    Tuple(Values),
     Adt {
         ctor: String,
         /// Field values in DECLARED order (the deftype's field order),
         /// not source or alphabetical order.
-        fields: Vec<RuntimeValue>,
+        fields: Values,
         /// When present, aligned index-for-index with `fields`, so it
         /// also follows declared order. `eval_record` enforces this
         /// (chelis#520 fixed a misalignment where kv source order was
@@ -172,6 +183,11 @@ pub enum RuntimeValue {
     },
     MappedFile(Vec<u8>),
     Closure {
+        /// Exact checked `(fn ...)` expression that produced this closure.
+        /// Transform lowering reuses this carrier directly: rebuilding a
+        /// function from `params` and `body` drops checker-owned parameter
+        /// and callable metadata (chelis#676).
+        checked_function: Box<Expr>,
         params: Vec<String>,
         /// Declared Deep type expression per param, when the `(fn ...)`
         /// carried checker-annotated `{type: ...}` param metadata.
@@ -182,8 +198,16 @@ pub enum RuntimeValue {
         /// Generic cast actualization matches this against the checker-owned
         /// call expression result, including context-fixed empty containers.
         return_type: Option<Expr>,
+        /// The checked function type retains renamed precision binders used
+        /// by body metadata, alongside the signature's declared names.
+        checked_signature: Option<Expr>,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary. These execute before this closure's own
+        /// entry so a broader supplied callable cannot erase a narrower
+        /// invocation contract.
+        invocation_contracts: Box<Vec<Expr>>,
         body: Expr,
-        env: UnordMap<String, RuntimeValue>,
+        env: Frame,
         /// Lexically captured concrete precision variables. A call derives a
         /// fresh specialization from checked argument/result types and lets
         /// the callee's own binders shadow same-spelled outer binders.
@@ -205,20 +229,59 @@ pub enum RuntimeValue {
     Transform {
         kind: TransformKind,
         transform_expr: Expr,
-        captured_env: UnordMap<String, RuntimeValue>,
+        captured_env: Frame,
+        /// Authored higher-order formal signatures retained at each
+        /// specialization boundary, shared with ordinary closures so every
+        /// supported runtime callable executes the same invocation protocol.
+        invocation_contracts: Box<Vec<Expr>>,
     },
     Unit,
 }
 
 impl RuntimeValue {
-    /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
-    /// construction: the storage variant IS the dtype).
+    fn invocation_contracts(&self) -> Option<&[Expr]> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
+    fn invocation_contracts_mut(&mut self) -> Option<&mut Vec<Expr>> {
+        match self {
+            Self::Closure {
+                invocation_contracts,
+                ..
+            }
+            | Self::Transform {
+                invocation_contracts,
+                ..
+            } => Some(invocation_contracts),
+            _ => None,
+        }
+    }
+
+    /// Wrap a module-finalized element (the WS-A0 invariant holds by
+    /// construction: the storage variant IS the dtype). A key element, such
+    /// as a rank-0 key tensor's one element, becomes a [`RuntimeValue::Key`]:
+    /// a key is never a numeric [`RuntimeValue::Scalar`], so every consumer
+    /// that reads a key and every renderer sees the key variant.
     pub(crate) fn from_scalar_value(value: chelis_types::ScalarValue) -> Self {
-        RuntimeValue::Scalar(ScalarPayload::from_value(value))
+        // The payload's only construction site: a key never becomes one.
+        match value.as_key() {
+            Some(key) => RuntimeValue::Key(key),
+            None => RuntimeValue::Scalar(ScalarPayload { value }),
+        }
     }
 
     /// Default-narrowed integer literal per spec §5.3: bare integer
-    /// values default to `int32` unless the surrounding context says
+    /// values default to `i32` unless the surrounding context says
     /// otherwise. The checker range-guards literals (spec §5.6), so the
     /// ingress constructor cannot trap here.
     pub(crate) fn int_lit(value: i64) -> Self {
@@ -238,11 +301,11 @@ impl RuntimeValue {
     }
 
     /// Computed integer value preserving full i64 precision (e.g. `len`,
-    /// shape sizes, parsed `to_int` results). Carries dtype `int64`.
+    /// shape sizes, parsed `to_int` results). Carries dtype `i64`.
     pub(crate) fn int64(value: i64) -> Self {
         Self::from_scalar_value(
-            chelis_types::scalar_from_i64("int64", Prim::Int64, value)
-                .expect("int64 ingress from i64 is total"),
+            chelis_types::scalar_from_i64("i64", Prim::Int64, value)
+                .expect("i64 ingress from i64 is total"),
         )
     }
 
@@ -361,7 +424,7 @@ pub(crate) struct RuntimeOutcome {
     /// root name so the manifest consumer can report them through [05-UNS-1]
     /// instead of either swallowing the cause or returning an unbranded host
     /// evaluator error.
-    pub(crate) host_root_errors: UnordMap<String, String>,
+    pub(crate) host_root_errors: UnordMap<String, RuntimeFailure>,
     pub(crate) transcript: Vec<String>,
 }
 
@@ -370,7 +433,28 @@ pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_filtered(program, tensor_bindings, None, None)
+    evaluate_host_program_filtered(program, tensor_bindings, None, None, None)
+        .map_err(|failure| failure.message)
+}
+
+pub(crate) struct HostEvaluationInputs<'a> {
+    pub(crate) roots: &'a UnordMap<String, RuntimeTensorValue>,
+    pub(crate) bindings: Option<&'a UnordMap<String, IrTensorValue>>,
+}
+
+/// A failed execution still owes the effects it performed before unwinding.
+#[derive(Debug)]
+pub(crate) struct RuntimeFailure {
+    pub(crate) message: String,
+    pub(crate) transcript: Vec<String>,
+    pub(crate) kind: RuntimeFailureKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RuntimeFailureKind {
+    #[default]
+    Ordinary,
+    NumericTrap,
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -387,13 +471,16 @@ pub(crate) fn evaluate_host_program_filtered(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
-) -> Result<RuntimeOutcome, String> {
+    bound_evaluation_inputs: Option<&UnordMap<String, IrTensorValue>>,
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_with_library_and_types(
         program,
-        &[],
-        &BTreeMap::new(),
         None,
-        tensor_bindings,
+        None,
+        HostEvaluationInputs {
+            roots: tensor_bindings,
+            bindings: bound_evaluation_inputs,
+        },
         selected_roots,
         manifested_lowered_names,
     )
@@ -424,13 +511,43 @@ pub(crate) fn evaluate_host_program_filtered(
 /// inner fn body the same way the C backend does.
 pub(crate) fn evaluate_host_program_with_library_and_types(
     program: &CheckedProgram,
-    library_exprs: &[Expr],
-    library_type_env: &BTreeMap<String, Expr>,
+    library: Option<&CheckedProgram>,
     library_lowered_names: Option<&BTreeMap<String, bool>>,
-    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
+    inputs: HostEvaluationInputs<'_>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
-) -> Result<RuntimeOutcome, String> {
+) -> Result<RuntimeOutcome, RuntimeFailure> {
+    let HostEvaluationInputs {
+        roots: tensor_bindings,
+        bindings: bound_evaluation_inputs,
+    } = inputs;
+    let empty_types = BTreeMap::new();
+    let library_exprs = library.map(CheckedProgram::exprs).unwrap_or(&[]);
+    let library_type_env = library
+        .map(CheckedProgram::type_env)
+        .unwrap_or(&empty_types);
+    // Looking up an imported function in the new-code-only program silently
+    // interpreted it without the kernel's declared shape obligations.
+    let kernel_program = library
+        .map(|library| {
+            CheckedProgram::compose(library, program)
+                .ok_or_else(|| "runtime kernel program lost its checked library proof".to_owned())
+        })
+        .transpose()
+        .map_err(|message| RuntimeFailure {
+            message,
+            transcript: Vec::new(),
+            kind: RuntimeFailureKind::Ordinary,
+        })?;
+    // chelis#1829: the kernel-decision probe behind `def_kernel` expands the
+    // call graph as a tree, so it must be derived once per definition for the
+    // whole evaluation. Before #1693 this program held new code only, so an
+    // imported name was not found and never probed; it now composes the
+    // library in, so every imported definition takes that path. The session
+    // `ctx` owns below is what holds those facts, and the borrow checker, not
+    // a declaration order, is what keeps it inside `kernel_program`'s life.
+    let eval_program = kernel_program.as_ref().unwrap_or(program);
+
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
     // inherit that function's host-lane-vs-tensor-lane classification —
@@ -490,10 +607,10 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         /* register_runtime_order = */ false,
     );
     // Register new-code defs. New-code is the only source of eager
-    // module-init bindings in `top_level_order` — library was already
-    // checked + lowered at context-build time and any side effects
-    // would have happened then; re-running them on every per-test
-    // worker is exactly the regression we're fixing.
+    // module-init bindings in `top_level_order`. Building a library context
+    // checks and lowers declarations; it does not execute their effects.
+    // Library values initialize on demand in each evaluation context, and
+    // successful values are reused only within that context.
     register_top_level_defs(
         program.exprs(),
         &lowered_names,
@@ -517,28 +634,36 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     }
 
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
+        result_producer: None,
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs,
+        program: ProgramScope::new(top_level_defs, type_env),
         declared_signatures,
         adt_registry: program.adt_registry().clone(),
-        type_env,
         adt_fields,
         tensor_bindings,
-        program: Some(program),
+        session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
+        active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
+        transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: chelis_types::current_cancel_token(),
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
 
     for name in top_level_order {
-        let _ = ctx.resolve_top_level(&name)?;
+        if let Err(message) = ctx.resolve_top_level(&name) {
+            return Err(RuntimeFailure {
+                message,
+                transcript: ctx.transcript,
+                kind: ctx.failure_kind,
+            });
+        }
     }
 
     // Surface host-lane selected callable roots. The arrow-form
@@ -621,15 +746,16 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         // call without their bindings. Unit therefore supplies arity without
         // inventing a numeric value; an incorrect reachability decision still
         // fails loudly when the body tries to use it. If another root already
-        // resolved this declaration, `ctx.bindings[name]` is the callable
+        // resolved this declaration, its cached value is the callable
         // closure, not its result. Reuse that closure but still apply it: an
         // owed [05-OBS-7] root can never be represented by `<closure>`, and
         // the effect-row guard above proves the automatic application pure.
-        let callable = ctx.bindings.get(name).cloned().map(Ok).unwrap_or_else(|| {
-            ctx.eval_expr(body)
-                .map(|value| stamp_def_closure(value, name, body))
-        });
+        ctx.failure_kind = RuntimeFailureKind::Ordinary;
+        let callable = ctx.resolve_top_level(name);
         let applied = callable.and_then(|closure| {
+            // Admission and required-input filtering already selected this
+            // call. Deliver its supplied tensor actuals independently of the
+            // body's execution profile, retaining evaluated-root precedence.
             let args = match &closure {
                 RuntimeValue::Closure { params, .. } => params
                     .iter()
@@ -638,6 +764,13 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                             .get(param)
                             .cloned()
                             .map(RuntimeValue::Tensor)
+                            .or_else(|| {
+                                bound_evaluation_inputs?
+                                    .get(param)
+                                    .cloned()
+                                    .map(RuntimeTensorValue::new)
+                                    .map(RuntimeValue::Tensor)
+                            })
                             .unwrap_or(RuntimeValue::Unit)
                     })
                     .collect(),
@@ -650,13 +783,22 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                 host_root_values.insert(name.to_string(), value);
             }
             Err(error) => {
-                host_root_errors.insert(name.to_string(), error);
+                host_root_errors.insert(
+                    name.to_string(),
+                    RuntimeFailure {
+                        message: error,
+                        transcript: Vec::new(),
+                        kind: ctx.failure_kind,
+                    },
+                );
             }
         }
     }
 
     Ok(RuntimeOutcome {
-        host_bindings: ctx.bindings,
+        // Lexical frames are not output roots. Project successful declaration
+        // values separately from applied callable-root observations above.
+        host_bindings: ctx.declaration_values,
         host_root_values,
         host_root_errors,
         transcript: ctx.transcript,
@@ -668,7 +810,7 @@ fn register_declared_signatures(exprs: &[Expr], signatures: &mut UnordMap<String
         let Some((DeepTag::Defsig, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.get(1))
+        let (Some(name), Some(signature)) = (kids.first().and_then(symbol_name), kids.last())
         else {
             continue;
         };
@@ -684,17 +826,23 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
     let body_is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
     match value {
         RuntimeValue::Closure {
+            checked_function,
             params,
             param_types,
             return_type,
+            checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,
             def_name: None,
         } if body_is_fn => RuntimeValue::Closure {
+            checked_function,
             params,
             param_types,
             return_type,
+            checked_signature,
+            invocation_contracts,
             body: closure_body,
             env,
             precision_env,
@@ -758,11 +906,8 @@ fn register_top_level_defs(
 /// the new-code lowering map merges with library state instead of
 /// re-deriving the wrong answer for library names that shadow
 /// builtins.
-pub(crate) fn library_lowered_names(
-    library_exprs: &[Expr],
-    library_type_env: &BTreeMap<String, Expr>,
-) -> BTreeMap<String, bool> {
-    top_level_lowering_map(library_exprs, library_type_env)
+pub(crate) fn library_lowered_names(library: &CheckedProgram) -> BTreeMap<String, bool> {
+    top_level_lowering_map(library.annotated_exprs(), library.type_env())
 }
 
 fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
@@ -775,11 +920,6 @@ fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {
 
 fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Module) => {
-            for child in list.elements.iter().skip(3) {
-                collect_top_level_items(child, out);
-            }
-        }
         Expr::Node(node, _) if node.tag() == DeepTag::Module => {
             for child in node.children_slice().iter().skip(1) {
                 collect_top_level_items(child, out);
@@ -789,96 +929,106 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     }
 }
 
+/// One pending step of [`runtime_value_to_schema`]'s walk.
+enum SchemaStep<'a> {
+    Visit(&'a RuntimeValue),
+    /// Every child of this container is on the output stack, in order.
+    Assemble(&'a RuntimeValue),
+}
+
+/// The machine-facing value of `value`, converted from a worklist so a value
+/// nested far deeper than the native stack converts with bounded native
+/// depth (chelis#2567). The first unconvertible leaf in depth-first,
+/// left-to-right order is the error, as in a recursive conversion.
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
-    Ok(match value {
-        RuntimeValue::Tensor(tensor) => {
-            // Exact per-dtype egress (execution wire v2, chelis#729
-            // section C3): the storage view carries every element at its
-            // own width, so int64 crosses the wire exactly and every
-            // dtype keeps its tag.
-            let data = match tensor.value.storage().view() {
-                chelis_types::StorageView::F64(v) => TensorElements::F64(v.to_vec()),
-                chelis_types::StorageView::F32(v) => TensorElements::F32(v.to_vec()),
-                chelis_types::StorageView::F16(v) => {
-                    TensorElements::F16(v.iter().map(|&x| f64::from(x)).collect())
+    let mut steps = vec![SchemaStep::Visit(value)];
+    let mut converted: Vec<ExecutionValue> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            SchemaStep::Visit(value) => match value {
+                RuntimeValue::List(items)
+                | RuntimeValue::Tuple(items)
+                | RuntimeValue::Adt { fields: items, .. } => {
+                    steps.push(SchemaStep::Assemble(value));
+                    steps.extend(items.iter().rev().map(SchemaStep::Visit));
                 }
-                chelis_types::StorageView::Bf16(v) => {
-                    TensorElements::Bf16(v.iter().map(|&x| f64::from(x)).collect())
+                RuntimeValue::Dict(entries) => {
+                    steps.push(SchemaStep::Assemble(value));
+                    for (key, entry) in entries.iter().rev() {
+                        steps.push(SchemaStep::Visit(entry));
+                        steps.push(SchemaStep::Visit(key));
+                    }
                 }
-                chelis_types::StorageView::I64(v) => TensorElements::Int64(v.to_vec()),
-                chelis_types::StorageView::I32(v) => TensorElements::Int32(v.to_vec()),
-                chelis_types::StorageView::I16(v) => TensorElements::Int16(v.to_vec()),
-                chelis_types::StorageView::I8(v) => TensorElements::Int8(v.to_vec()),
-                chelis_types::StorageView::Bool(v) => {
-                    TensorElements::Bool(v.iter().map(|&x| x != 0).collect())
-                }
-            };
-            ExecutionValue::Tensor {
-                value: TensorValue {
-                    shape: tensor.value.shape.clone(),
-                    data,
-                },
+                leaf => converted.push(leaf_to_schema(leaf)?),
+            },
+            SchemaStep::Assemble(value) => {
+                let assembled = match value {
+                    RuntimeValue::List(items) => ExecutionValue::List {
+                        value: converted.split_off(converted.len() - items.len()),
+                    },
+                    RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
+                        value: converted.split_off(converted.len() - items.len()),
+                    },
+                    // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
+                    // user-facing constructor name. This is the eval `--json` ABI
+                    // surface; decode (`decode_adt_value`) already keys on bare
+                    // constructor names, so emitting bare here makes the encode/decode
+                    // round-trip consistent and stops internal mangling leaking to
+                    // consumers (chelis#399).
+                    RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
+                        ctor: chelis_types::demangle_ident(ctor),
+                        fields: converted.split_off(converted.len() - fields.len()),
+                    },
+                    RuntimeValue::Dict(entries) => {
+                        let mut flat = converted
+                            .split_off(converted.len() - 2 * entries.len())
+                            .into_iter();
+                        let mut pairs = Vec::with_capacity(entries.len());
+                        while let (Some(key), Some(value)) = (flat.next(), flat.next()) {
+                            pairs.push(DictEntryValue { key, value });
+                        }
+                        ExecutionValue::Dict { entries: pairs }
+                    }
+                    _ => unreachable!("only containers are assembled"),
+                };
+                converted.push(assembled);
             }
         }
-        RuntimeValue::Scalar(payload) => match payload.value().element_ref() {
-            chelis_types::ElementRef::I8(value) => ExecutionValue::Int8 { value },
-            chelis_types::ElementRef::I16(value) => ExecutionValue::Int16 { value },
-            chelis_types::ElementRef::I32(value) => ExecutionValue::Int32 { value },
-            chelis_types::ElementRef::I64(value) => ExecutionValue::Int64 { value },
-            chelis_types::ElementRef::F16(value) => ExecutionValue::Float16 {
-                value: f64::from(value),
-            },
-            chelis_types::ElementRef::Bf16(value) => ExecutionValue::Bfloat16 {
-                value: f64::from(value),
-            },
-            chelis_types::ElementRef::F32(value) => ExecutionValue::Float32 { value },
-            chelis_types::ElementRef::F64(value) => ExecutionValue::Float64 { value },
-            chelis_types::ElementRef::Bool(_) => {
-                return Err(
-                    "bool ScalarValue unexpectedly reached the numeric RuntimeValue::Scalar wire path"
-                        .to_string(),
-                );
-            }
+    }
+    Ok(converted
+        .pop()
+        .expect("the schema worklist converts its root"))
+}
+
+/// The wire value of a runtime value that holds no nested runtime value.
+fn leaf_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
+    Ok(match value {
+        RuntimeValue::Tensor(tensor) => {
+            let value = TensorValue {
+                shape: tensor
+                    .value
+                    .shape
+                    .iter()
+                    .map(|extent| {
+                        i64::try_from(*extent)
+                            .map_err(|_| "runtime extent exceeds wire int64".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                data: tensor.value.storage().clone(),
+            };
+            value.validate()?;
+            ExecutionValue::Tensor { value }
+        }
+        RuntimeValue::Scalar(payload) => ExecutionValue::Scalar {
+            value: payload.value().try_into()?,
+        },
+        // spec/10 section 3.2: a scalar key is `{"type":"key","bits":h}`.
+        RuntimeValue::Key(key) => ExecutionValue::Key {
+            bits: chelis_types::KeyBits::new(*key),
         },
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {
             value: value.clone(),
-        },
-        RuntimeValue::List(items) => ExecutionValue::List {
-            value: items
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        RuntimeValue::Dict(entries) => ExecutionValue::Dict {
-            entries: entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok(DictEntryValue {
-                        key: runtime_value_to_schema(key)?,
-                        value: runtime_value_to_schema(value)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        },
-        RuntimeValue::Tuple(items) => ExecutionValue::Tuple {
-            value: items
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        RuntimeValue::Adt { ctor, fields, .. } => ExecutionValue::Adt {
-            // De-mangle the reef-linked `Pkg__..__Ctor` form to the bare,
-            // user-facing constructor name. This is the eval `--json` ABI
-            // surface; decode (`decode_adt_value`) already keys on bare
-            // constructor names, so emitting bare here makes the encode/decode
-            // round-trip consistent and stops internal mangling leaking to
-            // consumers (chelis#399).
-            ctor: chelis_types::demangle_ident(ctor),
-            fields: fields
-                .iter()
-                .map(runtime_value_to_schema)
-                .collect::<Result<Vec<_>, _>>()?,
         },
         RuntimeValue::MappedFile(_) => {
             return Err(
@@ -895,6 +1045,10 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
             },
         },
         RuntimeValue::Unit => ExecutionValue::Unit,
+        RuntimeValue::List(_)
+        | RuntimeValue::Tuple(_)
+        | RuntimeValue::Dict(_)
+        | RuntimeValue::Adt { .. } => unreachable!("containers are converted by the worklist"),
     })
 }
 
@@ -936,7 +1090,12 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
-    bindings: UnordMap<String, RuntimeValue>,
+    /// Only lexical values; successful declarations never enter this frame.
+    bindings: Frame,
+    /// Canonical producer of the tensor returned by the expression currently
+    /// completing. Expression entry clears it, and only a producer or
+    /// transparent value route may set it.
+    result_producer: Option<ResultProducer>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
     /// every frame boundary). Every locally-bound name gets a key here:
@@ -949,11 +1108,22 @@ struct EvalContext<'a> {
     /// casts. Values come only from checker-owned call-site argument/result
     /// types matched against the callee's declared signature.
     precision_bindings: UnordMap<String, Prim>,
+    /// Successful initializations keyed by canonical declaration identity.
+    /// Lives for this context (one ordinary request, or one invariant
+    /// predicate), independently of lexical frame restoration. Never stores
+    /// failed initializations or the results of applying cached callables.
+    declaration_values: UnordMap<String, RuntimeValue>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
     named_axis_route_cache: UnordMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
     named_axis_route_visiting: UnordSet<String>,
-    top_level_defs: UnordMap<String, Expr>,
+    /// The program's top-level definitions, its Deep type environment, and
+    /// the facts derived from both. Both tables are registered once during
+    /// construction and are fixed for the context's lifetime. The derived
+    /// facts would be stale if either table moved, so `program_scope` owns
+    /// them behind accessors and this module cannot reach the fields; that
+    /// module's header records why the boundary is a separate file.
+    program: ProgramScope,
     /// Authored `defsig` function types, including source binder spellings.
     /// The inferred `type_env` intentionally freshens those binders, so the
     /// evaluator keeps this separate map for generic cast targets in bodies.
@@ -961,46 +1131,39 @@ struct EvalContext<'a> {
     /// Checker-owned nominal definitions used when the executed constructor
     /// alone cannot reveal whether the parameter type has a float leaf.
     adt_registry: chelis_types::adt::AdtRegistry,
-    /// Combined library + new-code Deep type-env. Threaded into
-    /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
-    /// hits a `grad` / `vmap` form so the lowerer can resolve free names
-    /// the same way the C backend does. Empty when no library context is
-    /// present (e.g. unit tests that don't need transform support).
-    type_env: UnordMap<String, Expr>,
     adt_fields: UnordMap<String, Vec<String>>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
-    /// The checked program under evaluation. The kernel decision for a def
-    /// application is read off it through `chelis_ir::host::host_def_kernel`
-    /// (chelis#1277 B2h), so eval and C answer "is this def a kernel" from one
-    /// function. `None` only for the invariant-predicate evaluator, which has
-    /// no program and therefore no kernels: it interprets every application.
-    program: Option<&'a CheckedProgram>,
-    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
-    /// DAG draws no Random and is reused across applications. A Random-drawing
-    /// kernel is re-lowered per application and never cached (see
-    /// `EvalContext::def_kernel`).
+    /// The host-lowering session over the checked program under evaluation.
+    /// The kernel decision for a def application is read through it by
+    /// `chelis_ir::host::host_def_kernel` (chelis#1277 B2h), so eval and C
+    /// answer "is this def a kernel" from one function. One session serves the
+    /// whole evaluation, so each definition's decision is derived once
+    /// (chelis#1835); before that the memo behind it was gated on a
+    /// thread-local flag this entry never armed, and every applied definition
+    /// re-expanded the call graph (chelis#1829). `None` only for the
+    /// invariant-predicate evaluator, which has no program and therefore no
+    /// kernels: it interprets every application.
+    session: Option<chelis_ir::host::HostLoweringSession<'a>>,
+    /// Active checked declaration frames. Synthetic local-ascription regions
+    /// select artifact-local identities through this stack so two composed
+    /// source units with equal names and byte offsets cannot cross-own a
+    /// runtime obligation.
+    active_declaration_names: Vec<String>,
+    /// Per-def kernel decision: `None` is the host lane, `Some` a kernel
+    /// reused across applications (see `EvalContext::def_kernel`).
     def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
+    transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,
-    random_seed: Option<u64>,
-    random_counter: u64,
     /// Cooperative cancellation flag (chelis#914), captured ONCE from the
     /// thread-local install point at construction so the per-node-visit
     /// check in [`Self::eval_expr`] is a relaxed atomic load rather than a
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
-}
-
-fn tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn get_meta(list: &List) -> Option<&MetaMap> {
-    match list.elements.get(1) {
-        Some(Expr::Map(map, _)) => Some(map),
-        _ => None,
-    }
+    /// Origin of the error currently unwinding through the string-based host
+    /// evaluator. Only a trusted numeric producer may set `NumericTrap`.
+    failure_kind: RuntimeFailureKind,
 }
 
 /// True when the checked-program effect annotation on this node carries a
@@ -1013,23 +1176,17 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
 /// must not run its effect at display time.
 fn carries_effect_row(expr: &Expr) -> bool {
     let meta = match expr {
-        Expr::List(list, _) => get_meta(list),
         Expr::Node(node, _) => Some(node.meta()),
         _ => None,
     };
     let Some(meta) = meta else {
         return false;
     };
-    meta.entries.iter().any(|(key, value)| {
-        key == "effects"
-            && tagged_expr_children(value)
-                .is_some_and(|(tag, children)| tag == DeepTag::Effects && !children.is_empty())
-    })
+    meta.effects().is_some_and(|row| !row.values().is_empty())
 }
 
 fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr {
-        Expr::List(list, _) => tag(list).map(|tag| (tag, children(list))),
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -1039,23 +1196,15 @@ fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
 /// by the type checker, if any. Returns `None` for non-primitive type
 /// metadata (e.g. tensor literal types) or missing metadata; eval_lit
 /// then falls back to the spec §5.3 literal default.
-fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
-    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+fn lit_meta_prim(meta: &Metadata) -> Option<Prim> {
+    let ty_expr = meta.ty()?.expression();
     extract_prim_from_type_expr(ty_expr)
 }
 
 /// Binder name from a `(lit {type: (t-var {} p)} ...)` stamp (#1544).
-fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
-    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+fn lit_meta_type_var_name(meta: &Metadata) -> Option<&str> {
+    let ty_expr = meta.ty()?.expression();
     chelis_deep::exact_type_variable_name(ty_expr)
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
@@ -1068,31 +1217,6 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 fn int_value(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Atom(Atom::Int(value), _) => Some(*value),
-        _ => None,
-    }
-}
-
-/// Read a *literal* seed at full i64 width, peeling `(lit {meta} …)`
-/// wrappers down to the raw `Atom::Int`. Mirrors the compiled C host lane,
-/// which reads the raw atom and ignores the int32 default meta (`host.rs`
-/// `lower_host_expr`: the `lit` peel forwards to the `Atom::Int(i64)` arm).
-///
-/// chelis#771: routing a literal seed through `eval_lit` narrows it to the
-/// spec/04-type-system.md §5.3 int32 default (int32-truncate then
-/// sign-extend), so any seed `>= 2^31` becomes an unrelated `u64` in the
-/// evaluator while the compiled lane keeps the full value — the two lanes
-/// then sample completely different streams from the "same" seed. The seed
-/// is designed int64 (spec/design/checker_totality.md §C1.5 item 5, the
-/// int64-suffixed literal contract; #731 Phase 1's FORM gate is unshipped).
-///
-/// Returns `None` for non-literal (computed) seed expressions; those keep
-/// the existing dtype-narrowing `eval_expr` path unchanged.
-fn literal_seed_i64(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(literal_seed_i64)
-        }
         _ => None,
     }
 }

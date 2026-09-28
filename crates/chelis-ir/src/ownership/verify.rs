@@ -597,20 +597,31 @@ fn site_error(index: usize, detail: &'static str) -> OwnershipError {
 /// ownership IR or the site builder. This is deliberately a second traversal
 /// over the retained emission payload: verification would be circular if it
 /// derived its expected sites from the lowering result it is checking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExpectedHostSite {
+#[derive(Debug, Clone, Copy)]
+struct ExpectedHostSite<'a> {
     unit: usize,
     kind: super::ir::HostSiteKind,
+    #[cfg(feature = "lowering-trace")]
+    expression: Option<&'a ConcreteHostExpr>,
+    #[cfg(not(feature = "lowering-trace"))]
+    source_lifetime: std::marker::PhantomData<&'a ()>,
 }
 
-fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite {
-    ExpectedHostSite { unit, kind }
+fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite<'static> {
+    ExpectedHostSite {
+        unit,
+        kind,
+        #[cfg(feature = "lowering-trace")]
+        expression: None,
+        #[cfg(not(feature = "lowering-trace"))]
+        source_lifetime: std::marker::PhantomData,
+    }
 }
 
-fn census_host_payload(
-    host: &ConcreteHostProgram,
+fn census_host_payload<'a>(
+    host: &'a ConcreteHostProgram,
     manifest: &RootManifest,
-) -> Result<Vec<ExpectedHostSite>, OwnershipError> {
+) -> Result<Vec<ExpectedHostSite<'a>>, OwnershipError> {
     let mut sites = Vec::new();
     for binding in &host.globals {
         sites.push(expected_site(0, super::ir::HostSiteKind::Binding));
@@ -671,16 +682,28 @@ fn census_host_payload(
     Ok(sites)
 }
 
-fn census_host_expr(
-    expr: &ConcreteHostExpr,
-    helpers: &[HostTensorHelper],
+fn census_host_expr<'a>(
+    expr: &'a ConcreteHostExpr,
+    helpers: &'a [HostTensorHelper],
     unit: usize,
-    sites: &mut Vec<ExpectedHostSite>,
+    sites: &mut Vec<ExpectedHostSite<'a>>,
 ) -> Result<(), OwnershipError> {
     use super::ir::HostSiteKind;
 
-    sites.push(expected_site(unit, HostSiteKind::Expression));
+    let expression_site = expected_site(unit, HostSiteKind::Expression);
+    #[cfg(feature = "lowering-trace")]
+    let expression_site = ExpectedHostSite {
+        expression: Some(expr),
+        ..expression_site
+    };
+    sites.push(expression_site);
     match &expr.kind {
+        ConcreteHostExprKind::ResultClaimScope { body, .. } => {
+            census_host_expr(body, helpers, unit, sites)?;
+        }
+        ConcreteHostExprKind::FormalIngress { value, .. } => {
+            census_host_expr(value, helpers, unit, sites)?;
+        }
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
         | ConcreteHostExprKind::Bool(_)
@@ -691,6 +714,7 @@ fn census_host_expr(
         | ConcreteHostExprKind::Tuple(items, _)
         | ConcreteHostExprKind::AdtConstruct { fields: items, .. }
         | ConcreteHostExprKind::Call { args: items, .. }
+        | ConcreteHostExprKind::SignatureEntry { args: items, .. }
         | ConcreteHostExprKind::Builtin { args: items, .. } => {
             for item in items {
                 sites.push(expected_site(unit, HostSiteKind::Argument));
@@ -748,7 +772,8 @@ fn census_host_expr(
                 census_host_expr(default_expr, helpers, unit, sites)?;
             }
         }
-        ConcreteHostExprKind::Let { bindings, body, .. } => {
+        ConcreteHostExprKind::Let { bindings, body, .. }
+        | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
             for binding in bindings {
                 sites.push(expected_site(unit, HostSiteKind::Binding));
                 census_host_expr(&binding.value, helpers, unit, sites)?;
@@ -793,19 +818,13 @@ fn census_host_expr(
             sites.push(expected_site(unit, HostSiteKind::Binding));
             census_host_callback(callback, helpers, unit, sites)?;
         }
-        ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-            sites.push(expected_site(unit, HostSiteKind::Argument));
-            census_host_expr(seed, helpers, unit, sites)?;
-            sites.push(expected_site(unit, HostSiteKind::Argument));
-            census_host_expr(body, helpers, unit, sites)?;
-        }
         ConcreteHostExprKind::TensorCall { helper, args, .. } => {
             let Some(helper) = helpers.get(*helper) else {
                 return Err(OwnershipError::HostSiteMap {
                     detail: format!("payload names missing tensor helper {helper}"),
                 });
             };
-            if independent_identity_helper(helper) && args.len() == 1 {
+            if helper.identity_input().is_some() && args.len() == 1 {
                 census_host_expr(&args[0], helpers, unit, sites)?;
             } else {
                 for arg in args {
@@ -818,11 +837,30 @@ fn census_host_expr(
     Ok(())
 }
 
-fn census_host_callback(
-    callback: &ConcreteHostCallback,
-    helpers: &[HostTensorHelper],
+/// Project only the already-verified, retained source-structural census. No
+/// emitted spelling or separately supplied source may construct this cursor.
+#[cfg(feature = "lowering-trace")]
+pub(super) fn source_expressions(
+    emission: super::VerifiedHostEmission<'_>,
+) -> Vec<super::VerifiedHostSourceSite<'_>> {
+    let expected = census_host_payload(&emission.payload.program, &emission.payload.manifest)
+        .expect("verified host payload census");
+    expected
+        .into_iter()
+        .zip(emission.sites())
+        .filter_map(|(expected, site)| {
+            expected
+                .expression
+                .map(|expression| super::VerifiedHostSourceSite { site, expression })
+        })
+        .collect()
+}
+
+fn census_host_callback<'a>(
+    callback: &'a ConcreteHostCallback,
+    helpers: &'a [HostTensorHelper],
     unit: usize,
-    sites: &mut Vec<ExpectedHostSite>,
+    sites: &mut Vec<ExpectedHostSite<'a>>,
 ) -> Result<(), OwnershipError> {
     match &callback.kind {
         ConcreteHostCallbackKind::Named { .. } => Ok(()),
@@ -830,20 +868,6 @@ fn census_host_callback(
             census_host_expr(body, helpers, unit, sites)
         }
     }
-}
-
-fn independent_identity_helper(helper: &HostTensorHelper) -> bool {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return false;
-    }
-    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
-        return false;
-    };
-    matches!(
-        &node.op,
-        crate::dag::RiscOp::Load { name }
-            if node.output_type == helper.output && helper.inputs[0].name == *name
-    )
 }
 
 fn verify_materialized_roots(
@@ -945,12 +969,11 @@ fn verify_materialized_roots(
 }
 
 fn independent_display_root(root: &RootEntry) -> HostDisplayRoot {
-    let short_def = root
-        .def_name
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
-        .unwrap_or(root.def_name.as_str());
+    let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
+        chelis_types::demangle_ident(&root.def_name)
+    } else {
+        root.def_name.clone()
+    };
     let suffix = root.name.strip_prefix(root.def_name.as_str()).unwrap_or("");
     HostDisplayRoot {
         name: format!("{short_def}{suffix}"),
@@ -1071,10 +1094,12 @@ fn verify_unit(
                     local_max_live_bytes = local_max_live_bytes.maximum(add_live_byte_bounds(
                         live_byte_cost(unit, &live)?,
                         owner_byte_cost(unit, dest)?,
-                        format!(
-                            "accounting for `{}` operation o{} result",
-                            unit.name, operation.id.0
-                        ),
+                        || {
+                            format!(
+                                "accounting for `{}` operation o{} result",
+                                unit.name, operation.id.0
+                            )
+                        },
                     )?);
                 }
             }
@@ -1275,10 +1300,20 @@ fn live_heap_count(unit: &Unit, live: &BTreeSet<OwnerId>) -> usize {
         .count()
 }
 
+/// Sum two live-byte bounds, reporting `context` only when the addition
+/// overflows.
+///
+/// `context` is a closure rather than a `String` because the call inside
+/// [`live_byte_cost`] runs once per live owner per operation, and
+/// `live_byte_cost` itself runs two to four times per operation: an eagerly
+/// formatted diagnostic put roughly 39% of that function's samples in
+/// `alloc::fmt::format::format_inner` at N=640 on the chelis#1205 corpus, for
+/// a string the success path discards. The diagnostic text is unchanged
+/// (chelis#2331).
 fn add_live_byte_bounds(
     lhs: super::LiveByteBound,
     rhs: super::LiveByteBound,
-    context: String,
+    context: impl FnOnce() -> String,
 ) -> Result<super::LiveByteBound, OwnershipError> {
     match (lhs, rhs) {
         (super::LiveByteBound::Unbounded, _) | (_, super::LiveByteBound::Unbounded) => {
@@ -1290,7 +1325,7 @@ fn add_live_byte_bounds(
         (super::LiveByteBound::Exact(lhs), super::LiveByteBound::Exact(rhs)) => lhs
             .checked_add(rhs)
             .map(super::LiveByteBound::Exact)
-            .ok_or(OwnershipError::LiveByteBoundOverflow { context }),
+            .ok_or_else(|| OwnershipError::LiveByteBoundOverflow { context: context() }),
     }
 }
 
@@ -1372,11 +1407,9 @@ fn live_byte_cost(
         if info.origin != OwnerOrigin::Owned || !info.class.is_heap() {
             continue;
         }
-        result = add_live_byte_bounds(
-            result,
-            owner_byte_cost(unit, *owner)?,
-            format!("summing live owners in `{}`", unit.name),
-        )?;
+        result = add_live_byte_bounds(result, owner_byte_cost(unit, *owner)?, || {
+            format!("summing live owners in `{}`", unit.name)
+        })?;
     }
     Ok(result)
 }
@@ -1476,11 +1509,9 @@ fn compose_live_byte_bound(
         let mut bound = facts[index].local;
         for (callee, carry) in &facts[index].outgoing {
             let callee = component_bound(*callee, facts, memo, visiting)?;
-            bound = bound.maximum(add_live_byte_bounds(
-                *carry,
-                callee,
-                "composing caller carry with callee peak".to_string(),
-            )?);
+            bound = bound.maximum(add_live_byte_bounds(*carry, callee, || {
+                "composing caller carry with callee peak".to_string()
+            })?);
         }
         visiting.remove(&index);
         memo[index] = Some(bound);
@@ -2181,8 +2212,10 @@ fn transfer(
             return Err(OwnershipError::JoinMismatch {
                 unit: unit.name.clone(),
                 block: target.id.0,
-                expected: ids(expected),
-                actual: ids(&next),
+                only_here: owner_difference(unit, &next, expected),
+                only_earlier: owner_difference(unit, expected, &next),
+                here_count: next.len(),
+                earlier_count: expected.len(),
             });
         }
     } else {
@@ -2391,8 +2424,19 @@ fn check_terminal(
     }
 }
 
-fn ids(owners: &BTreeSet<OwnerId>) -> BTreeSet<u32> {
-    owners.iter().map(|owner| owner.0).collect()
+/// The owners live in `from` and not in `to`, labelled with their source
+/// binding names. A join mismatch is only actionable if the reader can see
+/// which owner the two paths disagree about (chelis#2122).
+fn owner_difference(unit: &Unit, from: &BTreeSet<OwnerId>, to: &BTreeSet<OwnerId>) -> String {
+    let labels = from
+        .difference(to)
+        .map(|owner| crate::ownership::render::owner_label(unit, *owner))
+        .collect::<Vec<_>>();
+    if labels.is_empty() {
+        "none".to_string()
+    } else {
+        labels.join(", ")
+    }
 }
 
 fn incomplete(unit: &Unit, owner: OwnerId, missing: &'static str) -> OwnershipError {

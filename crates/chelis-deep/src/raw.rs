@@ -26,6 +26,8 @@ pub enum RawAtom {
 /// inspects each list's head in context of its parent's role expectation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RawExpr {
+    /// Lexically parsed producer data; stamping it as program syntax is invalid.
+    ExtensionData(crate::ExtensionData),
     Atom(RawAtom, Span),
     /// A parenthesized list with arbitrary contents.
     List(Vec<RawExpr>, Span),
@@ -42,6 +44,7 @@ pub enum RawExpr {
 impl RawExpr {
     pub fn span(&self) -> Span {
         match self {
+            RawExpr::ExtensionData(data) => data.span(),
             RawExpr::Atom(_, s) | RawExpr::List(_, s) | RawExpr::Map(_, s) => *s,
             RawExpr::MetaExpr { span, .. } => *span,
         }

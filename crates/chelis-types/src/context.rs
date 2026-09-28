@@ -34,6 +34,10 @@
 //! - **Ir type-env**: cloned per check call. Library declared types
 //!   remain visible to new-code shape validation; the new-code's own
 //!   declared types are added on top.
+//! - **Callable provenance**: immutable ordered formal-name identities are
+//!   retained for library values so contextual `grad` validation applies the
+//!   same metadata/index consistency rule as a monolithic check. New
+//!   declarations shadow this snapshot without mutating it.
 //!
 //! ## No leak invariant
 //!
@@ -61,7 +65,9 @@
 //! errors and the totality invariant forbids error types in emitted snapshots.
 //! Compiler API cache decoding verifies the envelope and build identity.
 //! It requires one opaque identity on both type products.
-//! It reruns effect and linearity checks before it creates a library proof.
+//! It adopts the producer's effect and linearity results where it re-lowers
+//! and compares a stored lowering, and reruns those checkers where the
+//! payload carries none, as the dependency cache's does (chelis#2558).
 
 use chelis_unord::UnordSet;
 use std::collections::BTreeMap;
@@ -81,10 +87,15 @@ use crate::unify::Subst;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryProofId {
     digest: [u8; 32],
+    selector_context_digest: [u8; 32],
 }
 
 impl LibraryProofId {
-    pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
+    pub(crate) fn for_library(
+        annotated_exprs: &[deep::Expr],
+        context: Option<Self>,
+        selector_context_digest: [u8; 32],
+    ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis-library-proof-v1");
         if let Some(context) = context {
@@ -96,8 +107,10 @@ impl LibraryProofId {
         let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
         hasher.update((canonical.len() as u64).to_le_bytes());
         hasher.update(canonical.as_bytes());
+        hasher.update(selector_context_digest);
         Self {
             digest: hasher.finalize().into(),
+            selector_context_digest,
         }
     }
 }
@@ -107,11 +120,69 @@ impl LibraryProofId {
 /// Cheap to clone — internally `Arc`-shared. Build from a library decl
 /// list with [`crate::build_type_env_from_library`], or create an
 /// empty one with [`TypeEnv::empty`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypeEnv {
     inner: Arc<TypeEnvInner>,
-    #[serde(default)]
     library_proof_id: Option<LibraryProofId>,
+}
+
+// Source-free snapshots are faithful transports from a trusted checker
+// producer, not independently re-proved programs. Structural validation does
+// not establish completeness of a maliciously edited label summary.
+// v2 added #2071's type-variable restrictions. v3 added checked collection
+// relations to `Scheme`; reading an older snapshot as an empty relation list
+// would change which indirect calls are admitted. v4 adds immutable callable
+// provenance; reading v3 as an empty map would reject valid contextual named
+// gradient selectors. v5 adds [04-LIN-10]'s key-free type-variable marks and
+// key-carrying data types; reading v4 as empty sets would let a library generic
+// be instantiated at a key. v6 records whether each mark's generic is a value
+// binding; reading v5 as function generics would change a value binding's
+// suggested repair after a round trip.
+// v7 carries scalar/tensor key-operation relations in builtin schemes.
+const TYPE_ENV_FORMAT_VERSION: u32 = 7;
+
+#[derive(Serialize)]
+struct TypeEnvWireRef<'a> {
+    format_version: u32,
+    inner: &'a Arc<TypeEnvInner>,
+    library_proof_id: Option<LibraryProofId>,
+}
+
+#[derive(Deserialize)]
+struct TypeEnvWire {
+    format_version: u32,
+    inner: Arc<TypeEnvInner>,
+    library_proof_id: Option<LibraryProofId>,
+}
+
+impl Serialize for TypeEnv {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TypeEnvWireRef {
+            format_version: TYPE_ENV_FORMAT_VERSION,
+            inner: &self.inner,
+            library_proof_id: self.library_proof_id,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeEnv {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = TypeEnvWire::deserialize(deserializer)?;
+        if wire.format_version != TYPE_ENV_FORMAT_VERSION {
+            return Err(serde::de::Error::custom(
+                "obsolete TypeEnv format; regenerate the checker snapshot",
+            ));
+        }
+        wire.inner
+            .subst
+            .validate_dimension_labels(&wire.inner.var_gen)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            inner: wire.inner,
+            library_proof_id: wire.library_proof_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +207,10 @@ pub(crate) struct TypeEnvInner {
     /// cycle / unbound suppression logic to distinguish library
     /// references from new-code references.
     pub(crate) library_def_names: UnordSet<String>,
+    /// Module-scoped immutable callable identities and ordered formal names
+    /// accepted from the library source. Contextual `grad` validation seeds
+    /// its structural resolver from this snapshot.
+    pub(crate) selector_callables: crate::infer::SelectorCallableContext,
     /// Checker-enforced opacity metadata (RFC D-CHECK): per-module
     /// export sets, binding -> module attribution, and producer text,
     /// accumulated across the library and new-code phases. Defaults
@@ -164,6 +239,7 @@ impl TypeEnv {
                 adt_reg,
                 ir_types: BTreeMap::new(),
                 library_def_names: UnordSet::new(),
+                selector_callables: crate::infer::SelectorCallableContext::default(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
             library_proof_id: None,
@@ -223,10 +299,14 @@ impl TypeEnv {
 
     /// Confirm that this context and a checked program are one library product pair.
     ///
-    /// The library builders derive one opaque identity from accepted checked source.
-    /// Cache parsing requires that identity and the declared-type map to match.
+    /// The library builders derive one opaque identity from accepted checked source
+    /// and its exact callable-selector provenance snapshot. Cache parsing requires
+    /// that identity, the provenance digest, and the declared-type map to match.
     pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
-        self.library_proof_id.is_some()
+        let selector_context_digest =
+            crate::infer::selector_callable_context_digest(&self.inner.selector_callables);
+        self.library_proof_id
+            .is_some_and(|proof| proof.selector_context_digest == selector_context_digest)
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
     }
@@ -237,6 +317,43 @@ mod tests {
     use super::*;
     use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
+
+    #[test]
+    fn dimension_snapshot_rejects_obsolete_direct_encoding_and_missing_summary() {
+        let context = TypeEnv::empty();
+        // Previous source-free wire had no leading format version.
+        let old = bincode::serialize(&(&context.inner, context.library_proof_id)).unwrap();
+        assert!(bincode::deserialize::<TypeEnv>(&old).is_err());
+        let mut json = serde_json::to_value(&context).unwrap();
+        json["format_version"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<TypeEnv>(json).is_err());
+        let mut json = serde_json::to_value(&context).unwrap();
+        json["inner"]["subst"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dimension_labels");
+        assert!(serde_json::from_value::<TypeEnv>(json).is_err());
+    }
+
+    #[test]
+    fn dimension_snapshot_rejects_unallocated_and_invalid_labels() {
+        for label in ["fixed", "_", "", "two words"] {
+            let mut inner = TypeEnv::empty().inner().clone();
+            let v = if label == "fixed" {
+                crate::types::DimVar(u32::MAX)
+            } else {
+                inner.var_gen.fresh_dvar()
+            };
+            inner.subst.protect_dimensions([v]);
+            crate::unify::unify_dim(&Dim::Var(v), &Dim::Name(label.into()), &mut inner.subst)
+                .unwrap();
+            let encoded = bincode::serialize(&TypeEnv::from_inner(inner)).unwrap();
+            assert!(
+                bincode::deserialize::<TypeEnv>(&encoded).is_err(),
+                "{label:?}"
+            );
+        }
+    }
 
     #[test]
     fn serialized_level_state_resumes_old_ids_at_zero_and_compacts_history() {
@@ -303,6 +420,69 @@ mod tests {
     }
 
     #[test]
+    fn operation_value_restrictions_survive_context_round_trips() {
+        let encoded = bincode::serialize(&TypeEnv::empty()).unwrap();
+        let decoded: TypeEnv = bincode::deserialize(&encoded).unwrap();
+        for (name, restriction, accepted, rejected) in [
+            (
+                "mean",
+                TypeVarRestriction::FloatValue,
+                Prim::F32,
+                Prim::Int32,
+            ),
+            (
+                "trunc_div",
+                TypeVarRestriction::IntValue,
+                Prim::Int32,
+                Prim::F32,
+            ),
+            (
+                "add",
+                TypeVarRestriction::NumericValue,
+                Prim::Int32,
+                Prim::Bool,
+            ),
+        ] {
+            let mut resumed = decoded.resume_for_new_check();
+            let scheme = resumed.env.lookup(name).unwrap().clone();
+            assert!(
+                scheme
+                    .tvar_restrictions
+                    .iter()
+                    .any(|(_, bound)| *bound == restriction)
+            );
+            let Type::Fn(params, _) =
+                resumed
+                    .env
+                    .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst)
+            else {
+                panic!("operation remains callable");
+            };
+            let precision = resumed.var_gen.fresh_tvar();
+            let tensor = Type::Tensor(vec![Dim::Lit(3)], TensorPrec::Var(precision));
+            let operand = if matches!(params[0], Type::Ref(_)) {
+                Type::Ref(Box::new(tensor))
+            } else {
+                tensor
+            };
+            unify(&params[0], &operand, &mut resumed.subst)
+                .expect("a value restriction must admit tensor operands");
+            let mut valid = resumed.subst.clone();
+            unify(&Type::Var(precision), &Type::Prim(accepted), &mut valid).unwrap();
+            let error = unify(
+                &Type::Var(precision),
+                &Type::Prim(rejected),
+                &mut resumed.subst,
+            )
+            .expect_err("late dtype binding must enforce the deserialized family");
+            assert!(matches!(
+                error.kind,
+                crate::unify::TypeErrorKind::DtypeFamilyMismatch
+            ));
+        }
+    }
+
+    #[test]
     fn type_variable_restrictions_survive_context_round_trips() {
         let empty = TypeEnv::empty();
         let mut inner = empty.inner().clone();
@@ -346,10 +526,10 @@ mod tests {
             &Type::Prim(Prim::Int32),
             &mut integer_trial,
         )
-        .expect_err("round-tripped restriction must reject int32");
+        .expect_err("round-tripped restriction must reject i32");
         assert!(matches!(
             error.kind,
-            crate::unify::TypeErrorKind::PrecisionMismatch
+            crate::unify::TypeErrorKind::DtypeFamilyMismatch
         ));
 
         let mut float_trial = resumed.subst.clone();
@@ -359,5 +539,17 @@ mod tests {
             &mut float_trial,
         )
         .expect("round-tripped restriction must accept f32");
+    }
+
+    #[test]
+    fn type_env_rejects_the_pre_callable_provenance_version() {
+        let mut encoded = bincode::serialize(&TypeEnv::empty()).expect("TypeEnv serializes");
+        encoded[..4].copy_from_slice(&3_u32.to_le_bytes());
+        let error = bincode::deserialize::<TypeEnv>(&encoded)
+            .expect_err("TypeEnv v3 must not decode without callable provenance");
+        assert!(
+            error.to_string().contains("obsolete TypeEnv format"),
+            "unexpected predecessor-version diagnostic: {error}"
+        );
     }
 }

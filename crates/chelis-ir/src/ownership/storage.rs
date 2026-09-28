@@ -576,7 +576,10 @@ fn build_storage_plan(
     dag: VerifiedDagView<'_>,
     lane: StorageLaneKind,
 ) -> Result<BuiltStoragePlan, OwnershipError> {
-    let skipped = dag.reduction_inlined_fused_elems();
+    let mut skipped = dag.reduction_inlined_fused_elems();
+    if lane == StorageLaneKind::Hip {
+        skipped.extend(hip_emission_literals(dag));
+    }
     let mut placements = classify_nodes(dag, lane, &skipped);
     let owner_of = compute_owner_map(&placements);
     let destructively_dropped = destructively_dropped_owners(&placements, &owner_of);
@@ -596,6 +599,51 @@ fn build_storage_plan(
         reusable,
         max_live_bytes,
     ))
+}
+
+/// The constants the HIP emitter reads only as literals while it emits a draw:
+/// a draw key's seed and controls, a key derivation's seed or index, and a
+/// `uniform_like`'s bounds, which the emitter folds into the key it computes
+/// and the kernel's arguments. Such a
+/// constant has no device value, so it takes no slot and no lifetime. A
+/// constant any other operation, dependency or root reads keeps its storage.
+fn hip_emission_literals(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
+    // `None` until a read is seen; then whether every read is a literal one.
+    let mut literal_only = vec![None::<bool>; dag.len()];
+    let mut read = |input: NodeId, literal: bool| {
+        if let Some(entry) = literal_only.get_mut(input.0) {
+            *entry = Some(entry.unwrap_or(true) && literal);
+        }
+    };
+    for node in dag.nodes() {
+        for (slot, input) in node.inputs.iter().enumerate() {
+            let literal = match node.op {
+                RiscOp::KeyFromSeed => true,
+                RiscOp::FoldIn => slot == 1,
+                RiscOp::UniformLike => matches!(slot, 1 | 2),
+                _ => false,
+            };
+            read(*input, literal);
+        }
+        for dependency in node
+            .shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .chain(&node.owner.activation)
+        {
+            read(*dependency, false);
+        }
+    }
+    for root in dag.roots() {
+        read(*root, false);
+    }
+    dag.nodes()
+        .iter()
+        .filter(|node| {
+            matches!(node.op, RiscOp::Const { .. }) && literal_only[node.id.0] == Some(true)
+        })
+        .map(|node| node.id)
+        .collect()
 }
 
 fn classify_nodes(
@@ -624,16 +672,35 @@ fn classify_nodes(
                         }
                     }
                 },
-                RiscOp::Reshape { .. }
-                | RiscOp::Permute { .. }
-                | RiscOp::Expand { .. }
-                | RiscOp::Stride { .. } => match lane {
+                // A HIP input can have arbitrary checked strides. Reshape must
+                // materialize logical order, so its bytes and lifetime belong
+                // to the shared plan just as they do on the C lane.
+                RiscOp::Reshape { .. } => StoragePlacement::OwnedSlot {
+                    slot: StorageSlotId::UNASSIGNED,
+                },
+                RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => {
+                    match lane {
+                        StorageLaneKind::C => StoragePlacement::OwnedSlot {
+                            slot: StorageSlotId::UNASSIGNED,
+                        },
+                        StorageLaneKind::Hip => StoragePlacement::SharedView {
+                            source: node.inputs[0],
+                        },
+                    }
+                }
+                // A derived or joined key is an ordinary key tensor on the C
+                // lane. The HIP lane computes rank-0 derivations while it
+                // emits, and refuses the rest, so they take no device
+                // storage.
+                RiscOp::KeyFromSeed
+                | RiscOp::Split { .. }
+                | RiscOp::FoldIn
+                | RiscOp::SplitN { .. }
+                | RiscOp::KeySelect => match lane {
                     StorageLaneKind::C => StoragePlacement::OwnedSlot {
                         slot: StorageSlotId::UNASSIGNED,
                     },
-                    StorageLaneKind::Hip => StoragePlacement::SharedView {
-                        source: node.inputs[0],
-                    },
+                    StorageLaneKind::Hip => StoragePlacement::Skipped,
                 },
                 RiscOp::Drop => StoragePlacement::TerminalDrop {
                     source: node.inputs[0],
@@ -650,13 +717,21 @@ fn classify_nodes(
                 RiscOp::Const { .. }
                 | RiscOp::ConstTensor { .. }
                 | RiscOp::Shape { .. }
+                | RiscOp::ExtentWitness { .. }
+                | RiscOp::CheckedReshapeExtent { .. }
+                | RiscOp::CheckedUnitAxis { .. }
                 | RiscOp::Add
                 | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
-                | RiscOp::CmpLt
+                | RiscOp::Mod
+                | RiscOp::Bitwise(_)
+                | RiscOp::Compare(_)
+                | RiscOp::Logical(_)
+                | RiscOp::Where
+                | RiscOp::GuardedFail { .. }
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
                 | RiscOp::ExtremaAdjoint { .. }
@@ -675,8 +750,10 @@ fn classify_nodes(
                 | RiscOp::Floor
                 | RiscOp::Ceil
                 | RiscOp::Round
-                | RiscOp::UniformLike { .. }
-                | RiscOp::Dropout { .. }
+                | RiscOp::UniformLike
+                | RiscOp::Dropout
+                | RiscOp::DropoutReplay
+                | RiscOp::UniformBoundAdjoint { .. }
                 | RiscOp::Copy
                 | RiscOp::Sum { .. }
                 | RiscOp::Count { .. }
@@ -783,7 +860,7 @@ fn extend_lifetimes(
         if matches!(placements[node.id.0], StoragePlacement::Skipped) {
             continue;
         }
-        let effective_inputs = match &node.op {
+        let mut effective_inputs = match &node.op {
             RiscOp::Sum { .. } | RiscOp::MaxReduce { .. } => {
                 if let Some(input) = node.inputs.first().copied()
                     && matches!(placements[input.0], StoragePlacement::Skipped)
@@ -802,6 +879,13 @@ fn extend_lifetimes(
             },
             _ => node.inputs.clone(),
         };
+        // Ownership borrows shape dependencies as well as value inputs. A
+        // result-claim witness stores the canonical scalar the producer reads;
+        // reusing its allocation earlier changes the obligation itself.
+        effective_inputs.extend(node.shape_deps.iter().copied());
+        effective_inputs.extend(node.result_claim_deps.iter().copied());
+        // A node reads its activation to decide whether it checks.
+        effective_inputs.extend(node.owner.activation);
         for input in effective_inputs {
             if let Some(owner) = owner_of[input.0]
                 && let Some(requirement) = requirements.get_mut(&owner)
@@ -1134,6 +1218,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hip_reshape_materializes_independent_storage_while_permute_retains_source() {
+        let mut dag = crate::dag::Dag::new();
+        let decl = dag.declare("test");
+        let ty = TensorType {
+            dims: vec![crate::dag::DimInfo::Lit(2), crate::dag::DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], ty, None);
+        let permute = dag.add_node(
+            decl,
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![input],
+            TensorType {
+                dims: vec![crate::dag::DimInfo::Lit(3), crate::dag::DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let reshape = dag.add_node(
+            decl,
+            RiscOp::Reshape {
+                new_shape: vec![crate::dag::RtDim::Lit(6)],
+            },
+            vec![permute],
+            vector(6, Prim::F32),
+            None,
+        );
+        dag.add_root(reshape);
+        let plan = plan_hip_storage(verified(dag)).unwrap();
+        assert!(
+            matches!(plan.placements()[permute.0], StoragePlacement::SharedView { source } if source == input)
+        );
+        assert!(matches!(
+            plan.placements()[reshape.0],
+            StoragePlacement::OwnedSlot { .. }
+        ));
+        assert_ne!(
+            plan.placements()[input.0].slot(),
+            plan.placements()[reshape.0].slot()
+        );
+        assert_eq!(plan.max_live_bytes(), LiveByteBound::Exact(48));
+    }
+
     fn vector(elements: usize, precision: Prim) -> TensorType {
         TensorType {
             dims: vec![crate::dag::DimInfo::Lit(elements)],
@@ -1158,14 +1286,17 @@ mod tests {
 
     fn dropped_then_root(first: TensorType, second: TensorType) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let first_node = dag.add_node(
+            decl,
             RiscOp::synth_const(first.precision, 1.0),
             vec![],
             first.clone(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![first_node], first, None);
+        dag.add_node(decl, RiscOp::Drop, vec![first_node], first, None);
         let second_node = dag.add_node(
+            decl,
             RiscOp::synth_const(second.precision, 2.0),
             vec![],
             second,
@@ -1199,7 +1330,9 @@ mod tests {
     fn c_excludes_entry_borrows_while_hip_counts_input_mirrors() {
         fn input_dag() -> Dag {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let input = dag.add_node(
+                decl,
                 RiscOp::Load { name: "x".into() },
                 vec![],
                 vector(4, Prim::F32),
@@ -1217,13 +1350,16 @@ mod tests {
     #[test]
     fn c_materialized_store_has_storage_independent_of_its_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let store = dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![source],
             vector(4, Prim::F32),
@@ -1246,20 +1382,24 @@ mod tests {
     #[test]
     fn program_owned_fused_reuse_mints_one_take_only_token() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             vector(4, Prim::F32),
             None,
         );
-        let owned = dag.add_node(RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![input], vector(4, Prim::F32), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vector(4, Prim::F32),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,

@@ -6,7 +6,7 @@ in PR #337 (squash-merged to `main` as `c581cb8`). A single `def` reduces a
 axes through; it builds and runs on the **C backend**:
 
 ```chelis
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ;; tensor[batch, seq, hidden] -> tensor[batch, hidden]   (one def, any rank)
 ```
 
@@ -130,7 +130,7 @@ chelis-ir host-type inference (`infer_app_expr_host_type` ~L7055 and
 `infer_builtin_host_type_from_arg_tys` ~L7685) now types the whole reduction
 family — `max_reduce`/`min_reduce`/`prod_reduce`/`argmax_reduce`/`argmin_reduce`
 — as a tensor (the value reductions keep the operand precision;
-`argmax_reduce`/`argmin_reduce` return an int64 index tensor). With a tensor
+`argmax_reduce`/`argmin_reduce` return an i64 index tensor). With a tensor
 type in hand, a rank-poly reduce wrapper extracts a `__tensor_` DAG helper
 (`resolve_reduce_axis` resolves the named axis to a positional index against the
 operand's named dims) instead of falling through to the host-emit

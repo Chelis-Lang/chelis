@@ -5,9 +5,41 @@
 
 use super::*;
 
+/// The §4.5.2 join categories are semantic, not `Dim` representation tags.
+/// A private labelled Var can represent a concrete name with an optional
+/// known extent; only an active authored binder must retain rigid evidence.
+enum ListAxis {
+    Variable,
+    Wildcard,
+    Concrete {
+        extent: Option<i64>,
+        label: Option<String>,
+    },
+}
+
+impl ListAxis {
+    fn classify(dim: &Dim, subst: &Subst) -> Self {
+        let observation = subst.observe_dim(dim);
+        if observation.rank().is_some()
+            || (observation.variable().is_some()
+                && (observation.name().is_none() || observation.is_protected()))
+        {
+            Self::Variable
+        } else if observation.is_wildcard() {
+            Self::Wildcard
+        } else {
+            Self::Concrete {
+                extent: observation.known_extent(),
+                label: observation.name().map(str::to_owned),
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_app(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -16,9 +48,87 @@ pub(super) fn infer_app(
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
 ) -> Type {
-    let kids = children(list);
+    // Preserve lexical ownership before inference mutates the environment.
+    // This is discovery metadata, not a backend acceptance decision.
+    let kids = node.children_slice();
+    let builtin = kids.first().and_then(|callee| {
+        let (tag, _, parts) = stamped_parts(callee)?;
+        if tag != DeepTag::Var {
+            return None;
+        }
+        let name = parts.first().and_then(symbol_name)?;
+        if env.is_lexically_bound(name) {
+            return None;
+        }
+        builtins::builtin_decl(name)
+    });
+    let checkpoint = errors.checkpoint();
+    let result = infer_app_inner(
+        expr,
+        node,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+    );
+    if errors.iter_since(checkpoint).next().is_none()
+        && let Some(builtin) = builtin
+    {
+        // Only overload selectors need operand stamps. Axis syntax and other
+        // non-value children must not be re-inferred to discover an identity.
+        let positions: &[usize] = match builtin.name {
+            "len" | "to_string" | "eq" | "neq" => &[0],
+            "concat" => &[0, 1],
+            _ => &[],
+        };
+        let mut arguments = vec![Type::Unit; kids.len().saturating_sub(1)];
+        for &position in positions {
+            if let Some(child) = kids.get(position + 1)
+                && let Some(ty) = product.current_owner_type(child, subst, errors)
+            {
+                arguments[position] = ty;
+            }
+        }
+        if errors.iter_since(checkpoint).next().is_none() {
+            match builtin.semantic_selection(&arguments, subst) {
+                Ok(selection) => product.record_builtin_selection(selection),
+                Err(reason) => {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "{} operand has no declared semantic case: {reason}",
+                                builtin.name
+                            ),
+                            vec![],
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_app_inner(
+    expr: &deep::Expr,
+    node: &DeepNode,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
+) -> Type {
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "app", "a callee expression", errors);
+        return malformed_form(node, "app", "a callee expression", errors);
     }
 
     // Check if func is a comparison op (for special return type handling)
@@ -47,11 +157,11 @@ pub(super) fn infer_app(
     });
 
     if matches!(func_name.as_deref(), Some("permute")) {
-        return infer_permute_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_permute_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        let inferred = infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(node, env, vg, subst, adt_reg, errors, product);
         if let Some(expected) = env.exact_stdlib_expected_result()
             && matches!(expected, Type::Tensor(_, _))
         {
@@ -65,25 +175,27 @@ pub(super) fn infer_app(
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {
-        return infer_shrink_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_shrink_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("pad")) {
-        return infer_pad_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_pad_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     if matches!(func_name.as_deref(), Some("stride")) {
-        return infer_stride_app(list, env, vg, subst, adt_reg, errors, product);
+        return infer_stride_app(node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339: the anchored named-axis expand form `expand(x, new, size,
     // anchor)` carries four arguments, but the builtin HM scheme is arity-3
-    // (`(&tensor, int32, int32) -> out`), so it would hit the generic arity
+    // (`(&tensor, i32, i32) -> out`), so it would hit the generic arity
     // check before the procedural arm. Dispatch it here (the
-    // `infer_permute_app` pattern); 2-/3-arg expand keeps the generic path,
-    // which reaches `check_expand_signature` with the scheme intact.
+    // `infer_permute_app` pattern). The ordinary 3-arg expand keeps the generic
+    // path, which reaches `check_expand_signature` with the scheme intact.
+    // Named-axis calls and malformed arities use the procedural path so the
+    // expand-specific arity diagnostic owns obsolete shape-taking spellings.
     if let Some(callee @ ("expand" | "insert")) = func_name.as_deref()
-        && kids.len() >= 5
+        && kids.len() != 4
     {
         // `&'static str`, not the borrow, so the callee outlives `func_name`.
         let callee = if callee == "insert" {
@@ -91,7 +203,7 @@ pub(super) fn infer_app(
         } else {
             "expand"
         };
-        return infer_expand_app(callee, list, env, vg, subst, adt_reg, errors, product);
+        return infer_expand_app(callee, node, env, vg, subst, adt_reg, errors, product);
     }
 
     // chelis#339 Part 2: variadic named-axis reduction `sum(x, seq, head)`.
@@ -116,7 +228,7 @@ pub(super) fn infer_app(
     ) && kids.len() >= 4
     {
         return infer_reduction_app(
-            list,
+            node,
             func_name.as_deref().unwrap(),
             env,
             vg,
@@ -134,7 +246,8 @@ pub(super) fn infer_app(
         )
     ) {
         return infer_reduce_window_app(
-            list,
+            expr,
+            node,
             func_name.as_deref().unwrap(),
             env,
             vg,
@@ -160,13 +273,35 @@ pub(super) fn infer_app(
     // constructor authority preserves the active declaration/import owner
     // and scheme across ordinary lexical shadowing.
     let applied_constructor_head = source_func_name.as_deref().is_some_and(is_constructor_name);
+    // chelis#1801: bracket the callee's inference so the absorption below
+    // sees exactly the dimension variables THIS application's instantiation
+    // minted. The mark is taken before the callee and read immediately after
+    // it, so no argument's instantiation is in scope.
+    let instantiation_mark = product.instantiation_dvar_mark();
+    // chelis#1654: the same bracket owns checked operation-contract
+    // instantiations. Unlike type variables, a fully monomorphic contract has
+    // no structural identity to rediscover later; the opaque IDs minted while
+    // inferring this callee are the exact capabilities this application may
+    // consume.
+    let collection_contract_mark = subst.collection_contract_mark();
     let func_ty = if applied_constructor_head {
         let source_name = source_func_name.as_deref().unwrap();
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
             None
         } else {
-            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg)
-                .map(|(_, scheme, _)| env.instantiate(scheme, vg, subst))
+            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg).map(
+                |(_, scheme, _)| {
+                    let instantiated = env.instantiate_scheme(scheme, vg, subst);
+                    // chelis#1801: a constructor head is instantiated here
+                    // rather than through the Var rule, so it records its
+                    // own fresh dimension variables or the bracket above
+                    // would see none for a `Ctor(...)` application.
+                    product.record_instantiation_dvars(
+                        instantiated.dvars.iter().map(|(_, fresh)| *fresh),
+                    );
+                    instantiated.ty
+                },
+            )
         };
         match resolved_constructor {
             Some(constructor_type) => constructor_type,
@@ -188,6 +323,10 @@ pub(super) fn infer_app(
             }
         }
     } else {
+        product.callee_reference = matches!(
+            kids[0].carrier(),
+            chelis_deep::ExprCarrier::DecodedNode(DeepTag::Var, _, _)
+        );
         infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product)
     };
     // The constructor callee no longer passes through `infer_expr`, but it is
@@ -200,10 +339,18 @@ pub(super) fn infer_app(
         }
         product.record_canonical(&kids[0], func_ty.clone());
     }
+    let instantiation_dvars = product.instantiation_dvars_since(instantiation_mark);
+    let callee_collection_contracts = subst.collection_contract_ids_since(collection_contract_mark);
+    macro_rules! return_with_collection_cleanup {
+        ($value:expr) => {{
+            subst.cancel_collection_contract_application(collection_contract_mark);
+            return $value;
+        }};
+    }
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
-    // an axis (`int32`) rather than inferred as a value — otherwise the
+    // an axis (`i32`) rather than inferred as a value — otherwise the
     // name-resolution pass would report a spurious `unbound variable`. The
     // actual name is read back from the arg expr in `check_reduction_signature`.
     let is_named_reduction = matches!(
@@ -228,7 +375,7 @@ pub(super) fn infer_app(
             // named-axis expand — the inserted-axis name (index 1). The
             // inserted-axis slot is scope-discriminated: a name bound in the
             // value environment is a *runtime value* (the issue #259 class,
-            // `expand(&x, ax, 4)` with `ax: int32`), not a dim name, and must
+            // `expand(&x, ax, 4)` with `ax: i32`), not a dim name, and must
             // keep flowing through ordinary inference into the
             // compile-time-constant rejection. The 4-arg anchored form routes
             // through `infer_expand_app` instead and never reaches this loop.
@@ -242,8 +389,8 @@ pub(super) fn infer_app(
                 && symbolic_dim_ref_name(arg).is_some()
             {
                 // [05-DIM-1]: a dim name in the size slot is an extent
-                // (int64); the inserted-axis name and reduction axes are
-                // axis-domain (int32).
+                // (i64); the inserted-axis name and reduction axes are
+                // axis-domain (i32).
                 if is_expand_size {
                     Type::Prim(Prim::Int64)
                 } else {
@@ -255,8 +402,174 @@ pub(super) fn infer_app(
         })
         .collect();
 
-    if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
-        return Type::Unit;
+    // [05-OP-67]: `drop` is the one-argument linearity consume and returns
+    // unit for every operand type. Its arity is exact here rather than in
+    // `app_post`, because this route returns before unification runs; the
+    // list slice that once shared the name is `skip` ([05-OP-54]).
+    if matches!(func_name.as_deref(), Some("drop")) {
+        if arg_tys.len() != 1 {
+            return_with_collection_cleanup!(report_builtin_arity(
+                errors,
+                node,
+                "drop",
+                1,
+                arg_tys.len()
+            ));
+        }
+        return_with_collection_cleanup!(Type::Unit);
+    }
+
+    // #2413: the counter-stream draws took no key. A call at the retired
+    // arity names the retired spelling and points at explicit keys, rather
+    // than reporting a bare arity count.
+    let retired_draw = match func_name.as_deref() {
+        Some("dropout") if arg_tys.len() == 2 => Some(("dropout(x, rate)", "dropout(k, x, rate)")),
+        Some("uniform_like") if arg_tys.len() == 3 => Some((
+            "uniform_like(t, low, high)",
+            "uniform_like(k, t, low, high)",
+        )),
+        _ => None,
+    };
+    if let Some((retired, keyed)) = retired_draw {
+        return_with_collection_cleanup!(report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::ArityMismatch,
+                with_node_provenance(
+                    node,
+                    format!(
+                        "`{retired}` is the retired counter-stream spelling: a random draw \
+                         takes an explicit key first, `{keyed}` (spec/05-risc-primitives.md \
+                         section 2.7)"
+                    ),
+                ),
+                vec![format!(
+                    "Pass a key first: make one with `key_from_seed(seed)` and derive more \
+                     with `split_key`, `split_keys` or `fold_in`, as in `{keyed}`"
+                )],
+            ),
+        ));
+    }
+
+    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
+    // It therefore has a scalar surface even before specialization. Reject
+    // mixed surfaces before unification can emit an unrelated occurs-check
+    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
+    if let Some(ref fname) = func_name
+        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
+            || matches!(
+                fname.as_str(),
+                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+            ))
+        && arg_tys.len() == 2
+    {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        let scalar = |ty: &Type| {
+            matches!(ty, Type::Prim(_))
+                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some_and(|bound| !bound.is_value_constraint()))
+        };
+        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
+            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
+        {
+            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
+                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
+            } else {
+                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
+            };
+            let mut error = CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
+                vec![
+                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
+                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
+                ],
+            );
+            if let Some(id) = node_span_id(node) {
+                error.span_offset = parse_span_offset(id);
+                error.span_id = Some(id.to_string());
+            } else {
+                let off = expr.span().offset;
+                if off > 0 {
+                    error.span_offset = Some(off);
+                }
+            }
+            return_with_collection_cleanup!(report(errors, error));
+        }
+    }
+
+    product.record_call_operand_contracts(&func_ty, func_name.as_deref(), &arg_tys, env, subst);
+
+    // Preserve the direct operation's diagnostic before its scheme enforces
+    // the same family through unification. Indirect calls need no name lookup:
+    // their checked function value carries the restriction itself.
+    // Matmul's concrete integer refusal belongs to its signature checker.
+    // Run that existing refusal before the scheme's family error can hide it.
+    if let Some(fname) = func_name.as_deref()
+        && (INT_BINOPS.contains(&fname) || INT_SHIFT_OPS.contains(&fname))
+        && arg_tys.iter().any(|ty| {
+            matches!(type_for_readonly_check(ty, subst),
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) if !prim.is_integer())
+        })
+        && let Some(rejected) = integer_binop_result_type(
+            node, Some(fname), &arg_tys, vg, subst, errors, None, &Type::Unit, product,
+        )
+    {
+        // Preserve the existing direct operation's diagnostic. Symbolic
+        // family requirements still travel through ordinary unification.
+        return_with_collection_cleanup!(rejected);
+    }
+    if func_name.as_deref() == Some("matmul") && arg_tys.len() == 2 {
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        if let (
+            Type::Tensor(_, TensorPrec::Concrete(left)),
+            Type::Tensor(_, TensorPrec::Concrete(right)),
+        ) = (&lhs, &rhs)
+            && left == right
+            && left.is_integer()
+        {
+            return_with_collection_cleanup!(check_matmul_signature(
+                &arg_tys,
+                &Type::Unit,
+                subst,
+                errors
+            ));
+        }
+    }
+    let mixed_division_precisions =
+        matches!(func_name.as_deref(), Some("div" | "trunc_div")) && arg_tys.len() == 2 && {
+            let precision = |ty: &Type| match type_for_readonly_check(ty, subst) {
+                Type::Prim(prim) | Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                _ => None,
+            };
+            matches!((precision(&arg_tys[0]), precision(&arg_tys[1])),
+                (Some(left), Some(right)) if left != right)
+        };
+    if let Some(fname) = func_name.as_deref()
+        && operand_family_policy(fname).is_some()
+        && !mixed_division_precisions
+    {
+        let operands = if matches!(fname, "mean" | "softmax") {
+            &arg_tys[..arg_tys.len().min(1)]
+        } else {
+            &arg_tys[..]
+        };
+        for operand in operands {
+            let resolved = type_for_readonly_check(operand, subst);
+            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
+                return_with_collection_cleanup!(report(
+                    errors,
+                    CheckError::new(kind, with_node_provenance(node, message,), hints,),
+                ));
+            }
+            if let Type::Tensor(_, TensorPrec::Var(var)) = resolved
+                && let Some(rejected) =
+                    decide_precision_variable_operand(node, fname, var, env, subst, errors)
+            {
+                return_with_collection_cleanup!(rejected);
+            }
+        }
     }
 
     // The builtin signature structurally shares one precision variable across
@@ -265,10 +578,21 @@ pub(super) fn infer_app(
     // unification reports its lower-level precision pair. Unresolved generic
     // wrappers pass this precheck and are constrained by the shared variable.
     if matches!(func_name.as_deref(), Some("test_assert_close_tensor"))
-        && let Some(rejected) =
-            reject_test_assert_close_tensor_operand_dtypes(list, &arg_tys, subst, errors)
+        && let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
+            node,
+            &arg_tys,
+            subst,
+            errors,
+            // No suspension: this pass runs before signature unification has
+            // constrained anything, and `finish_unified_app` calls the same
+            // function again on the types unification produced. That later call
+            // is the one that decides, so it is the one that suspends.
+            None,
+            &Type::Unit,
+            product,
+        )
     {
-        return rejected;
+        return_with_collection_cleanup!(rejected);
     }
 
     // [05-DIM-3]: the semantic registry owns axis dtype slots. `concat`
@@ -277,9 +601,9 @@ pub(super) fn infer_app(
     // `postprocess_application`; every unambiguous builtin is screened here.
     if let Some(fname) = func_name.as_deref()
         && fname != "concat"
-        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors)
+        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors)
     {
-        return rejected;
+        return_with_collection_cleanup!(rejected);
     }
 
     // [05-DIM-1] fix-naming diagnostic for expand's extent slot: a wrong
@@ -291,21 +615,21 @@ pub(super) fn infer_app(
         && let Type::Prim(p) = subst.apply(&arg_tys[2])
         && p != Prim::Int64
     {
-        return report(
+        return_with_collection_cleanup!(report(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "{callee} expects an int64 size (write Ni64 or cast(N, int64)), \
+                        "{callee} expects an i64 size (write Ni64 or cast(N, i64)), \
                          got {}",
                         Type::Prim(p)
                     ),
                 ),
                 vec![],
             ),
-        );
+        ));
     }
 
     // If the *callee* is Error, propagate. With no resolved callee scheme
@@ -331,7 +655,7 @@ pub(super) fn infer_app(
     // Error-typed size slot always reaches the per-form located diagnostic.
     // A genuinely sourced size never infers to `Error`.
     if let Some(err) = propagate_if_error([&func_ty]) {
-        return err;
+        return_with_collection_cleanup!(err);
     }
 
     // Issue Chelis-Lang/chelis#218 R3 HIGH-CONCAT: when `Cons` is
@@ -375,12 +699,12 @@ pub(super) fn infer_app(
                 // a rank-mixed literal. The dim slot `k` is a
                 // dimension variable, not a shape-vector variable;
                 // see spec/04-type-system.md §4.5.1.
-                return report(
+                return_with_collection_cleanup!(report(
                     errors,
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "list element rank mismatch: {} dims vs {} dims; \
                              List[tensor[...]] requires rank-uniform elements \
@@ -394,10 +718,10 @@ pub(super) fn infer_app(
                         ),
                         vec![],
                     ),
-                );
+                ));
             }
             if let Err(te) = unify_tensor_prec(head_prec, &tail_prec, subst) {
-                return report(errors, te.into());
+                return_with_collection_cleanup!(report(errors, te.into()));
             }
             // Per-axis join (chelis#218 concat ergonomics, tightened
             // by chelis#272). Resolve each dim through the current
@@ -432,23 +756,34 @@ pub(super) fn infer_app(
             for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
                 let hr = subst.apply_dim(h);
                 let tr = subst.apply_dim(t);
-                let joined = match (&hr, &tr) {
-                    (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
-                    (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
-                    // Mismatched concrete dims (literal/literal or
-                    // name/name): the deliberate #218 ragged-axis
-                    // widening. Neither side is a dim variable, so there
-                    // is no rigid-dim promise to preserve here.
-                    (Dim::Lit(_), Dim::Lit(_))
-                    | (Dim::Name(_), Dim::Name(_))
-                    | (Dim::Lit(_), Dim::Name(_))
-                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
-                    // At least one side is a dim variable (or a
-                    // wildcard). Unify so rigid dim parameters keep their
-                    // identity and `check_declared_dvars_rigid` can fire.
+                let joined = match (
+                    ListAxis::classify(&hr, subst),
+                    ListAxis::classify(&tr, subst),
+                ) {
+                    (
+                        ListAxis::Concrete {
+                            extent: a,
+                            label: an,
+                        },
+                        ListAxis::Concrete {
+                            extent: b,
+                            label: bn,
+                        },
+                    ) => {
+                        // Names and literal extents are separate observations.
+                        // Name/Lit and distinct names widen even at equal sizes;
+                        // equal names cannot conceal a known extent conflict.
+                        if an == bn && !matches!((a, b), (Some(a), Some(b)) if a != b) {
+                            hr.clone()
+                        } else {
+                            Dim::Wildcard
+                        }
+                    }
+                    // Keep genuine variable constraints for the body-rigidity
+                    // guards, and preserve the specified wildcard head bias.
                     _ => {
                         if let Err(te) = unify_dim(&hr, &tr, subst) {
-                            return report(errors, te.into());
+                            return_with_collection_cleanup!(report(errors, te.into()));
                         }
                         subst.apply_dim(&hr)
                     }
@@ -457,91 +792,136 @@ pub(super) fn infer_app(
             }
             let joined_prec = subst.apply_tensor_prec(head_prec);
             let elem = Type::Tensor(joined_dims, joined_prec);
-            return Type::Adt("List".to_string(), vec![elem]);
+            return_with_collection_cleanup!(Type::Adt("List".to_string(), vec![elem]));
         }
     }
 
-    let ret_tv = vg.fresh_type();
-
-    // Comparison-op tensor/scalar broadcast: when a comparison op
-    // (`cmplt`, `eq`, `neq`, `lt`, `gt`, `lte`, `gte`) is called with one
-    // tensor argument and one scalar argument of matching precision, the
-    // scalar is broadcast across the tensor at eval time. The polymorphic
-    // scheme `(α, α) → α` would otherwise reject the call because
-    // `tensor[D, p]` does not unify with `Prim(p)`. Rewrite the scalar's
-    // type to the tensor type for unification purposes only; the
-    // semantic post-check below still validates each original arg type.
-    //
-    // Ordered comparisons (`lt`, `gt`, `lte`, `gte`, `cmplt`) require
-    // matching numeric precision. `eq`/`neq` allow any matching precision
-    // (including `bool` and `string`).
-    let unify_arg_tys: Vec<Type> = if let Some(ref fname) = func_name
-        && builtins::COMPARISON_OPS.contains(&fname.as_str())
-        && arg_tys.len() == 2
-    {
-        let lhs_resolved = type_for_readonly_check(&arg_tys[0], subst);
-        let rhs_resolved = type_for_readonly_check(&arg_tys[1], subst);
-        let is_eq_family = matches!(fname.as_str(), "eq" | "neq");
-        let precisions_compatible = |tensor_prec: &TensorPrec, scalar_prec: &Prim| -> bool {
-            // Polymorphic-precision tensors (TensorPrec::Var) are not
-            // eligible for the scalar-broadcast rewrite: the rewrite
-            // requires a known precision so the rewritten arg type can
-            // unify against the actual scalar argument. Leave them to
-            // the standard unification path (which will surface a
-            // precise PrecisionMismatch if needed).
-            match tensor_prec {
-                TensorPrec::Concrete(p) => p == scalar_prec && (is_eq_family || p.is_numeric()),
-                TensorPrec::Var(_) => false,
-            }
+    let direct_collection_builtin = matches!(
+        func_name.as_deref(),
+        Some("len" | "index" | "append" | "concat")
+    );
+    if direct_collection_builtin {
+        subst.discard_collection_contracts(&callee_collection_contracts);
+    } else if matches!(
+        subst.apply(&func_ty),
+        Type::Fn(ref params, _) if params.len() == arg_tys.len()
+    ) {
+        let tensor_concat = subst
+            .collection_contracts_include_concat(&callee_collection_contracts, &func_ty)
+            .then(|| tensor_concat_call_evidence(kids, env, subst, errors, product));
+        subst.prepare_collection_contract_call(
+            &callee_collection_contracts,
+            &func_ty,
+            tensor_concat,
+        );
+    }
+    let mut ret_tv =
+        match unify_checked_call_contract(expr, &func_ty, &arg_tys, vg, subst, errors, product) {
+            Ok(ret_ty) => ret_ty,
+            Err(rejected) => return_with_collection_cleanup!(rejected),
         };
-        match (&lhs_resolved, &rhs_resolved) {
-            (Type::Tensor(dims, tensor_prec), Type::Prim(scalar_prec))
-                if precisions_compatible(tensor_prec, scalar_prec) =>
-            {
-                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
-                vec![arg_tys[0].clone(), tensor_ty]
-            }
-            (Type::Prim(scalar_prec), Type::Tensor(dims, tensor_prec))
-                if precisions_compatible(tensor_prec, scalar_prec) =>
-            {
-                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
-                vec![tensor_ty, arg_tys[1].clone()]
-            }
-            _ => arg_tys.clone(),
-        }
+    if let Some(checked_result) =
+        subst.finish_collection_contract_application(collection_contract_mark, &arg_tys, &ret_tv)
+    {
+        ret_tv = checked_result;
+    }
+    absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
+    // chelis#1512: watch whether the eager pass rejects this call. A
+    // route can suspend on one operand and then reject on another in
+    // the same pass, and the replay re-enters the whole route, so the
+    // rejection would be reported a second time. A call that has
+    // already failed has nothing left to decide, so its suspension is
+    // cancelled here.
+    let checkpoint = errors.checkpoint();
+    let contract_name = func_name.clone();
+    let applied = finish_unified_app(
+        node,
+        kids,
+        func_name,
+        arg_tys,
+        ret_tv,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        expected_result,
+    );
+    if errors.iter_since(checkpoint).next().is_some() {
+        subst.cancel_collection_contract_application(collection_contract_mark);
+        product.cancel_post_app_check_for(node);
     } else {
-        arg_tys.clone()
-    };
+        product.record_call_result_contracts(&func_ty, contract_name.as_deref(), env, subst);
+    }
+    applied
+}
 
-    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, unify_arg_tys, subst);
-    let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
-
-    match unify(&func_ty, &expected_fn, subst) {
-        Ok(()) => finish_unified_app(
-            list,
-            kids,
-            func_name,
-            arg_tys,
-            ret_tv,
-            env,
-            vg,
-            subst,
-            errors,
-            product,
-            expected_result,
-        ),
-        Err(te) => {
-            let mut e: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
-                e.span_offset = parse_span_offset(id);
-                e.span_id = Some(id.to_string());
-            } else {
-                let off = span_of_list(list).offset;
-                if off > 0 {
-                    e.span_offset = Some(off);
-                }
-            }
-            report(errors, e)
+/// Bind every alias class this application's instantiation minted a member of
+/// that met a runtime extent `*` and that no argument claimed (chelis#1801).
+///
+/// `spec/04-type-system.md` section 3.2 Application: a dimension variable
+/// minted by an application's instantiation that unifies with a runtime
+/// extent `*`, and that no argument of that application binds to a literal or
+/// named dimension, denotes that runtime extent and is `*` in the
+/// application's result. A literal or name another argument of the same
+/// application binds to it is a claim on the runtime extent, checked by a
+/// section 4.7 guard.
+///
+/// The three questions below are that sentence and nothing else. Unification
+/// identifies dimension variables, so the subject of every clause is the
+/// ALIAS CLASS rather than the variable this application happens to hold:
+/// "unifies with a runtime extent" is the class's wildcard flag, "binds to a
+/// literal" is `constraint_dim` answering a non-variable, and "or named
+/// dimension" is the class's pin, which covers both an authored name that
+/// `bind_dvar` recorded as a label without binding and a declared binder of
+/// the definition under check. `Subst` maintains both flags ON the class root
+/// and merges them at every union, so one question per class is a complete
+/// answer.
+///
+/// chelis#1925's rounds 1 and 2 both reported the same defect class against
+/// weaker forms of this: asking the variable alone missed a class rooted by a
+/// polymorphic argument's own instantiation, and asking two ends missed a
+/// three-member class carrying the meeting on the middle one. Neither the
+/// two-end query nor the "some instantiation minted this root" membership
+/// index survives, because both approximated a sentence the representation
+/// now states.
+///
+/// Why here, and not in `unify_dim`. Binding the variable where it meets the
+/// wildcard freezes it: `f(x: tensor[d, f32], y: tensor[d, f32])` applied to
+/// a runtime-extent argument and a `tensor[3, f32]` one would read `*` when
+/// the wildcard came first and `3` when it came second, so the answer would
+/// depend on argument order. That is the loss the Wildcard-against-Var
+/// invariant on `unify_dim` exists to avoid, and it is why this runs after
+/// the WHOLE call has unified: by then every argument has had its chance to
+/// constrain the class, and the orders agree.
+///
+/// Why here, and not at generalization. A declared result reaches the
+/// definition boundary before generalization does, so a signature such as
+/// `-> tensor[100, f32]` would have pinned the variable to `100` first and
+/// the absorption could never see it. It would also need a let/def
+/// distinction that this rule does not.
+///
+/// `constraint_dim`, not `apply_dim`, decides "still unbound", because that
+/// is the question `constraint_dim` answers: it resolves the variable and
+/// nothing else. `apply_dim` deliberately answers `Var(v)` for a LABELLED
+/// variable that resolved to a concrete dim, to keep the label's identity
+/// available to name-sensitive operations, so it cannot tell a free class
+/// from one an argument just bound to a literal.
+/// `unify::tests::a_recorded_meeting_does_not_by_itself_mean_the_class_is_still_free`
+/// builds that state directly and locks which predicate answers correctly in
+/// it.
+fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], subst: &mut Subst) {
+    for &dv in instantiation_dvars {
+        let Dim::Var(root) = subst.constraint_dim(&Dim::Var(dv)) else {
+            // Bound to a literal, a name or a rank: an argument of this
+            // application supplied a claim on the runtime extent, and
+            // spec/04-type-system.md section 4.7 guards it at run time.
+            continue;
+        };
+        if !subst.dvar_class_met_wildcard(root) || subst.dvar_class_is_binder_pinned(root) {
+            continue;
         }
+        subst.insert_dim(root, Dim::Wildcard);
     }
 }

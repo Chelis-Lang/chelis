@@ -1,4 +1,4 @@
-# Sweep 1 battery: narrow floats (f16/bf16) and narrow ints (int8/16/32) scalars + tensors.
+# Sweep 1 battery: narrow floats (f16/bf16) and narrow ints (i8/16/32) scalars + tensors.
 ROWS = [
     # --- f16 scalar boundary/rounding, both lanes ---
     ("f16_add_2048_1", "add(cast(2048.0, f16), cast(1.0, f16))", "f16"),
@@ -44,11 +44,11 @@ ROWS = [
         "out = print(f(to_tensor([cast(2048.0, f16), cast(1.0, f16), cast(1.0, f16), cast(1.0, f16)])))\n",
     ),
     # --- narrow int scalars: width semantics across lanes ---
-    ("int8_add_overflow", "add(cast(100, int8), cast(100, int8))", "int8"),
-    ("int16_add_overflow", "add(cast(30000, int16), cast(30000, int16))", "int16"),
-    ("int32_add_overflow", "add(cast(2000000000, int32), cast(2000000000, int32))", "int32"),
-    ("int8_mul_overflow", "mul(cast(16, int8), cast(16, int8))", "int8"),
-    ("int8_neg_min", "neg(cast(-128, int8))", "int8"),
+    ("int8_add_overflow", "add(cast(100, i8), cast(100, i8))", "i8"),
+    ("int16_add_overflow", "add(cast(30000, i16), cast(30000, i16))", "i16"),
+    ("int32_add_overflow", "add(cast(2000000000, i32), cast(2000000000, i32))", "i32"),
+    ("int8_mul_overflow", "mul(cast(16, i8), cast(16, i8))", "i8"),
+    ("int8_neg_min", "neg(cast(-128, i8))", "i8"),
     # --- f8e4m3: documented as rejected; is it? ---
     ("f8_cast", "cast(1.0, f8e4m3)", "f8e4m3"),
     (

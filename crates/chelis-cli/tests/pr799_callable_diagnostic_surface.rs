@@ -21,7 +21,7 @@ use tempfile::tempdir;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::write_file;
+use common::{build_and_run, write_file};
 
 /// `chelis build --target c`; (build_ok, stderr, emitted (file name, contents)).
 fn c_build(program: &str, name: &str) -> (bool, String, Vec<(String, String)>) {
@@ -82,10 +82,10 @@ fn assert_frozen_callable_rejection(stderr: &str, emitted: &[(String, String)]) 
 #[test]
 fn used_returned_named_function_gets_the_frozen_callable_diagnostic() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def choose() -> int8 -> int8 = increment\n\
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def choose() -> i8 -> i8 = increment\n\
          chosen = choose()\n\
-         out = print(chosen(cast(6, int8)))\n",
+         out = print(chosen(cast(6, i8)))\n",
         "returned_named_used",
     );
     assert!(!ok, "a used returned function value must not build for C");
@@ -98,10 +98,10 @@ fn used_returned_named_function_gets_the_frozen_callable_diagnostic() {
 #[test]
 fn dynamically_selected_named_callback_gets_the_frozen_callable_diagnostic() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def decrement(x: int8) -> int8 = sub(x, cast(1, int8))\n\
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def decrement(x: i8) -> i8 = sub(x, cast(1, i8))\n\
          selected = if true then increment else decrement\n\
-         out = print(selected(cast(6, int8)))\n",
+         out = print(selected(cast(6, i8)))\n",
         "selected_callback",
     );
     assert!(!ok, "a dynamically selected callback must not build for C");
@@ -114,7 +114,7 @@ fn dynamically_selected_named_callback_gets_the_frozen_callable_diagnostic() {
 #[test]
 fn a_def_named_call_is_an_ordinary_supported_program() {
     let (ok, stderr, _emitted) = c_build(
-        "def call(x: int32) -> int32 = add(x, 1)\n\
+        "def call(x: i32) -> i32 = add(x, 1)\n\
          out = print(call(5))\n",
         "def_named_call",
     );
@@ -142,8 +142,104 @@ fn unresolved_grad_positions_keep_the_ad_workaround_text() {
         "an actual grad position must keep the workaround guidance:\n{stderr}"
     );
     assert!(
+        !stderr.contains("ownership lowering") && !stderr.contains("unbound name `fold`"),
+        "an unsupported grad position must be rejected before ownership lowering:\n{stderr}"
+    );
+    assert!(
         emitted.is_empty(),
         "a rejected build must emit no artifacts"
+    );
+}
+
+/// Positive neighbor: a supported pure-scalar gradient remains on the
+/// scalar-host AD route rather than being rejected with the `fold` case.
+#[test]
+fn supported_pure_scalar_grad_still_builds() {
+    let (ok, stderr, emitted) = c_build(
+        "def square(x: f32) -> f32 = mul(x, x)\n\
+         def gradient(x: f32) -> f32 = grad(square)(x)\n\
+         out = print(gradient(3.0))\n",
+        "supported_scalar_grad",
+    );
+    assert!(ok, "supported scalar grad must keep building:\n{stderr}");
+    assert!(
+        emitted
+            .iter()
+            .any(|(name, _)| name == "supported_scalar_grad.c"),
+        "a supported scalar grad must emit its C translation unit"
+    );
+}
+
+/// Standing-review control for [05-OP-50]: a scalar signature does not imply
+/// a scalar-only body. The scalar/tensor boundary operations are part of the
+/// reverse DAG and their inverse adjoints must execute exactly on generated C.
+#[test]
+fn tensor_bodied_scalar_signature_grad_builds_runs_and_is_exact() {
+    let stdout = build_and_run(
+        "def tensor_square(x: f32) -> f32 =\n\
+           tensor_to_scalar(mul(scalar_to_tensor(x), scalar_to_tensor(x)))\n\
+         out = print(grad(tensor_square)(3.0f32))\n",
+        "tensor_bodied_scalar_signature_grad",
+    );
+    let value = stdout
+        .lines()
+        .find_map(|line| line.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("expected scalar gradient output, got:\n{stdout}"));
+    assert!(
+        (value - 6.0).abs() <= 1e-6,
+        "d/dx x² at x=3 must be 6, got {value}"
+    );
+}
+
+/// Negative parity for the same body-sensitive boundary: merely containing
+/// [05-OP-50] conversions must not make a host-lane `fold` body eligible for
+/// reverse-DAG lowering.
+#[test]
+fn tensor_bodied_fold_grad_keeps_the_ad_workaround_text() {
+    let (ok, stderr, emitted) = c_build(
+        "def folded_tensor_product(theta: f32) -> f32 =\n\
+           fold(\n\
+             fn (acc: f32, x: f32) ->\n\
+               add(acc, tensor_to_scalar(mul(scalar_to_tensor(theta), scalar_to_tensor(x)))),\n\
+             0.0,\n\
+             [1.0, 2.0])\n\
+         out = print(grad(folded_tensor_product)(3.0f32))\n",
+        "tensor_bodied_grad_through_fold",
+    );
+    assert!(!ok, "grad through host-lane fold still rejects");
+    assert!(
+        stderr.contains("applies/binds `grad`"),
+        "tensor intermediates must not hide the host-fold rejection:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("ownership lowering") && !stderr.contains("unbound name `fold`"),
+        "host fold must be rejected before ownership lowering:\n{stderr}"
+    );
+    assert!(
+        emitted.is_empty(),
+        "a rejected host-fold gradient must emit no artifacts"
+    );
+}
+
+/// #2078 preservation control: a primitive scalar target whose callable also
+/// has a tensor parameter/result stays on the reverse-DAG reconstruction path.
+#[test]
+fn tensor_bodied_primitive_scalar_grad_still_builds() {
+    let (ok, stderr, emitted) = c_build(
+        "def loss(scale: f32, x: tensor[2, f32]) -> tensor[f32] =\n\
+           mul(sum(x, 0i32), scalar_to_tensor(scale))\n\
+         out = grad(loss, wrt=scale)(3.0f32, to_tensor([1.0f32, 2.0f32]))\n",
+        "tensor_bodied_scalar_target",
+    );
+    assert!(
+        ok,
+        "#2078's primitive-scalar target must keep building:\n{stderr}"
+    );
+    assert!(
+        emitted
+            .iter()
+            .any(|(name, _)| name == "tensor_bodied_scalar_target.c"),
+        "the supported primitive-scalar target must emit its C translation unit"
     );
 }
 
@@ -152,9 +248,9 @@ fn unresolved_grad_positions_keep_the_ad_workaround_text() {
 #[test]
 fn declared_callback_parameter_with_named_callback_still_builds() {
     let (ok, stderr, emitted) = c_build(
-        "def increment(x: int8) -> int8 = add(x, cast(1, int8))\n\
-         def apply8(callback: int8 -> int8, value: int8) -> int8 = callback(value)\n\
-         out = print(apply8(increment, cast(6, int8)))\n",
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def apply8(callback: i8 -> i8, value: i8) -> i8 = callback(value)\n\
+         out = print(apply8(increment, cast(6, i8)))\n",
         "declared_callback_positive",
     );
     assert!(

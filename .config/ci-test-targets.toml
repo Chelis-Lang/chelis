@@ -1,0 +1,3503 @@
+# Versioned pull-request integration ownership. All default-feature lib/bin units are automatic.
+# standing_target preserves the reviewed ci-fast set; exclusions and shared-path rules
+# are consumed by scripts/ci_change_owned.py and fail closed when stale.
+version = 3
+
+# chelis#845: shared skill source and generated agent symlinks are checked by
+# the script-unit skill metadata/link contract.
+[[path_rule]]
+prefix = ".claude/skills"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies the Claude skill path is the canonical ../agent-skills symlink"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = ".codex/skills"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies the Codex skill path is the canonical ../agent-skills symlink"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/check_agent_skills.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared-skill metadata and discovery-link checker"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/test_check_agent_skills.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises positive and negative shared-skill link contracts"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/regenerate_conformance_assets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks deterministic regeneration of conformance assets and agent-surface links"
+tracking_issue = "chelis#845"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_conformance_assets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit exercises conformance and agent-surface asset regeneration"
+tracking_issue = "chelis#845"
+
+# Binder and defsig contract changes can invalidate Surf and Deep fixtures
+# embedded anywhere in the chelis-types integration package. These reviewed
+# triggers promote every eligible chelis-types integration target into the
+# required lane; package expansion is not sufficient migration evidence.
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/ast.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder representation changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/desugar.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder and type-desugaring changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/dtype_name.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder vocabulary changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/format.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder formatting changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/parser.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder grammar changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-surf/src/resugar.rs"
+packages = ["chelis-types"]
+reason = "Surf declaration-binder reconstruction changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/dtype_bounds.rs"
+packages = ["chelis-types"]
+reason = "Deep declaration-binder bound metadata changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/role.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig child-role changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-deep/src/stamp_to_typed.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig typed-carrier changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/deep_type.rs"
+packages = ["chelis-types"]
+reason = "Deep defsig shape changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/infer/"
+packages = ["chelis-types"]
+reason = "declaration-binder resolution and diagnostic ownership changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+[[required_package_rule]]
+prefix = "crates/chelis-types/src/session.rs"
+packages = ["chelis-types"]
+reason = "binder diagnostic owner-key changes require the complete chelis-types integration owner set"
+tracking_issue = "chelis#1854"
+
+# chelis#1354: the runtime's build record must declare every input of its
+# compilation. A change anywhere in the runtime closure or the lockfile can add
+# an input, so it requires the runtime bundle's integration targets, including
+# the dep-info completeness test.
+[[required_package_rule]]
+prefix = "Cargo.lock"
+packages = ["chelis-runtime-bundle"]
+reason = "the workspace lockfile is a declared runtime source input whose record the bundle checks"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-abi/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-runtime/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-unord/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+[[required_package_rule]]
+prefix = "crates/chelis-vocab/"
+packages = ["chelis-runtime-bundle"]
+reason = "runtime dependency changes can add runtime inputs the build record must declare"
+tracking_issue = "chelis#1354"
+
+# chelis#1582: package-resolved scalar callables stay lexical under vmap, with
+# exact evaluator/native-C agreement and unimported-name rejection controls.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1582_vmap_std_scalar"
+
+# The dedicated changelog job exercises the release-fragment policy and CLI.
+[[path_rule]]
+prefix = "scripts/changelog.py"
+disposition = "owner"
+workflow = "changelog.yml"
+job = "changelog"
+cadence = "pull_request"
+reason = "the changelog job runs the CLI contract tests and evaluates the candidate's release-fragment policy"
+tracking_issue = "chelis#1627"
+
+# The diagnostic-kind producer-seal script has a dedicated pull-request job,
+# while its mutation helpers and command contracts are covered by script-unit.
+# Keep this exact so unrelated scripts receive no implied owner.
+[[path_rule]]
+prefix = "scripts/diagnostic_kind_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "diagnostic-kind-oracle"
+cadence = "pull_request and workflow_dispatch"
+reason = "the dedicated diagnostic-kind job executes every controlled mutation, with its helper contracts covered by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/grad_selector_identity_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "ci-fast executes the oracle's five standing Rust acceptance targets, while script-unit locks its command roster and fallback guard"
+tracking_issue = "chelis#1955"
+
+[[path_rule]]
+prefix = "scripts/test_grad_selector_identity_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the managed-interpreter acceptance roster and unsafe-fallback guard execute in script-unit"
+tracking_issue = "chelis#1955"
+
+# The keyed corpus is manual; its receipt contract runs in script-unit.
+[[path_rule]]
+prefix = "scripts/keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes selection, execution-receipt, timeout and retirement negative controls; full keyed acceptance is an explicit manual gate"
+tracking_issue = "chelis#2413"
+
+[[path_rule]]
+prefix = "scripts/test_keyed_randomness_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the keyed randomness acceptance runner contract tests without compiling its manual corpus"
+tracking_issue = "chelis#2413"
+
+# The completion runner consumes these exact runtime-extent corpus inputs.
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes both registered phase corpora and their receipts"
+tracking_issue = "chelis#1277"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle_targets.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle derives and executes its exact receipt selection from this manifest"
+tracking_issue = "chelis#1277"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_oracle_baseline_phase_b.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle compares the reviewed phase-B baseline and required exit states"
+tracking_issue = "chelis#1277"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_extent_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-extent corpus and controlled-mutation unit contracts execute in script-unit"
+tracking_issue = "chelis#1277"
+
+# The runtime-representation gate executes the frozen inventory and mutations.
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "unit contracts check the reviewed representation source universe and foundation"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/runtime_representation_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate checks the reviewed foundation and executes its frozen mutations"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/runtime_representation_phase1.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 2 representation gate executes this Phase 1 selection, receipt, and native-control driver"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_phase1.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 1 selection and receipt unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate executes this Phase 2 selection, receipt, binding, and native-control driver"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_representation_phase2.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 selection and receipt unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase0_inventory.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate compares the live inventory with this reviewed foundation"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase1_tests.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the Phase 2 representation gate validates and executes this frozen Phase 1 test selection"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "spec/design/runtime_representation_phase2_tests.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the representation gate validates and executes this frozen Phase 2 test selection"
+tracking_issue = "chelis#893"
+
+[[path_rule]]
+prefix = "scripts/test_unrepresentable_domain_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the domain-oracle fixture, roster, and rejection unit contracts execute in the PR script-unit discovery"
+tracking_issue = "chelis#908"
+
+[[path_rule]]
+prefix = "scripts/unrepresentable_domain_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "integration-support"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the domain integration-support slice executes every compiled unrepresentable-domain oracle obligation"
+tracking_issue = "chelis#908"
+
+[[path_rule]]
+prefix = "examples/grad_extent_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# chelis#2027: canonical release manifests and bundled locks are live inputs.
+[[standing_target]]
+package = "chelis-cli"
+name = "compiler_pin_tripwire"
+
+# chelis#2020: inherited profile admission must not copy the whole program per call.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "recursive_profile_allocations"
+
+# chelis#2023: builtin-spelled lexical inputs agree in eval and native C.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "builtin_named_kernel_inputs"
+
+# chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1956_named_axis_inputs"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1956_named_axis_inputs_cli"
+
+# chelis#1955 / chelis#1473: callable-origin identity must agree across the
+# semantic checker, Surf resolver, contextual compiler preparation, and
+# shell-visible CLI.
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1955_grad_selector_checker"
+
+[[standing_target]]
+package = "chelis-surf"
+name = "issue_1955_grad_selector_identity"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1955_grad_selector_pipeline"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1955_grad_selector_identity"
+
+# chelis#1975: fused zero slots, forward checks, and exact eval/native values.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1975_fused_zero_cotangents"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1975_fused_zero_cotangents_cli"
+
+# chelis#1915: caller/formal scope, exact eval/native values and rejection control.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1915_caller_actual_scope"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1753_grad_result_order_ir"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1753_grad_result_order"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1753_grad_result_order_cli"
+
+# chelis#1922: fatal helper-summary error transport and same-process recovery.
+# Host evaluation only; no C build or package provisioning.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1922_helper_summary_diagnostic_api"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1922_helper_summary_diagnostic_cli"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1906_concat_admission"
+
+# chelis#2491: the DAG evaluator admits every extent-sized result before
+# allocating it, trapping where the compiled lane traps instead of panicking.
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_2491_eval_extent_admission"
+
+# chelis#2413 / chelis#2440: a local tensor ascription checks only under its
+# carrier's owner activation (grad/vmap bodies in arms, per-row vmap arms).
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "local_ascription_activation"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2563_local_ascription_eval_file"
+
+# chelis#2413: at a runtime `if` join every lane returns the taken arm or its
+# claim's typed trap, over the generated claimed-join matrix.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2413_claimed_join_lanes"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1906_annotated_softmax"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1906_annotated_concat_softmax"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1875_protected_dimension_identity"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1875_callable_labels"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1875_callable_label_caches"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "phase3_gate_contract"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_687_rejected_cells_corpus"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "invocation_local_random"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "fixed_control_host_c"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_771_seed_width_parity"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "resource_target_admission"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1738_transcript_capture"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1741_scalar_gradient_api"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1741_scalar_gradient_cli"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1650_empty_tensor_api"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1650_empty_tensor_cli"
+
+[[standing_target]]
+package = "chelis-deep"
+name = "roundtrip"
+
+[[standing_target]]
+package = "chelis-surf"
+name = "issue_486_parser_diagnostics"
+
+[[standing_target]]
+package = "chelis-types"
+name = "infer_module_parity"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1107_stamped_node_ingress_parity"
+
+# chelis#1603: a lit node's declared type stamp must agree with its atom at
+# both checker ingresses (vmap axis and tuple-get index admission).
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1603_literal_stamp_compatibility"
+
+[[standing_target]]
+package = "chelis-types"
+name = "unresolved_operand_census"
+
+[[standing_target]]
+package = "chelis-types"
+name = "unresolved_operand_matrix"
+
+# chelis#1801's checker-visible rows. The two executable halves run through
+# `runtime_extent_slice_b` (registered below) and the phase-A oracle target;
+# this file is the signature matrix and the cross-lane refuted-claim control.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1801_wildcard_absorption"
+
+# chelis#2003: scalar Shape identity, batching, and malformed-read refusal.
+[[standing_target]]
+package = "chelis-ir"
+name = "vmap"
+
+# chelis#2211, chelis#2558: the authenticated worker handoff and the disk
+# decoders that compare a stored lowering (the compiled context and the stdlib
+# typecheck cache) skip the effect and linearity reruns, which is sound only
+# while rerunning them reproduces the stored program. This target holds the
+# test that says so for each cache layer, and the scan that keeps the
+# unauthenticated route out of shipped code, so it runs on every candidate
+# rather than waiting for package expansion.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "compiled_context_authenticated_handoff"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "pipeline_contract"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "diagnostic_kind_pipeline"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "fragment_parity"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "dropout_fixed_stream_api"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "dropout_fixed_stream_cli"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "dp_check_ingest"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "check_exits_zero_with_errors_contract"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_207_check_exit_code_invariant"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_394_f64_literal_eval_roundtrip"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1732_integer_host_literals"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "test_command_smoke"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "parity"
+
+# chelis#1351: [05-OP-33] expectations that neither lane computes, checked
+# against eval and against the compiled C lane separately.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1351_structural_axis_independent_oracle"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "parity_corpus_contract"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "phase3_body_contract"
+
+[[standing_target]]
+package = "chelis-e2e"
+name = "pipeline"
+
+[[standing_target]]
+package = "chelis-e2e"
+name = "eval_agreement"
+
+[[standing_target]]
+package = "chelis-reef"
+name = "pipeline_parity"
+
+[[standing_target]]
+package = "chelis-conformance"
+name = "audit_negative_parity"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1710_c_source_names"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1418_recursive_cast_targets"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1640_value_root_actualization"
+
+[[standing_target]]
+package = "chelis-backend-hip"
+name = "hip_count_codegen"
+
+[[standing_target]]
+package = "chelis-backend-hip"
+name = "logical_comparison_where"
+
+[[standing_target]]
+package = "chelis-backend-hip"
+name = "hip_activation_gate"
+
+[[standing_target]]
+package = "chelis-backend-metal"
+name = "logical_comparison_where_rejection"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "logical_comparison_where_targets"
+
+[[standing_target]]
+package = "chelis-backend-metal"
+name = "metal_count_codegen"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_1291_count_device_helpers_api"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1291_count_device_helpers_cli"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1291_count_device_entry"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_368_grad_concat_windows"
+
+[[standing_target]]
+package = "chelis-ir"
+name = "issue_1775_runtime_extent_producer_identity"
+
+[[standing_target]]
+# chelis#1374/#1376: this change's two regression receipts. Both are
+# milliseconds, and without a row here they would run only in the unfiltered
+# nightly, which is not where a regression this pull request introduced should
+# first be caught.
+package = "chelis-compiler-api"
+name = "runtime_extent_authored_claims"
+
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "hip_entry_obligation_witness"
+
+# chelis#1808: the phase-b oracle's receipt leg reads this file, so a sibling
+# merge that changes the C emission turns `runtime_extent_oracle.py --phase b`
+# red on `main` itself. It went unnoticed once because no per-pull-request job
+# ran it. 70 tests, 13.4 s measured warm.
+#
+# The oracle's other receipt leg, `runtime_extent_claim_preparation`, is
+# deliberately NOT here. It is 28 tests and 177 s measured warm on an M-series
+# workstation, and it compiles and links a C fixture per cell, which is slower
+# on the hosted Linux runner. Registered once, it took the Fast Tests job past
+# its 20-minute budget: the ci-fast run of 4193 tests was cancelled at 15m47s
+# with no junit, and the integration aggregator failed on the cancellation. The
+# nightly `runtime-extent-oracle` job runs `--phase b`, which reads that leg, so
+# the matrix stays covered; it is the per-pull-request budget it does not fit,
+# not the coverage that is missing.
+[[standing_target]]
+package = "chelis-cli"
+name = "runtime_extent_slice_b"
+
+# chelis#2108: callable/AD diagnostic routing plus the supported scalar-host
+# and primitive-scalar reverse-DAG neighbors. These short build-only cases
+# catch host-gradient applicability changes before ownership lowering.
+[[standing_target]]
+package = "chelis-cli"
+name = "pr799_callable_diagnostic_surface"
+
+# chelis#1787: this file's census builds every executable Phase 0 example to C,
+# so a merge that adds an example, or that makes one stop building, breaks it on
+# `main` with no per-pull-request job to catch it. That happened once already,
+# on a hand-written example count this change retires. 16 tests, 2.9 s measured
+# warm, of which the census is 2.6 s.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1739_diagonal_runtime_bound"
+
+# chelis#1818/#1817/#1777/#1820: the remaining guard below merged green and
+# surfaced only in a nightly, because no per-pull-request job ran it. It is
+# cheap enough to close that gap here and does not compile or link C.
+#
+# PROVISIONAL pending chelis#1824, which is the open decision about what this
+# selection is FOR. The defect that issue names is not that targets get added;
+# it is that nobody has decided what the set covers, so it grows one escape at a
+# time with no rule. The row carries a measured cost and this status so the
+# evidence is concrete rather than another silent accretion. Re-decide it with
+# the rest of the file when #1824 settles.
+#
+# Deliberately NOT registered, so the gap is recorded rather than silent:
+#   - issue_1222_root_alias_ownership: two rows are red on chelis#1776, so
+#     registering it would make Fast Tests red on every pull request.
+#   - issue_1271_cross_package_ctor_collision, issue_1344_block_alias_ownership:
+#     green, but both publish packages and link C per case, which is the cost
+#     shape that took the Fast Tests job past its budget above.
+#   - scalar_stub_matrix: already delegated to the parallel dtype oracle through
+#     the `ci` profile's default-filter, so it has a hosted owner already.
+#
+# issue_1739_diagonal_runtime_bound was on that list until chelis#1834, for
+# being red on chelis#1192. It is registered directly above because #1834 made
+# it green: its census now ASSERTS the two dropout refusals with their exact
+# diagnostic instead of failing on them, so the row measures the gap rather
+# than tripping over it.
+
+# 18 tests, 1.595 s measured warm. Host-runtime evaluation only.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "issue_257_tensor_scan_host_runtime"
+
+# chelis#1489: both rows guard a SOUNDNESS property -- a deferred operand
+# decision must still be checked against the declaration -- and neither was
+# registered, so the regression the second row pins reached `main` in #1577 with
+# no per-pull-request job running either suite. They invoke the `chelis` binary
+# per case but emit and link no C, which is the cost shape the notes above say
+# took the Fast Tests job past its budget.
+#
+# Same PROVISIONAL status as the row above, pending chelis#1824.
+
+# 16 tests, 3.385 s measured warm.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1489_deferred_tensor_operand_gates"
+
+# 8 tests, 2.884 s measured warm.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1489_deferred_result_generalization"
+
+# chelis#1923: the two locks on WHERE the pipe fold runs. The first says the
+# fold returns a new tree and that every public checker entry calls it, so a
+# tenth entry added later cannot quietly skip it; the second says which printed
+# surfaces move and which do not. Six tests, well under a second warm.
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1923_pipe_fold_placement"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_1923_pipe_fold_surface"
+
+# chelis#1779: one nine-line `chelis build --target c` of the Shoals column
+# reshape. It went red on `main` when chelis#1693 put the staged partition
+# ahead of the decision that reads the runtime-shaped `to_tensor` marker, and
+# nothing per pull request caught it: bisection in chelis#1776 found it. One
+# test, under a second warm.
+[[standing_target]]
+package = "chelis-cli"
+name = "reshape_symbolic_dim_vmap_column"
+
+# chelis#1824 / Jeff's incoming-main audit: the retired spelling inventories
+# stay retired, while their small AST-position and behavioral replacements
+# receive ordinary pull-request ownership.
+[[standing_target]]
+package = "chelis-types"
+name = "expand_insert_dispatch_family"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1294_standard_lowerings"
+
+# chelis#2205: the counted receipts for the container-consumer table. Each
+# asserts that an N-step let-bound chain emits zero cloning calls, which is
+# the only executable evidence that the last-use move reaches the emitter at
+# all; the value-parity rows beside them pass with the table's rows removed,
+# so they cannot substitute. Package expansion is not a substitute either: it
+# is the lane these two were left to, and it does not reliably finish.
+# Registered together because the list file carries the mechanism's original
+# evidence and the dictionary file only extends it.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_container_last_use"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_dict_last_use"
+
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2205_string_last_use"
+
+# chelis#2334 extends that table with `skip`, and this target carries the
+# same counted receipt for it: an N-step let-bound skip chain emitting zero
+# cloning calls, plus the pair that shows the move reaches the bound-head
+# cursor and not the inline one. The comment above applies unchanged --
+# the value-parity rows beside it pass with the row removed, and package
+# expansion is the lane that does not reliably finish.
+[[standing_target]]
+package = "chelis-cli"
+name = "issue_2334_skip_cursor"
+
+# chelis#2496: a Mac run of a test-authored C fixture is no portability
+# evidence. On Linux this target fails unless `cc` is GCC and the strict
+# fixture flags reject both chelis#1864 shapes; it proves only the toolchain
+# that runs it.
+[[standing_target]]
+package = "chelis-runtime"
+name = "c_fixture_portability"
+
+# All five rows in this published-stdlib acceptance target are intentionally
+# ignored. A direct modification remains required change-owned coverage: the
+# worker lists with ignored tests included, rejects this mode if any active
+# test appears, and executes the complete ignored suite with per-test receipts.
+[[manual_only_target]]
+package = "chelis-cli"
+name = "issue_1417_stdlib_dtype_family_bounds"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
+reason = "the documented published-stdlib acceptance matrix is entirely ignored and must execute explicitly when its target changes"
+tracking_issue = "chelis#1824"
+
+# All six CPU-fixture rows require an exact-head runtime archive and are
+# intentionally ignored in ordinary workspace runs. Direct modifications must
+# execute the complete ignored suite through the change-owned worker rather
+# than being rejected as an empty active target.
+[[manual_only_target]]
+package = "chelis-backend-hip"
+name = "device_entry_execution"
+workflow = "ci.yml"
+job = "change-owned-shard"
+cadence = "pull_request and exact-candidate workflow_dispatch when directly modified"
+reason = "the runtime-dependent HIP CPU-fixture suite is entirely ignored and must execute explicitly against the exact-head runtime archive when its target changes"
+tracking_issue = "chelis#1863"
+
+# These all-ignored targets need prerequisites no Linux PR worker has. A direct
+# modification is listed with its ignored tests, rejected if an active test
+# appears, and reported as a manual gate that PR CI did not execute. Each
+# `manual_gates` value is a docs/manual_gates.md row whose command runs exactly
+# this target's ignored tests, and one of them runs all of them with no name
+# filter; an uncited row that runs it makes this row stale.
+[[manual_gate_target]]
+package = "chelis-cli"
+name = "shoals_oracle"
+manual_gates = [
+  "phase3l_shoals_oracle",
+  "phase3l_shoals_oracle_grad_greeks_match_analytic",
+  "shoals_oracle suite",
+]
+reason = "the Shoals finance-oracle rows need a Shoals checkout that the Linux PR workers do not have"
+tracking_issue = "chelis#1824"
+
+[[manual_gate_target]]
+package = "chelis-python"
+name = "manual_reef_context"
+manual_gates = ["reef_context_manual_acceptance_oracle"]
+reason = "the reef-context gate needs a populated local registry and the macOS Python library path unavailable to Linux PR workers"
+tracking_issue = "chelis#2694"
+
+# This target requires a real HIP workstation. Ubuntu change-owned and package
+# expansion workers must preserve the exact manual gate without attempting to
+# execute the ignored hardware matrix themselves.
+[[target_exclusion]]
+package = "chelis-backend-hip"
+name = "logical_comparison_where_gpu"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "manual-required on the exact reviewed candidate"
+reason = "the runtime-representation hardware manifest registers the exact real-HIP command"
+tracking_issue = "chelis#1284"
+
+# This target requires an Apple Silicon Metal device, and every test in it is
+# ignored. The same hardware manifest registers its exact manual command (lane
+# `metal`, docs/manual_gates.md Phase M row), so Ubuntu change-owned and
+# package expansion workers preserve that manual gate rather than attempting
+# the ignored hardware suite.
+[[target_exclusion]]
+package = "chelis-backend-metal"
+name = "gpu_correctness"
+workflow = "heavy-e2e.yml"
+job = "runtime-representation-phase0-oracle"
+cadence = "manual-required on the exact reviewed candidate"
+reason = "the runtime-representation hardware manifest registers the exact Metal command"
+tracking_issue = "chelis#893"
+
+# The default nextest profile excludes these complete targets. The current
+# unfiltered four-shard Linux workspace job is their exact alternative owner.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "stdlib_typecheck_cache_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "cold/warm and monolithic/layered cache acceptance rebuilds the chelis-std graph"
+tracking_issue = "chelis#1824"
+
+[[target_exclusion]]
+package = "chelis-cli"
+name = "stdlib_typecheck_cache_concurrency"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "parallel cold-cache stress is contention-sensitive and belongs to the unfiltered nightly"
+tracking_issue = "chelis#1824"
+
+[[target_exclusion]]
+package = "chelis-cli"
+name = "monomorphization_build"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
+tracking_issue = "chelis#1824"
+
+# These individual heavy rows remain in otherwise selectable targets. Each
+# exact test is removed from package expansion and retains the same unfiltered
+# Linux nightly owner.
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "phase3a_reef_std_acceptance_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "named reef-std acceptance oracle publishes and builds a dependent package"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "reef_check_accepts_sig_only_shell_imports"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real reef check traverses the packaged chelis-std dependency graph"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "reef_build_emits_shell_and_archive"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real reef build emits the packaged shell and archive"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "bundled_chelis_std_loader"
+name = "phaseA_bundled_chelis_std_loader_property_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "named bundled-stdlib property oracle performs a real reef build"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "reef_install_from_monorepo"
+name = "reef_install_from_monorepo_populates_registry_and_unblocks_check"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real monorepo reef install populates a registry before checking a dependent package"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_1293_redteam_round4"
+name = "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "recursive composite cotangent parity compiles and executes generated C"
+tracking_issue = "chelis#1293"
+
+# Cargo metadata classifies paths under workspace package roots directly.
+# Shared roots remain fail-closed unless this file records a current,
+# evidence-backed disposition. Directory prefixes end in `/`; other rules are
+# exact files. Overlap is forbidden by the parser.
+
+[[path_rule]]
+prefix = "spec/02-surf-syntax.md"
+disposition = "packages"
+packages = ["chelis-surf", "chelis-types", "chelis-compiler-api"]
+
+[[path_rule]]
+prefix = "spec/03-deep-syntax.md"
+disposition = "packages"
+packages = ["chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"]
+
+[[path_rule]]
+prefix = "spec/04-type-system.md"
+disposition = "packages"
+packages = ["chelis-types", "chelis-compiler-api"]
+
+# The Python package that maturin ships with the chelis-python extension;
+# chelis-python's execution-wire facade tests import it.
+[[path_rule]]
+prefix = "bindings/python/chelis/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+# These PEP 517 inputs choose the features used to build chelis-python wheels.
+[[path_rule]]
+prefix = "bindings/python/pyproject.toml"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/build_backend/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/tests/"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "editors/vscode/syntaxes/chelis.tmLanguage.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the issue 1592 script-unit boundary test checks canonical integer spelling in the maintained VS Code grammar"
+tracking_issue = "chelis#1592"
+
+# Exact executable-corpus source exercised by both
+# chelis-cli::parity::parity_kinded_nominal_dimensions and
+# chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/kinded_nominal_dimensions.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+# Exact executable-corpus source exercised by both
+# chelis-cli::parity::parity_nested_tuple_projection and
+# chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/nested_tuple_projection.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+# Exact executable-corpus source exercised by both
+# chelis-cli::parity::parity_unicode_string_foundation and
+# chelis-e2e::spec_all_executable_examples_parse_and_check.
+[[path_rule]]
+prefix = "examples/unicode_string_foundation.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+
+# Exact executable-corpus sources exercised by
+# chelis-e2e::spec_all_executable_examples_parse_and_check. Keep these exact:
+# unrelated future example files must acquire their own evidence-backed owner.
+[[path_rule]]
+prefix = "examples/checked_reshape.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/checked_sparse_axes.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/count_bool_axes.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/count_bool_device_entry.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/dict_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/hello_tensor.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/induction_bond.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/integer_functions.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/iter_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/list_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/recursive_cast_targets.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/recursive_generic.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/scalar_string_foundation.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+[[path_rule]]
+prefix = "examples/tensor_structural_ops.ch"
+disposition = "packages"
+packages = ["chelis-e2e"]
+
+# Exact explicit-binder migration examples and their direct executable owners.
+# Keep these file-specific: a new example must establish its own evidence.
+[[path_rule]]
+prefix = "examples/checked_host_local_ascription.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/generic_host_permutation.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/checked_runtime_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/dropout_staged_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# chelis#2413 explicit-key examples. Each is exercised by
+# chelis-cli::parity (its per-file lane test), by
+# chelis-e2e::spec_all_executable_examples_parse_and_check and
+# example_corpus_validate, by chelis-surf's fmt_idempotent_on_repo_ch_corpus
+# (which failed on their retired `with seed` form), and additionally:
+# dropout_entry.ch by cli.rs's fixed-control C-entry test,
+# dropout_fixed_stream.ch by dropout_fixed_stream_cli, and
+# dropout_static_rate.ch by cli.rs and
+# chelis-compiler-api::dropout_fixed_stream_api.
+[[path_rule]]
+prefix = "examples/dropout_entry.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_fixed_stream.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/dropout_static_rate.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/signed_seed.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# Forward staged ADT selection is checked through public Eval/C and parity.
+[[path_rule]]
+prefix = "examples/staged_adt_control.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
+# chelis-cli::parity, and enters the executable and formatter corpora.
+[[path_rule]]
+prefix = "examples/keyed_state_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/tensor_key_operations.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
+# Illustrative source read by chelis-e2e::example_corpus_validate and
+# chelis-surf's fmt_idempotent_on_repo_ch_corpus.
+[[path_rule]]
+prefix = "examples/illustrative/effects_handlers.ch"
+disposition = "packages"
+packages = ["chelis-e2e", "chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/illustrative/mlp.ch"
+disposition = "packages"
+packages = ["chelis-surf"]
+
+[[path_rule]]
+prefix = "examples/rank_poly_borrow.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# Exact illustrative and package-fixture sources exercised by recursive
+# chelis-cli integration targets.
+[[path_rule]]
+prefix = "examples/illustrative/moe_gather_duplicate_indices.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/phase3g_text_pipeline/src/main.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/process_run_chelis_version.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/runtime_shape_semantics.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/scatter_replace_last_write_wins.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/sparse_summary_def_wrapper.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# Exact shared scripts changed by the integer spelling migration. The PR
+# script-unit selection discovers every named test module; production oracles
+# with stronger standing jobs retain those jobs as their owners below.
+[[path_rule]]
+prefix = "scripts/builtin_atom_semantic_contracts.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_builtin_atom_registry imports and mutation-tests the semantic contract table in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "spec/registry/builtin_semantic_identities.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_builtin_atom_registry parses and validates every checked-in builtin identity against its exact numbered-spec authority"
+tracking_issue = "chelis#1294"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_adapters.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the stored-value codec cases and native and mirror shape checks are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_adapters.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily and workflow_dispatch"
+reason = "the compiler-backed ActualCanonicalCodec and ConstGenericGraph classes execute in script-nightly; lightweight paired controls also execute in PR script-unit"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_materialization.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the materialization-case selection and expectations are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_artifact.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the compiled-artifact manifest codec cases are executed by PR script-unit census controls and the nightly schema-codec census"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_operations.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact wire operation field registrations are imported by PR script-unit census controls"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/front_end_performance_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_front_end_performance_fixtures imports the generator and checks exact rendered programs in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/integer_dtype_spelling_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated oracle scanner, boundary contract and command roster are mutation-tested by script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/nautilus_local_gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated integer spelling oracle boundary test pins the local Nautilus canary's canonical dtype spellings"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/runtime_extent_cache_compatibility.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_runtime_extent_cache_compatibility imports and checks the exact diagnostic contract in script-unit"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_compiled_value_ownership_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the compiled ownership oracle's ledger and receipt mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_faithful_observation_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 source, receipt and mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_front_end_performance_fixtures.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact front-end fixture rendering tests run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_integer_dtype_spelling_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the dedicated corpus scanner and boundary mutation controls run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/test_runtime_extent_cache_compatibility.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact cache diagnostic result contract tests run in the PR script-unit selection"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/compiled_value_ownership_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "compiled-value-ownership-phase0-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the standing compiled value ownership job executes the Phase 2 and launch oracle entry points"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "scripts/faithful_observation_phase2_oracle.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "faithful-observation-phase2-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the standing faithful observation job executes the complete Phase 2 oracle"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "spec/05-risc-primitives.md"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/conformance/hull/programs/"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull gate executes every frozen program against the candidate compiler"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull gate runs this runner against the candidate compiler, and its unit tests run in the same job"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/test_run_conformance.py"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull job's conformance unit-test step executes this module"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/build_corpus.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the issue 1592 script-unit boundary test checks canonical integer spelling in the maintained Hull corpus builder"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/known_conservative.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "the required Hull integrity and conformance gates load the committed conservative-reference fixture"
+tracking_issue = "chelis#1592"
+
+[[path_rule]]
+prefix = "tests/support/c_preprocessor.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/support/capacity_census_stdlib.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/support/capacity_census_stdlib_tests.rs"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "tests/support/helper_summary_fatal.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-ir"]
+
+[[path_rule]]
+prefix = "examples/declared_operation_bounds.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::parity target checks this exact example and compares eval with generated C"
+tracking_issue = "chelis#1942"
+
+[[path_rule]]
+prefix = "examples/ordered_extent_claims.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::parity target checks this exact example and compares eval with generated C"
+tracking_issue = "chelis#2377"
+
+[[path_rule]]
+prefix = "examples/vmap_tensor_capture.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::parity target checks this exact example and compares eval with generated C"
+tracking_issue = "chelis#516"
+
+[[path_rule]]
+prefix = "examples/caller_actual_scope.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing issue_1915_caller_actual_scope target checks this exact example and its eval/native results"
+tracking_issue = "chelis#1956"
+
+[[path_rule]]
+prefix = "examples/grad_scalar_extent_claim.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/illustrative/grad_selector_provenance.ch"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing chelis-cli::issue_1955_grad_selector_identity target checks and evaluates this exact illustrative callable-provenance example without treating it as C-host phase proof"
+tracking_issue = "chelis#1955"
+
+[[path_rule]]
+prefix = ".cargo/"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "packages/chelis-std/"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-reef", "chelis-std-bundle"]
+
+# The configuration-closure implementation and its adversarial controls execute
+# together in the pull-request script-unit discovery.
+[[path_rule]]
+prefix = "scripts/check_configuration_closure.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the configuration-closure implementation is imported and exercised by its script-unit controls"
+tracking_issue = "chelis#2168"
+
+[[path_rule]]
+prefix = "scripts/test_check_configuration_closure.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the configuration-closure positive and negative controls execute in script-unit"
+tracking_issue = "chelis#2168"
+
+# The runtime-archive lookup guard scans the whole repository from its
+# script-unit test.
+[[path_rule]]
+prefix = "scripts/check_runtime_archive_lookups.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-archive lookup guard is imported and run against the repository by its script-unit tests"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_check_runtime_archive_lookups.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the runtime-archive lookup guard's repository scan and planted-lookup controls execute in script-unit"
+tracking_issue = "chelis#1354"
+
+# Exact implementation paths for the initial chelis#1824 mechanism. These
+# avoid granting authority to unrelated future files under scripts/, .github/
+# or .config/.
+[[path_rule]]
+prefix = ".config/ci-test-targets.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the strict v2 ownership manifest is parsed and mutation-tested by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".config/ci-change-owned-durations.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the reviewed target-duration baseline is authenticated and mutation-tested by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/build-cvc5.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the cvc5 build, cache and release helpers and their glibc-231 and hosted-validation contracts are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/cache-prune.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/conformance-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the nightly Hull cadence and its command inventory are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/ecosystem-drift.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the drift report, repin helper and their workflow contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "scripts/drift_prepare_dependencies.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the immutable dependency preparation and its exact source, checksum, and failure contracts"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
+prefix = "scripts/test_drift_prepare_dependencies.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the dependency preparation's positive and controlled-mutation tests"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
+prefix = "scripts/test_ecosystem_drift_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit locks the ecosystem workflow's immutable inputs, strict source builds, and no-auto-fetch commands"
+tracking_issue = "chelis#2268"
+
+[[path_rule]]
+prefix = ".github/workflows/loc-report.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit holds this workflow's reviewed registration as running no command the per-PR gate owns; it validates that membership, not a command inventory"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/loud-unsupported-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the loud-unsupported nightly workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/macos-nightly.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the macOS nightly cadence, its configuration-closure inputs and its hosted-validation contract are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/nix-packages.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates this workflow's flake-package contract and its reviewed registration as running no command the per-PR gate owns"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/openspec-store.yml"
+disposition = "owner"
+workflow = "openspec-store.yml"
+job = "openspec-store"
+cadence = "pull_request and push"
+reason = "the shared store action verifies the consumer pointer, immutable checkout, and strict planning schema"
+tracking_issue = "chelis#733"
+
+[[path_rule]]
+prefix = "openspec/"
+disposition = "owner"
+workflow = "openspec-store.yml"
+job = "openspec-store"
+cadence = "pull_request and push"
+reason = "the shared store action owns the consumer pointer and immutable revision lock"
+tracking_issue = "chelis#733"
+
+[[path_rule]]
+prefix = ".github/workflows/ownership-hip.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the ownership HIP manual-gate workflow contract is locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/smt-full-prove.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the full SMT prove cadence and its configuration-closure inputs are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "docs/manual_gates.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates every manual_gate_target row against this table, which the planner also reads; the docs-only detector lists it as a control artifact"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "docs/investigations/remediation_status_2026_08_04.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates this protected status contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/11-ffi.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected FFI contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "spec/design/spec_provenance.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected provenance contract and exact change acknowledgements; the docs-only detector already lists it as a control artifact"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = "scripts/test_diagnostic_kind_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes this oracle's own test; the docs-only detector separately promotes a change here into the diagnostic-kind mutation oracle"
+tracking_issue = "chelis#2232"
+
+[[path_rule]]
+prefix = ".github/workflows/changelog.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required Changelog check's trigger set and per-head concurrency contract are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/ci.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the change-owned workflow graph and command spellings are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/conformance.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "generic-edit exclusion and exact-base Hull dispatch are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-base-retarget.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "trusted base-retarget coordination and its required receipt are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-contract-acknowledgements.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only acknowledgement routing and its dedicated required job are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-package-expansion.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the stale-head-rejecting manual expansion interface and worker topology are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/pr-candidate-receipt.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the trusted workflow-run receipt boundary and read-only topology are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/heavy-e2e.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the unattended owner graph and nightly reporting are locked by script-unit"
+tracking_issue = "chelis#2232"
+
+# The release workflow is text-parsed by the script-unit suites that lock its
+# job graph, cargo build targets, runtime-header manifests, glibc 2.31 lane,
+# installed-artifact canary wiring, and release-notes extraction. Other sibling
+# workflow files and .github/scripts stay unclassified.
+[[path_rule]]
+prefix = ".github/workflows/release.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the release workflow's job graph, build targets, header manifests, glibc lane, canary wiring, and release-notes extraction are locked by script-unit"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = ".kache.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the fast lane compiles and runs executable and runtime contracts through the checked-in Kache policy"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/kache_toolchain_smoke.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_kache_toolchain_smoke exercises managed-wrapper selection, repository-policy validation, and isolated-store rejection in the PR script suite"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/test_kache_toolchain_smoke.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the managed-wrapper and isolated-config unit contracts"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/kache_executable_cache_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_kache_executable_cache_regression exercises cache-report classification and restored-executable identity validation in the PR script suite"
+tracking_issue = "chelis#2385"
+
+[[path_rule]]
+prefix = "scripts/test_kache_executable_cache_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes cache-report and restored-executable validation unit contracts"
+tracking_issue = "chelis#2385"
+
+# The project runtime is activated by script-unit before its discovered tests.
+# Native flake execution and protected cache publication retain their manual owners.
+[[path_rule]]
+prefix = "devenv.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the locked project runtime and executes the Devenv version and lock-parity contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit evaluates the project entry point during activation and executes the Devenv composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv.yaml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the declared Devenv inputs and checks the CLI version and lock parity"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/commands.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs through the managed project command launcher and exercises its environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/toolchains.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit realizes the project toolchain during activation and checks the Devenv version and composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/checks.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native Nix job executes the complete flake check set, including the generated launcher's Bash syntax and shellcheck derivation"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/packages.nix"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the native Nix job builds every locked package defined here, including the chelis package's runtime export and digest check"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "devenv/ci.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit enters the project CI profile before executing runtime and environment handoff contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "activation tests exercise successful handoff, failed initialization, cancellation and interpreter identity"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_devenv.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the project activation regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "every hosted job enters its commands through these shims; the script suite proves the command file, gate and interpreter contract"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_ci_hosted_commands.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered script suite runs the hosted command shim regression cases"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/actions/setup-project-ci/"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit activates the project through the shared setup sequence before its environment handoff regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_nix_cache_roots.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "the protected native job publishes only realized environment and completed flake-check roots"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-cvc5.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "the SMT lane realizes the native solver provider and exercises discharge, containment and feature-specific Clippy"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-openblas.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Linux Nix Rust-policy stage compiles the complete solver-free feature configuration with the LP64 static provider"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "nix/ci-arb.nix"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Nix Rust-policy stage compiles the Arb feature against the locked compiler-matched native numeric cache"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/scripts/verify_release_smt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "smt-build"
+cadence = "pull_request and push"
+reason = "both SMT lanes execute the release verifier: the native lane proves discharge and the compatibility lane proves it under glibc 2.31"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".github/scripts/smoke_macos_metal.py"
+disposition = "owner"
+workflow = "macos-nightly.yml"
+job = "macos-workspace-shard"
+cadence = "daily 04:17 UTC and workflow_dispatch"
+reason = "the macOS workspace shard's Metal smoke builds a Metal host with chelis build and links the archive it staged"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_glibc231_workflows.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit checks the immutable Bullseye producer and release configuration; the Nix CI lane owns its separate runtime proof"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/devenv_entry_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the entry-result classifier's success, failed-task, missing-export, and missing-payload contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = ".cargo-husky/hooks/commit-msg"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the cargo-husky hook's real acceptance, rejection, and interpreter-ownership controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = ".githooks/commit-msg"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the shared hook's acceptance, rejection, owned-profile isolation, and truncation controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_check_commit_message.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes commit-message policy and cargo-husky acceptance and rejection cases"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_commit_hook.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes both hooks' owned-profile, foreign-profile, uv fallback, and truncation regressions"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_bootstrapless_scripts.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the bootstrap-free carve-out's 3.9-parse, stdlib-only, and gate re-exec locks"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_native_execution.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the native census under the project-owned interpreter"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_native_execution.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the native execution evidence-rejection controls; script-nightly runs the NativeExecutionIntegration class"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_python_environment.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes managed-interpreter admission and foreign-environment rejection controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_ci_script_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit verifies that native execution retains its dedicated owner outside broad PR discovery"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_managed_toolchain_contract.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the managed toolchain contracts"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_nix_flake_contract.py"
+disposition = "owner"
+workflow = "nix-packages.yml"
+job = "nix-linux-x86-64"
+cadence = "workflow_dispatch and published release"
+reason = "native Nix jobs explicitly run the complete module, including evaluation and package build contracts"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/test_release_workflow_pyo3_isolation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the release workflow's build-target and pyo3-isolation contracts run in the PR script-unit discovery"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_release_runtime_header_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit requires every release staging block to ship the exported runtime-header closure and preprocesses it as an installed consumer"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/installed_artifact_canary.py"
+disposition = "owner"
+workflow = "release.yml"
+job = "installed-artifact-canary"
+cadence = "tag push and workflow_dispatch"
+reason = "the release canary installs the shipped toolchain and requires the staged runtime to match the shipped lib archive byte for byte and to come from a sealed build"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_installed_artifact_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit runs the canary's transport, process and staged-runtime receipt controls and ties each canary leg to the build chelisup installs (chelis#2686)"
+tracking_issue = "chelis#1354"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_composition.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the Devenv module-composition contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_entry_regression.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the concurrent-entry result classification regressions"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_devenv_version.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes the CLI version, module pin, and Kache version contracts"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/test_gate_parity_adversarial.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the discovered PR script suite executes adversarial canonical-gate and hosted-workflow parity checks"
+tracking_issue = "chelis#2241"
+
+[[path_rule]]
+prefix = "scripts/ci_change_owned.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the planner executor and report implementation is directly covered by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_script_tests.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required script-unit job executes the changed partitioner and validates its complete disjoint selection"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates default-branch baseline run selection, base containment and manifest issuance"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_preflight_carrier.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the always-completes and single-carrier contract's own tests"
+tracking_issue = "chelis#2228"
+
+[[path_rule]]
+prefix = "scripts/ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the candidate clone's stated invariant and the confinement of its fetches"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
+prefix = "scripts/test_ci_establish_candidate_clone.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the candidate clone invariant's own tests"
+tracking_issue = "chelis#2234"
+
+[[path_rule]]
+prefix = "scripts/ci_candidate_lifecycle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates candidate update classification and persistent declarations"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_candidate_identity.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates exact synthetic-candidate parents and stable PR patch identity"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_candidate_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates trusted required-check provenance and candidate receipt issuance"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_contract_paths.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates the canonical required-check contract path classifier"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_rebase_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates trusted prior-receipt discovery, exact patch replay and fail-closed rebase lane selection"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_pr_lifecycle_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit validates complete PR Actions collection, lifecycle attribution, billing estimates and trace-backed wait accounting"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_change_owned.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the planner executor and report mutation suite runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_failure_baseline.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "baseline selection, containment and manifest controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_lifecycle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes candidate lifecycle graph and acknowledgement controls"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_identity.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "exact candidate-parent and patch-identity controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_candidate_receipt.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "receipt provenance, stale-head and tampered-artifact controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_contract_paths.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "canonical required-check contract path classifier parity executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_changelog.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the isolated changelog policy fixture executes in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_rebase_reuse.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "rebase evidence reuse and negative fallback controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_pr_lifecycle_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the lifecycle report attribution, chronology, job-accounting and Markdown contracts execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_change_owned_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required and informational workflow topology is locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_pr_workflow_routing.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "metadata-only CI routing, acknowledgement isolation and manual dispatch inputs are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_hosted_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "hosted Docs coverage and metadata-edit negative controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_validate_pr_candidate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-head and planned-base manual dispatch validator is locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "exact-base dispatch, polling and head-receipt failure controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_validate_pr_candidate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the manual dispatch validator's positive and stale-candidate controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_retarget_validation.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "retarget success, stale, duplicate, missing and failed receipt controls execute in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_test_targets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the standing ci-fast manifest consumer is directly covered by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_test_targets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the standing ci-fast selection contract runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_cadence.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "CI cadence and stable dependency assertions run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "gate stage definitions and command construction are exercised by the gate contract suite in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "gate-owned workflow and cache invariants run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate_fast.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact --fast stage list, its ordering and its summary run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate_local.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the local gate's stage selection and tool resolution run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate_detach.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the detached-run launcher, handle and --status verdict contract run in script-unit"
+tracking_issue = "chelis#1568"
+
+[[path_rule]]
+prefix = "scripts/test_gate_diagnostics.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the gate's failure transcript, replay and rerun diagnostics run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/worktree_status.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the worktree busy-signal probe is exercised by its own suite in script-unit"
+tracking_issue = "chelis#1568"
+
+[[path_rule]]
+prefix = "scripts/test_worktree_status.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the worktree busy-signal verdicts, lease and process evidence run in script-unit"
+tracking_issue = "chelis#1568"
+
+# The rows below own the opaque-invariants corpus, whose only CI consumer
+# runs nightly: `chelis-cli::opaque_corpus_gate` runs each committed program
+# against the live binary, and it is not a standing_target, so it reaches CI
+# only through the nightly full workspace. `scripts/test_regen_all.py` does
+# run per pull request, but its corpus tests exercise
+# `regen_all.compare_corpus_trees` against synthetic trees rather than the
+# committed one, so they defend the comparison and not the artifact. That
+# distinction is the rule for these rows: name the job that goes red when the
+# artifact is wrong, not the job that tests the generator or the checker.
+# chelis#2261 tracks promoting them to per-pull-request coverage.
+[[path_rule]]
+prefix = "tests/corpus/opaque_invariants/manifest.json"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "opaque_corpus_gate runs each check-lane corpus program named here against the live binary and holds it to its pinned exit code"
+tracking_issue = "chelis#2250"
+
+[[path_rule]]
+prefix = "tests/corpus/opaque_invariants/programs/"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "opaque_corpus_gate executes every generated corpus program here on the checked lane"
+tracking_issue = "chelis#2250"
+
+# These exact paths use the existing chelis#1824 ownership mechanism.
+# Script-unit owns the portable contracts, not live cache acceptance.
+[[path_rule]]
+prefix = ".github/actionlint.yaml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the custom label in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/shared-runner-canary.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests check the manual workflow and its credential restrictions in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner tests exercise the portable cache probe contracts in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_shared_runner_canary.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "The shared runner contract suite executes in script-unit."
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_nextest_profile_partition.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "workspace shard 1 runs the real standing-selection versus unfiltered-nightly listing comparison"
+tracking_issue = "chelis#1824"
+
+# Rejection authority row admission and standing-canary controls.
+[[path_rule]]
+prefix = "spec/design/loud_unsupported.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the Phase 4B freeze and per-file contract acknowledgement run in the required Docs job"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "spec/design/loud_unsupported_issue_manifest.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the checked-in rejection registry agreement and offline authority-admission controls execute in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/generate_rejection_registries.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "manifest schema and source derivation controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_generate_rejection_registries.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "manifest parser and production source graph tests run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/validate_rejection_issue_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "offline parser and Git-comparison controls run in script-unit; complete live issue-state validation runs in the daily/manual standing workflow"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_validate_rejection_issue_manifest.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "real Git comparison and authority admission controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/ci_detect_docs_only.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "docs-only and diagnostic-kind change detection controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_ci_detect_docs_only.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "change-detector output and path controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/loud_unsupported_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "test_loud_unsupported_phase2_oracle executes the controlled vocabulary and HostAbiType mutation builders and their drift controls in script-unit"
+tracking_issue = "chelis#730"
+
+[[path_rule]]
+prefix = "scripts/test_loud_unsupported_phase2_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the Phase 2 mutation-builder, drift and restoration controls run in script-unit"
+tracking_issue = "chelis#730"
+
+[[path_rule]]
+prefix = "scripts/test_loud_unsupported_nightly_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "PR admission and nightly standing workflow controls run in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/dtype_phase4b_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job executes the authoritative Phase 4B contract and acknowledgement oracle"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/phase4b_contract_text.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "shared atom and region extraction executes in the required Phase 4B report and oracle"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/phase4b_acknowledgements.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the shared frozen-contract acknowledgement grammar and negative controls run in script-unit"
+tracking_issue = "chelis#1824"
+
+# Stable root controls with direct standing owners.
+[[path_rule]]
+prefix = "scripts/phase4b_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job executes and publishes the committed atom and region report"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_phase4b_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "Git, workflow, and retained-freeze mutation controls for the Phase 4B report run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/faithful_observation_phase3_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "Phase 3 source, call-role, comparator, receipt and runner mutation controls run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_faithful_observation_phase3_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "Phase 3 oracle and Rust declaration discovery tests run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/phase3_test_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job executes and publishes the committed Phase 3 test change report"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_phase3_test_change_report.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "real Git and workflow mutation controls for the Phase 3 report run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/faithful_observation.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the Docs job executes the Phase 3 review-report trial described by this contract"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "Cargo.lock"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-runtime-bundle", "chelis-shell",
+  "chelis-std-bundle", "chelis-surf", "chelis-tide", "chelis-types",
+  "chelis-unord", "chelis-validate", "chelis-version", "chelis-vocab",
+  "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "Cargo.toml"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "clippy.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "Clippy policy is executed directly by the standing Rust policy job"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/pipeline_core_dependency_guard.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core dependency guard against the workspace's resolved cargo graph"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the chelis-std bundle regeneration check twice against the committed outputs"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the bundle regeneration unit tests; the real fixed-point class stays on the nightly script lane"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "rust-toolchain.toml"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+# Exact release inputs; neighboring example and corpus sources stay unclassified.
+
+[[path_rule]]
+prefix = "examples/illustrative/phase3g_text_pipeline/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/reef.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "examples/nautilus_quantile_contract/fixtures/nautilus/reef.lock"
+disposition = "owner"
+workflow = "ci.yml"
+job = "ci-fast"
+cadence = "pull_request and push"
+reason = "the standing compiler_pin_tripwire target checks the live compiler pins in release manifests and bundled dependency locks"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "tests/conformance/hull/manifest.json"
+disposition = "owner"
+workflow = "conformance.yml"
+job = "conformance"
+cadence = "pull_request and push"
+reason = "test_corpus_integrity checks the manifest pin and the frozen Hull corpus gate consumes this exact manifest"
+tracking_issue = "chelis#2027"
+
+[[path_rule]]
+prefix = "scripts/regen_all.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "regeneration ordering, failure handling and reviewed-artifact non-writing controls run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_regen_all.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the regeneration orchestrator regression suite runs in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_phase4b_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "required-clause, identity and acknowledgement mutation controls run in script-unit"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/capability_table.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected capability contract and exact change acknowledgements"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/capacity_census.json"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "spec/design/capacity_census_wire.json"
+disposition = "packages"
+packages = ["chelis-compiler-api"]
+
+[[path_rule]]
+prefix = "spec/design/dtype_semantics.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected dtype contract and exact change acknowledgements"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/compiled_value_ownership.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected compiled-value-ownership contract and exact change acknowledgements; the docs-only detector already lists the document as a control artifact"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "spec/design/remediation_roadmap.md"
+disposition = "owner"
+workflow = "ci.yml"
+job = "docs"
+cadence = "pull_request and push"
+reason = "the required Docs job validates the protected Phase 4 handoff region and exact change acknowledgement"
+tracking_issue = "chelis#1868"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_schema.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the current wire graph, schema codecs and diagnostic projection receipts through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_acceptance.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the exact wire mutation and consumer selections through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_calls.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the exact compiler-call inventory and Cargo-origin provenance controls through capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_compiler_json.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes current compiler JSON binding authority and construction controls"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_native_authority.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes current native binding authority and execution controls"
+tracking_issue = "chelis#2287"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_invocation_owners.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the authoritative wire census executes the exact invocation-owner enumerator"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_calls.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the compiler-call Cargo-origin positive and rejection controls selected by capacity_census_wire"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_schema.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "script-nightly"
+cadence = "daily and workflow_dispatch"
+reason = "the compiler-backed ActualSchemaCodec class executes in script-nightly; lightweight paired controls also execute in PR script-unit and the wire census"
+tracking_issue = "chelis#2048"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_invocation_owners.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the invocation-owner positive and mutation controls execute in PR script-unit"
+tracking_issue = "chelis#2048"
+
+# Shared nextest configuration can affect every workspace package.
+[[path_rule]]
+prefix = ".config/nextest.toml"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "scripts/capacity_census_liveness.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "final census format, legacy rejection and shared liveness API controls execute in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_liveness.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "final census format, legacy rejection and shared liveness API controls execute in script-unit"
+tracking_issue = "chelis#1870"
+
+[[path_rule]]
+prefix = "examples/mixed_signature_extents.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_envelopes.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes current wire graph, codec and admission cases including result-claim transport"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt framework are imported and exercised by the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_pre_phase4c_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the composite prerequisite manifest and receipt positive, negative, and mutation controls execute in the PR script-unit suite"
+tracking_issue = "chelis#1296"
+
+[[path_rule]]
+prefix = "scripts/dtype_direct_arithmetic_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "direct arithmetic oracle version and receipt-selection contracts execute in the script unit suite"
+tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_direct_arithmetic_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "direct arithmetic oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1306"
+
+[[path_rule]]
+prefix = "scripts/dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle source contracts and runner legs execute in the script unit suite"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_relu_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "relu oracle mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1313"
+
+[[path_rule]]
+prefix = "scripts/dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction completion manifest and source contracts execute in the script unit suite"
+tracking_issue = "chelis#1281"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_exact_reductions_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the exact-reduction oracle manifest and mutation controls execute in the script unit suite"
+tracking_issue = "chelis#1281"
+
+[[path_rule]]
+prefix = "scripts/dtype_nonnumeric_lowering_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the #1284 completion oracle command and source-contract manifest execute in the script unit suite"
+tracking_issue = "chelis#1284"
+
+[[path_rule]]
+prefix = "scripts/test_dtype_nonnumeric_lowering_oracle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the #1284 oracle standing mutations and runner contracts execute in the script unit suite"
+tracking_issue = "chelis#1284"
+
+[[path_rule]]
+prefix = "scripts/test_timing_baseline.json"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the timing unit suite loads the exact committed baseline and fails closed on malformed or empty data"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_wire_structural.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle validates structural wire roles against executed current-version codec cases"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_wire_structural.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "runtime-extent-oracle"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "the completion oracle executes the structural wire-role acceptance and rejection controls"
+tracking_issue = "chelis#729"
+
+[[path_rule]]
+prefix = "scripts/capacity_census_cache_publication.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "dtype-phase3-oracle"
+cadence = "daily and workflow_dispatch"
+reason = "the dtype oracle executes the compiled cache-publication acceptance, rejection and artifact-integrity witnesses"
+tracking_issue = "chelis#1730"
+
+[[path_rule]]
+prefix = "scripts/test_capacity_census_cache_publication.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the cache-publication selection, artifact sealing and mutation controls"
+tracking_issue = "chelis#1730"
+
+[[path_rule]]
+prefix = "examples/pure_helper_result_claims.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_disconnected.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+[[path_rule]]
+prefix = "examples/grad_bitwise.ch"
+disposition = "packages"
+packages = ["chelis-cli"]
+
+# chelis#2119: tree-sitter-chelis/build.rs compiles this grammar's parser and
+# external scanner into the crate, so its Rust/tree-sitter parity corpus is
+# what a scanner or grammar edit must re-run.
+[[path_rule]]
+prefix = "grammars/tree-sitter-chelis-surf/"
+disposition = "packages"
+packages = ["tree-sitter-chelis"]
+
+[[path_rule]]
+prefix = "grammars/tree-sitter-chelis-deep/"
+disposition = "packages"
+packages = ["tree-sitter-chelis"]
+
+[[path_rule]]
+prefix = "examples/grad_host_results.ch"
+disposition = "packages"
+packages = ["chelis-cli"]

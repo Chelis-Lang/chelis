@@ -171,19 +171,23 @@ mod tests {
     #[test]
     fn detects_canonical_matmul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -193,6 +197,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -201,8 +206,9 @@ mod tests {
             tensor3_f32(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -224,19 +230,23 @@ mod tests {
     #[test]
     fn rejects_wrong_sum_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -246,6 +256,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -254,9 +265,10 @@ mod tests {
             tensor3_f32(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
         // sum axis=0 is the wrong axis; matmul detector should bail.
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -272,19 +284,23 @@ mod tests {
     #[test]
     fn rejects_mismatched_inner_dims() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_f32(5, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -294,6 +310,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -302,8 +319,9 @@ mod tests {
             tensor3_f32(2, 5, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -335,19 +353,23 @@ mod tests {
 
     fn build_matmul(prec: Prim) -> (Dag, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_prec(2, 3, prec),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_prec(3, 4, prec),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -357,6 +379,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -365,7 +388,13 @@ mod tests {
             tensor3_prec(2, 3, 4, prec),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_prec(2, 3, 4, prec), None);
+        let mul = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![ea, eb],
+            tensor3_prec(2, 3, 4, prec),
+            None,
+        );
         // Per spec/04-type-system.md §5.7.1 the accumulator for f16/bf16
         // sum is f32; for f32 it stays f32. The detector only inspects
         // axis (membership-style); the codegen path picks the dispatch.
@@ -374,6 +403,7 @@ mod tests {
             other => other,
         };
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: acc,
@@ -414,19 +444,23 @@ mod tests {
         // f32 × f16 matmul is a type error upstream, but if it ever
         // synthesizes here the detector must not pretend to handle it.
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             mat_prec(2, 3, Prim::F32),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             mat_prec(3, 4, Prim::F16),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -436,6 +470,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -445,12 +480,14 @@ mod tests {
             None,
         );
         let mul = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![ea, eb],
             tensor3_prec(2, 3, 4, Prim::F32),
             None,
         );
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: Prim::F32,

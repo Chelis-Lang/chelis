@@ -133,15 +133,52 @@ the lint is.
 
 ### 1.7 Backend symbol emission
 
-> **[01-CID-1]** C and HIP backend symbol emission SHALL preserve the
-> spelling of a user identifier unless that spelling is reserved by the
-> target language. The C backend SHALL prefix a reserved C spelling with
-> `chelis_user__`; if that mapping collides with another user identifier,
-> the build SHALL reject both names and ask the user to rename one. It SHALL
-> NOT select one definition or emit an ambiguous translation unit.
+> **[01-CID-1]** Every authored C function export other than source-level
+> `main` SHALL use the compiler-owned symbol `chelis_fn_` followed by the
+> lowercase hexadecimal UTF-8 bytes of its exact Chelis name. Source-level
+> `main` SHALL use the module-qualified symbol specified by
+> `spec/08-backends.md` §2. The mapping SHALL be injective for every legal
+> Surf identifier, including C keywords, platform symbols, and names that
+> themselves begin with `chelis_fn_`. The generated header and source SHALL
+> use the same symbol. A Reef linker identity whose decoded source binding is
+> exactly `main` retains that source-level exception; an ordinary authored
+> identifier that merely ends in `__main` does not. The generated header
+> and source SHALL carry the same versioned artifact envelope. The envelope
+> binds the lowercase-hex UTF-8 program identity, the exact generated-source
+> SHA-256 digest, and one declaration/export-block record per public
+> definition. A declaration record carries the exact Chelis source identity,
+> canonical C symbol, and canonical C declaration in lowercase-hex UTF-8,
+> followed by declaration bytes that match the record exactly even when the
+> declaration is multiline. Its source export block carries the export kind
+> plus the same source identity, symbol, declaration, and a canonical
+> definition commitment. That commitment hashes the exact enclosed C function
+> definition bytes together with the translation unit's canonical source-local
+> preprocessing-directive sequence. Validation SHALL parse the C
+> translation unit structurally and prove that each block encloses exactly one
+> externally linked function definition whose declarator and signature match
+> the recorded symbol and declaration and whose exact definition bytes and
+> preprocessing context match the recorded commitment. This structural parse,
+> rather than C substring
+> heuristics, determines definition boundaries and linkage. Downstream C code SHALL
+> consume the generated declaration, and tooling that needs the Chelis-to-C
+> association SHALL consume the envelope rather than reconstructing the
+> symbol from source spelling. The declaration records and source export
+> blocks SHALL form an exact set in program identity, source identity,
+> canonical symbol, declaration, linkage, and exact definition. The header digest SHALL bind every
+> source byte, so a partial header, an unmarked addition, a formatting or type
+> mutation, or a source-name/symbol/definition reassociation is invalid before
+> native execution. Recomputing the whole-source digest SHALL NOT authorize a
+> changed public definition. Generated source SHALL NOT use direct or indirect
+> preprocessor aliases to change a published definition's symbol or body.
+> Every externally linked function definition other than the generated process
+> entry `main` SHALL have exactly one export record. Translation-unit-private
+> `static` helpers, including comment-separated multiline declarations, remain
+> valid outside that set.
 
-No case rewriting is performed. Non-reserved Surf identifiers cross the
-language boundary literally.
+The source identifier itself is unchanged: no case rewriting or source-level
+reservation is introduced. The compiler-owned spelling is the published C ABI
+identity, not a renamed Chelis binding. Other backend-local user identifiers
+remain subject to their target language's identifier rules.
 
 ---
 
@@ -651,7 +688,7 @@ when the function name benefits from being explicit about the type
 it operates on.
 
 ```chelis
-def parse_int(s: string) -> Option[int64] = ...
+def parse_int(s: string) -> Option[i64] = ...
 def parse_string(s: string) -> string = ...
 def parse_bool(s: string) -> Option[bool] = ...
 ```
@@ -666,7 +703,7 @@ argument. `_scalar` is rank-0; `_vec` is rank-1. Not used when the
 function works generically over rank.
 
 ```chelis
-def softmax_vec(x: tensor[n, f32]) -> tensor[n, f32] = ...
+def softmax_vec[n](x: tensor[n, f32]) -> tensor[n, f32] = ...
 def relu_scalar(x: f32) -> f32 = ...
 ```
 
@@ -686,12 +723,12 @@ column rather than a raw tensor), use a distinct mechanism:
 
 ```chelis
 // Correct
-def is_nan(t: tensor[n, f32]) -> tensor[n, bool] = ...     // tensor variant
-def is_nan_col(f: Frame, name: string) -> tensor[n, bool] = ... // column variant
+def is_nan[n](t: tensor[n, f32]) -> tensor[n, bool] = ...     // tensor variant
+def is_nan_col[n](f: Frame, name: string) -> tensor[n, bool] = ... // column variant
 
 // Incorrect: `_int` here means "Frame variant taking int column",
 // which conflates element type with dispatch form.
-def is_nan_int(f: Frame, name: string) -> tensor[n, bool] = ...
+def is_nan_int[n](f: Frame, name: string) -> tensor[n, bool] = ...
 ```
 
 The historical Coral `*_int` family (`is_nan_int`, `any_nan_int`,
@@ -713,8 +750,8 @@ argument is typically a string (or another carrier of the encoded
 data).
 
 ```chelis
-def parse_int(s: string) -> Option[int64] = ...    // tests/produces int
-def unwrap_int(s: string) -> int64 = ...           // produces int (panicking)
+def parse_int(s: string) -> Option[i64] = ...    // tests/produces int
+def unwrap_int(s: string) -> i64 = ...           // produces int (panicking)
 def is_some_int(s: string) -> bool = ...           // tests for int
 def is_some_float(s: string) -> bool = ...         // tests for float
 def from_string_to_bool(s: string) -> bool = ...   // converter
@@ -1240,6 +1277,8 @@ producer set is covered-or-rejected: an exported producer whose result
 reaches the type through an unsupported container, or whose signature
 hands caller-supplied code an unobligated value, is a declaration error,
 so the discipline has no silent gaps.
+If producer-set analysis cannot complete, the proof request SHALL report an
+error; traversal exhaustion SHALL NOT mean that a type carries no obligation.
 
 Advisory (non-blocking) lint rules support the invariant workflow:
 
@@ -1342,7 +1381,71 @@ root is rejected. Governance follows the ancillary link path as well as its
 resolved target: a link above the policy root remains machine-local even when
 it points to an admitted file inside the root.
 
-### 12.3 Future rule queue
+### 12.3 Recursive list cursor
+
+`recursive-list-cursor` is advisory. It reports a self-recursive
+definition whose recursive call advances one of that definition's own
+parameters `p` through `skip`, in the argument position `p` itself
+occupies in the parameter list.
+
+That shape is a cursor walking a List one step at a time, and `skip`
+returns a new List rather than a view into the old one, so the walk
+allocates a fresh List per step and costs time quadratic in the List's
+length. The linear form is a `fold` or `map` over the whole List, which
+visits each element once. `Std.Io.Csv`'s row parser records the
+rewrite; the general shape is to carry a scalar accumulator in a `fold`
+and produce the result List with a single `map`.
+
+The recursive argument advances `p` in either of two spellings. It may
+be `skip(p, k)` written in the argument position itself, or it may be a
+bare name that a local binding in scope at the call binds to
+`skip(p, k)`:
+
+```chelis
+def walk(xs: List[i64], out: List[i64]) -> List[i64] = {
+  rest = skip(xs, 1i64)
+  if eq(len(xs), 0i64) then out else walk(rest, append(out, index(xs, 0i64)))
+}
+```
+
+Both spellings are one defect and both are reported. Substitution is
+one level deep and purely syntactic: the bound value must itself be a
+direct `skip` of a parameter, so a name bound to another name resolves
+no further. A binding is in scope for the bindings that follow it and
+for its own block's body, and nowhere else.
+
+The rule is deliberately narrow, and reports neither of these:
+
+- `skip(xs, k)` outside a self-recursive call, including the single
+  tail pass `fold(f, index(xs, 0), skip(xs, 1))` and a `skip` handed to
+  a *different* function. One `skip` copies one List once.
+- a self-recursive call whose cursor reaches the recursive argument
+  through a call to another function, as in
+  `apply_all(merge_once(tokens, skip(tokens, 1)), rules)`.
+
+The second exclusion differs in kind from the first. Whether that call
+advances a cursor depends on whether `merge_once` returns a suffix of
+its argument, which is a fact about a different definition. A rule
+reading one definition's syntax has no way to establish it, so
+covering the form would mean giving the rule a different input rather
+than a deeper substitution.
+
+The rule also stays silent wherever its own reading would be a guess,
+in three ways that are worth keeping distinct. A parameter the body
+rebinds is no longer the value a recursive call walks, so that
+parameter is not a cursor; the definition's other parameters are still
+read, and a cursor among them is still reported. A definition that
+rebinds its own name is skipped entirely, because its recursive calls
+can no longer be identified by that name. And a name the body binds
+more than once is never substituted. Each case errs toward silence,
+which is the right direction for an advisory rule. Advisory severity
+follows from a further limit: a ten-element List is not a defect, and
+the rule cannot know the length.
+
+`skip` is [05-OP-54]'s prefix removal. The one-argument `drop` is
+[05-OP-67]'s linearity consume and is never this rule's subject.
+
+### 12.4 Future rule queue
 
 The following rules are intentionally queued, not currently part of
 the blocking registry:
@@ -1378,4 +1481,4 @@ the blocking registry:
 - `crates/chelis-lint/`: lint implementation.
 - `docs/archive/snapshots/ecosystem_naming_snapshot.md`: empirical snapshot of the
   May 2026 ecosystem state and the cleanup inventory.
-- `AGENTS.md` / `CLAUDE.md` Surf Style Guide: Surf code-style guidance.
+- the `example-corpus` skill (`agent-skills/example-corpus/SKILL.md`) §Writing Surf: Surf code-style guidance.

@@ -2,7 +2,8 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
+use chelis_deep::annotations::{MacroSource, MetadataValue};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier, MetaExpr, Metadata, UnknownFormData};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,10 @@ impl ExpandedProgram {
 
 #[derive(Debug, Error)]
 pub enum ExpansionError {
+    #[error("{0}")]
+    Metadata(#[from] chelis_deep::metadata::MetadataError),
+    #[error("macro expansion produced an invalid stamped node: {0}")]
+    InvalidNode(#[from] chelis_deep::node::NodeError),
     #[error("macro expansion limit exceeded after {limit} expansions")]
     ExpansionLimitExceeded { limit: usize },
 
@@ -65,6 +70,117 @@ struct MacroDef {
     name: String,
     params: Vec<String>,
     body: Expr,
+}
+
+#[derive(Clone, Copy)]
+struct MacroNode<'a> {
+    expr: &'a Expr,
+    tag: DeepTag,
+    metadata: &'a Metadata,
+    children: &'a [Expr],
+}
+
+impl<'a> MacroNode<'a> {
+    fn new(expr: &'a Expr, tag: DeepTag, metadata: &'a Metadata, children: &'a [Expr]) -> Self {
+        Self {
+            expr,
+            tag,
+            metadata,
+            children,
+        }
+    }
+}
+
+enum AdmittedSpecialForm<'a> {
+    Fn {
+        params_expr: &'a Expr,
+        body: &'a Expr,
+    },
+    Let {
+        bind_node: MacroNode<'a>,
+        body: &'a Expr,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum MacroParameterDisposition<'a> {
+    Binder(&'a str),
+    Invalid,
+}
+
+/// How a `params` child takes part in macro scoping. A bare name, an
+/// annotated `(name {type: ...})` parameter, and the prefix metadata spelling
+/// used for vocabulary names are all `fn` parameters. Hygiene renames them
+/// and they block macro expansion of their name
+/// (spec/02-surf-syntax.md §P5).
+fn macro_parameter_disposition(expr: &Expr) -> MacroParameterDisposition<'_> {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => MacroParameterDisposition::Binder(name),
+        ExprCarrier::StructuralList([Expr::Atom(Atom::Name(name), _), Expr::Map(_, _)]) => {
+            MacroParameterDisposition::Binder(name)
+        }
+        ExprCarrier::MetadataExpression(meta) => match meta.expr.as_ref() {
+            Expr::Atom(Atom::Name(name), _) => MacroParameterDisposition::Binder(name),
+            _ => MacroParameterDisposition::Invalid,
+        },
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => MacroParameterDisposition::Invalid,
+    }
+}
+
+fn admitted_special_form(node: MacroNode<'_>) -> Option<AdmittedSpecialForm<'_>> {
+    match (node.tag, node.children) {
+        (DeepTag::Fn, [params_expr, body]) => {
+            let ExprCarrier::DecodedNode(DeepTag::Params, _, params) = params_expr.carrier() else {
+                return None;
+            };
+            if !params.iter().all(|param| {
+                !matches!(
+                    macro_parameter_disposition(param),
+                    MacroParameterDisposition::Invalid
+                )
+            }) {
+                return None;
+            }
+            Some(AdmittedSpecialForm::Fn { params_expr, body })
+        }
+        (DeepTag::Let, [bind_expr, body]) => {
+            let ExprCarrier::DecodedNode(DeepTag::Bind, metadata, bind_children) =
+                bind_expr.carrier()
+            else {
+                return None;
+            };
+            let (pairs, remainder) = bind_children.as_chunks::<2>();
+            if !remainder.is_empty() || !pairs.iter().all(|[name, _]| symbol_name(name).is_some()) {
+                return None;
+            }
+            Some(AdmittedSpecialForm::Let {
+                bind_node: MacroNode::new(bind_expr, DeepTag::Bind, metadata, bind_children),
+                body,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn rebuild_macro_node(node: MacroNode<'_>, metadata: Metadata, children: Vec<Expr>) -> Expr {
+    Expr::node(node.tag, metadata, children, node.expr.span())
+}
+
+fn try_rebuild_macro_node(
+    node: MacroNode<'_>,
+    metadata: Metadata,
+    children: Vec<Expr>,
+) -> Result<Expr, chelis_deep::node::NodeError> {
+    Ok(Expr::Node(
+        Box::new(chelis_deep::node::Node::try_new(
+            node.tag, metadata, children,
+        )?),
+        node.expr.span(),
+    ))
 }
 
 pub fn expand_program(
@@ -179,79 +295,54 @@ impl Expander {
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Expr, ExpansionError> {
-        match expr {
-            Expr::Atom(_, _) => Ok(expr.clone()),
-            // Metadata values are full Deep expressions (spec/03 section 1.1
-            // macro boundary rule), so macro syntax inside a metadata map,
-            // including a map nested inside another metadata value, must
-            // compile away like any other position (PR #1319 review).
-            Expr::Map(meta, span) => Ok(Expr::Map(
-                MetaMap {
-                    entries: try_map_meta_entries(&meta.entries, |value| {
-                        self.expand_expr(value, macros, scope)
-                    })?,
-                },
-                *span,
+        match expr.carrier() {
+            ExprCarrier::Atom(_) => Ok(expr.clone()),
+            ExprCarrier::MetadataMap(meta) => Ok(Expr::Map(
+                try_map_meta_entries(meta, |value| self.expand_expr(value, macros, scope))?,
+                expr.span(),
             )),
-            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-            Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
-                self.expand_expr(&bridged, macros, scope)
-            }
-            // chelis#1087: a macro invocation nested inside either
-            // transitional variant must still expand, so both recurse.
-            Expr::BareList(elements, span) => Ok(Expr::BareList(
-                elements
-                    .iter()
-                    .map(|child| self.expand_expr(child, macros, scope))
-                    .collect::<Result<Vec<_>, _>>()?,
-                *span,
-            )),
-            Expr::UnknownForm(data) => {
-                try_map_unknown_form(data, |child| self.expand_expr(child, macros, scope))
-            }
-            Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
+            ExprCarrier::MetadataExpression(meta) => Ok(Expr::MetaExpr(
                 MetaExpr {
-                    entries: try_map_meta_entries(&meta.entries, |value| {
+                    metadata: try_map_meta_entries(&meta.metadata, |value| {
                         self.expand_expr(value, macros, scope)
                     })?,
                     expr: Box::new(self.expand_expr(&meta.expr, macros, scope)?),
                 },
-                *span,
+                expr.span(),
             )),
-            Expr::List(list, span) => {
-                if let Some(expanded) = self.try_expand_macro_call(list, macros, scope)? {
+            ExprCarrier::StructuralList(elements) => Ok(Expr::BareList(
+                elements
+                    .iter()
+                    .map(|child| self.expand_expr(child, macros, scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+                expr.span(),
+            )),
+            ExprCarrier::UndecodableHead(_, _, _) => {
+                try_map_unknown_form(unknown_form(expr), |child| {
+                    self.expand_expr(child, macros, scope)
+                })
+            }
+            ExprCarrier::DecodedNode(tag, metadata, children) => {
+                let node = MacroNode::new(expr, tag, metadata, children);
+                if let Some(expanded) = self.try_expand_macro_call(node, macros, scope)? {
                     return self.expand_expr(&expanded, macros, scope);
                 }
-
-                let Some(tag) = get_tag(list) else {
-                    return Ok(Expr::List(
-                        List {
-                            elements: list
-                                .elements
-                                .iter()
-                                .map(|child| self.expand_expr(child, macros, scope))
-                                .collect::<Result<Vec<_>, _>>()?,
-                        },
-                        *span,
-                    ));
-                };
-
                 match tag {
-                    DeepTag::Module => self.expand_module(list, macros, *span),
-                    DeepTag::Fn => self.expand_fn(list, macros, scope, *span),
-                    DeepTag::Let => self.expand_let(list, macros, scope, *span),
-                    DeepTag::Match => self.expand_match(list, macros, scope, *span),
-                    _ => Ok(Expr::List(
-                        List {
-                            elements: list
-                                .elements
-                                .iter()
-                                .map(|child| self.expand_expr(child, macros, scope))
-                                .collect::<Result<Vec<_>, _>>()?,
-                        },
-                        *span,
-                    )),
+                    DeepTag::Module => self.expand_module(node, macros),
+                    DeepTag::Fn => self.expand_fn(node, macros, scope),
+                    DeepTag::Let => self.expand_let(node, macros, scope),
+                    DeepTag::Match => self.expand_match(node, macros, scope),
+                    _ => try_rebuild_macro_node(
+                        node,
+                        try_map_meta_entries(metadata, |value| {
+                            self.expand_expr(value, macros, scope)
+                        })?,
+                        children
+                            .iter()
+                            .map(|child| self.expand_expr(child, macros, scope))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                    .map_err(Into::into),
                 }
             }
         }
@@ -259,152 +350,121 @@ impl Expander {
 
     fn expand_module(
         &mut self,
-        list: &List,
+        node: MacroNode<'_>,
         macros: &UnordMap<String, MacroDef>,
-        span: Span,
     ) -> Result<Expr, ExpansionError> {
-        let kids = children(list);
+        let kids = node.children;
         if kids.is_empty() {
-            return Ok(Expr::List(list.clone(), span));
+            return Ok(node.expr.clone());
         }
-        let mut expanded = vec![
-            list.elements[0].clone(),
-            list.elements[1].clone(),
-            kids[0].clone(),
-        ];
+        let mut expanded = vec![kids[0].clone()];
         let body = self.expand_sequence(&kids[1..], macros)?;
         expanded.extend(body);
-        Ok(Expr::List(List { elements: expanded }, span))
+        try_rebuild_macro_node(node, node.metadata.clone(), expanded).map_err(Into::into)
     }
 
     fn expand_fn(
         &mut self,
-        list: &List,
+        node: MacroNode<'_>,
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
-        span: Span,
     ) -> Result<Expr, ExpansionError> {
-        let mut elements = list.elements.clone();
-        let kids = children(list);
-        if kids.len() < 2 {
-            return Ok(Expr::List(List { elements }, span));
-        }
+        let Some(AdmittedSpecialForm::Fn { params_expr, body }) = admitted_special_form(node)
+        else {
+            return Ok(node.expr.clone());
+        };
 
-        let params_expr = kids[0].clone();
-        let blocker_names = params_blockers(&params_expr);
+        let blocker_names = params_blockers(params_expr);
         let fn_scope = scope.with_blockers(&blocker_names);
-        elements[2] = params_expr;
-        elements[3] = self.expand_expr(&kids[1], macros, &fn_scope)?;
-        Ok(Expr::List(List { elements }, span))
+        try_rebuild_macro_node(
+            node,
+            node.metadata.clone(),
+            vec![
+                params_expr.clone(),
+                self.expand_expr(body, macros, &fn_scope)?,
+            ],
+        )
+        .map_err(Into::into)
     }
 
     fn expand_let(
         &mut self,
-        list: &List,
+        node: MacroNode<'_>,
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
-        span: Span,
     ) -> Result<Expr, ExpansionError> {
-        let kids = children(list);
-        if kids.len() < 2 {
-            return Ok(Expr::List(list.clone(), span));
+        let Some(AdmittedSpecialForm::Let { bind_node, body }) = admitted_special_form(node) else {
+            return Ok(node.expr.clone());
+        };
+        // Preserve the node, but do not clone the entire unvisited body
+        // before replacing it with its expansion at every nested binding.
+        let bind_kids = bind_node.children;
+        let mut scope_for_values = scope.clone();
+        let mut new_bind_children = Vec::with_capacity(bind_kids.len());
+        for [name_expr, value_expr] in bind_kids.as_chunks::<2>().0 {
+            let name = symbol_name(name_expr).expect("special-form admission checked binders");
+            new_bind_children.push(name_expr.clone());
+            new_bind_children.push(self.expand_expr(value_expr, macros, &scope_for_values)?);
+            scope_for_values.add_blocker(name.to_string());
         }
-        let mut elements = list.elements.clone();
-        if let Expr::List(bind_list, bind_span) = &kids[0] {
-            let bind_kids = children(bind_list);
-            let mut scope_for_values = scope.clone();
-            let mut new_bind_children = Vec::new();
-            let mut i = 0;
-            while i + 1 < bind_kids.len() {
-                let name_expr = bind_kids[i].clone();
-                let value_expr = self.expand_expr(&bind_kids[i + 1], macros, &scope_for_values)?;
-                if let Some(name) = symbol_name(&bind_kids[i]) {
-                    scope_for_values.add_blocker(name.to_string());
-                }
-                new_bind_children.push(name_expr);
-                new_bind_children.push(value_expr);
-                i += 2;
-            }
-            elements[2] = node_with_meta(
-                DeepTag::Bind,
-                bind_list.elements[1].clone(),
-                new_bind_children,
-                *bind_span,
-            );
-            elements[3] = self.expand_expr(&kids[1], macros, &scope_for_values)?;
-        }
-        Ok(Expr::List(List { elements }, span))
+        let children = vec![
+            try_rebuild_macro_node(bind_node, bind_node.metadata.clone(), new_bind_children)?,
+            self.expand_expr(body, macros, &scope_for_values)?,
+        ];
+        try_rebuild_macro_node(node, node.metadata.clone(), children).map_err(Into::into)
     }
 
     fn expand_match(
         &mut self,
-        list: &List,
+        node: MacroNode<'_>,
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
-        span: Span,
     ) -> Result<Expr, ExpansionError> {
-        let kids = children(list);
+        let kids = node.children;
         if kids.is_empty() {
-            return Ok(Expr::List(list.clone(), span));
+            return Ok(node.expr.clone());
         }
-        let mut elements = Vec::with_capacity(list.elements.len());
-        elements.push(list.elements[0].clone());
-        elements.push(list.elements[1].clone());
-        elements.push(self.expand_expr(&kids[0], macros, scope)?);
+        let mut children = Vec::with_capacity(kids.len());
+        children.push(self.expand_expr(&kids[0], macros, scope)?);
         for arm in &kids[1..] {
-            if let Expr::List(arm_list, arm_span) = arm
-                && get_tag(arm_list) == Some(DeepTag::Arm)
-            {
-                let arm_kids = children(arm_list);
+            if let ExprCarrier::DecodedNode(DeepTag::Arm, metadata, arm_children) = arm.carrier() {
+                let arm_node = MacroNode::new(arm, DeepTag::Arm, metadata, arm_children);
+                let arm_kids = arm_node.children;
                 if arm_kids.len() >= 3 {
                     let mut arm_scope = scope.clone();
                     arm_scope.add_blockers(chelis_deep::pattern_binder_names(&arm_kids[0]));
-                    let mut arm_elements = arm_list.elements.clone();
-                    arm_elements[4] = self.expand_expr(&arm_kids[2], macros, &arm_scope)?;
+                    let mut arm_children = arm_kids.to_vec();
+                    arm_children[2] = self.expand_expr(&arm_kids[2], macros, &arm_scope)?;
                     if !is_unit_list(&arm_kids[1]) {
-                        arm_elements[3] = self.expand_expr(&arm_kids[1], macros, &arm_scope)?;
+                        arm_children[1] = self.expand_expr(&arm_kids[1], macros, &arm_scope)?;
                     }
-                    elements.push(Expr::List(
-                        List {
-                            elements: arm_elements,
-                        },
-                        *arm_span,
-                    ));
+                    children.push(try_rebuild_macro_node(
+                        arm_node,
+                        arm_node.metadata.clone(),
+                        arm_children,
+                    )?);
                     continue;
                 }
             }
-            elements.push(self.expand_expr(arm, macros, scope)?);
+            children.push(self.expand_expr(arm, macros, scope)?);
         }
-        Ok(Expr::List(List { elements }, span))
+        try_rebuild_macro_node(node, node.metadata.clone(), children).map_err(Into::into)
     }
 
     fn try_expand_macro_call(
         &mut self,
-        list: &List,
+        node: MacroNode<'_>,
         macros: &UnordMap<String, MacroDef>,
         scope: &Scope,
     ) -> Result<Option<Expr>, ExpansionError> {
-        let (name, args) = if internal_tag(list) == Some("macro-invoke") {
-            let kids = children(list);
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                return Ok(None);
-            };
-            (name.to_string(), kids[1..].to_vec())
-        } else {
-            match get_tag(list) {
-                Some(DeepTag::App) => {
-                    let kids = children(list);
-                    if kids.is_empty() {
-                        return Ok(None);
-                    }
-                    let Some(name) = var_name(&kids[0]) else {
-                        return Ok(None);
-                    };
-                    (name.to_string(), kids[1..].to_vec())
-                }
-                Some(_) | None => return Ok(None),
-            }
+        if node.tag != DeepTag::App || node.children.is_empty() {
+            return Ok(None);
+        }
+        let Some(name) = var_name(&node.children[0]) else {
+            return Ok(None);
         };
+        let name = name.to_string();
+        let args = node.children[1..].to_vec();
 
         if scope.blocks(&name) {
             return Ok(None);
@@ -422,8 +482,15 @@ impl Expander {
             &mut self.hygiene_counter,
             &UnordMap::new(),
         );
-        let substituted = replace_placeholder_vars(&hygienic, &placeholder_args);
-        Ok(Some(annotate_source_expr(&substituted, &invocation)))
+        let substituted = inherit_replaced_value_annotations(
+            replace_placeholder_vars(&hygienic, &placeholder_args)?,
+            node.expr,
+        )?
+        .try_inherit_extensions(node.expr)?;
+        Ok(Some(annotate_source_expr(
+            &substituted,
+            &MacroSource::try_from_expression(&invocation)?,
+        )))
     }
 
     fn consume_expansion_budget(&mut self) -> Result<(), ExpansionError> {
@@ -436,6 +503,57 @@ impl Expander {
         self.expansions += 1;
         Ok(())
     }
+}
+
+/// A replaced expression owns its type obligation and Surf binding origin,
+/// whether it is an invocation or a template parameter reference. If the new
+/// root already owns either key, a one-expression `block` keeps both independent
+/// metadata owners; the block has exactly the expression's value and effect.
+fn inherit_replaced_value_annotations(
+    mut replacement: Expr,
+    owner: &Expr,
+) -> Result<Expr, ExpansionError> {
+    let ExprCarrier::DecodedNode(_, metadata, _) = owner.carrier() else {
+        return Ok(replacement);
+    };
+    let annotations = metadata
+        .values()
+        .filter(|value| {
+            matches!(
+                value,
+                MetadataValue::Type(_) | MetadataValue::SurfBindingType(_)
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return Ok(replacement);
+    }
+    if let Expr::Node(node, _) = &mut replacement {
+        let mut metadata = node.meta().clone();
+        let conflict = annotations.iter().any(|value| match value {
+            MetadataValue::Type(_) => metadata.ty().is_some(),
+            MetadataValue::SurfBindingType(_) => metadata.surf_binding_type().is_some(),
+            _ => unreachable!("only invocation value annotations were collected"),
+        });
+        if !conflict {
+            for value in annotations {
+                metadata.insert(value)?;
+            }
+            node.try_replace_meta(metadata)?;
+            return Ok(replacement);
+        }
+    }
+    let metadata = Metadata::try_from_values(annotations)?;
+    let span = replacement.span();
+    Ok(Expr::Node(
+        Box::new(chelis_deep::node::Node::try_new(
+            DeepTag::Block,
+            metadata,
+            vec![replacement],
+        )?),
+        span,
+    ))
 }
 
 fn macro_arg_placeholders(
@@ -471,115 +589,90 @@ fn fresh_placeholder(
     }
 }
 
-fn replace_placeholder_vars(expr: &Expr, replacements: &UnordMap<String, Expr>) -> Expr {
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        // Metadata values are walked like children (PR #1319 review).
-        Expr::Map(meta, span) => Expr::Map(
-            MetaMap {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    replace_placeholder_vars(value, replacements)
-                }),
-            },
-            *span,
+fn replace_placeholder_vars(
+    expr: &Expr,
+    replacements: &UnordMap<String, Expr>,
+) -> Result<Expr, ExpansionError> {
+    Ok(match expr.carrier() {
+        ExprCarrier::Atom(_) => expr.clone(),
+        ExprCarrier::MetadataMap(meta) => Expr::Map(
+            try_map_meta_entries(meta, |value| replace_placeholder_vars(value, replacements))?,
+            expr.span(),
         ),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            replace_placeholder_vars(&bridged, replacements)
-        }
-        // chelis#1087: placeholders inside either transitional variant must
-        // still receive their argument, so both recurse.
-        Expr::BareList(elements, span) => Expr::BareList(
+        ExprCarrier::MetadataExpression(meta) => Expr::MetaExpr(
+            MetaExpr {
+                metadata: try_map_meta_entries(&meta.metadata, |value| {
+                    replace_placeholder_vars(value, replacements)
+                })?,
+                expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)?),
+            },
+            expr.span(),
+        ),
+        ExprCarrier::StructuralList(elements) => Expr::BareList(
             elements
                 .iter()
                 .map(|child| replace_placeholder_vars(child, replacements))
-                .collect(),
-            *span,
+                .collect::<Result<_, _>>()?,
+            expr.span(),
         ),
-        Expr::UnknownForm(data) => {
-            map_unknown_form(data, |child| replace_placeholder_vars(child, replacements))
+        ExprCarrier::UndecodableHead(_, _, _) => {
+            try_map_unknown_form(unknown_form(expr), |child| {
+                replace_placeholder_vars(child, replacements)
+            })?
         }
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            MetaExpr {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    replace_placeholder_vars(value, replacements)
-                }),
-                expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)),
-            },
-            *span,
-        ),
-        Expr::List(list, span) => {
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::Var
+                && let Some(name) = children.first().and_then(symbol_name)
                 && let Some(replacement) = replacements.get(name)
             {
-                return replacement.clone();
+                return Ok(
+                    inherit_replaced_value_annotations(replacement.clone(), expr)?
+                        .try_inherit_extensions(expr)?,
+                );
             }
-            Expr::List(
-                List {
-                    elements: list
-                        .elements
-                        .iter()
-                        .map(|child| replace_placeholder_vars(child, replacements))
-                        .collect(),
-                },
-                *span,
-            )
+            try_rebuild_macro_node(
+                MacroNode::new(expr, tag, metadata, children),
+                try_map_meta_entries(metadata, |value| {
+                    replace_placeholder_vars(value, replacements)
+                })?,
+                children
+                    .iter()
+                    .map(|child| replace_placeholder_vars(child, replacements))
+                    .collect::<Result<_, _>>()?,
+            )?
         }
-    }
+    })
 }
 
 fn collect_symbols(expr: &Expr, out: &mut UnordSet<String>) {
-    match expr {
-        Expr::Atom(Atom::Name(name), _) => {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => {
             out.insert(name.clone());
         }
-        Expr::Atom(_, _) => {}
-        // Names inside metadata values are used symbols too (PR #1319
-        // review); the source provenance record stays unread like every
-        // other compiler pass (spec/03 section 1.1).
-        Expr::Map(meta, _) => {
-            for (key, value) in &meta.entries {
-                if key != PROVENANCE_KEY {
-                    collect_symbols(value, out);
-                }
-            }
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::MetadataMap(meta) => {
+            meta.visit_syntax(&mut |_, value| collect_symbols(value, out));
         }
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_symbols(&bridged, out);
+        ExprCarrier::MetadataExpression(meta) => {
+            meta.metadata
+                .visit_syntax(&mut |_, value| collect_symbols(value, out));
+            collect_symbols(&meta.expr, out);
         }
-        // chelis#1087: names inside either transitional variant are used
-        // symbols. Skipping them made those names invisible to the
-        // fresh-placeholder collision check and to hygiene/capture analysis.
-        Expr::BareList(elements, _) => {
+        ExprCarrier::StructuralList(elements) => {
             for element in elements {
                 collect_symbols(element, out);
             }
         }
-        Expr::UnknownForm(data) => {
-            for (key, value) in &data.meta.entries {
-                if key != PROVENANCE_KEY {
-                    collect_symbols(value, out);
-                }
-            }
-            for child in &data.children {
+        ExprCarrier::UndecodableHead(_, metadata, children) => {
+            metadata.visit_syntax(&mut |_, value| collect_symbols(value, out));
+            for child in children {
                 collect_symbols(child, out);
             }
         }
-        Expr::MetaExpr(meta, _) => {
-            for (key, value) in &meta.entries {
-                if key != PROVENANCE_KEY {
-                    collect_symbols(value, out);
-                }
-            }
-            collect_symbols(&meta.expr, out);
-        }
-        Expr::List(list, _) => {
-            for element in &list.elements {
-                collect_symbols(element, out);
+        ExprCarrier::DecodedNode(_, metadata, children) => {
+            metadata.visit_syntax(&mut |_, value| collect_symbols(value, out));
+            for child in children {
+                collect_symbols(child, out);
             }
         }
     }
@@ -614,13 +707,19 @@ impl Scope {
 }
 
 fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
-    let kids = match expr {
-        Expr::List(list, _) if internal_tag(list) == Some("defmacro") => children(list),
-        Expr::BareList(elements, _) if bare_internal_tag(elements) == Some("defmacro") => {
+    let kids = match expr.carrier() {
+        ExprCarrier::UndecodableHead("defmacro", _, children) => children,
+        ExprCarrier::StructuralList(elements)
+            if bare_internal_tag(elements) == Some("defmacro") =>
+        {
             elements.get(2..).unwrap_or(&[])
         }
-        Expr::UnknownForm(data) if data.head == "defmacro" => data.children.as_slice(),
-        _ => return Ok(None),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return Ok(None),
     };
     if kids.len() != 3 {
         return Err(ExpansionError::MalformedDefinition {
@@ -632,14 +731,14 @@ fn extract_macro_def(expr: &Expr) -> Result<Option<MacroDef>, ExpansionError> {
             message: "defmacro name must be a symbol".to_string(),
         });
     };
-    let params_children = match &kids[1] {
-        Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
-            children(params_list)
-        }
-        Expr::Node(params_node, _) if params_node.tag() == DeepTag::Params => {
-            params_node.children_slice()
-        }
-        _ => {
+    let params_children = match kids[1].carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {
             return Err(ExpansionError::MalformedDefinition {
                 message: format!("defmacro `{name}` must use `(params {{}} ...)`"),
             });
@@ -667,65 +766,55 @@ fn substitute_expr(
     params: &UnordMap<String, Expr>,
     shadowed: &UnordSet<String>,
 ) -> Expr {
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        // Metadata values are walked like children (PR #1319 review).
-        Expr::Map(meta, span) => Expr::Map(
-            MetaMap {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    substitute_expr(value, params, shadowed)
-                }),
-            },
-            *span,
+    match expr.carrier() {
+        ExprCarrier::Atom(_) => expr.clone(),
+        ExprCarrier::MetadataMap(meta) => Expr::Map(
+            map_meta_entries(meta, |value| substitute_expr(value, params, shadowed)),
+            expr.span(),
         ),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            substitute_expr(&bridged, params, shadowed)
-        }
-        // chelis#1087: macro parameters referenced inside either
-        // transitional variant must still substitute, so both recurse.
-        Expr::BareList(elements, span) => Expr::BareList(
-            elements
-                .iter()
-                .map(|child| substitute_expr(child, params, shadowed))
-                .collect(),
-            *span,
-        ),
-        Expr::UnknownForm(data) => {
-            map_unknown_form(data, |child| substitute_expr(child, params, shadowed))
-        }
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+        ExprCarrier::MetadataExpression(meta) => Expr::MetaExpr(
             MetaExpr {
-                entries: map_meta_entries(&meta.entries, |value| {
+                metadata: map_meta_entries(&meta.metadata, |value| {
                     substitute_expr(value, params, shadowed)
                 }),
                 expr: Box::new(substitute_expr(&meta.expr, params, shadowed)),
             },
-            *span,
+            expr.span(),
         ),
-        Expr::List(list, span) => {
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+        ExprCarrier::StructuralList(elements) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| substitute_expr(child, params, shadowed))
+                .collect(),
+            expr.span(),
+        ),
+        ExprCarrier::UndecodableHead(_, _, _) => map_unknown_form(unknown_form(expr), |child| {
+            substitute_expr(child, params, shadowed)
+        }),
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::Var
+                && let Some(name) = children.first().and_then(symbol_name)
                 && !shadowed.contains(name)
                 && let Some(replacement) = params.get(name)
             {
-                return replacement.clone();
+                return inherit_replaced_value_annotations(replacement.clone(), expr)
+                    .expect("macro parameter annotation remains valid on a placeholder")
+                    .try_inherit_extensions(expr)
+                    .expect("fresh macro placeholders have no conflicting extensions");
             }
 
-            match get_tag(list) {
-                Some(DeepTag::Fn) => substitute_fn(list, params, shadowed, *span),
-                Some(DeepTag::Let) => substitute_let(list, params, shadowed, *span),
-                Some(DeepTag::Match) => substitute_match(list, params, shadowed, *span),
-                _ => Expr::List(
-                    List {
-                        elements: list
-                            .elements
-                            .iter()
-                            .map(|child| substitute_expr(child, params, shadowed))
-                            .collect(),
-                    },
-                    *span,
+            let node = MacroNode::new(expr, tag, metadata, children);
+            match tag {
+                DeepTag::Fn => substitute_fn(node, params, shadowed),
+                DeepTag::Let => substitute_let(node, params, shadowed),
+                DeepTag::Match => substitute_match(node, params, shadowed),
+                _ => rebuild_macro_node(
+                    node,
+                    map_meta_entries(metadata, |value| substitute_expr(value, params, shadowed)),
+                    children
+                        .iter()
+                        .map(|child| substitute_expr(child, params, shadowed))
+                        .collect(),
                 ),
             }
         }
@@ -733,261 +822,213 @@ fn substitute_expr(
 }
 
 fn substitute_fn(
-    list: &List,
+    node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
     shadowed: &UnordSet<String>,
-    span: Span,
 ) -> Expr {
-    let mut elements = list.elements.clone();
-    let kids = children(list);
-    if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
-    }
+    let Some(AdmittedSpecialForm::Fn { params_expr, body }) = admitted_special_form(node) else {
+        return node.expr.clone();
+    };
     let mut child_shadowed = shadowed.clone();
-    for blocker in params_blockers(&kids[0]) {
+    for blocker in params_blockers(params_expr) {
         child_shadowed.insert(blocker);
     }
-    elements[3] = substitute_expr(&kids[1], params, &child_shadowed);
-    Expr::List(List { elements }, span)
+    rebuild_macro_node(
+        node,
+        node.metadata.clone(),
+        vec![
+            params_expr.clone(),
+            substitute_expr(body, params, &child_shadowed),
+        ],
+    )
 }
 
 fn substitute_let(
-    list: &List,
+    node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
     shadowed: &UnordSet<String>,
-    span: Span,
 ) -> Expr {
-    let mut elements = list.elements.clone();
-    let kids = children(list);
-    if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
-    }
+    let Some(AdmittedSpecialForm::Let { bind_node, body }) = admitted_special_form(node) else {
+        return node.expr.clone();
+    };
     let mut scope_for_values = shadowed.clone();
-    if let Expr::List(bind_list, bind_span) = &kids[0] {
-        let bind_kids = children(bind_list);
-        let mut new_bind_children = Vec::new();
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            new_bind_children.push(bind_kids[i].clone());
-            new_bind_children.push(substitute_expr(
-                &bind_kids[i + 1],
-                params,
-                &scope_for_values,
-            ));
-            if let Some(name) = symbol_name(&bind_kids[i]) {
-                scope_for_values.insert(name.to_string());
-            }
-            i += 2;
-        }
-        elements[2] = node_with_meta(
-            DeepTag::Bind,
-            list.elements[1].clone(),
-            new_bind_children,
-            *bind_span,
-        );
+    let bind_kids = bind_node.children;
+    let mut new_bind_children = Vec::with_capacity(bind_kids.len());
+    for [name_expr, value_expr] in bind_kids.as_chunks::<2>().0 {
+        let name = symbol_name(name_expr).expect("special-form admission checked binders");
+        new_bind_children.push(name_expr.clone());
+        new_bind_children.push(substitute_expr(value_expr, params, &scope_for_values));
+        scope_for_values.insert(name.to_string());
     }
-    elements[3] = substitute_expr(&kids[1], params, &scope_for_values);
-    Expr::List(List { elements }, span)
+    rebuild_macro_node(
+        node,
+        node.metadata.clone(),
+        vec![
+            rebuild_macro_node(bind_node, bind_node.metadata.clone(), new_bind_children),
+            substitute_expr(body, params, &scope_for_values),
+        ],
+    )
 }
 
 fn substitute_match(
-    list: &List,
+    node: MacroNode<'_>,
     params: &UnordMap<String, Expr>,
     shadowed: &UnordSet<String>,
-    span: Span,
 ) -> Expr {
-    let mut elements = Vec::with_capacity(list.elements.len());
-    elements.push(list.elements[0].clone());
-    elements.push(list.elements[1].clone());
-    let kids = children(list);
+    let kids = node.children;
+    let mut children = Vec::with_capacity(kids.len());
     if kids.is_empty() {
-        return Expr::List(List { elements }, span);
+        return node.expr.clone();
     }
-    elements.push(substitute_expr(&kids[0], params, shadowed));
+    children.push(substitute_expr(&kids[0], params, shadowed));
     for arm in &kids[1..] {
-        if let Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some(DeepTag::Arm)
-        {
-            let arm_kids = children(arm_list);
+        if let ExprCarrier::DecodedNode(DeepTag::Arm, metadata, arm_children) = arm.carrier() {
+            let arm_node = MacroNode::new(arm, DeepTag::Arm, metadata, arm_children);
+            let arm_kids = arm_node.children;
             if arm_kids.len() >= 3 {
                 let mut arm_shadowed = shadowed.clone();
                 arm_shadowed.extend(chelis_deep::pattern_binder_names(&arm_kids[0]));
-                let mut arm_elements = arm_list.elements.clone();
+                let mut arm_children = arm_kids.to_vec();
                 if !is_unit_list(&arm_kids[1]) {
-                    arm_elements[3] = substitute_expr(&arm_kids[1], params, &arm_shadowed);
+                    arm_children[1] = substitute_expr(&arm_kids[1], params, &arm_shadowed);
                 }
-                arm_elements[4] = substitute_expr(&arm_kids[2], params, &arm_shadowed);
-                elements.push(Expr::List(
-                    List {
-                        elements: arm_elements,
-                    },
-                    *arm_span,
+                arm_children[2] = substitute_expr(&arm_kids[2], params, &arm_shadowed);
+                children.push(rebuild_macro_node(
+                    arm_node,
+                    arm_node.metadata.clone(),
+                    arm_children,
                 ));
                 continue;
             }
         }
-        elements.push(substitute_expr(arm, params, shadowed));
+        children.push(substitute_expr(arm, params, shadowed));
     }
-    Expr::List(List { elements }, span)
+    rebuild_macro_node(node, node.metadata.clone(), children)
 }
 
 fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        // Metadata values are walked like children (PR #1319 review).
-        Expr::Map(meta, span) => Expr::Map(
-            MetaMap {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    hygienize_expr(value, counter, env)
-                }),
-            },
-            *span,
+    match expr.carrier() {
+        ExprCarrier::Atom(_) => expr.clone(),
+        ExprCarrier::MetadataMap(meta) => Expr::Map(
+            map_meta_entries(meta, |value| hygienize_expr(value, counter, env)),
+            expr.span(),
         ),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            hygienize_expr(&bridged, counter, env)
-        }
-        // chelis#1087: binder renames must reach references inside either
-        // transitional variant, so both recurse.
-        Expr::BareList(elements, span) => Expr::BareList(
-            elements
-                .iter()
-                .map(|child| hygienize_expr(child, counter, env))
-                .collect(),
-            *span,
-        ),
-        Expr::UnknownForm(data) => {
-            map_unknown_form(data, |child| hygienize_expr(child, counter, env))
-        }
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+        ExprCarrier::MetadataExpression(meta) => Expr::MetaExpr(
             MetaExpr {
-                entries: map_meta_entries(&meta.entries, |value| {
+                metadata: map_meta_entries(&meta.metadata, |value| {
                     hygienize_expr(value, counter, env)
                 }),
                 expr: Box::new(hygienize_expr(&meta.expr, counter, env)),
             },
-            *span,
+            expr.span(),
         ),
-        Expr::List(list, span) => {
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+        ExprCarrier::StructuralList(elements) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| hygienize_expr(child, counter, env))
+                .collect(),
+            expr.span(),
+        ),
+        ExprCarrier::UndecodableHead(_, _, _) => map_unknown_form(unknown_form(expr), |child| {
+            hygienize_expr(child, counter, env)
+        }),
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            let node = MacroNode::new(expr, tag, metadata, children);
+            if tag == DeepTag::Var
+                && let Some(name) = children.first().and_then(symbol_name)
                 && let Some(renamed) = env.get(name)
             {
-                let mut elements = list.elements.clone();
-                elements[2] = Expr::Atom(Atom::Name(renamed.clone()), children(list)[0].span());
-                return Expr::List(List { elements }, *span);
+                let mut renamed_children = children.to_vec();
+                renamed_children[0] = Expr::Atom(Atom::Name(renamed.clone()), children[0].span());
+                return rebuild_macro_node(node, metadata.clone(), renamed_children);
             }
-            match get_tag(list) {
-                Some(DeepTag::Fn) => hygienize_fn(list, counter, env, *span),
-                Some(DeepTag::Let) => hygienize_let(list, counter, env, *span),
-                Some(DeepTag::Match) => hygienize_match(list, counter, env, *span),
-                _ => Expr::List(
-                    List {
-                        elements: list
-                            .elements
-                            .iter()
-                            .map(|child| hygienize_expr(child, counter, env))
-                            .collect(),
-                    },
-                    *span,
+            match tag {
+                DeepTag::Fn => hygienize_fn(node, counter, env),
+                DeepTag::Let => hygienize_let(node, counter, env),
+                DeepTag::Match => hygienize_match(node, counter, env),
+                _ => rebuild_macro_node(
+                    node,
+                    map_meta_entries(metadata, |value| hygienize_expr(value, counter, env)),
+                    children
+                        .iter()
+                        .map(|child| hygienize_expr(child, counter, env))
+                        .collect(),
                 ),
             }
         }
     }
 }
 
-fn hygienize_fn(
-    list: &List,
-    counter: &mut usize,
-    env: &UnordMap<String, String>,
-    span: Span,
-) -> Expr {
-    let mut elements = list.elements.clone();
-    let kids = children(list);
-    if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
-    }
-    let (params_expr, next_env) = hygienize_params_expr(&kids[0], counter, env);
-    elements[2] = params_expr;
-    elements[3] = hygienize_expr(&kids[1], counter, &next_env);
-    Expr::List(List { elements }, span)
+fn hygienize_fn(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
+    let Some(AdmittedSpecialForm::Fn { params_expr, body }) = admitted_special_form(node) else {
+        return node.expr.clone();
+    };
+    let (params_expr, next_env) = hygienize_params_expr(params_expr, counter, env);
+    rebuild_macro_node(
+        node,
+        node.metadata.clone(),
+        vec![params_expr, hygienize_expr(body, counter, &next_env)],
+    )
 }
 
-fn hygienize_let(
-    list: &List,
-    counter: &mut usize,
-    env: &UnordMap<String, String>,
-    span: Span,
-) -> Expr {
-    let mut elements = list.elements.clone();
-    let kids = children(list);
-    if kids.len() < 2 {
-        return Expr::List(List { elements }, span);
-    }
+fn hygienize_let(node: MacroNode<'_>, counter: &mut usize, env: &UnordMap<String, String>) -> Expr {
+    let Some(AdmittedSpecialForm::Let { bind_node, body }) = admitted_special_form(node) else {
+        return node.expr.clone();
+    };
     let mut scope_env = env.clone();
-    if let Expr::List(bind_list, bind_span) = &kids[0] {
-        let bind_kids = children(bind_list);
-        let mut new_bind_children = Vec::new();
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            let name = symbol_name(&bind_kids[i]).unwrap_or("_");
-            let fresh = fresh_name(name, counter);
-            new_bind_children.push(Expr::Atom(Atom::Name(fresh.clone()), bind_kids[i].span()));
-            new_bind_children.push(hygienize_expr(&bind_kids[i + 1], counter, &scope_env));
-            scope_env.insert(name.to_string(), fresh);
-            i += 2;
-        }
-        elements[2] = node_with_meta(
-            DeepTag::Bind,
-            list.elements[1].clone(),
-            new_bind_children,
-            *bind_span,
-        );
+    let bind_kids = bind_node.children;
+    let mut new_bind_children = Vec::with_capacity(bind_kids.len());
+    for [name_expr, value_expr] in bind_kids.as_chunks::<2>().0 {
+        let name = symbol_name(name_expr).expect("special-form admission checked binders");
+        let fresh = fresh_name(name, counter);
+        new_bind_children.push(Expr::Atom(Atom::Name(fresh.clone()), name_expr.span()));
+        new_bind_children.push(hygienize_expr(value_expr, counter, &scope_env));
+        scope_env.insert(name.to_string(), fresh);
     }
-    elements[3] = hygienize_expr(&kids[1], counter, &scope_env);
-    Expr::List(List { elements }, span)
+    rebuild_macro_node(
+        node,
+        node.metadata.clone(),
+        vec![
+            rebuild_macro_node(bind_node, bind_node.metadata.clone(), new_bind_children),
+            hygienize_expr(body, counter, &scope_env),
+        ],
+    )
 }
 
 fn hygienize_match(
-    list: &List,
+    node: MacroNode<'_>,
     counter: &mut usize,
     env: &UnordMap<String, String>,
-    span: Span,
 ) -> Expr {
-    let kids = children(list);
-    let mut elements = Vec::with_capacity(list.elements.len());
-    elements.push(list.elements[0].clone());
-    elements.push(list.elements[1].clone());
+    let kids = node.children;
+    let mut children = Vec::with_capacity(kids.len());
     if kids.is_empty() {
-        return Expr::List(List { elements }, span);
+        return node.expr.clone();
     }
-    elements.push(hygienize_expr(&kids[0], counter, env));
+    children.push(hygienize_expr(&kids[0], counter, env));
     for arm in &kids[1..] {
-        if let Expr::List(arm_list, arm_span) = arm
-            && get_tag(arm_list) == Some(DeepTag::Arm)
-        {
-            let arm_kids = children(arm_list);
+        if let ExprCarrier::DecodedNode(DeepTag::Arm, metadata, arm_children) = arm.carrier() {
+            let arm_node = MacroNode::new(arm, DeepTag::Arm, metadata, arm_children);
+            let arm_kids = arm_node.children;
             if arm_kids.len() >= 3 {
                 let (pattern, arm_env) = hygienize_pattern(&arm_kids[0], counter, env);
-                let mut arm_elements = arm_list.elements.clone();
-                arm_elements[2] = pattern;
+                let mut arm_children = arm_kids.to_vec();
+                arm_children[0] = pattern;
                 if !is_unit_list(&arm_kids[1]) {
-                    arm_elements[3] = hygienize_expr(&arm_kids[1], counter, &arm_env);
+                    arm_children[1] = hygienize_expr(&arm_kids[1], counter, &arm_env);
                 }
-                arm_elements[4] = hygienize_expr(&arm_kids[2], counter, &arm_env);
-                elements.push(Expr::List(
-                    List {
-                        elements: arm_elements,
-                    },
-                    *arm_span,
+                arm_children[2] = hygienize_expr(&arm_kids[2], counter, &arm_env);
+                children.push(rebuild_macro_node(
+                    arm_node,
+                    arm_node.metadata.clone(),
+                    arm_children,
                 ));
                 continue;
             }
         }
-        elements.push(hygienize_expr(arm, counter, env));
+        children.push(hygienize_expr(arm, counter, env));
     }
-    Expr::List(List { elements }, span)
+    rebuild_macro_node(node, node.metadata.clone(), children)
 }
 
 fn hygienize_params_expr(
@@ -996,41 +1037,73 @@ fn hygienize_params_expr(
     env: &UnordMap<String, String>,
 ) -> (Expr, UnordMap<String, String>) {
     let mut next_env = env.clone();
-    let Expr::List(list, span) = expr else {
-        return (expr.clone(), next_env);
+    let node = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, metadata, children) => {
+            MacroNode::new(expr, DeepTag::Params, metadata, children)
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return (expr.clone(), next_env),
     };
-    if get_tag(list) != Some(DeepTag::Params) {
+    let dispositions = node
+        .children
+        .iter()
+        .map(macro_parameter_disposition)
+        .collect::<Vec<_>>();
+    if dispositions
+        .iter()
+        .any(|disposition| matches!(disposition, MacroParameterDisposition::Invalid))
+    {
         return (expr.clone(), next_env);
     }
-    let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
-    for param in children(list) {
+    let mut children = Vec::with_capacity(node.children.len());
+    for (param, disposition) in node.children.iter().zip(dispositions) {
+        let MacroParameterDisposition::Binder(name) = disposition else {
+            children.push(param.clone());
+            continue;
+        };
+        let fresh = fresh_name(name, counter);
+        next_env.insert(name.to_string(), fresh.clone());
         match param {
-            Expr::Atom(Atom::Name(name), span) => {
-                let fresh = fresh_name(name, counter);
-                next_env.insert(name.clone(), fresh.clone());
-                elements.push(Expr::Atom(Atom::Name(fresh), *span));
+            Expr::Atom(Atom::Name(_), _) => {
+                children.push(Expr::Atom(Atom::Name(fresh), param.span()));
             }
-            Expr::List(param_list, param_span) if param_list.elements.len() == 2 => {
-                let Some(name) = symbol_name(&param_list.elements[0]) else {
-                    elements.push(param.clone());
-                    continue;
-                };
-                let fresh = fresh_name(name, counter);
-                next_env.insert(name.to_string(), fresh.clone());
-                elements.push(Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Name(fresh), param_list.elements[0].span()),
-                            param_list.elements[1].clone(),
-                        ],
-                    },
-                    *param_span,
+            Expr::BareList(elements, span) => {
+                children.push(Expr::BareList(
+                    vec![
+                        Expr::Atom(Atom::Name(fresh), elements[0].span()),
+                        elements[1].clone(),
+                    ],
+                    *span,
                 ));
             }
-            _ => elements.push(param.clone()),
+            Expr::MetaExpr(meta, span) => {
+                let Expr::Atom(Atom::Name(_), name_span) = meta.expr.as_ref() else {
+                    unreachable!("admitted prefix metadata parameter has a name")
+                };
+                // A vocabulary name needs prefix metadata to avoid being read
+                // as a Deep tag. The fresh name is ordinary, so use the
+                // canonical typed-name carrier that Surf desugaring emits.
+                children.push(Expr::BareList(
+                    vec![
+                        Expr::Atom(Atom::Name(fresh), *name_span),
+                        Expr::Map(meta.metadata.clone(), *span),
+                    ],
+                    *span,
+                ));
+            }
+            Expr::Atom(_, _) | Expr::Map(_, _) | Expr::Node(_, _) | Expr::UnknownForm(_) => {
+                unreachable!("admitted macro parameter retains its exact source carrier")
+            }
         }
     }
-    (Expr::List(List { elements }, *span), next_env)
+    (
+        rebuild_macro_node(node, node.metadata.clone(), children),
+        next_env,
+    )
 }
 
 fn hygienize_pattern(
@@ -1038,32 +1111,36 @@ fn hygienize_pattern(
     counter: &mut usize,
     env: &UnordMap<String, String>,
 ) -> (Expr, UnordMap<String, String>) {
-    let Expr::List(list, span) = expr else {
-        return (expr.clone(), env.clone());
+    let node = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            MacroNode::new(expr, tag, metadata, children)
+        }
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return (expr.clone(), env.clone()),
     };
-    let Some(tag) = get_tag(list) else {
-        return (expr.clone(), env.clone());
-    };
+    let tag = node.tag;
     let mut next_env = env.clone();
     match tag {
         DeepTag::PatVar => {
-            let Some(name) = children(list).first().and_then(symbol_name) else {
+            let Some(name) = node.children.first().and_then(symbol_name) else {
                 return (expr.clone(), env.clone());
             };
             let fresh = fresh_name(name, counter);
             next_env.insert(name.to_string(), fresh.clone());
             (
-                node_with_meta(
-                    DeepTag::PatVar,
-                    list.elements[1].clone(),
-                    vec![Expr::Atom(Atom::Name(fresh), children(list)[0].span())],
-                    *span,
+                rebuild_macro_node(
+                    node,
+                    node.metadata.clone(),
+                    vec![Expr::Atom(Atom::Name(fresh), node.children[0].span())],
                 ),
                 next_env,
             )
         }
         DeepTag::PatAs => {
-            let kids = children(list);
+            let kids = node.children;
             if kids.len() < 2 {
                 return (expr.clone(), env.clone());
             }
@@ -1074,17 +1151,16 @@ fn hygienize_pattern(
             next_env.insert(name.to_string(), fresh.clone());
             let (inner, inner_env) = hygienize_pattern(&kids[1], counter, &next_env);
             (
-                node_with_meta(
-                    DeepTag::PatAs,
-                    list.elements[1].clone(),
+                rebuild_macro_node(
+                    node,
+                    node.metadata.clone(),
                     vec![Expr::Atom(Atom::Name(fresh), kids[0].span()), inner],
-                    *span,
                 ),
                 inner_env,
             )
         }
         DeepTag::PatTuple | DeepTag::PatCtor => {
-            let kids = children(list);
+            let kids = node.children;
             let mut new_children = Vec::new();
             let mut working_env = env.clone();
             if tag == DeepTag::PatCtor && !kids.is_empty() {
@@ -1102,32 +1178,30 @@ fn hygienize_pattern(
                 }
             }
             (
-                node_with_meta(tag, list.elements[1].clone(), new_children, *span),
+                rebuild_macro_node(node, node.metadata.clone(), new_children),
                 working_env,
             )
         }
         DeepTag::PatRecord => {
             let mut new_children = Vec::new();
-            let kids = children(list);
+            let kids = node.children;
             if kids.is_empty() {
                 return (expr.clone(), env.clone());
             }
             new_children.push(kids[0].clone());
             let mut working_env = env.clone();
             for kv in &kids[1..] {
-                if let Expr::List(kv_list, kv_span) = kv
-                    && get_tag(kv_list) == Some(DeepTag::Kv)
-                {
-                    let kv_kids = children(kv_list);
+                if let ExprCarrier::DecodedNode(DeepTag::Kv, metadata, kv_children) = kv.carrier() {
+                    let kv_node = MacroNode::new(kv, DeepTag::Kv, metadata, kv_children);
+                    let kv_kids = kv_node.children;
                     if kv_kids.len() == 2 {
                         let (child_pat, child_env) =
                             hygienize_pattern(&kv_kids[1], counter, &working_env);
                         working_env = child_env;
-                        new_children.push(node_with_meta(
-                            DeepTag::Kv,
-                            kv_list.elements[1].clone(),
+                        new_children.push(rebuild_macro_node(
+                            kv_node,
+                            kv_node.metadata.clone(),
                             vec![kv_kids[0].clone(), child_pat],
-                            *kv_span,
                         ));
                         continue;
                     }
@@ -1135,12 +1209,7 @@ fn hygienize_pattern(
                 new_children.push(kv.clone());
             }
             (
-                node_with_meta(
-                    DeepTag::PatRecord,
-                    list.elements[1].clone(),
-                    new_children,
-                    *span,
-                ),
+                rebuild_macro_node(node, node.metadata.clone(), new_children),
                 working_env,
             )
         }
@@ -1148,86 +1217,115 @@ fn hygienize_pattern(
     }
 }
 
-fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
-    match expr {
-        Expr::Atom(_, _) => expr.clone(),
-        // Metadata values are walked like children (PR #1319 review), so a
-        // vocabulary node inside a metadata value carries provenance the
-        // same way one in a child position does.
-        Expr::Map(meta, span) => Expr::Map(
-            MetaMap {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    annotate_source_expr(value, invocation)
-                }),
-            },
-            *span,
+fn annotate_source_expr(expr: &Expr, invocation: &MacroSource) -> Expr {
+    match expr.carrier() {
+        ExprCarrier::Atom(_) => expr.clone(),
+        ExprCarrier::MetadataMap(meta) => Expr::Map(
+            map_meta_entries(meta, |value| annotate_source_expr(value, invocation)),
+            expr.span(),
         ),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            annotate_source_expr(&bridged, invocation)
+        // An inline-annotated parameter `(x {type: T})` is one binder the
+        // template wrote, and its map is that binder's metadata. Provenance
+        // goes on the map, and, as for a node, the annotation's values (the
+        // type syntax) are not stamped again.
+        ExprCarrier::StructuralList(
+            [
+                name @ Expr::Atom(Atom::Name(_), _),
+                Expr::Map(metadata, map_span),
+            ],
+        ) => {
+            let mut metadata = metadata.clone();
+            if metadata.source().is_none() {
+                metadata
+                    .insert(MetadataValue::Source(invocation.clone()))
+                    .expect("source is absent");
+            }
+            Expr::BareList(
+                vec![name.clone(), Expr::Map(metadata, *map_span)],
+                expr.span(),
+            )
         }
-        // chelis#1087: expansion output nested inside either transitional
-        // variant still carries `source` metadata, so both recurse. The
-        // variant's own metadata map records no `source` entry here — only
-        // recursion, matching the recursion-only disposition of the sibling
-        // walks above.
-        Expr::BareList(elements, span) => Expr::BareList(
+        ExprCarrier::StructuralList(elements) => Expr::BareList(
             elements
                 .iter()
                 .map(|child| annotate_source_expr(child, invocation))
                 .collect(),
-            *span,
+            expr.span(),
         ),
-        Expr::UnknownForm(data) => {
-            map_unknown_form(data, |child| annotate_source_expr(child, invocation))
-        }
-        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            MetaExpr {
-                entries: map_meta_entries(&meta.entries, |value| {
-                    annotate_source_expr(value, invocation)
-                }),
-                expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
-            },
-            *span,
-        ),
-        Expr::List(list, span) => {
-            let mut elements = list.elements.clone();
-            if let Some(Expr::Map(meta, meta_span)) = elements.get_mut(1) {
-                if !meta.entries.iter().any(|(key, _)| key == "source") {
-                    meta.entries
-                        .push(("source".to_string(), invocation.clone()));
+        ExprCarrier::UndecodableHead(_, _, _) => map_unknown_form(unknown_form(expr), |child| {
+            annotate_source_expr(child, invocation)
+        }),
+        ExprCarrier::MetadataExpression(meta) => {
+            if matches!(meta.expr.as_ref(), Expr::Atom(Atom::Name(_), _)) {
+                let mut metadata = meta.metadata.clone();
+                if metadata.source().is_none() {
+                    metadata
+                        .insert(MetadataValue::Source(invocation.clone()))
+                        .expect("source is absent");
                 }
-                elements[1] = Expr::Map(meta.clone(), *meta_span);
+                Expr::MetaExpr(
+                    MetaExpr {
+                        metadata,
+                        expr: meta.expr.clone(),
+                    },
+                    expr.span(),
+                )
+            } else {
+                Expr::MetaExpr(
+                    MetaExpr {
+                        metadata: map_meta_entries(&meta.metadata, |value| {
+                            annotate_source_expr(value, invocation)
+                        }),
+                        expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
+                    },
+                    expr.span(),
+                )
             }
-            for child in elements.iter_mut().skip(2) {
-                *child = annotate_source_expr(child, invocation);
+        }
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            let node = MacroNode::new(expr, tag, metadata, children);
+            let mut metadata = metadata.clone();
+            if metadata.source().is_none() {
+                metadata
+                    .insert(MetadataValue::Source(invocation.clone()))
+                    .expect("source is absent");
             }
-            Expr::List(List { elements }, *span)
+            rebuild_macro_node(
+                node,
+                metadata,
+                children
+                    .iter()
+                    .map(|child| annotate_source_expr(child, invocation))
+                    .collect(),
+            )
         }
     }
 }
 
 fn params_blockers(expr: &Expr) -> Vec<String> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list)
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Params, _, children) => children
             .iter()
-            .filter_map(|param| match param {
-                Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
-                Expr::List(param_list, _) if param_list.elements.len() == 2 => {
-                    symbol_name(&param_list.elements[0]).map(|name| name.to_string())
-                }
-                _ => None,
+            .filter_map(|param| match macro_parameter_disposition(param) {
+                MacroParameterDisposition::Binder(name) => Some(name.to_string()),
+                MacroParameterDisposition::Invalid => None,
             })
             .collect(),
-        _ => Vec::new(),
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => Vec::new(),
     }
 }
 
+/// The invocation `(name args...)` as the historical syntax record that
+/// `source` metadata carries.
 fn macro_source(name: &str, args: &[Expr]) -> Expr {
     let mut elements = vec![Expr::Atom(Atom::Name(name.to_string()), zero_span())];
     elements.extend(args.iter().cloned());
-    Expr::List(List { elements }, zero_span())
+    Expr::BareList(elements, zero_span())
 }
 
 fn standard_prelude_macros() -> Result<UnordMap<String, MacroDef>, ExpansionError> {
@@ -1242,53 +1340,17 @@ fn standard_prelude_macros() -> Result<UnordMap<String, MacroDef>, ExpansionErro
     Ok(defs)
 }
 
-fn get_tag(list: &List) -> Option<DeepTag> {
-    list.tag()
+/// Rebuild only live payloads; the typed visitor preserves structural roots,
+/// dtype binder data, and historical source records.
+fn map_meta_entries(meta: &Metadata, mut f: impl FnMut(&Expr) -> Expr) -> Metadata {
+    meta.map_expressions(&mut |value, _| f(value))
+        .expect("macro rewrite preserves metadata shape")
 }
-
-/// The provenance metadata key (spec/03 section 1.1): its value records the
-/// original macro invocation verbatim, and the spec says every compiler pass
-/// except error reporting ignores it. The metadata walks below therefore
-/// leave it untouched; walking it would re-expand, rename, or substitute
-/// inside the historical record and destroy the "original invocation
-/// arguments" guarantee.
-const PROVENANCE_KEY: &str = "source";
-
-/// Rebuild metadata entries, applying `f` to every value except the
-/// `source` provenance record. Metadata values are full Deep expressions,
-/// so every macro walk treats them like children (PR #1319 review); a map
-/// nested inside a metadata value reaches the caller's own `Expr::Map` arm
-/// and recurses to any depth.
-fn map_meta_entries(
-    entries: &[(String, Expr)],
-    mut f: impl FnMut(&Expr) -> Expr,
-) -> Vec<(String, Expr)> {
-    entries
-        .iter()
-        .map(|(key, value)| {
-            if key == PROVENANCE_KEY {
-                (key.clone(), value.clone())
-            } else {
-                (key.clone(), f(value))
-            }
-        })
-        .collect()
-}
-
-/// Fallible twin of [`map_meta_entries`] for the expansion walk.
 fn try_map_meta_entries(
-    entries: &[(String, Expr)],
+    meta: &Metadata,
     mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
-) -> Result<Vec<(String, Expr)>, ExpansionError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for (key, value) in entries {
-        if key == PROVENANCE_KEY {
-            out.push((key.clone(), value.clone()));
-        } else {
-            out.push((key.clone(), f(value)?));
-        }
-    }
-    Ok(out)
+) -> Result<Metadata, ExpansionError> {
+    meta.try_map_expressions(&mut |value, _| f(value))
 }
 
 /// Rebuild an `UnknownForm`, applying `f` to every metadata value and every
@@ -1297,12 +1359,18 @@ fn try_map_meta_entries(
 fn map_unknown_form(data: &UnknownFormData, mut f: impl FnMut(&Expr) -> Expr) -> Expr {
     Expr::UnknownForm(Box::new(UnknownFormData {
         head: data.head.clone(),
-        meta: MetaMap {
-            entries: map_meta_entries(&data.meta.entries, &mut f),
-        },
+        meta: map_meta_entries(&data.meta, &mut f),
         children: data.children.iter().map(&mut f).collect(),
         span: data.span,
     }))
+}
+
+/// The `UnknownForm` behind an undecodable-head carrier, its only source.
+fn unknown_form(expr: &Expr) -> &UnknownFormData {
+    let Expr::UnknownForm(data) = expr else {
+        unreachable!("an undecodable head is carried only by an UnknownForm");
+    };
+    data
 }
 
 /// Fallible twin of [`map_unknown_form`] for the expansion walk.
@@ -1310,26 +1378,17 @@ fn try_map_unknown_form(
     data: &UnknownFormData,
     mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
 ) -> Result<Expr, ExpansionError> {
-    let entries = try_map_meta_entries(&data.meta.entries, &mut f)?;
+    let metadata = try_map_meta_entries(&data.meta, &mut f)?;
     let mut children = Vec::with_capacity(data.children.len());
     for child in &data.children {
         children.push(f(child)?);
     }
     Ok(Expr::UnknownForm(Box::new(UnknownFormData {
         head: data.head.clone(),
-        meta: MetaMap { entries },
+        meta: metadata,
         children,
         span: data.span,
     })))
-}
-
-/// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
-/// are deliberately outside the public vocabulary (spec/03 macro
-/// boundary rule) and remain symbol-headed; this is the macro layer's
-/// recorded raw-string entry point (checker_totality.md §C1.2). It
-/// returns None for stamped vocabulary nodes by construction.
-fn internal_tag(list: &List) -> Option<&str> {
-    list.unknown_tag_symbol()
 }
 
 /// Parsed compiler-internal forms at a structural syntax position remain a
@@ -1339,14 +1398,6 @@ fn bare_internal_tag(elements: &[Expr]) -> Option<&str> {
         return None;
     };
     DeepTag::parse(head).is_none().then_some(head.as_str())
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 fn symbol_name(expr: &Expr) -> Option<&str> {
@@ -1361,13 +1412,16 @@ fn standard_prelude_decl_name<'a>(
     expected: DeepTag,
     prelude: &UnordMap<String, MacroDef>,
 ) -> Option<&'a str> {
-    let kids = match expr {
-        Expr::List(list, _) if get_tag(list) == Some(expected) => children(list),
-        Expr::Node(node, _) if node.tag() == expected => node.children_slice(),
-        Expr::MetaExpr(meta, _) => {
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) if tag == expected => children,
+        ExprCarrier::MetadataExpression(meta) => {
             return standard_prelude_decl_name(&meta.expr, expected, prelude);
         }
-        _ => return None,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => return None,
     };
     kids.first()
         .and_then(symbol_name)
@@ -1375,25 +1429,22 @@ fn standard_prelude_decl_name<'a>(
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
-            children(list).first().and_then(symbol_name)
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
+            children.first().and_then(symbol_name)
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
-            node.children_slice().first().and_then(symbol_name)
-        }
-        _ => None,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
+/// The empty `()` guard of an `arm`.
 fn is_unit_list(expr: &Expr) -> bool {
-    matches!(expr, Expr::List(List { elements }, _) if elements.is_empty())
-}
-
-fn node_with_meta(tag: DeepTag, meta: Expr, children: Vec<Expr>, span: Span) -> Expr {
-    let mut elements = vec![Expr::Atom(Atom::Tag(tag), span), meta];
-    elements.extend(children);
-    Expr::List(List { elements }, span)
+    matches!(expr.carrier(), ExprCarrier::StructuralList([]))
 }
 
 fn zero_span() -> Span {
@@ -1478,29 +1529,339 @@ fn var(name: &str) -> Expr {
 }
 
 fn int32_lit(value: i64) -> Expr {
-    node_with_meta(
+    Expr::node(
         DeepTag::Lit,
-        Expr::Map(
-            MetaMap {
-                entries: vec![(
-                    "type".to_string(),
-                    node(
-                        DeepTag::TPrim,
-                        vec![Expr::Atom(Atom::Name("int32".to_string()), zero_span())],
-                    ),
-                )],
-            },
-            zero_span(),
-        ),
+        Metadata::from(MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(node(
+                DeepTag::TPrim,
+                vec![Expr::Atom(Atom::Name("i32".to_string()), zero_span())],
+            ))
+            .expect("i32 type syntax"),
+        )),
         vec![Expr::Atom(Atom::Int(value), zero_span())],
         zero_span(),
     )
 }
 
 fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
-    node_with_meta(tag, meta_empty(), children, zero_span())
+    Expr::node(tag, Metadata::default(), children, zero_span())
 }
 
-fn meta_empty() -> Expr {
-    Expr::Map(MetaMap::default(), zero_span())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An annotated `(name {})` parameter, the structural list a `params`
+    /// node carries for a typed binder.
+    fn typed_parameter(name: &str) -> Expr {
+        Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name(name.to_string()), zero_span()),
+                Expr::Map(Metadata::default(), zero_span()),
+            ],
+            zero_span(),
+        )
+    }
+
+    /// Both typed parameter spellings block macro expansion of their names
+    /// (spec/02-surf-syntax.md §P5). Negative control: a structural list that
+    /// is not a name-and-annotations pair binds nothing.
+    #[test]
+    fn typed_parameter_is_a_macro_blocker() {
+        let params = node(DeepTag::Params, vec![typed_parameter("typed_parameter")]);
+        assert_eq!(
+            params_blockers(&params),
+            vec!["typed_parameter".to_string()]
+        );
+
+        let prefix_parameter = Expr::MetaExpr(
+            MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(Expr::Atom(Atom::Name("record".to_string()), zero_span())),
+            },
+            zero_span(),
+        );
+        assert_eq!(
+            params_blockers(&node(DeepTag::Params, vec![prefix_parameter])),
+            vec!["record".to_string()]
+        );
+
+        let malformed = Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("not_a_parameter".to_string()), zero_span()),
+                Expr::Map(Metadata::default(), zero_span()),
+                Expr::Atom(Atom::Name("extra".to_string()), zero_span()),
+            ],
+            zero_span(),
+        );
+        assert!(params_blockers(&node(DeepTag::Params, vec![malformed])).is_empty());
+    }
+
+    /// Hygiene renames a macro-introduced typed parameter and keeps its
+    /// annotated structural carrier.
+    #[test]
+    fn typed_parameter_is_hygienized_as_a_binder() {
+        let params = node(DeepTag::Params, vec![typed_parameter("typed_parameter")]);
+        let mut counter = 0;
+        let (result, env) = hygienize_params_expr(&params, &mut counter, &UnordMap::new());
+        assert_eq!(counter, 1);
+        assert_eq!(
+            env.get("typed_parameter").map(String::as_str),
+            Some("typed_parameter_macro_0")
+        );
+        assert_eq!(
+            result,
+            node(
+                DeepTag::Params,
+                vec![typed_parameter("typed_parameter_macro_0")]
+            )
+        );
+    }
+
+    #[test]
+    fn source_specific_parameters_do_not_freeze_fn_rewrite_passes() {
+        // Each parameter with the params node hygiene leaves behind and the
+        // fresh names it spends: both typed parameter spellings are binders.
+        let parameters = [
+            (
+                typed_parameter("structural_parameter"),
+                node(
+                    DeepTag::Params,
+                    vec![typed_parameter("structural_parameter_macro_0")],
+                ),
+                1,
+            ),
+            {
+                let parameter = Expr::MetaExpr(
+                    chelis_deep::MetaExpr {
+                        metadata: Metadata::default(),
+                        expr: Box::new(Expr::Atom(
+                            Atom::Name("metadata_parameter".to_string()),
+                            zero_span(),
+                        )),
+                    },
+                    zero_span(),
+                );
+                (
+                    parameter,
+                    node(
+                        DeepTag::Params,
+                        vec![typed_parameter("metadata_parameter_macro_0")],
+                    ),
+                    1,
+                )
+            },
+        ];
+
+        for (parameter, hygienized_params, fresh_names) in parameters {
+            let params = node(DeepTag::Params, vec![parameter]);
+            let mut macros = UnordMap::new();
+            macros.insert(
+                "rewrite".to_string(),
+                MacroDef {
+                    name: "rewrite".to_string(),
+                    params: Vec::new(),
+                    body: int32_lit(7),
+                },
+            );
+            let function = node(
+                DeepTag::Fn,
+                vec![params.clone(), app("rewrite", Vec::new())],
+            );
+            let mut expander = Expander::new(10, UnordMap::new());
+            let expanded = expander
+                .expand_expr(&function, &macros, &Scope::default())
+                .expect("valid source-specific parameter admits expansion");
+            let ExprCarrier::DecodedNode(DeepTag::Fn, _, expanded_children) = expanded.carrier()
+            else {
+                panic!("expanded function retains its decoded carrier");
+            };
+            assert_eq!(
+                expanded_children.first(),
+                Some(&params),
+                "expansion must preserve the source-specific parameter carrier"
+            );
+            assert!(
+                matches!(
+                    expanded_children.get(1).map(Expr::carrier),
+                    Some(ExprCarrier::DecodedNode(
+                        DeepTag::Lit,
+                        _,
+                        [Expr::Atom(Atom::Int(7), _)]
+                    ))
+                ),
+                "a typed parameter carrier must not freeze body expansion: {expanded:?}"
+            );
+
+            let function = node(DeepTag::Fn, vec![params.clone(), var("value")]);
+            let mut substitutions = UnordMap::new();
+            substitutions.insert("value".to_string(), int32_lit(9));
+            assert_eq!(
+                substitute_expr(&function, &substitutions, &UnordSet::new()),
+                node(DeepTag::Fn, vec![params.clone(), int32_lit(9)]),
+                "a typed parameter carrier must not freeze substitution"
+            );
+
+            let function = node(DeepTag::Fn, vec![params.clone(), var("outer")]);
+            let mut env = UnordMap::new();
+            env.insert("outer".to_string(), "renamed".to_string());
+            let mut counter = 0;
+            assert_eq!(
+                hygienize_expr(&function, &mut counter, &env),
+                node(DeepTag::Fn, vec![hygienized_params, var("renamed")]),
+                "a parameter carrier must not freeze outer hygiene"
+            );
+            assert_eq!(
+                counter, fresh_names,
+                "only a binder parameter spends a fresh name"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_fn_and_let_shapes_are_opaque_to_every_rewrite_pass() {
+        let rewrite_call = app("rewrite", vec![]);
+        let mut macros = UnordMap::new();
+        macros.insert(
+            "rewrite".to_string(),
+            MacroDef {
+                name: "rewrite".to_string(),
+                params: Vec::new(),
+                body: int32_lit(7),
+            },
+        );
+
+        let malformed_fn = node(DeepTag::Fn, vec![int32_lit(0), rewrite_call.clone()]);
+        let malformed_let = node(
+            DeepTag::Let,
+            vec![
+                node(DeepTag::Bind, vec![int32_lit(0), rewrite_call.clone()]),
+                var("outer"),
+            ],
+        );
+        let mut expander = Expander::new(10, UnordMap::new());
+        assert_eq!(
+            expander
+                .expand_expr(&malformed_fn, &macros, &Scope::default())
+                .expect("malformed fn remains opaque"),
+            malformed_fn,
+            "expansion must not rewrite a fn whose first child is not Params"
+        );
+        assert_eq!(
+            expander
+                .expand_expr(&malformed_let, &macros, &Scope::default())
+                .expect("malformed let remains opaque"),
+            malformed_let,
+            "expansion must not rewrite a let with a non-name binder"
+        );
+
+        let mut substitutions = UnordMap::new();
+        substitutions.insert("value".to_string(), int32_lit(9));
+        let malformed_fn_params = node(
+            DeepTag::Fn,
+            vec![node(DeepTag::Params, vec![int32_lit(0)]), var("value")],
+        );
+        let malformed_let_owner = node(DeepTag::Let, vec![int32_lit(0), var("value")]);
+        assert_eq!(
+            substitute_expr(&malformed_fn_params, &substitutions, &UnordSet::new()),
+            malformed_fn_params,
+            "substitution must not enter a fn with a non-name parameter"
+        );
+        assert_eq!(
+            substitute_expr(&malformed_let_owner, &substitutions, &UnordSet::new()),
+            malformed_let_owner,
+            "substitution must not enter a let whose first child is not Bind"
+        );
+
+        let mut env = UnordMap::new();
+        env.insert("outer".to_string(), "renamed".to_string());
+        let malformed_hygiene_fn = node(
+            DeepTag::Fn,
+            vec![node(DeepTag::Params, vec![int32_lit(0)]), var("outer")],
+        );
+        let malformed_hygiene_let = node(
+            DeepTag::Let,
+            vec![
+                node(DeepTag::Bind, vec![int32_lit(0), var("outer")]),
+                var("outer"),
+            ],
+        );
+        let mut counter = 0;
+        assert_eq!(
+            hygienize_expr(&malformed_hygiene_fn, &mut counter, &env),
+            malformed_hygiene_fn,
+            "hygiene must not enter a fn with a non-name parameter"
+        );
+        assert_eq!(
+            hygienize_expr(&malformed_hygiene_let, &mut counter, &env),
+            malformed_hygiene_let,
+            "hygiene must not synthesize a binder for an invalid let name"
+        );
+        assert_eq!(counter, 0, "invalid binders must not consume fresh names");
+    }
+
+    /// Collect every `let` binder name and every `var` reference, in
+    /// pre-order, skipping metadata.
+    fn let_binders_and_references(expr: &Expr, binders: &mut Vec<String>, refs: &mut Vec<String>) {
+        let ExprCarrier::DecodedNode(tag, _, children) = expr.carrier() else {
+            return;
+        };
+        match tag {
+            DeepTag::Bind => {
+                for (index, child) in children.iter().enumerate() {
+                    if index % 2 == 0 {
+                        binders.extend(symbol_name(child).map(str::to_string));
+                    } else {
+                        let_binders_and_references(child, binders, refs);
+                    }
+                }
+            }
+            DeepTag::Var => refs.extend(var_name(expr).map(str::to_string)),
+            _ => {
+                for child in children {
+                    let_binders_and_references(child, binders, refs);
+                }
+            }
+        }
+    }
+
+    /// chelis#1320 capture polarity, over stamped `let`/`bind` nodes: the
+    /// `let` binder a macro body introduces is renamed together with its
+    /// references, while the caller's own binder of the same name, and the
+    /// argument that refers to it, are left alone.
+    #[test]
+    fn macro_introduced_let_binder_is_renamed_and_user_binder_is_not() {
+        let program = chelis_deep::parser::parse_str(
+            "(defmacro {} shadow (params {} x) \
+               (let {} (bind {} tmp (var {} x)) \
+                 (app {} (var {} add) (var {} tmp) (var {} x)))) \
+             (def {} f (let {} (bind {} tmp (lit {} 1)) \
+               (app {} (var {} shadow) (var {} tmp))))",
+        )
+        .expect("fixture parses");
+        let options = ExpansionOptions {
+            max_iterations: 10,
+            load_std_prelude: false,
+        };
+        let expanded = expand_program(&program, &options).expect("expansion succeeds");
+        assert_eq!(expanded.expansions(), 1);
+        let [def] = expanded.exprs() else {
+            panic!("one declaration survives expansion: {:?}", expanded.exprs());
+        };
+
+        let mut binders = Vec::new();
+        let mut references = Vec::new();
+        let_binders_and_references(def, &mut binders, &mut references);
+        assert_eq!(
+            binders,
+            ["tmp", "tmp_macro_0"],
+            "the user binder keeps its name; the macro binder is renamed"
+        );
+        assert_eq!(
+            references,
+            ["tmp", "add", "tmp_macro_0", "tmp"],
+            "the macro body reads its renamed binder, and the argument still \
+             reads the caller's binder"
+        );
+    }
 }

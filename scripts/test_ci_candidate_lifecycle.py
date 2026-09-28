@@ -1,0 +1,711 @@
+"""Candidate-history classification and acknowledgement controls."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import unittest
+
+from scripts import ci_candidate_lifecycle as lifecycle
+
+
+OLD_BASE = "1" * 40
+NEW_BASE = "2" * 40
+BEFORE = "3" * 40
+HEAD = "4" * 40
+MERGE = "5" * 40
+TARGET = "6" * 40
+
+
+class FakeGraph:
+    def __init__(
+        self,
+        *,
+        ancestors: set[tuple[str, str]],
+        merge_bases: dict[tuple[str, str], str] | None = None,
+        merges: list[tuple[str, tuple[str, ...]]] | None = None,
+    ) -> None:
+        self.ancestors = ancestors
+        self.merge_bases = merge_bases or {}
+        self.merges = merges or []
+
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        return ancestor == descendant or (ancestor, descendant) in self.ancestors
+
+    def merge_base(self, left: str, right: str) -> str:
+        return self.merge_bases[(left, right)]
+
+    def new_merge_commits(
+        self, before: str, head: str
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        self.assert_range = (before, head)
+        return self.merges
+
+
+class UnavailableGraph(FakeGraph):
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        raise lifecycle.GraphInspectionError("old force-pushed head is unavailable")
+
+
+def payload(*, body: str = "", action: str = "synchronize") -> dict:
+    return {
+        "action": action,
+        "before": BEFORE,
+        "after": HEAD,
+        "pull_request": {
+            "body": body,
+            "base": {"sha": NEW_BASE},
+            "head": {"sha": HEAD},
+        },
+    }
+
+
+def current_pr(*, body: str = "", head: str = HEAD) -> dict:
+    return {
+        "body": body,
+        "base": {"sha": NEW_BASE, "ref": "main"},
+        "head": {"sha": head},
+    }
+
+
+class CandidateLifecycleTests(unittest.TestCase):
+    def test_non_pr_event_needs_no_candidate_declaration(self) -> None:
+        self.assertEqual(
+            lifecycle.validate_payload(
+                {"ref": "refs/heads/main"},
+                FakeGraph(ancestors=set()),
+            ),
+            "unchanged-candidate",
+        )
+
+    def test_opened_candidate_needs_no_history_acknowledgement(self) -> None:
+        self.assertEqual(
+            lifecycle.validate_payload(payload(action="opened"), FakeGraph(ancestors=set())),
+            "initial-candidate",
+        )
+
+    def test_ordinary_review_repair_push_is_not_a_base_update(self) -> None:
+        graph = FakeGraph(ancestors={(BEFORE, HEAD)}, merges=[])
+        self.assertEqual(
+            lifecycle.validate_payload(payload(), graph),
+            "review-repair",
+        )
+
+    def test_merge_from_base_requires_exact_head_bound_reason(self) -> None:
+        graph = FakeGraph(
+            ancestors={(BEFORE, HEAD), (NEW_BASE, NEW_BASE)},
+            merges=[(MERGE, (BEFORE, NEW_BASE))],
+        )
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update"):
+            lifecycle.validate_payload(payload(), graph)
+        with self.assertRaisesRegex(ValueError, "current head"):
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-base-update: {BEFORE} "
+                        "required conflict resolution"
+                    )
+                ),
+                graph,
+            )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "required conflict resolution"
+                    )
+                ),
+                graph,
+            ),
+            "base-merge",
+        )
+
+    def test_rebase_onto_newer_base_requires_base_update_reason(self) -> None:
+        graph = FakeGraph(
+            ancestors={(OLD_BASE, NEW_BASE)},
+            merge_bases={
+                (BEFORE, NEW_BASE): OLD_BASE,
+                (HEAD, NEW_BASE): NEW_BASE,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update"):
+            lifecycle.validate_payload(payload(), graph)
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+                graph,
+            ),
+            "base-rebase",
+        )
+
+    def test_other_history_rewrite_requires_its_own_exact_reason(self) -> None:
+        graph = FakeGraph(
+            ancestors=set(),
+            merge_bases={
+                (BEFORE, NEW_BASE): OLD_BASE,
+                (HEAD, NEW_BASE): OLD_BASE,
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "Candidate-history-rewrite"):
+            lifecycle.validate_payload(payload(), graph)
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-history-rewrite: {HEAD} "
+                        "approved consolidation before review"
+                    )
+                ),
+                graph,
+            ),
+            "history-rewrite",
+        )
+
+    def test_live_pr_body_repairs_a_rerun_of_the_same_event(self) -> None:
+        graph = FakeGraph(
+            ancestors={(OLD_BASE, NEW_BASE)},
+            merge_bases={
+                (BEFORE, NEW_BASE): OLD_BASE,
+                (HEAD, NEW_BASE): NEW_BASE,
+            },
+        )
+        event = payload(body="")
+        self.assertEqual(
+            lifecycle.validate_payload(
+                event,
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+            ),
+            "base-rebase",
+        )
+
+    def test_live_pr_head_must_still_match_the_event_candidate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not equal current PR head"):
+            lifecycle.validate_payload(
+                payload(),
+                FakeGraph(ancestors={(BEFORE, HEAD)}),
+                current_pr=current_pr(head=MERGE),
+            )
+
+    def test_live_target_tip_controls_classification_not_event_base_snapshot(
+        self,
+    ) -> None:
+        graph = FakeGraph(
+            ancestors={(OLD_BASE, TARGET)},
+            merge_bases={
+                (BEFORE, TARGET): OLD_BASE,
+                (HEAD, TARGET): TARGET,
+            },
+        )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {HEAD} "
+                        "base-sensitive overlap required a rebase"
+                    )
+                ),
+                target_tip=TARGET,
+            ),
+            "base-rebase",
+        )
+
+    def test_force_push_declaration_survives_body_edits_and_later_pushes(
+        self,
+    ) -> None:
+        graph = FakeGraph(ancestors={(MERGE, HEAD)}, merges=[])
+        edited = payload(action="edited")
+        edited["pull_request"]["head"]["sha"] = HEAD
+        timeline = [
+            [
+                {
+                    "event": "head_ref_force_pushed",
+                    "commit_id": MERGE,
+                }
+            ]
+        ]
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update.*or"):
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(),
+                target_tip=TARGET,
+                timeline=timeline,
+            )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {MERGE} "
+                        "semantic conflict resolution required the rebase"
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=timeline,
+            ),
+            "unchanged-candidate",
+        )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                edited,
+                graph,
+                current_pr=current_pr(
+                    body="\n".join(
+                        [
+                            (
+                                f"Candidate-base-update: {MERGE} "
+                                "semantic conflict resolution required the rebase"
+                            ),
+                            (
+                                f"Candidate-history-rewrite: {HEAD} "
+                                "approved consolidation followed"
+                            ),
+                        ]
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=timeline,
+            ),
+            "unchanged-candidate",
+        )
+
+    def test_prior_base_merge_declaration_survives_later_pushes(self) -> None:
+        graph = FakeGraph(
+            ancestors={(MERGE, HEAD), (NEW_BASE, TARGET)},
+            merges=[(MERGE, (BEFORE, NEW_BASE))],
+        )
+        reopened = payload(action="reopened")
+        with self.assertRaisesRegex(ValueError, "Candidate-base-update"):
+            lifecycle.validate_payload(
+                reopened,
+                graph,
+                current_pr=current_pr(),
+                target_tip=TARGET,
+                timeline=[],
+            )
+        self.assertEqual(
+            lifecycle.validate_payload(
+                reopened,
+                graph,
+                current_pr=current_pr(
+                    body=(
+                        f"Candidate-base-update: {MERGE} "
+                        "main overlap required the merge"
+                    )
+                ),
+                target_tip=TARGET,
+                timeline=[],
+            ),
+            "unchanged-candidate",
+        )
+
+    def test_unavailable_old_head_requires_explicit_history_rewrite_reason(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Candidate-history-rewrite"):
+            lifecycle.validate_payload(payload(), UnavailableGraph(ancestors=set()))
+        self.assertEqual(
+            lifecycle.validate_payload(
+                payload(
+                    body=(
+                        f"Candidate-history-rewrite: {HEAD} "
+                        "approved force push after the old head became unavailable"
+                    )
+                ),
+                UnavailableGraph(ancestors=set()),
+            ),
+            "history-rewrite-unverifiable",
+        )
+
+    def test_an_uninspectable_pre_push_head_says_so_rather_than_blaming_the_author(
+        self,
+    ) -> None:
+        """The demand must name its cause, not read as a forgotten line.
+
+        chelis#2229: a clean forward rebase produced
+        `Candidate-history-rewrite: requires exactly one exact-head line in
+        the PR body` while the body already carried a correct
+        `Candidate-base-update:` line. The author has no way to tell from
+        that message that the checkout never obtained the pre-push head.
+        """
+
+        with self.assertRaises(ValueError) as raised:
+            lifecycle.validate_payload(
+                payload(
+                    body=f"Candidate-base-update: {HEAD} a real conflict"
+                ),
+                UnavailableGraph(ancestors=set()),
+            )
+
+        message = str(raised.exception)
+        self.assertIn(
+            f"could not be classified against the pre-push head {BEFORE}",
+            message,
+        )
+        self.assertIn("old force-pushed head is unavailable", message)
+        self.assertIn("cannot be recorded as a base update", message)
+        # The stricter declaration is still what unblocks it: fail-safe.
+        self.assertIn("Candidate-history-rewrite:", message)
+        # Two states reach this path and the wording must fit both, so it
+        # must not assert the head is absent: chelis#2234's shallow lanes
+        # reach it with the head present and its ancestry truncated.
+        self.assertNotIn("could not be inspected", message)
+        self.assertNotIn("could not be fetched", message)
+
+    def test_a_reasonless_git_failure_does_not_promise_a_reason(self) -> None:
+        """`git merge-base` exits 1 with empty stderr; say so (chelis#2234)."""
+
+        detail = lifecycle._git_detail("", "", 1)
+
+        self.assertEqual(detail, "git printed no reason (exit 1)")
+        self.assertEqual(
+            lifecycle._git_detail("  fatal: bad object\n", "", 128),
+            "fatal: bad object",
+        )
+
+    def test_empty_or_duplicate_acknowledgements_fail_closed(self) -> None:
+        graph = FakeGraph(
+            ancestors={(BEFORE, HEAD)},
+            merges=[(MERGE, (BEFORE, NEW_BASE))],
+        )
+        for body in (
+            f"Candidate-base-update: {HEAD}",
+            "\n".join(
+                [
+                    f"Candidate-base-update: {HEAD} conflict one",
+                    f"Candidate-base-update: {HEAD} conflict two",
+                ]
+            ),
+        ):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                lifecycle.validate_payload(payload(body=body), graph)
+
+    def test_malformed_synchronize_payload_fails_closed(self) -> None:
+        malformed = payload()
+        del malformed["before"]
+        with self.assertRaisesRegex(ValueError, "before"):
+            lifecycle.validate_payload(malformed, FakeGraph(ancestors=set()))
+
+
+class GitGraphIntegrationTests(unittest.TestCase):
+    def git(self, root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.strip()
+
+    def commit(self, root: Path, name: str, content: str) -> str:
+        (root / name).write_text(content, encoding="utf-8")
+        self.git(root, "add", name)
+        self.git(root, "commit", "-m", name)
+        return self.git(root, "rev-parse", "HEAD")
+
+    def initialized_repo(self, root: Path) -> str:
+        self.git(root, "init", "-b", "main")
+        self.git(root, "config", "user.name", "Candidate Lifecycle Test")
+        self.git(root, "config", "user.email", "candidate@example.invalid")
+        return self.commit(root, "root.txt", "root\n")
+
+    def test_real_base_merge_is_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.initialized_repo(root)
+            self.git(root, "checkout", "-b", "feature")
+            before = self.commit(root, "feature.txt", "feature\n")
+            self.git(root, "checkout", "main")
+            base = self.commit(root, "base.txt", "base\n")
+            self.git(root, "checkout", "feature")
+            self.git(root, "merge", "--no-ff", "main", "-m", "merge base")
+            head = self.git(root, "rev-parse", "HEAD")
+
+            self.assertEqual(
+                lifecycle.classify_update(
+                    before=before,
+                    head=head,
+                    base=base,
+                    graph=lifecycle.GitGraph(root),
+                ),
+                "base-merge",
+            )
+
+    def test_real_base_rebase_is_classified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.initialized_repo(root)
+            self.git(root, "checkout", "-b", "feature")
+            before = self.commit(root, "feature.txt", "feature\n")
+            self.git(root, "checkout", "main")
+            base = self.commit(root, "base.txt", "base\n")
+            self.git(root, "checkout", "feature")
+            self.git(root, "rebase", "main")
+            head = self.git(root, "rev-parse", "HEAD")
+
+            self.assertEqual(
+                lifecycle.classify_update(
+                    before=before,
+                    head=head,
+                    base=base,
+                    graph=lifecycle.GitGraph(root),
+                ),
+                "base-rebase",
+            )
+
+
+    def test_a_grafted_target_tip_defeats_classification_until_unshallowed(
+        self,
+    ) -> None:
+        """chelis#2234's topology, end to end, in real shallow clones.
+
+        The `Compute docs_only` deepen lands its boundary on the target tip
+        and grafts it. Git then ignores that commit's parents even though
+        they are in the clone, so a clean forward rebase cannot be told from
+        an arbitrary rewrite. Only a deepening fetch removes the graft; the
+        depth-less fetch the step used to run is a no-op on a commit already
+        present, which is why chelis#2230's backstop does not reach it.
+        """
+
+        with tempfile.TemporaryDirectory() as origin_directory:
+            source = Path(origin_directory)
+            self.initialized_repo(source)
+            branch_point = self.commit(source, "base.txt", "base\n")
+            self.git(source, "checkout", "-b", "old-head")
+            before = self.commit(source, "feature.txt", "one\n")
+            self.git(source, "checkout", "main")
+            target = self.commit(source, "target.txt", "target advanced\n")
+            self.git(source, "checkout", "-b", "new-head")
+            head = self.commit(source, "feature.txt", "one\n")
+            self.assertNotEqual(branch_point, target)
+
+            with tempfile.TemporaryDirectory() as clone_directory:
+                clone = Path(clone_directory)
+                self.git(clone, "init", "-b", "main")
+                self.git(clone, "remote", "add", "origin", source.as_uri())
+                # `--depth=$((COMMITS + 1))`: two commits from the head
+                # reaches the target tip and grafts it.
+                self.git(clone, "fetch", "--depth=2", "origin", head)
+                shallow = (clone / ".git" / "shallow").read_text().split()
+                self.assertIn(target, shallow)
+                # chelis#2230's depth-less backstop cannot undo that.
+                self.git(clone, "fetch", "--no-tags", "origin", target)
+                self.assertIn(
+                    target, (clone / ".git" / "shallow").read_text().split()
+                )
+                self.git(clone, "fetch", "origin", before, head, target)
+                self.assertEqual(
+                    self.git(clone, "cat-file", "-t", before), "commit"
+                )
+
+                graph = lifecycle.GitGraph(clone)
+                with self.assertRaises(lifecycle.GraphInspectionError):
+                    lifecycle.classify_update(
+                        before=before, head=head, base=target, graph=graph
+                    )
+
+                # The repair: a deepening fetch, which removes the graft.
+                self.git(
+                    clone, "fetch", "--unshallow", "origin", before, head, target
+                )
+                self.assertFalse((clone / ".git" / "shallow").exists())
+                self.assertEqual(
+                    lifecycle.classify_update(
+                        before=before, head=head, base=target, graph=graph
+                    ),
+                    "base-rebase",
+                )
+
+    def test_unrelated_histories_still_fail_and_not_for_truncation(
+        self,
+    ) -> None:
+        """Negative control, in a complete clone so truncation is excluded."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.initialized_repo(root)
+            base = self.commit(root, "base.txt", "base\n")
+            # Two orphan roots, so `before` is not an ancestor of `head`
+            # either: the classifier must reach merge-base to fail here.
+            self.git(root, "checkout", "--orphan", "one")
+            self.git(root, "rm", "-rf", ".")
+            before = self.commit(root, "one.txt", "one\n")
+            self.git(root, "checkout", "--orphan", "two")
+            self.git(root, "rm", "-rf", ".")
+            head = self.commit(root, "two.txt", "two\n")
+            self.assertNotEqual(
+                self.git(root, "rev-list", "--max-parents=0", before),
+                self.git(root, "rev-list", "--max-parents=0", head),
+            )
+            self.assertEqual(
+                self.git(root, "rev-parse", "--is-shallow-repository"), "false"
+            )
+            graph = lifecycle.GitGraph(root)
+
+            with self.assertRaises(lifecycle.GraphInspectionError) as raised:
+                lifecycle.classify_update(
+                    before=before, head=head, base=base, graph=graph
+                )
+
+        message = str(raised.exception)
+        self.assertIn("cannot find merge base", message)
+        # It must not blame truncation when the clone is complete, and it
+        # must not invent a reason git did not give.
+        self.assertNotIn("shallow", message)
+        self.assertIn("git printed no reason", message)
+
+
+class LifecycleInvocationTests(unittest.TestCase):
+    """Every invocation must hand the classifier the head it needs.
+
+    `pr-contract-acknowledgements.yml` checks out at `fetch-depth: 0`, but a
+    full clone holds only what refs reach, and a force-pushed-away head is
+    reachable from none, so that step has to fetch it by SHA. The other two
+    invocations already fetch it; what they did was hide the failure. The
+    script now reports an uninspectable pre-push head and repeats git's
+    reason, so a `2>/dev/null` at any call site throws away the half of that
+    diagnosis git holds and leaves the same script diagnosing itself on one
+    path and going quiet on another (chelis#2229).
+    """
+
+    WORKFLOWS = Path(__file__).resolve().parents[1] / ".github/workflows"
+
+    def acknowledgement_step(self) -> str:
+        text = (self.WORKFLOWS / "pr-contract-acknowledgements.yml").read_text()
+        start = text.index("Require persistent candidate lifecycle declaration")
+        end = text.index("- name: Require protected-test acknowledgements")
+        return text[start:end]
+
+    def detector_step(self, workflow: str) -> str:
+        text = (self.WORKFLOWS / workflow).read_text()
+        start = text.index("- name: Validate candidate lifecycle")
+        end = text.index("- name: Select targeted rebase lane")
+        return text[start:end]
+
+    def all_steps(self) -> dict[str, str]:
+        return {
+            "pr-contract-acknowledgements.yml": self.acknowledgement_step(),
+            "ci.yml": self.detector_step("ci.yml"),
+            "conformance.yml": self.detector_step("conformance.yml"),
+        }
+
+    def test_the_detector_steps_delegate_to_the_established_clone(self) -> None:
+        """The detector lanes read a stated shape instead of making one.
+
+        They used to fetch for themselves, which is how each of them ended
+        up depending on what the previous step happened to leave
+        (chelis#2228, chelis#2234). The invariant and its confinement are
+        locked by scripts/test_ci_establish_candidate_clone.py; what this
+        asserts is that these two steps stopped fetching at all.
+        """
+
+        for workflow in ("ci.yml", "conformance.yml"):
+            body = self.detector_step(workflow)
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("git fetch", body)
+                self.assertIn("steps.clone.outputs.target_tip", body)
+
+    def test_the_acknowledgement_step_fetches_the_pre_push_head(self) -> None:
+        body = self.acknowledgement_step()
+
+        self.assertIn("BEFORE: ${{ github.event.before }}", body)
+        self.assertIn("ACTION: ${{ github.event.action }}", body)
+        self.assertIn('git fetch --no-tags origin "$BEFORE"', body)
+
+    @staticmethod
+    def joined_commands(body: str) -> list[str]:
+        """Fold backslash continuations before scanning for a command.
+
+        A line-scoped scan is evaded by the spelling these files already
+        use elsewhere: `git fetch ... \\` on one line and `2>/dev/null ||
+        true` on the next passes a per-line check while restoring exactly
+        what the check exists to forbid.
+        """
+
+        joined: list[str] = []
+        pending = ""
+        for line in body.splitlines():
+            stripped = line.rstrip()
+            if stripped.endswith("\\"):
+                pending += stripped[:-1].rstrip() + " "
+                continue
+            joined.append((pending + stripped.strip()).strip())
+            pending = ""
+        if pending:
+            joined.append(pending.strip())
+        return joined
+
+    #: Any redirection of file descriptor 2 other than onto stderr itself.
+    #: `2>/dev/null`, `2> /dev/null`, `2>&-` and `2>&1` all qualify.
+    STDERR_REDIRECT = re.compile(r"2>(?!&2(?:\b|$))")
+    #: A fallback that discards the status without saying anything.
+    DISCARDING_FALLBACK = re.compile(r"\|\|\s*(?:true|:)\s*$")
+
+    def test_no_invocation_silences_its_pre_push_head_fetch(self) -> None:
+        """Assert the property, not a list of the spellings that break it.
+
+        Only the acknowledgement invocation still fetches the pre-push head
+        in YAML. The two detector invocations delegate to
+        `ci_establish_candidate_clone.py`, whose own tests hold the same
+        property in Python, so scanning their steps for a fetch would now
+        assert about a command that is deliberately not there.
+
+        Matching `2>/dev/null` as a substring is evaded by a space or by
+        `2>&-`, and chasing each spelling adds witnesses rather than
+        coverage. The command is normalised first, then two rules decide
+        it: no redirection of stderr away from stderr, and a fallback that
+        reports rather than one that swallows.
+
+        What is proved, exactly: those two rules hold **of the joined
+        command the fetch sits on**, plus the one step-wide spelling
+        `exec 2>`, which is rejected outright. A construct that wraps that
+        command or the step rather than appearing on it is outside this
+        scope and passes: a brace group or subshell around the fetch, an
+        `exec` redirect written another way, or a fallback continued onto a
+        following line. Those are not spellings a maintainer writes by
+        accident, so they are recorded here rather than chased; this
+        docstring exists so nobody reads the guard as proving more than it
+        does.
+        """
+
+        for workflow, body in {
+            "pr-contract-acknowledgements.yml": self.acknowledgement_step()
+        }.items():
+            with self.subTest(workflow=workflow):
+                # A step-wide silencer would defeat any per-command rule.
+                self.assertNotRegex(body, r"exec\s+2>")
+                fetches = [
+                    command
+                    for command in self.joined_commands(body)
+                    if "git fetch" in command and '"$BEFORE"' in command
+                ]
+                self.assertTrue(fetches, "no pre-push head fetch")
+                for command in fetches:
+                    normalised = " ".join(command.split())
+                    self.assertNotRegex(normalised, self.STDERR_REDIRECT)
+                    self.assertNotRegex(normalised, self.DISCARDING_FALLBACK)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -120,7 +120,7 @@ fn reef_std_io_module_checks_and_builds() {
 import Std.Io (read_trimmed_lines, read_head_bytes, exists, mmap_size)
 
 lines = read_trimmed_lines({dataset})
-head = read_head_bytes({dataset}, cast(4, int64))
+head = read_head_bytes({dataset}, cast(4, i64))
 file_is_present = exists({dataset})
 size = mmap_size({dataset})
 lines_view = print(lines)

@@ -152,21 +152,17 @@ fn setup_syncs_source_crates_when_chelis_src_present() {
 
 // ---- toolchain missing: auto-install via chelisup -------------------------
 
-/// The host release-asset slug, matching `chelisup::install::detect_slug`.
-fn host_slug() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x86_64",
-        ("linux", "x86_64") => "linux-x86_64",
-        other => panic!("unsupported host for this test: {other:?}"),
-    }
+/// The release build `chelisup install <ver>` downloads on this host.
+fn host_build(ver: &str) -> String {
+    let slug = chelisup::install::detect_slug().expect("host platform supported");
+    chelisup::install::release_build(ver, slug).expect("validated version")
 }
 
-/// Write a gzip toolchain release tarball `chelis-v<ver>-<slug>.tar.gz` into
-/// `base` containing `chelis-v<ver>-<slug>/bin/chelis`, the shape
+/// Write a gzip toolchain release tarball `chelis-v<ver>-<build>.tar.gz` into
+/// `base` containing `chelis-v<ver>-<build>/bin/chelis`, the shape
 /// `chelisup install` extracts.
-fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
-    let inner = format!("chelis-v{ver}-{slug}");
+fn write_release_tarball(base: &Path, ver: &str, build: &str) {
+    let inner = format!("chelis-v{ver}-{build}");
     let mut tar_buf: Vec<u8> = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
@@ -183,7 +179,7 @@ fn write_release_tarball(base: &Path, ver: &str, slug: &str) {
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(&tar_buf).unwrap();
     let gz = enc.finish().unwrap();
-    fs::write(base.join(format!("chelis-v{ver}-{slug}.tar.gz")), gz).unwrap();
+    fs::write(base.join(chelisup::install::asset_name(ver, build)), gz).unwrap();
 }
 
 /// Build and return the path to the real `chelisup` binary that
@@ -233,7 +229,7 @@ fn setup_auto_installs_missing_toolchain_and_keeps_shim_intact() {
     // No toolchain in `home` yet -> setup must delegate to chelisup.
     let releases = tmp.path().join("releases");
     fs::create_dir_all(&releases).unwrap();
-    write_release_tarball(&releases, "0.9.9", host_slug());
+    write_release_tarball(&releases, "0.9.9", &host_build("0.9.9"));
     let chelisup = chelisup_bin();
 
     chelis(&home)

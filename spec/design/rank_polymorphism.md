@@ -11,20 +11,22 @@ runs correctly — see Implementation Status below.
 
 What landed vs. the plan below, with two deliberate divergences:
 
-- **Surface syntax is `..r`, introduced *contextually*** (like a sig dim
-  variable) — there is **no `[..r]` quantifier**. Write
-  `def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`.
-  The plan's `def f[..r](...)` examples below predate this decision; the
-  contextual form is the shipped surface.
+- **A rank-spread use is written `..r`; its declaration owner lists the plain
+  name explicitly in the complete binder clause.** There is no `[..r]`
+  binder spelling. Write
+  `def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)`.
+  The binder clause establishes ownership, while `..` marks rank use in a
+  tensor shape.
 - **Identity tier is shipped and sound.** `..r` lexer/parser (Tier-3 adjacency
   rejected at parse time), `(d-rank {} r)` deep node, `Dim::Rank` + `Scheme.rvars`
   + a unitary rank-unification arm, the `Dim::Rank`-free monomorphization
   assertion at IR lowering, and the Body-Discipline check (an explicit
-  shape-identity allowlist over every builtin; everything else is rejected in a
-  `..r` body, so a missed classification can only over-reject, never open a
-  §4.2 hole). A `..r` body may currently call only shape-identity *builtins* —
-  calling a user-defined function from a rank-poly body is conservatively
-  rejected (proving an arbitrary callee rank-safe is future work).
+  shape-class allowlist over every builtin). The current classes follow
+  spec/04 §4.5.3: shape identity, named-axis operations, and ordered-prefix
+  key derivations. The latter retain each operand axis in order and let
+  `split_keys` append its count axis; their checked operation relations own
+  the result shapes. Calling a user-defined function from a rank-poly body
+  remains conservatively rejected.
 - **Erasure tier is deferred.** `&tensor[..r, p] -> tensor[p]` requires a
   genuine order-invariant *all-reduce-to-scalar* primitive; Chelis's `sum`/`mean`
   are axis-indexed (rank-reducing = Tier-3 rank arithmetic), so there is no
@@ -63,7 +65,7 @@ What landed vs. the plan below, with two deliberate divergences:
   monomorphization. A standalone rank-poly def with no concrete caller is
   skipped from emission entirely (it has no usable monomorphization), so the
   genuinely-unresolvable case never reaches the backend rather than miscompiling.
-  Verified end-to-end: a single `relu_forward(x: &tensor[..r, f32]) ->
+  Verified end-to-end: a single `relu_forward[r](x: &tensor[..r, f32]) ->
   tensor[..r, f32] = relu(x)` called at concrete ranks 1, 2, 3, and 4 builds,
   compiles, and runs, with backend output equal to the evaluator output
   value-for-value (the `rank_poly_tier2` acceptance suite).
@@ -94,7 +96,7 @@ Tier-3 sidesteps both: a spread is **name-preserving** (it binds to the actual
 named dims it covers), and a shape is the alternating form `Rank? (Name Rank?)*`
 where each interior split is fixed by a **named anchor** — so unification stays
 **unitary** (locate each unique named anchor in the operand; bind the spreads
-between). A named-axis reduction (`def reduce_seq(x: &tensor[..pre, seq, ..post,
+between). A named-axis reduction (`def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post,
 f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)`) reduces the named anchor and
 carries the surviving named axes through; multi-axis reduction composes
 single-axis reductions. The §4.2 soundness boundary is preserved by the
@@ -409,12 +411,13 @@ rank-var map; `Subst::apply` substitutes `Dim::Rank(r)` → the bound dim list.
 
 ## Surface Syntax
 
-Proposed: a spread marker on a bare quantifier name used as a whole shape.
+The spread marker belongs to each rank use; the declaration's complete binder
+clause owns the plain name.
 Candidate forms (decide in commit 1, pin in spec/02 + spec/03):
 
 ```
-def relu_forward[..r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
-def sum_all[..r](x: &tensor[..r, f32]) -> tensor[f32] = ...
+def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def sum_all[r](x: &tensor[..r, f32]) -> tensor[f32] = ...
 ```
 
 The `..r` marker is mandatory and may appear **only** as the sole shape
@@ -452,7 +455,7 @@ arms. Against an opaque `R`, the procedural arm cannot rewrite an unknown-rank
 shape, so a body like
 
 ```
-def evil[..r](x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, [1, 0])
+def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, [1, 0])
 ```
 
 would unify `tv := tensor[..r, f32]` and return `tensor[..r, f32]` — passing
@@ -474,7 +477,7 @@ semantics (NOT on the HM scheme). Concretely:
   result (only valid in an erasure-position body).
 - *denylist (reject inside an `R`-body):* every shape-rewriting op —
   `permute`, `reshape`, `expand`, `shrink`, `stride`, `pad`, `concat`,
-  `gather`, `scatter`, `matmul`, axis-indexed reductions, `conv2d`, … — and
+  `gather`, `scatter`, `matmul`, axis-indexed reductions, `conv`, … — and
   any user `def` not itself proven rank-safe.
 
 The check runs during body validation (extends the §4.4 "body must type-check
@@ -523,7 +526,7 @@ But `chelis fmt` **preserves** the redundant inline annotation rather than
 stripping it (verified), so the form is reachable and passes the style gate —
 filed as standalone soundness bug **chelis#285**, independent of #258.
 
-**Why this gates Tier 2:** the identity position `def relu_forward[..r](x) ->
+**Why this gates Tier 2:** the identity position `def relu_forward[r](x) ->
 tensor[..r,p] = ...` is, syntactically, sig-sourced params + an inline `-> T`.
 Shipping `R` on top of a body check that this exact form already skips would
 ship a position whose body is unverified by construction. Tier 2 must not start
@@ -549,7 +552,7 @@ Verified baseline: `add(x: tensor[batch,seq], y: tensor[seq,batch])` is rejected
 today (`dimension mismatch: Name("batch") vs Name("seq")`) because dims carry
 names and unify element-wise (§4.1). If `R` denoted a *rank/count*, axes within
 its span become wildcards and the transposition blindness §4.2 forbids returns
-(multi-arg `add2[..r](x,y)` would accept mismatched named axes — implicit
+(multi-arg `add2[r](x,y)` would accept mismatched named axes — implicit
 broadcast). Resolution: `R` denotes the ordered named-dim vector and must appear
 identically in every tensor position of the sig. Already reflected in
 §Scope/§Test Strategy; promote to an explicit representation note.
@@ -603,12 +606,12 @@ Commit 6: Migrate School's relu/silu/gelu family + full-reduce to single
 
 Every "works" test has its paired "fails with the right reason" test.
 
-- [ ] `relu_forward[..r]` checks and is callable at rank 1, 2, 3, 4 with the
+- [ ] `relu_forward[r]` checks and is callable at rank 1, 2, 3, 4 with the
       same def (positive) — and the rank-2 caller no longer emits
       `tensor rank mismatch` (the chelis#258 repro turns green).
-- [ ] erasure: `sum_all[..r](x) -> tensor[f32]` checks and returns rank-0 at
+- [ ] erasure: `sum_all[r](x) -> tensor[f32]` checks and returns rank-0 at
       every input rank.
-- [ ] **negative:** `def evil[..r](x) -> tensor[..r,f32] = permute(x,[1,0])`
+- [ ] **negative:** `def evil[r](x) -> tensor[..r,f32] = permute(x,[1,0])`
       is REJECTED by Body Discipline with a §4.2-citing diagnostic.
 - [ ] **negative:** every denylisted op (`reshape`/`expand`/`matmul`/…) in an
       `R`-body is rejected with the op named.
@@ -616,7 +619,7 @@ Every "works" test has its paired "fails with the right reason" test.
 - [ ] **negative:** two rank vars in one shape, or `..r` inside a `List`
       element, rejected.
 - [x] identity `R` shared across two args forces same *shape* (not just same
-      rank): `add2[..r](x,y)` rejects mismatched concrete shapes — no implicit
+      rank): `add2[r](x,y)` rejects mismatched concrete shapes — no implicit
       broadcast (§4.2). Positive: matching shapes accepted. Covered in
       `chelis-cli` (`rank_poly_tier2`): positive checks
       (`multi_arg_rank_poly_def_callable_at_ranks_1_through_4`) and a backend

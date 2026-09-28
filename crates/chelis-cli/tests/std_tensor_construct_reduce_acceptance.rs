@@ -29,9 +29,9 @@ fn phase3j_pre_batch2_linspace_matches_reference_values() {
 
 import Std.Tensor.Construct (linspace)
 
-ls_5 = linspace(cast(0.0, f32), cast(1.0, f32), cast(5, int64))
-ls_3 = linspace(cast(-1.0, f32), cast(1.0, f32), cast(3, int64))
-ls_1 = linspace(cast(4.0, f32), cast(9.0, f32), cast(1, int64))
+ls_5 = linspace(cast(0.0, f32), cast(1.0, f32), cast(5, i64))
+ls_3 = linspace(cast(-1.0, f32), cast(1.0, f32), cast(3, i64))
+ls_1 = linspace(cast(4.0, f32), cast(9.0, f32), cast(1, i64))
 "#,
     );
 
@@ -70,7 +70,7 @@ fn phase3j_pre_batch2_linspace_rejects_non_scalar_start() {
 
 import Std.Tensor.Construct (linspace)
 
-bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int64))
+bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, i64))
 "#,
     );
 
@@ -89,7 +89,7 @@ bad = linspace(to_tensor([cast(0.0, f32)]), cast(1.0, f32), cast(5, int64))
 #[test]
 #[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]
 fn phase3j_pre_batch2_linspace_rejects_count_below_one() {
-    // chelis#1422. [05-OP-35]: "`linspace` requires finite endpoints and int64
+    // chelis#1422. [05-OP-35]: "`linspace` requires finite endpoints and i64
     // `count >= 1`; count one returns `[start]`". Count zero is a runtime
     // Domain failure, not a value: the pre-fix `count <= 1` branch returned
     // `[start]` for zero and for every negative count.
@@ -100,7 +100,7 @@ fn phase3j_pre_batch2_linspace_rejects_count_below_one() {
 
 import Std.Tensor.Construct (linspace)
 
-bad = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, int64))
+bad = linspace(cast(0.0, f32), cast(1.0, f32), cast(0, i64))
 "#,
     );
 
@@ -129,8 +129,8 @@ fn phase3j_pre_batch2_arange_matches_reference_values() {
 
 import Std.Tensor.Construct (arange)
 
-ar_0_4 = arange(cast(0, int32), cast(4, int32))
-ar_2_6 = arange(cast(2, int32), cast(6, int32))
+ar_0_4 = arange(cast(0, i32), cast(4, i32))
+ar_2_6 = arange(cast(2, i32), cast(6, i32))
 "#,
     );
 
@@ -164,7 +164,7 @@ fn phase3j_pre_batch2_arange_rejects_mixed_bound_dtypes() {
 
 import Std.Tensor.Construct (arange)
 
-bad = arange(cast(0, int16), cast(4, int64))
+bad = arange(cast(0, i16), cast(4, i64))
 "#,
     );
 
@@ -185,11 +185,11 @@ bad = arange(cast(0, int16), cast(4, int64))
 // chelis#333: the three `phase3j_pre_batch2_reduce_*` acceptance tests
 // (min/prod, argmax/argmin, and the scalar-input rejection) were removed
 // with the Std.Tensor.Reduce module. The four functions were bodyless sigs
-// taking a runtime int32 axis that could not forward to the const-axis
+// taking a runtime i32 axis that could not forward to the const-axis
 // `*_reduce` builtins, so they never had a runtime implementation and these
 // import-and-eval tests could not have passed. Reductions are exercised
 // directly through the `*_reduce` builtins with a compile-time-constant axis
-// (e.g. `min_reduce(x, cast(1, int32))`).
+// (e.g. `min_reduce(x, cast(1, i32))`).
 
 #[test]
 #[ignore = "manual gate: Phase 3j-pre batch acceptance suite exceeds the default inner-loop budget"]

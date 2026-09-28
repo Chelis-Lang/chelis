@@ -8,13 +8,14 @@ use crate::tag::DeepTag;
 pub const VALID_TAGS: &[&str] = &DeepTag::ALL_STRS;
 
 /// Decode-once invariant walker (chelis#731 Phase 3, PERMANENT): return
-/// the first location where a list's element 0 carries a closed-vocabulary
-/// tag as a raw `Atom::Name` string instead of a stamped `Atom::Tag`.
-/// After the parser's stamping pass (and the typed producer constructors),
-/// no parsed or desugared tree may contain one; a `Some` here means a
-/// producer bypassed decode-once and its node would silently miss every
-/// typed dispatch arm. Keep this callable from other crates' permanent
-/// suites (the parser-side and desugar-side invariant tests).
+/// the first location where a closed-vocabulary tag survives as a raw
+/// head string instead of a stamped [`crate::node::Node`]. The one carrier
+/// that can spell that is an `UnknownForm` whose head decodes: the stamper
+/// builds a `Node` for every decodable head, so no parsed or desugared tree
+/// may contain one, and a `Some` here means a producer bypassed decode-once
+/// and its node would silently miss every typed dispatch arm. Keep this
+/// callable from other crates' permanent suites (the parser-side and
+/// desugar-side invariant tests).
 pub fn find_raw_vocabulary_tag(exprs: &[Expr]) -> Option<String> {
     exprs.iter().find_map(|expr| walk(expr, true))
 }
@@ -35,63 +36,50 @@ pub fn find_raw_vocabulary_tag(exprs: &[Expr]) -> Option<String> {
 /// vocabulary tags. Re-walking it is pure repetition, and repeating it at
 /// every ancestor made bottom-up stamping quadratic in nesting depth.
 ///
-/// Non-`Node` carriers (`List`, `BareList`, `Map`, `MetaExpr`,
-/// `UnknownForm`) carry no such guarantee — nothing validated them — so
+/// Non-`Node` carriers (`BareList`, `Map`, `MetaExpr`, `UnknownForm`)
+/// carry no such guarantee — nothing validated them — so
 /// the scan still descends through them to any depth, including into
 /// metadata values.
 pub(crate) fn find_raw_vocabulary_tag_below_gate(exprs: &[Expr]) -> Option<String> {
     exprs.iter().find_map(|expr| walk(expr, false))
 }
 
+fn walk_metadata(meta: &crate::Metadata, descend_into_nodes: bool) -> Option<String> {
+    let mut result = None;
+    meta.visit_expressions(&mut |value, _| {
+        if result.is_none() {
+            result = walk(value, descend_into_nodes);
+        }
+    });
+    result
+}
 fn walk(expr: &Expr, descend_into_nodes: bool) -> Option<String> {
     match expr {
-        Expr::List(list, _) => {
-            if let Some(symbol) = list.unknown_tag_symbol()
-                && DeepTag::parse(symbol).is_some()
-            {
-                return Some(symbol.to_string());
-            }
-            list.elements
-                .iter()
-                .find_map(|element| walk(element, descend_into_nodes))
-        }
-        Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .find_map(|(_, value)| walk(value, descend_into_nodes)),
-        Expr::MetaExpr(meta, _) => walk(&meta.expr, descend_into_nodes).or_else(|| {
-            meta.entries
-                .iter()
-                .find_map(|(_, value)| walk(value, descend_into_nodes))
-        }),
-        Expr::Atom(_, _) => None,
+        Expr::Map(meta, _) => walk_metadata(meta, descend_into_nodes),
+        Expr::MetaExpr(meta, _) => walk(&meta.expr, descend_into_nodes)
+            .or_else(|| walk_metadata(&meta.metadata, descend_into_nodes)),
+        Expr::Atom(..) => None,
         Expr::Node(node, _) => {
             if !descend_into_nodes {
                 return None;
             }
-            node.meta()
-                .entries
-                .iter()
-                .find_map(|(_, value)| walk(value, descend_into_nodes))
-                .or_else(|| {
-                    node.children_slice()
-                        .iter()
-                        .find_map(|child| walk(child, descend_into_nodes))
-                })
+            walk_metadata(node.meta(), descend_into_nodes).or_else(|| {
+                node.children_slice()
+                    .iter()
+                    .find_map(|v| walk(v, descend_into_nodes))
+            })
         }
-        Expr::BareList(elements, _) => elements
-            .iter()
-            .find_map(|element| walk(element, descend_into_nodes)),
-        Expr::UnknownForm(data) => data
-            .meta
-            .entries
-            .iter()
-            .find_map(|(_, value)| walk(value, descend_into_nodes))
-            .or_else(|| {
+        Expr::BareList(items, _) => items.iter().find_map(|v| walk(v, descend_into_nodes)),
+        Expr::UnknownForm(data) => {
+            if DeepTag::parse(&data.head).is_some() {
+                return Some(data.head.clone());
+            }
+            walk_metadata(&data.meta, descend_into_nodes).or_else(|| {
                 data.children
                     .iter()
-                    .find_map(|child| walk(child, descend_into_nodes))
-            }),
+                    .find_map(|v| walk(v, descend_into_nodes))
+            })
+        }
     }
 }
 
@@ -143,6 +131,13 @@ impl WarningKind {
 
 pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
     let mut warnings = Vec::new();
+    if let Err(error) = crate::metadata::validate_metadata(exprs) {
+        warnings.push(ValidationWarning {
+            kind: WarningKind::Structural,
+            offset: error.span.offset,
+            message: error.to_string(),
+        });
+    }
     for expr in exprs {
         // chelis#858: a top-level expression must be a tagged Deep node.
         // The pest-side executable grammar (`chelis-validate`) already
@@ -151,18 +146,6 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
         // parity divergence on exactly the input class whose checker-side
         // silent skip motivated the issue.
         match expr {
-            Expr::List(list, span)
-                if !list.elements.is_empty()
-                    && list.tag().is_none()
-                    && list.unknown_tag_symbol().is_none() =>
-            {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset: span.offset,
-                    message: "top-level expression must be a canonical `(tag {} ...)` node                           (chelis#858)"
-                        .to_string(),
-                });
-            }
             // [03-ROLE-3] keeps a tag-word head without a metadata map a
             // structural BareList — an import name list `(copy fill)` is a
             // real program, so the stamp pass may not reinterpret the list
@@ -230,74 +213,13 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
 
 fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
     match expr {
-        Expr::List(list, span) => {
-            if list.elements.is_empty() {
-                // Empty list () — valid (e.g., empty guard)
-                return;
-            }
-
-            // Decode-once (chelis#731 Phase 3): the parser already stamped
-            // vocabulary tags as `Atom::Tag`, so tag identity is read from
-            // the typed accessor; the element-0 symbol survives only for
-            // non-vocabulary heads (unknown tags, typed-name helpers, bare
-            // structural lists).
-            let deep_tag = list.tag();
-            if deep_tag.is_some() || list.unknown_tag_symbol().is_some() {
-                // Typed helper forms like `(x {type: ...})` are structural children inside
-                // `(params {} ...)`, not standalone tagged Deep nodes.
-                let helper_typed_name = list.elements.len() == 2
-                    && matches!(list.elements.get(1), Some(Expr::Map(_, _)));
-                if helper_typed_name && deep_tag.is_none() {
-                    for child in &list.elements {
-                        validate_expr(child, warnings);
-                    }
-                    return;
-                }
-
-                match (list.elements.get(1), deep_tag) {
-                    (Some(Expr::Map(_, _)), Some(deep_tag)) => {
-                        validate_tag_shape(deep_tag, list, span.offset, warnings);
-                    }
-                    (Some(Expr::Map(_, _)), None) => {
-                        // The raw-string boundary (checker_totality.md
-                        // §C1.2): the string never decoded into the closed
-                        // vocabulary, so the loud unknown-tag arm owns it.
-                        let tag = list.unknown_tag_symbol().unwrap_or("<none>");
-                        warnings.push(ValidationWarning {
-                            kind: WarningKind::UnknownTag,
-                            offset: span.offset,
-                            message: format!("unknown tag '{tag}'. Not in the 62-tag vocabulary"),
-                        });
-                    }
-                    (_, Some(deep_tag)) => warnings.push(ValidationWarning {
-                        kind: WarningKind::MissingMetadata,
-                        offset: span.offset,
-                        message: format!(
-                            "tagged node '{}' must use canonical 3-tuple form `(tag {{}} ...)`",
-                            deep_tag.as_str()
-                        ),
-                    }),
-                    (_, None) => {}
-                }
-            }
-
-            // Recurse into children
-            for child in &list.elements {
-                validate_expr(child, warnings);
-            }
-        }
-        Expr::MetaExpr(meta, span) => {
-            validate_surf_metadata_entries(&meta.entries, span.offset, warnings);
+        Expr::MetaExpr(meta, _) => {
             validate_expr(&meta.expr, warnings);
-            for (_, v) in &meta.entries {
-                validate_expr(v, warnings);
-            }
+            meta.metadata
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
-        Expr::Map(map, span) => {
-            validate_surf_metadata_namespace(map, span.offset, warnings);
-            for (_, v) in &map.entries {
-                validate_expr(v, warnings);
-            }
+        Expr::Map(map, _) => {
+            map.visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
         Expr::Atom(_, _) => {} // Atoms are always valid
         // Stamped Node variants: structurally valid by construction (arity
@@ -305,16 +227,14 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
         // still need to validate semantic metadata shapes (e.g., invariant
         // on deftype) and recurse into children for validation.
         Expr::Node(node, span) => {
-            validate_surf_metadata_namespace(node.meta(), span.offset, warnings);
             validate_node_tag_shape(node.tag(), node, span.offset, warnings);
             // Recurse into children
             for child in node.children_slice() {
                 validate_expr(child, warnings);
             }
             // Recurse into metadata values
-            for (_, v) in &node.meta().entries {
-                validate_expr(v, warnings);
-            }
+            node.meta()
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
         }
         Expr::BareList(elems, _) => {
             for child in elems {
@@ -322,7 +242,6 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::UnknownForm(data) => {
-            validate_surf_metadata_namespace(&data.meta, data.span.offset, warnings);
             warnings.push(ValidationWarning {
                 kind: WarningKind::UnknownTag,
                 offset: data.span.offset,
@@ -332,9 +251,8 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                     DeepTag::COUNT
                 ),
             });
-            for (_, value) in &data.meta.entries {
-                validate_expr(value, warnings);
-            }
+            data.meta
+                .visit_expressions(&mut |v, _| validate_expr(v, warnings));
             for child in &data.children {
                 validate_expr(child, warnings);
             }
@@ -342,44 +260,12 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
     }
 }
 
-fn validate_surf_metadata_namespace(
-    meta: &crate::ast::MetaMap,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    validate_surf_metadata_entries(&meta.entries, offset, warnings);
-}
-
-fn validate_surf_metadata_entries(
-    entries: &[(String, Expr)],
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    for (key, _) in entries {
-        if key.starts_with("surf_")
-            && !matches!(
-                key.as_str(),
-                "surf_path"
-                    | "surf_dim_group_size"
-                    | "surf_pipe_stage"
-                    | "surf_literal_style"
-                    | "surf_binding_type"
-            )
-        {
-            warnings.push(ValidationWarning {
-                kind: WarningKind::Structural,
-                offset,
-                message: format!(
-                    "unknown key `{key}` in the closed Deep `surf_*` metadata namespace"
-                ),
-            });
-        }
-    }
-}
-
-/// Per-tag metadata validation for Node-form expressions. Arity is already
-/// enforced at construction time (`Node::try_new`), so this only runs the
-/// metadata-shape checks that `validate_tag_shape` performs on List-form.
+/// Per-tag shape validation over the closed vocabulary. Arity is already
+/// enforced at construction time (`Node::try_new`), so this runs only the
+/// shape checks construction does not own. The match is exhaustive with no
+/// `_` arm (chelis#731 Phase 3, checker_totality.md §C4.2): a 63rd
+/// `DeepTag` variant fails to compile here until it gets an explicit shape
+/// disposition.
 fn validate_node_tag_shape(
     deep_tag: DeepTag,
     node: &crate::node::Node,
@@ -387,9 +273,8 @@ fn validate_node_tag_shape(
     warnings: &mut Vec<ValidationWarning>,
 ) {
     match deep_tag {
-        DeepTag::Def => validate_property_def_metadata_from_node(node, offset, warnings),
+        DeepTag::Def => {}
         DeepTag::Deftype => {
-            validate_deftype_invariant_metadata_from_node(node, offset, warnings);
             validate_type_parameter_list("deftype", node.children_slice().get(1), offset, warnings);
         }
         DeepTag::Typealias => validate_type_parameter_list(
@@ -436,14 +321,6 @@ fn validate_node_tag_shape(
                         )
                         && matches!(elements.get(1), Some(Expr::Map(_, _)))
                 }
-                Expr::List(list, _) => {
-                    list.elements.len() == 2
-                        && matches!(
-                            list.elements.first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                        && matches!(list.elements.get(1), Some(Expr::Map(_, _)))
-                }
                 _ => false,
             });
             if !all_names {
@@ -470,11 +347,6 @@ fn validate_node_tag_shape(
                     || matches!(
                         child,
                         Expr::Node(resource, _) if resource.tag() == DeepTag::Resource
-                    )
-                    || matches!(
-                        child,
-                        Expr::List(resource, _)
-                            if resource.tag() == Some(DeepTag::Resource)
                     )
             });
             if !all_entries {
@@ -546,208 +418,6 @@ fn validate_node_tag_shape(
     }
 }
 
-/// Per-tag shape validation over the closed vocabulary. The match is
-/// exhaustive with no `_` arm (chelis#731 Phase 3, checker_totality.md
-/// §C4.2): a 63rd `DeepTag` variant fails to compile here until it gets an
-/// explicit shape disposition.
-fn validate_tag_shape(
-    deep_tag: DeepTag,
-    list: &crate::ast::List,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    let tag = deep_tag.as_str();
-    let child_count = list.elements.len().saturating_sub(2);
-
-    let warn_arity = |warnings: &mut Vec<ValidationWarning>, expected: &str| {
-        warnings.push(ValidationWarning {
-            kind: WarningKind::Arity,
-            offset,
-            message: format!(
-                "`{tag}` has invalid arity: expected {expected}, found {child_count} child(ren)"
-            ),
-        });
-    };
-
-    match deep_tag {
-        DeepTag::Def => validate_property_def_metadata(list, offset, warnings),
-        DeepTag::Deftype => {
-            validate_deftype_invariant_metadata(list, offset, warnings);
-            validate_type_parameter_list("deftype", list.elements.get(3), offset, warnings);
-        }
-        DeepTag::Typealias => {
-            validate_type_parameter_list("typealias", list.elements.get(3), offset, warnings)
-        }
-        DeepTag::If | DeepTag::Arm => {
-            if child_count != 3 {
-                warn_arity(warnings, "exactly 3 children");
-            }
-        }
-        DeepTag::HandleEffect => {
-            if child_count != 2 {
-                warn_arity(warnings, "exactly 2 children");
-            }
-        }
-        DeepTag::Fn => {
-            if child_count != 2 {
-                warn_arity(warnings, "exactly 2 children");
-                return;
-            }
-            let params_ok = match list.elements.get(2) {
-                Some(Expr::List(params, _)) => {
-                    params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-                }
-                Some(Expr::Node(node, _)) => node.tag() == DeepTag::Params,
-                _ => false,
-            };
-            if !params_ok {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`fn` must use `(fn {} (params {} ...) body)`".to_string(),
-                });
-            }
-        }
-        DeepTag::Let => {
-            if child_count != 2 {
-                warn_arity(warnings, "exactly 2 children");
-                return;
-            }
-            let bind_ok = match list.elements.get(2) {
-                Some(Expr::List(bind, _)) => {
-                    bind.tag() == Some(DeepTag::Bind)
-                        && matches!(bind.elements.get(1), Some(Expr::Map(_, _)))
-                }
-                Some(Expr::Node(node, _)) => node.tag() == DeepTag::Bind,
-                _ => false,
-            };
-            if !bind_ok {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`let` must use `(let {} (bind {} ...) body)`".to_string(),
-                });
-            }
-        }
-        DeepTag::App => {
-            if child_count < 1 {
-                warn_arity(warnings, "at least 1 child");
-            }
-        }
-        DeepTag::Params => {
-            let all_names = list.elements.iter().skip(2).all(|child| match child {
-                Expr::Atom(crate::ast::Atom::Name(_), _) => true,
-                Expr::MetaExpr(meta, _) => {
-                    matches!(meta.expr.as_ref(), Expr::Atom(crate::ast::Atom::Name(_), _))
-                }
-                Expr::List(inner, _) => {
-                    inner.elements.len() == 2
-                        && matches!(
-                            inner.elements.first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                        && matches!(inner.elements.get(1), Some(Expr::Map(_, _)))
-                }
-                _ => false,
-            });
-            if !all_names {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`params` must contain bare names or typed-name metadata helpers"
-                        .to_string(),
-                });
-            }
-        }
-        DeepTag::Bind => {
-            if !child_count.is_multiple_of(2) {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`bind` must contain name/expression pairs".to_string(),
-                });
-            }
-        }
-        DeepTag::Effects => {
-            let all_entries = list.elements.iter().skip(2).all(|child| {
-                matches!(child, Expr::Atom(crate::ast::Atom::Name(_), _))
-                    || matches!(
-                        child,
-                        Expr::List(inner, _)
-                            if inner.tag() == Some(DeepTag::Resource)
-                    )
-            });
-            if !all_entries {
-                warnings.push(ValidationWarning {
-                    kind: WarningKind::Structural,
-                    offset,
-                    message: "`effects` must contain symbols or `(resource {} ...)` entries"
-                        .to_string(),
-                });
-            }
-        }
-        DeepTag::Resource => {
-            if child_count != 1 {
-                warn_arity(warnings, "exactly 1 child");
-            }
-        }
-        // No additional shape constraint at this validator: these tags'
-        // arity/shape rules are owned by the type checker (spec/03
-        // §2.5.1/§2.6, §8.2) or by their enclosing form. Listed explicitly
-        // rather than wildcarded so a 63rd tag forces a decision here.
-        DeepTag::Module
-        | DeepTag::Import
-        | DeepTag::ImportAll
-        | DeepTag::Export
-        | DeepTag::Defsig
-        | DeepTag::Variant
-        | DeepTag::Field
-        | DeepTag::Defdim
-        | DeepTag::Match
-        | DeepTag::Var
-        | DeepTag::Lit
-        | DeepTag::Record
-        | DeepTag::Access
-        | DeepTag::Pipe
-        | DeepTag::Block
-        | DeepTag::Tuple
-        | DeepTag::TupleGet
-        | DeepTag::RecordUpdate
-        | DeepTag::Par
-        | DeepTag::Borrow
-        | DeepTag::PatVar
-        | DeepTag::PatLit
-        | DeepTag::PatCtor
-        | DeepTag::PatTuple
-        | DeepTag::PatRecord
-        | DeepTag::PatWild
-        | DeepTag::PatAs
-        | DeepTag::TPrim
-        | DeepTag::TFn
-        | DeepTag::TTensor
-        | DeepTag::TRef
-        | DeepTag::TAdt
-        | DeepTag::TVar
-        | DeepTag::TUnit
-        | DeepTag::TTuple
-        | DeepTag::DName
-        | DeepTag::DVar
-        | DeepTag::DLit
-        | DeepTag::DRank
-        | DeepTag::Grad
-        | DeepTag::Vmap
-        | DeepTag::Jit
-        | DeepTag::Realize
-        | DeepTag::Cast
-        | DeepTag::Copy
-        | DeepTag::Quote
-        | DeepTag::Unquote
-        | DeepTag::Splice
-        | DeepTag::Kv => {}
-    }
-}
-
 fn validate_type_parameter_list(
     declaration: &str,
     params: Option<&Expr>,
@@ -756,7 +426,6 @@ fn validate_type_parameter_list(
 ) {
     let elements = match params {
         Some(Expr::BareList(elements, _)) => Some(elements.as_slice()),
-        Some(Expr::List(list, _)) => Some(list.elements.as_slice()),
         _ => None,
     };
     if !elements.is_some_and(|elements| {
@@ -774,294 +443,10 @@ fn validate_type_parameter_list(
     }
 }
 
-fn validate_property_def_metadata(
-    list: &crate::ast::List,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return;
-    };
-    let is_property = meta.entries.iter().any(|(key, value)| {
-        key == "chelis_role"
-            && matches!(value, Expr::Atom(crate::ast::Atom::Str(value), _) if value == "property")
-    });
-    if !is_property {
-        return;
-    }
-    let has_source_kind = meta.entries.iter().any(|(key, value)| {
-        key == "property_source_kind" && matches!(value, Expr::Atom(crate::ast::Atom::Str(_), _))
-    });
-    let has_quantifiers = meta.entries.iter().any(|(key, value)| {
-        key == "property_quantifiers"
-            && matches!(
-                value,
-                Expr::List(params, _)
-                    if params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-            )
-    });
-    let has_preconditions = meta.entries.iter().any(|(key, value)| {
-        key == "property_preconditions"
-            && matches!(
-                value,
-                Expr::List(tuple, _)
-                    if tuple.tag() == Some(DeepTag::Tuple)
-                        && matches!(tuple.elements.get(1), Some(Expr::Map(_, _)))
-            )
-    });
-    let body_is_fn = matches!(
-        list.elements.get(3),
-        Some(Expr::List(body, _))
-            if body.tag() == Some(DeepTag::Fn)
-    );
-    for (ok, message) in [
-        (
-            has_source_kind,
-            "property def metadata must include string `property_source_kind`",
-        ),
-        (
-            has_quantifiers,
-            "property def metadata must include `(params {} ...)` `property_quantifiers`",
-        ),
-        (
-            has_preconditions,
-            "property def metadata must include `(tuple {} ...)` `property_preconditions`",
-        ),
-        (body_is_fn, "property def body must be a callable `fn`"),
-    ] {
-        if !ok {
-            warnings.push(ValidationWarning {
-                kind: WarningKind::Structural,
-                offset,
-                message: message.to_string(),
-            });
-        }
-    }
-}
-
-/// Structural shape check of the opaque-invariant metadata keys on a
-/// `deftype` (RFC D-META, warning-level; mirrors the property-metadata
-/// check). When an `invariant` key is present it must be a predicate fn
-/// `(fn {} (params {} <one symbol>) <expr>)`, and any
-/// `invariant_amenability` key must be one of the four canonical strings.
-/// The deeper well-formedness (grammar, value class, amenability match)
-/// is the checker's job (chelis-types); this is the cheap shape gate.
-fn validate_deftype_invariant_metadata(
-    list: &crate::ast::List,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return;
-    };
-    if let Some((_, value)) = meta.entries.iter().find(|(key, _)| key == "invariant")
-        && !is_predicate_fn_shape(value)
-    {
-        warnings.push(ValidationWarning {
-            kind: WarningKind::Structural,
-            offset,
-            message: "`invariant` metadata must be `(fn {} (params {} <binder>) <expr>)`"
-                .to_string(),
-        });
-    }
-    if let Some((_, value)) = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "invariant_amenability")
-        && !is_canonical_amenability(value)
-    {
-        warnings.push(ValidationWarning {
-            kind: WarningKind::Structural,
-            offset,
-            message: "`invariant_amenability` must be one of \
-                      \"linear\"|\"polynomial\"|\"transcendental\"|\"opaque\""
-                .to_string(),
-        });
-    }
-}
-
-/// Whether `expr` is a predicate fn `(fn {} (params {} <one symbol>)
-/// <body>)`: a `fn` node whose first child is a `params` node holding
-/// exactly one bare-symbol binder, and which has a body child.
-fn is_predicate_fn_shape(expr: &Expr) -> bool {
-    match expr {
-        Expr::List(fn_list, _) => {
-            let is_fn = fn_list.tag() == Some(DeepTag::Fn)
-                && matches!(fn_list.elements.get(1), Some(Expr::Map(_, _)));
-            if !is_fn || fn_list.elements.len() != 4 {
-                return false;
-            }
-            // params node with exactly one bare-symbol binder.
-            match fn_list.elements.get(2) {
-                Some(Expr::List(params, _)) => {
-                    params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-                        && params.elements.len() == 3
-                        && matches!(
-                            params.elements.get(2),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                Some(Expr::Node(params_node, _)) => {
-                    params_node.tag() == DeepTag::Params
-                        && params_node.child_count() == 1
-                        && matches!(
-                            params_node.children_slice().first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                _ => false,
-            }
-        }
-        Expr::Node(fn_node, _) => {
-            if fn_node.tag() != DeepTag::Fn || fn_node.child_count() != 2 {
-                return false;
-            }
-            // params node with exactly one bare-symbol binder.
-            match fn_node.children_slice().first() {
-                Some(Expr::Node(params_node, _)) => {
-                    params_node.tag() == DeepTag::Params
-                        && params_node.child_count() == 1
-                        && matches!(
-                            params_node.children_slice().first(),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                Some(Expr::List(params, _)) => {
-                    params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-                        && params.elements.len() == 3
-                        && matches!(
-                            params.elements.get(2),
-                            Some(Expr::Atom(crate::ast::Atom::Name(_), _))
-                        )
-                }
-                _ => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-fn is_canonical_amenability(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Atom(crate::ast::Atom::Str(s), _)
-            if matches!(s.as_str(), "linear" | "polynomial" | "transcendental" | "opaque")
-    )
-}
-
-/// Node-form: validate property def metadata (mirrors validate_property_def_metadata).
-fn validate_property_def_metadata_from_node(
-    node: &crate::node::Node,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    let meta = node.meta();
-    let is_property = meta.entries.iter().any(|(key, value)| {
-        key == "chelis_role"
-            && matches!(value, Expr::Atom(crate::ast::Atom::Str(value), _) if value == "property")
-    });
-    if !is_property {
-        return;
-    }
-    let has_source_kind = meta.entries.iter().any(|(key, value)| {
-        key == "property_source_kind" && matches!(value, Expr::Atom(crate::ast::Atom::Str(_), _))
-    });
-    let has_quantifiers = meta.entries.iter().any(|(key, value)| {
-        key == "property_quantifiers"
-            && (matches!(
-                value,
-                Expr::List(params, _)
-                    if params.tag() == Some(DeepTag::Params)
-                        && matches!(params.elements.get(1), Some(Expr::Map(_, _)))
-            ) || matches!(
-                value,
-                Expr::Node(n, _) if n.tag() == DeepTag::Params
-            ))
-    });
-    let has_preconditions = meta.entries.iter().any(|(key, value)| {
-        key == "property_preconditions"
-            && (matches!(
-                value,
-                Expr::List(tuple, _)
-                    if tuple.tag() == Some(DeepTag::Tuple)
-                        && matches!(tuple.elements.get(1), Some(Expr::Map(_, _)))
-            ) || matches!(
-                value,
-                Expr::Node(n, _) if n.tag() == DeepTag::Tuple
-            ))
-    });
-    let body_is_fn = matches!(
-        node.children_slice().get(1), // children[1] is the fn body
-        Some(Expr::Node(fn_node, _)) if fn_node.tag() == DeepTag::Fn
-    ) || matches!(
-        node.children_slice().get(1),
-        Some(Expr::List(body, _)) if body.tag() == Some(DeepTag::Fn)
-    );
-    for (ok, message) in [
-        (
-            has_source_kind,
-            "property def metadata must include string `property_source_kind`",
-        ),
-        (
-            has_quantifiers,
-            "property def metadata must include `(params {} ...)` `property_quantifiers`",
-        ),
-        (
-            has_preconditions,
-            "property def metadata must include `(tuple {} ...)` `property_preconditions`",
-        ),
-        (body_is_fn, "property def body must be a callable `fn`"),
-    ] {
-        if !ok {
-            warnings.push(ValidationWarning {
-                kind: WarningKind::Structural,
-                offset,
-                message: message.to_string(),
-            });
-        }
-    }
-}
-
-/// Node-form: validate deftype invariant metadata (mirrors validate_deftype_invariant_metadata).
-fn validate_deftype_invariant_metadata_from_node(
-    node: &crate::node::Node,
-    offset: usize,
-    warnings: &mut Vec<ValidationWarning>,
-) {
-    let meta = node.meta();
-    if let Some((_, value)) = meta.entries.iter().find(|(key, _)| key == "invariant")
-        && !is_predicate_fn_shape(value)
-    {
-        warnings.push(ValidationWarning {
-            kind: WarningKind::Structural,
-            offset,
-            message: "`invariant` metadata must be `(fn {} (params {} <binder>) <expr>)`"
-                .to_string(),
-        });
-    }
-    if let Some((_, value)) = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "invariant_amenability")
-        && !is_canonical_amenability(value)
-    {
-        warnings.push(ValidationWarning {
-            kind: WarningKind::Structural,
-            offset,
-            message: "`invariant_amenability` must be one of \
-                      \"linear\"|\"polynomial\"|\"transcendental\"|\"opaque\""
-                .to_string(),
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Atom, List, MetaMap};
+    use crate::ast::{Atom, Metadata};
     use crate::span::Span;
 
     const ZERO: Span = Span { offset: 0, len: 0 };
@@ -1070,16 +455,22 @@ mod tests {
         Expr::Atom(Atom::Name(s.to_string()), ZERO)
     }
 
-    fn empty_map() -> Expr {
-        Expr::Map(MetaMap::default(), ZERO)
+    fn parse_one(source: &str) -> Expr {
+        let mut exprs = crate::parser::parse_str(source).expect("deep parses");
+        assert_eq!(exprs.len(), 1, "one top-level form");
+        exprs.remove(0)
     }
 
-    fn make_list(elements: Vec<Expr>) -> Expr {
-        let mut expr = Expr::List(List { elements }, ZERO);
-        // Mirror the parser's decode-once stamping so these hand-built
-        // trees match what every real consumer sees.
-        crate::parser::stamp_tags(std::slice::from_mut(&mut expr));
-        expr
+    /// A vocabulary head that bypassed stamping: the stamper builds a `Node`
+    /// for every decodable head, so only a hand-built `UnknownForm` can
+    /// carry one.
+    fn raw_vocabulary_form(head: &str, children: Vec<Expr>) -> Expr {
+        Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+            head: head.to_string(),
+            meta: Metadata::default(),
+            children,
+            span: ZERO,
+        }))
     }
 
     /// PERMANENT decode-once invariant (chelis#731 Phase 3): a parsed
@@ -1087,7 +478,7 @@ mod tests {
     /// a stale `Atom::Name` tag match can never half-work again.
     #[test]
     fn parsed_trees_carry_no_raw_vocabulary_tag_strings() {
-        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))))";
+        let source = "(module {} m\n  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n  (deftype {opaque: true, invariant: (fn {} (params {} p) (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0)))} T () (variant {} T (field {} value (t-prim {} f32))))\n  (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (handle-effect {effect: resource} (lit {} \"gpu:0\") (var {} x)))))";
         let exprs = crate::parser::parse_str(source).expect("deep parses");
         assert_eq!(
             find_raw_vocabulary_tag(&exprs),
@@ -1095,12 +486,7 @@ mod tests {
             "the parser must stamp every vocabulary tag, including inside metadata values"
         );
         // Negative control: an unstamped hand-built tree IS caught.
-        let raw = Expr::List(
-            List {
-                elements: vec![sym("var"), empty_map(), sym("x")],
-            },
-            ZERO,
-        );
+        let raw = raw_vocabulary_form("var", vec![sym("x")]);
         assert_eq!(find_raw_vocabulary_tag(&[raw]).as_deref(), Some("var"));
 
         // Negative controls for every stamped carrier: the permanent oracle
@@ -1111,42 +497,13 @@ mod tests {
         // oracle finds it": the constructor consults this same traversal, so
         // a Node hiding a raw vocabulary tag in its metadata cannot be built
         // at all (chelis#731 Phase 3 successor acceptance).
-        let raw_in_meta = Expr::List(
-            List {
-                elements: vec![sym("var"), empty_map(), sym("hidden")],
-            },
-            ZERO,
-        );
-        let rejected = crate::node::Node::try_new(
-            DeepTag::Tuple,
-            MetaMap {
-                entries: vec![("probe".to_string(), raw_in_meta.clone())],
-            },
-            Vec::new(),
-        );
+        let raw_in_meta = raw_vocabulary_form("var", vec![sym("hidden")]);
+        let metadata = Metadata::default();
+        let error = crate::annotations::RuntimeExpression::try_new(raw_in_meta).unwrap_err();
+        assert!(error.to_string().contains("var"));
         assert!(
-            matches!(
-                rejected,
-                Err(crate::node::NodeError::RawVocabularyTag { ref raw_tag, .. })
-                    if raw_tag == "var"
-            ),
-            "Node metadata remains part of the decode-once oracle: {rejected:?}"
-        );
-
-        // The ungated carriers have no constructor to reject them, so the
-        // oracle itself must still walk their metadata.
-        let unknown_with_raw_meta = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
-            head: "future-form".to_string(),
-            meta: MetaMap {
-                entries: vec![("probe".to_string(), raw_in_meta)],
-            },
-            children: Vec::new(),
-            span: ZERO,
-        }));
-        assert_eq!(
-            find_raw_vocabulary_tag(&[unknown_with_raw_meta]).as_deref(),
-            Some("var"),
-            "UnknownForm metadata remains part of the decode-once oracle"
+            metadata.is_empty(),
+            "no carrier can receive the rejected annotation"
         );
     }
 
@@ -1156,7 +513,7 @@ mod tests {
             .expect("an empty sequential binding list is valid");
 
         let odd_bind = crate::parser::parse_str_strict(
-            "(let {} (bind {} x (lit {type: (t-prim {} int64)} 1) y) (var {} x))",
+            "(let {} (bind {} x (lit {type: (t-prim {} i64)} 1) y) (var {} x))",
         )
         .expect_err("an odd binding list must be rejected");
         assert!(
@@ -1165,7 +522,7 @@ mod tests {
         );
 
         let invalid_param = crate::parser::parse_str_strict(
-            "(fn {} (params {} 1) (lit {type: (t-prim {} int64)} 1))",
+            "(fn {} (params {} 1) (lit {type: (t-prim {} i64)} 1))",
         )
         .expect_err("a parameter must be a bare name or typed helper");
         assert!(
@@ -1197,14 +554,20 @@ mod tests {
 
         let nested = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
             head: "nested-unknown".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: Vec::new(),
             span: ZERO,
         }));
         let outer = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
             head: "outer-unknown".to_string(),
-            meta: MetaMap {
-                entries: vec![("payload".to_string(), nested)],
+            meta: {
+                let mut metadata = Metadata::default();
+                metadata
+                    .insert(crate::annotations::MetadataValue::PropertySeed(
+                        crate::annotations::RuntimeExpression::try_new(nested).unwrap(),
+                    ))
+                    .unwrap();
+                metadata
             },
             children: Vec::new(),
             span: ZERO,
@@ -1260,7 +623,7 @@ mod tests {
     #[test]
     fn valid_3tuple_no_warnings() {
         // (var {} x) — valid 3-tuple node
-        let node = make_list(vec![sym("var"), empty_map(), sym("x")]);
+        let node = parse_one("(var {} x)");
         let warnings = validate(&[node]);
         assert!(
             warnings.is_empty(),
@@ -1271,7 +634,7 @@ mod tests {
     #[test]
     fn unknown_tag_warning() {
         // (apply {} f x) — "apply" is not in the vocabulary
-        let node = make_list(vec![sym("apply"), empty_map(), sym("f"), sym("x")]);
+        let node = parse_one("(apply {} f x)");
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::UnknownTag));
@@ -1282,7 +645,7 @@ mod tests {
     fn bare_list_not_validated_as_tag() {
         // (a b) — bare structural list, NOT a tagged node (no {} at [1])
         // Should produce no warnings — validator only checks 3-tuple nodes
-        let node = make_list(vec![sym("a"), sym("b")]);
+        let node = parse_one("(a b)");
         let warnings = validate(&[node]);
         assert!(
             warnings.is_empty(),
@@ -1292,10 +655,7 @@ mod tests {
 
     #[test]
     fn nested_valid_nodes_no_warnings() {
-        // (app {} (var {} f) (var {} x))
-        let inner1 = make_list(vec![sym("var"), empty_map(), sym("f")]);
-        let inner2 = make_list(vec![sym("var"), empty_map(), sym("x")]);
-        let outer = make_list(vec![sym("app"), empty_map(), inner1, inner2]);
+        let outer = parse_one("(app {} (var {} f) (var {} x))");
         let warnings = validate(&[outer]);
         assert!(
             warnings.is_empty(),
@@ -1306,7 +666,7 @@ mod tests {
     #[test]
     fn legacy_sig_unknown_tag() {
         // (sig {} x i32) — "sig" is not in vocabulary (use "defsig")
-        let node = make_list(vec![sym("sig"), empty_map(), sym("x"), sym("i32")]);
+        let node = parse_one("(sig {} x i32)");
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::UnknownTag));
@@ -1316,7 +676,7 @@ mod tests {
     #[test]
     fn legacy_apply_unknown_tag() {
         // (apply {} f x) — "apply" is not in vocabulary (use "app")
-        let node = make_list(vec![sym("apply"), empty_map(), sym("f"), sym("x")]);
+        let node = parse_one("(apply {} f x)");
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::UnknownTag));
@@ -1325,7 +685,7 @@ mod tests {
 
     #[test]
     fn missing_metadata_is_reported() {
-        let node = make_list(vec![sym("if"), sym("cond"), sym("then"), sym("else")]);
+        let node = parse_one("(if cond then else)");
         let warnings = validate(&[node]);
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].kind, WarningKind::MissingMetadata));
@@ -1333,27 +693,28 @@ mod tests {
 
     #[test]
     fn typed_param_meta_expr_is_valid() {
-        let node = make_list(vec![
-            sym("def"),
-            empty_map(),
-            sym("f"),
-            make_list(vec![
-                sym("fn"),
-                empty_map(),
-                make_list(vec![
-                    sym("params"),
-                    empty_map(),
-                    Expr::MetaExpr(
-                        crate::ast::MetaExpr {
-                            entries: vec![("type".to_string(), sym("int64"))],
-                            expr: Box::new(sym("let")),
-                        },
-                        ZERO,
-                    ),
-                ]),
-                make_list(vec![sym("var"), empty_map(), sym("let")]),
-            ]),
-        ]);
+        let type_syntax = crate::annotations::TypeSyntax::try_new(parse_one("(t-prim {} i64)"))
+            .expect("type syntax");
+        let param = Expr::MetaExpr(
+            crate::ast::MetaExpr {
+                metadata: Metadata::from(crate::annotations::MetadataValue::Type(type_syntax)),
+                expr: Box::new(sym("let")),
+            },
+            ZERO,
+        );
+        let params = Expr::node(DeepTag::Params, Metadata::default(), vec![param], ZERO);
+        let function = Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![params, parse_one("(var {} let)")],
+            ZERO,
+        );
+        let node = Expr::node(
+            DeepTag::Def,
+            Metadata::default(),
+            vec![sym("f"), function],
+            ZERO,
+        );
         let warnings = validate(&[node]);
         assert!(
             warnings.is_empty(),
@@ -1361,30 +722,22 @@ mod tests {
         );
     }
 
+    /// A wrong child count is rejected where the node is built: the stamper
+    /// refuses to construct the node, so no tree reaches this validator
+    /// with an arity violation to warn about.
     #[test]
     fn arity_is_validated() {
-        let node = make_list(vec![sym("if"), empty_map(), sym("cond"), sym("then")]);
-        let warnings = validate(&[node]);
-        assert_eq!(warnings.len(), 1);
-        assert!(matches!(warnings[0].kind, WarningKind::Arity));
+        let error = crate::parser::parse_str("(if {} (lit {} true) (lit {} 1))")
+            .expect_err("a two-child `if` must not stamp");
+        assert!(
+            error.to_string().contains("wrong child count for `if`"),
+            "the rejection must name the arity violation: {error}"
+        );
     }
 
     #[test]
     fn t_ref_type_tag_is_valid() {
-        let node = make_list(vec![
-            sym("t-ref"),
-            empty_map(),
-            make_list(vec![
-                sym("t-tensor"),
-                empty_map(),
-                make_list(vec![
-                    sym("d-lit"),
-                    empty_map(),
-                    Expr::Atom(Atom::Int(4), ZERO),
-                ]),
-                make_list(vec![sym("t-prim"), empty_map(), sym("f32")]),
-            ]),
-        ]);
+        let node = parse_one("(t-ref {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)))");
         let warnings = validate(&[node]);
         assert!(
             warnings.is_empty(),
@@ -1395,12 +748,14 @@ mod tests {
     // ── Opaque-invariant metadata shape (RFC D-META) ─────────────────
 
     fn structural_messages(src: &str) -> Vec<String> {
-        let exprs = crate::parser::parse_str(src).expect("deep parses");
-        validate(&exprs)
-            .into_iter()
-            .filter(|w| matches!(w.kind, WarningKind::Structural))
-            .map(|w| w.message)
-            .collect()
+        match crate::parser::parse_str(src) {
+            Ok(exprs) => validate(&exprs)
+                .into_iter()
+                .filter(|w| matches!(w.kind, WarningKind::Structural))
+                .map(|w| w.message)
+                .collect(),
+            Err(error) => vec![error.to_string()],
+        }
     }
 
     #[test]
@@ -1426,7 +781,7 @@ mod tests {
         );
         assert!(
             msgs.iter()
-                .any(|m| m.contains("`invariant` metadata must be")),
+                .any(|m| m.contains("metadata `invariant` requires a one-binder fn")),
             "expected invariant-shape warning, got: {msgs:?}"
         );
     }
@@ -1441,7 +796,7 @@ mod tests {
         );
         assert!(
             msgs.iter()
-                .any(|m| m.contains("`invariant` metadata must be")),
+                .any(|m| m.contains("metadata `invariant` requires a one-binder fn")),
             "expected invariant-shape warning for multi-binder, got: {msgs:?}"
         );
     }

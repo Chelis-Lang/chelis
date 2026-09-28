@@ -5,7 +5,7 @@ use super::*;
 /// Enforce [05-SPARSE-1]. Unlike `scatter`, indices and updates keep the data
 /// rank and share one shape; the result always has the data type.
 pub(super) fn check_scatter_elements(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     arg_tys: &[Type],
     pending_ty: Type,
@@ -13,7 +13,7 @@ pub(super) fn check_scatter_elements(
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
     if arg_tys.len() != 4 {
-        return report_builtin_arity(errors, list, "scatter_elements", 4, arg_tys.len());
+        return report_builtin_arity(errors, node, "scatter_elements", 4, arg_tys.len());
     }
     let data_ty = subst.apply(&arg_tys[0]);
     let indices_ty = subst.apply(&arg_tys[1]);
@@ -26,8 +26,8 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("scatter_elements expects tensor data, got {other}"),
                     ),
                     vec![],
@@ -43,11 +43,9 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!(
-                            "scatter_elements expects int32 or int64 tensor indices, got {other}"
-                        ),
+                    with_node_provenance(
+                        node,
+                        format!("scatter_elements expects i32 or i64 tensor indices, got {other}"),
                     ),
                     vec![],
                 ),
@@ -59,10 +57,10 @@ pub(super) fn check_scatter_elements(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "scatter_elements expects int32 or int64 tensor indices, got tensor[..., {}]",
+                        "scatter_elements expects i32 or i64 tensor indices, got tensor[..., {}]",
                         index_prec.name()
                     ),
                 ),
@@ -78,8 +76,8 @@ pub(super) fn check_scatter_elements(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("scatter_elements expects tensor updates, got {other}"),
                     ),
                     vec![],
@@ -135,7 +133,8 @@ pub(super) fn check_scatter_elements(
         kids.get(4),
         &subst.apply(&arg_tys[3]),
         &data_ty,
-        list,
+        node,
+        subst,
         errors,
     ) {
         Ok(axis) => axis,
@@ -145,11 +144,11 @@ pub(super) fn check_scatter_elements(
         if dim_index == axis {
             continue;
         }
-        let index_dim = subst.apply_dim(index_dim);
-        let data_dim = subst.apply_dim(data_dim);
-        match (&index_dim, &data_dim) {
-            (Dim::Lit(index), Dim::Lit(data)) if index <= data => {}
-            (Dim::Lit(index), Dim::Lit(data)) => {
+        let index_dim = subst.observe_dim(index_dim);
+        let data_dim = subst.observe_dim(data_dim);
+        match (index_dim.known_extent(), data_dim.known_extent()) {
+            (Some(index), Some(data)) if index <= data => {}
+            (Some(index), Some(data)) => {
                 return report(
                     errors,
                     CheckError::new(
@@ -161,7 +160,12 @@ pub(super) fn check_scatter_elements(
                     ),
                 );
             }
-            (left, right) if left == right => {}
+            // Containment, not unification: names can prove symbolic equality,
+            // but must never hide the concrete overshoot handled above.
+            _ if index_dim.name().is_some() && index_dim.name() == data_dim.name() => {}
+            _ if index_dim.variable().is_some() && index_dim.variable() == data_dim.variable() => {}
+            _ if index_dim.rank().is_some() && index_dim.rank() == data_dim.rank() => {}
+            _ if index_dim.is_wildcard() && data_dim.is_wildcard() => {}
             _ => {
                 return report(
                     errors,

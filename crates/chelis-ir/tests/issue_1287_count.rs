@@ -21,13 +21,16 @@ fn ty(dims: &[usize], precision: Prim) -> TensorType {
 
 fn count_dag(input_shape: &[usize], axes: Vec<usize>, output_shape: &[usize]) -> Dag {
     let mut dag = Dag::default();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(input_shape, Prim::Bool),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Count { axes },
         vec![input],
         ty(output_shape, Prim::Int64),
@@ -99,17 +102,20 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
         (vec![1, 1], Prim::Bool, vec![2], Prim::Int64, "descending"),
         (vec![2], Prim::Bool, vec![2], Prim::Int64, "out of range"),
         (vec![1], Prim::F32, vec![2], Prim::Int64, "bool"),
-        (vec![1], Prim::Bool, vec![2], Prim::F32, "int64"),
+        (vec![1], Prim::Bool, vec![2], Prim::F32, "i64"),
         (vec![1], Prim::Bool, vec![3], Prim::Int64, "shape"),
     ] {
         let mut dag = Dag::default();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[2, 3], input_prim),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes },
             vec![input],
             ty(&output_dims, output_prim),
@@ -125,7 +131,7 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
 
 fn lower_surf(source: &str) -> Result<Dag, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
     let checked =
@@ -137,7 +143,7 @@ fn lower_surf(source: &str) -> Result<Dag, String> {
 fn lowering_emits_one_count_with_original_axes_normalized_descending() {
     let dag = lower_surf(
         r#"
-def main() -> tensor[3, int64] = {
+def main() -> tensor[3, i64] = {
   x: tensor[2, 3, 4, bool] = [
     [[true, false, true, false], [true, false, true, false], [true, false, true, false]],
     [[true, false, true, false], [true, false, true, false], [true, false, true, false]]
@@ -203,8 +209,10 @@ fn count_is_a_fusion_barrier() {
 #[test]
 fn grad_rejects_a_live_count_with_a_structured_reason() {
     let mut dag = count_dag(&[2, 3], vec![1, 0], &[]);
+    let decl = dag.nodes()[0].owner.decl;
     let count = dag.roots()[0];
     let output = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F64,
         },

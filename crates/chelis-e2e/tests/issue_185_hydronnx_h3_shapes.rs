@@ -17,7 +17,7 @@
 //!     `max_reduce` on a `[1, 4, 8, 8, f32]` input, producing
 //!     `[1, 4, 4, 4, f32]`.
 //!   * `layer_norm` on `[2, 4, f32]` with rank-1 gamma/beta of size 4.
-//!   * `conv2d` on `[1, 3, 8, 8, f32]` with an `[8, 3, 3, 3, f32]`
+//!   * `conv` on `[1, 3, 8, 8, f32]` with an `[8, 3, 3, 3, f32]`
 //!     kernel, stride=1, padding=0 -> `[1, 8, 6, 6, f32]`.
 
 use std::collections::BTreeMap;
@@ -156,22 +156,22 @@ fn maxpool_reference(input: &[f32]) -> Vec<f32> {
     out
 }
 
-/// Build a deterministic ramp for the conv2d input + kernel.
-fn conv2d_input_data() -> Vec<f32> {
+/// Build a deterministic ramp for the conv input + kernel.
+fn conv_input_data() -> Vec<f32> {
     // n = 1 * 3 * 8 * 8 = 192.
     let n: usize = 3 * 8 * 8;
     (0..n).map(|i| (i as f32 * 0.05) - 1.0).collect()
 }
 
-fn conv2d_kernel_data() -> Vec<f32> {
+fn conv_kernel_data() -> Vec<f32> {
     let n: usize = 8 * 3 * 3 * 3;
     (0..n).map(|i| (i as f32 * 0.013).cos() * 0.5).collect()
 }
 
-/// Reference conv2d (NCHW, OIHW), stride=1, padding=0. Returns flat
+/// Reference conv (NCHW, OIHW), stride=1, padding=0. Returns flat
 /// row-major data of shape `[1, 8, 6, 6]`. Pure Rust f32 reference for
 /// the host-runtime assertion.
-fn conv2d_reference(input: &[f32], kernel: &[f32]) -> Vec<f32> {
+fn conv_reference(input: &[f32], kernel: &[f32]) -> Vec<f32> {
     let (n, ic, ih, iw) = (1, 3, 8, 8);
     let (oc, _kic, kh, kw) = (8, 3, 3, 3);
     let oh = ih - kh + 1;
@@ -221,8 +221,8 @@ fn hydronnx_h3_maxpool_2x2_stride2_no_padding_matches_ir_eval() {
     let input_literal = nested_list_literal(&[1, 4, 8, 8], &input);
 
     // Note: `stride(_, step_0, step_1, ..., step_n_minus_1)` takes one
-    // positive int64 stride per axis (rank-4 input -> 4 strides).
-    // `shrink(_, bounds)` takes (tensor, List[List[int64]]). The chain
+    // positive i64 stride per axis (rank-4 input -> 4 strides).
+    // `shrink(_, bounds)` takes (tensor, List[List[i64]]). The chain
     // below builds (top-left, top-right, bottom-left, bottom-right)
     // sub-views from the same 4D input, each `[1, 4, 4, 4]`, then
     // concats them on a new last axis and `max_reduce`s along that
@@ -237,10 +237,10 @@ tl = stride(&x, 1i64, 1i64, 2i64, 2i64)
 tr = stride(&shifted_col, 1i64, 1i64, 2i64, 2i64)
 bl = stride(&shifted_row, 1i64, 1i64, 2i64, 2i64)
 br = stride(&shifted_both, 1i64, 1i64, 2i64, 2i64)
-tl5 = reshape(&tl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-tr5 = reshape(&tr, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-bl5 = reshape(&bl, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
-br5 = reshape(&br, [cast(1, int64), cast(4, int64), cast(4, int64), cast(4, int64), cast(1, int64)])
+tl5 = reshape(&tl, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+tr5 = reshape(&tr, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+bl5 = reshape(&bl, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
+br5 = reshape(&br, [cast(1, i64), cast(4, i64), cast(4, i64), cast(4, i64), cast(1, i64)])
 stacked = concat([tl5, tr5, bl5, br5], 4)
 out = max_reduce(&stacked, 4)
 "#,
@@ -255,7 +255,7 @@ out = max_reduce(&stacked, 4)
     );
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want as f64,
             1e-5,
             &format!("maxpool[{i}]"),
@@ -282,7 +282,7 @@ fn hydronnx_h3_layer_norm_batch2_hidden4_matches_ir_eval() {
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0], [4.0, 2.0, 0.0, 6.0]], 0.0)
 g = to_tensor([1.0, 2.0, 3.0, 4.0])
 b = to_tensor([0.1, 0.2, 0.3, 0.4])
-out = layer_norm(&x, &g, &b)
+out = layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
@@ -305,7 +305,7 @@ out = layer_norm(&x, &g, &b)
     }
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-5,
             &format!("layer_norm[{i}]"),
@@ -314,48 +314,46 @@ out = layer_norm(&x, &g, &b)
 }
 
 // ===========================================================================
-// Case 3 -- conv2d on [1, 3, 8, 8] with kernel [8, 3, 3, 3], stride=1,
+// Case 3 -- conv on [1, 3, 8, 8] with kernel [8, 3, 3, 3], stride=1,
 // padding=0. Output shape per `floor((in + 2p - k) / s) + 1` = [1, 8, 6, 6].
 //
-// `conv2d`'s typer (`crates/chelis-types/src/infer.rs::
-// conv2d_input_dims_concrete_modulo_batch`) needs explicit shape metadata
-// on the call site, so the fixture wraps the call in a typed `def` whose
-// parameters carry the full tensor[...] shape. The eval pipeline is
-// driven with `eval_surf_selected` so the formal-parameter binding in
-// `def run_conv2d` doesn't trip the "missing input" path -- only the
-// `out` root is forward-evaluated.
+// The fixture wraps the call in a typed `def` whose parameters carry the
+// full tensor[...] shape used by convolution inference and evaluation. The
+// eval pipeline is driven with `eval_surf_selected` so the formal-parameter
+// binding in `def run_conv` doesn't trip the "missing input" path -- only
+// the `out` root is forward-evaluated.
 //
 // In addition to the elementwise reference comparison against the pure-
-// Rust conv2d reference (locking the wiring against silent corruption),
+// Rust conv reference (locking the wiring against silent corruption),
 // this test pins one output pixel against a hand-computed value to lock
 // correctness, not just self-consistency between two paths through the
 // same evaluator.
 // ===========================================================================
 
 #[test]
-fn hydronnx_h3_conv2d_1x3x8x8_kernel_8x3x3x3_matches_ir_eval() {
-    let input = conv2d_input_data();
-    let kernel = conv2d_kernel_data();
-    let expected = conv2d_reference(&input, &kernel);
+fn hydronnx_h3_conv_1x3x8x8_kernel_8x3x3x3_matches_ir_eval() {
+    let input = conv_input_data();
+    let kernel = conv_kernel_data();
+    let expected = conv_reference(&input, &kernel);
 
     let input_literal = nested_list_literal(&[1, 3, 8, 8], &input);
     let kernel_literal = nested_list_literal(&[8, 3, 3, 3], &kernel);
 
     let src = format!(
         r#"
-def run_conv2d(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv2d(&x, &k, 1, 0)
+def run_conv(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 def make_x() -> tensor[1, 3, 8, 8, f32] = to_tensor({input_literal})
 def make_k() -> tensor[8, 3, 3, 3, f32] = to_tensor({kernel_literal})
-out = run_conv2d(make_x(), make_k())
+out = run_conv(make_x(), make_k())
 "#,
     );
     let result = eval_surf_selected(&src, &["out"]);
     let out = root_tensor(&result, "out");
-    assert_eq!(out.shape, vec![1, 8, 6, 6], "conv2d shape");
+    assert_eq!(out.shape, vec![1, 8, 6, 6], "conv shape");
     assert_eq!(
         out.data.len(),
         expected.len(),
-        "conv2d element count mismatch"
+        "conv element count mismatch"
     );
 
     // Compare every output pixel against the pure-Rust reference.
@@ -364,10 +362,10 @@ out = run_conv2d(make_x(), make_k())
     // tolerance comfortably covers the worst-case rounding noise.
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want as f64,
             1e-4,
-            &format!("conv2d[{i}]"),
+            &format!("conv[{i}]"),
         );
     }
 
@@ -390,9 +388,9 @@ out = run_conv2d(make_x(), make_k())
         }
     }
     assert_close(
-        out.data.element_as_f64_lossy(0),
+        out.data.element_f64_lossy(0),
         hand,
         1e-4,
-        "conv2d hand-computed out[0, 0, 0, 0]",
+        "conv hand-computed out[0, 0, 0, 0]",
     );
 }

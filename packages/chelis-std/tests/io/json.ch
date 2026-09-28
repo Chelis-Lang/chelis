@@ -19,7 +19,7 @@ def test_parse_false_returns_json_bool_false() -> unit ! { Test } =
 def test_parse_int_returns_json_int() -> unit ! { Test } = {
   parsed = parse_json("42")
   match json_int(Some(parsed)) with {
-    | Some(n) => assert_eq(n, cast(42, int64), "parse_json(\"42\") yields JsonInt(42)")
+    | Some(n) => assert_eq(n, cast(42, i64), "parse_json(\"42\") yields JsonInt(42)")
     | None => fail("parse_json(\"42\") did not yield JsonInt")
   }
 }
@@ -45,7 +45,7 @@ def test_bigint_accessors_refuse_cross_variant_coercion() -> unit ! { Test } = {
     | Some(_) => fail("json_float must refuse JsonBigInt")
     | None => assert_true(true, "json_float(JsonBigInt) -> None")
   }
-  match json_bigint(Some(JsonInt(cast(1, int64)))) with {
+  match json_bigint(Some(JsonInt(cast(1, i64)))) with {
     | Some(_) => fail("json_bigint must refuse JsonInt")
     | None => assert_true(true, "json_bigint(JsonInt) -> None")
   }
@@ -57,21 +57,35 @@ def test_parse_string_returns_json_string() -> unit ! { Test } = {
     | None => fail("parse_json(\"\\\"hello\\\"\") did not yield JsonString")
   }
 }
+def test_parse_unicode_escapes_and_surrogate_pairs() -> unit ! { Test } = {
+  parsed = parse_json("\"\\u00e9\\ud83d\\ude00\"")
+  match json_string(Some(parsed)) with {
+    | Some(text) => assert_eq(text, "é😀", "BMP and surrogate-pair escapes decode to Unicode scalars")
+    | None => fail("unicode escape input did not yield JsonString")
+  }
+}
+def test_try_parse_json_rejects_malformed_unicode_escapes_and_raw_controls() -> unit ! { Test } = {
+  invalid = ["\"\\u12x4\"", "\"\\ud83d\"", "\"\\ude00\"", "\"\\ud83d\\u0041\"", "\"a\u{b}b\""]
+  fold(fn (acc: unit, text: string) -> match try_parse_json(text) with {
+    | Some(_) => fail(string_concat("try_parse_json must reject malformed Unicode/control input: ", text))
+    | None => assert_true(true, "malformed Unicode/control input rejected")
+  }, (), invalid)
+}
 def test_parse_array_three_ints() -> unit ! { Test } = {
   parsed = parse_json("[1, 2, 3]")
   match json_array(Some(parsed)) with {
     | Some(items) => {
-    _ = assert_eq(cast(len(items), int64), cast(3, int64), "[1, 2, 3] has length 3")
-    _ = match json_int(Some(index(items, cast(0, int64)))) with {
-      | Some(n) => assert_eq(n, cast(1, int64), "items[0] == JsonInt(1)")
+    _ = assert_eq(cast(len(items), i64), cast(3, i64), "[1, 2, 3] has length 3")
+    _ = match json_int(Some(index(items, cast(0, i64)))) with {
+      | Some(n) => assert_eq(n, cast(1, i64), "items[0] == JsonInt(1)")
       | None => fail("items[0] is not a JsonInt")
     }
-    _ = match json_int(Some(index(items, cast(1, int64)))) with {
-      | Some(n) => assert_eq(n, cast(2, int64), "items[1] == JsonInt(2)")
+    _ = match json_int(Some(index(items, cast(1, i64)))) with {
+      | Some(n) => assert_eq(n, cast(2, i64), "items[1] == JsonInt(2)")
       | None => fail("items[1] is not a JsonInt")
     }
-    match json_int(Some(index(items, cast(2, int64)))) with {
-      | Some(n) => assert_eq(n, cast(3, int64), "items[2] == JsonInt(3)")
+    match json_int(Some(index(items, cast(2, i64)))) with {
+      | Some(n) => assert_eq(n, cast(3, i64), "items[2] == JsonInt(3)")
       | None => fail("items[2] is not a JsonInt")
     }
   }
@@ -81,7 +95,7 @@ def test_parse_array_three_ints() -> unit ! { Test } = {
 def test_parse_object_with_int_value() -> unit ! { Test } = {
   parsed = parse_json("{\"a\": 1}")
   match json_int(json_get(parsed, "a")) with {
-    | Some(n) => assert_eq(n, cast(1, int64), "{\"a\": 1}.a == JsonInt(1)")
+    | Some(n) => assert_eq(n, cast(1, i64), "{\"a\": 1}.a == JsonInt(1)")
     | None => fail("json_get(parse_json(\"{\\\"a\\\": 1}\"), \"a\") did not yield JsonInt")
   }
 }
@@ -108,7 +122,7 @@ def test_to_json_scalars() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonNull), "null", "to_json(JsonNull) == null")
   _ = assert_eq(to_json(JsonBool(true)), "true", "to_json(JsonBool(true)) == true")
   _ = assert_eq(to_json(JsonBool(false)), "false", "to_json(JsonBool(false)) == false")
-  assert_eq(to_json(JsonInt(cast(42, int64))), "42", "to_json(JsonInt(42)) == 42")
+  assert_eq(to_json(JsonInt(cast(42, i64))), "42", "to_json(JsonInt(42)) == 42")
 }
 def test_to_json_canonical_bigint_is_verbatim_and_round_trips_as_bigint() -> unit ! { Test } = {
   positive = JsonBigInt("9223372036854775808")
@@ -129,21 +143,22 @@ def test_try_to_json_rejects_noncanonical_or_in_range_bigint_storage() -> unit !
 }
 def test_to_json_float_is_shortest_round_trip() -> unit ! { Test } = assert_eq(to_json(JsonFloat(0.15110743269565682f64)), "0.15110743269565682", "17-significant-digit f64 survives to_json byte-exactly")
 def test_to_json_string_escapes_specials() -> unit ! { Test } = assert_eq(to_json(JsonString("a\"b\\c\nd\te\rf")), "\"a\\\"b\\\\c\\nd\\te\\rf\"", "quote, backslash, and control whitespace are escaped")
+def test_to_json_string_escapes_every_c0_control() -> unit ! { Test } = assert_eq(to_json(JsonString("\0\u{8}\u{b}\u{c}\u{1f}")), "\"\\u0000\\b\\u000b\\f\\u001f\"", "every C0 control is emitted as RFC-valid JSON")
 def test_to_json_array_and_empty_containers() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonArray([JsonFloat(1.5f64), JsonNull])), "[1.5,null]", "array renders compact with null")
   _ = assert_eq(to_json(JsonArray([])), "[]", "empty array renders []")
   assert_eq(to_json(JsonObject(dict_of([]))), "{}", "empty object renders {}")
 }
 def test_to_json_object_uses_recursive_canonical_unicode_key_order() -> unit ! { Test } = {
-  ba = JsonObject(dict_of([("b", JsonInt(cast(1, int64))), ("a", JsonFloat(2.0f64))]))
-  ab = JsonObject(dict_of([("a", JsonFloat(2.0f64)), ("b", JsonInt(cast(1, int64)))]))
+  ba = JsonObject(dict_of([("b", JsonInt(cast(1, i64))), ("a", JsonFloat(2.0f64))]))
+  ab = JsonObject(dict_of([("a", JsonFloat(2.0f64)), ("b", JsonInt(cast(1, i64)))]))
   ba_bytes = to_json(ba)
   ab_bytes = to_json(ab)
   _ = assert_eq(ba_bytes, "{\"a\":2.0,\"b\":1}", "canonical order is independent of insertion history and preserves JsonFloat/JsonInt spelling")
   _ = assert_eq(ba_bytes, ab_bytes, "equal mappings serialize to identical bytes")
-  nested = JsonObject(dict_of([("outer", JsonObject(dict_of([("z", JsonInt(cast(3, int64))), ("m", JsonInt(cast(4, int64)))]))), ("a", JsonNull)]))
+  nested = JsonObject(dict_of([("outer", JsonObject(dict_of([("z", JsonInt(cast(3, i64))), ("m", JsonInt(cast(4, i64)))]))), ("a", JsonNull)]))
   _ = assert_eq(to_json(nested), "{\"a\":null,\"outer\":{\"m\":4,\"z\":3}}", "canonical key ordering applies recursively")
-  unicode_and_escaped = JsonObject(dict_of([("😀", JsonInt(cast(4, int64))), ("é", JsonInt(cast(3, int64))), ("a\\", JsonInt(cast(2, int64))), ("a\"", JsonInt(cast(1, int64)))]))
+  unicode_and_escaped = JsonObject(dict_of([("😀", JsonInt(cast(4, i64))), ("é", JsonInt(cast(3, i64))), ("a\\", JsonInt(cast(2, i64))), ("a\"", JsonInt(cast(1, i64)))]))
   assert_eq(to_json(unicode_and_escaped), "{\"a\\\"\":1,\"a\\\\\":2,\"é\":3,\"😀\":4}", "keys order by Unicode scalar values before JSON escaping")
 }
 def test_try_to_json_non_finite_returns_none() -> unit ! { Test } = {
@@ -161,7 +176,7 @@ def test_try_to_json_non_finite_returns_none() -> unit ! { Test } = {
   }
 }
 def test_to_json_round_trips_through_parse_json() -> unit ! { Test } = {
-  doc = JsonObject(dict_of([("cap", JsonFloat(0.15110743269565682f64)), ("name", JsonString("a\"b\\c")), ("n", JsonInt(cast(3, int64)))]))
+  doc = JsonObject(dict_of([("cap", JsonFloat(0.15110743269565682f64)), ("name", JsonString("a\"b\\c")), ("n", JsonInt(cast(3, i64)))]))
   parsed = parse_json(to_json(doc))
   _ = match json_float(json_get(parsed, "cap")) with {
     | Some(x) => assert_true(eq(x, 0.15110743269565682f64), "float field round-trips bit-exactly")
@@ -172,7 +187,7 @@ def test_to_json_round_trips_through_parse_json() -> unit ! { Test } = {
     | None => fail("name did not round-trip as a string")
   }
   match json_int(json_get(parsed, "n")) with {
-    | Some(n) => assert_eq(n, cast(3, int64), "int field round-trips")
+    | Some(n) => assert_eq(n, cast(3, i64), "int field round-trips")
     | None => fail("n did not round-trip as an int")
   }
 }
@@ -194,7 +209,7 @@ def test_try_load_json_missing_path_returns_none() -> unit ! { Test, IO } =
     | None => assert_true(true, "missing path -> None (not a crash)")
   }
 def test_to_json_long_string_renders_escaped() -> unit ! { Test } = {
-  tail = fold(fn (acc: string, i: int64) -> string_concat(acc, "ab"), "", range(cast(0, int64), cast(2048, int64)))
+  tail = fold(fn (acc: string, i: i64) -> string_concat(acc, "ab"), "", range(cast(0, i64), cast(2048, i64)))
   big = string_concat("a\"b\\c", tail)
   expected = string_concat("\"a\\\"b\\\\c", string_concat(tail, "\""))
   assert_eq(to_json(JsonString(big)), expected, "4 KiB string with escapes renders byte-exactly (parse-back of long strings is capped by the reader's recursion, chelis#953/#954 territory)")
@@ -221,7 +236,7 @@ def test_write_json_reads_back() -> unit ! { Test, IO } = {
 -- prelude JInt/JNum split (chelis#891) makes load-bearing.
 def test_to_json_whole_valued_float_keeps_its_point() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonFloat(2.0f64)), "2.0", "a whole-valued float renders with a decimal point")
-  _ = assert_eq(to_json(JsonInt(cast(2, int64))), "2", "an int renders without a decimal point")
+  _ = assert_eq(to_json(JsonInt(cast(2, i64))), "2", "an int renders without a decimal point")
   _ = match json_float(Some(parse_json("2.0"))) with {
     | Some(x) => assert_true(eq(x, 2.0f64), "\"2.0\" parses back as a float")
     | None => fail("\"2.0\" did not parse back as a float")
@@ -231,7 +246,7 @@ def test_to_json_whole_valued_float_keeps_its_point() -> unit ! { Test } = {
     | None => assert_true(true, "json_int refuses the whole-valued float")
   }
   match json_int(Some(parse_json("2"))) with {
-    | Some(n) => assert_eq(n, cast(2, int64), "\"2\" parses back as an exact int")
+    | Some(n) => assert_eq(n, cast(2, i64), "\"2\" parses back as an exact int")
     | None => fail("\"2\" did not parse back as an int")
   }
 }

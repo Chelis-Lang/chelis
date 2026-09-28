@@ -15,29 +15,31 @@
 //! index groups into the same closed typed-kernel boundary; this module
 //! does not own numeric accumulation or comparison.
 
-use std::borrow::Cow;
-
+use chelis_abi::metadata::{MetadataError, ShapeMetadata};
 use chelis_unord::{UnordMap, UnordSet};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 use crate::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType,
-    bind_symbolic_dims, symbolic_bindings,
+    ComparisonKind, Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput,
+    FusedStepOp, LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, RuntimeCheck,
+    SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
-    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, RawTensor,
+    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NumericTrap, RawTensor,
     ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
     count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_relu, float_relu_adjoint,
     float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
     integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars, uniform_sample,
+    tensor_from_scalars,
+};
+use chelis_types::dtype_semantics::{
+    PreparedDropout, fold_in_storage, key_from_seed_storage, split_key_storage, split_keys_storage,
+    uniform_like_bound_adjoint_rows,
 };
 use chelis_types::types::Prim;
-
-/// Public evaluator entry points that do not inherit an enclosing handler
-/// still evaluate a path-sensitive DAG from the beginning of its stream.
-const INITIAL_RANDOM_STREAM_ORDINAL: u64 = 0;
+use chelis_types::{PreparedUniformLike, RandomKey, uniform_like_bound_adjoint};
 
 #[derive(Debug, Clone)]
 pub struct TensorValue {
@@ -100,7 +102,7 @@ impl TensorValue {
         self.storage.is_empty()
     }
 
-    /// Widen every element to f64; exact except for int64 magnitudes
+    /// Widen every element to f64; exact except for i64 magnitudes
     /// above 2^53 (the named-lossy read of section C3).
     pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
         self.storage.to_f64_lossy_vec()
@@ -202,6 +204,72 @@ fn numel(shape: &[usize]) -> usize {
     }
 }
 
+/// The C runtime's report when a tensor's storage cannot be allocated
+/// (`allocate_tensor` in `crates/chelis-runtime/src/lib.rs`), verbatim.
+const TENSOR_ALLOCATION_FAILED: &str = "Domain: chelis_alloc tensor allocation failed";
+
+/// [05-OP-33]'s checked admission of a result before allocation: the one
+/// gate every evaluator path that sizes a new tensor from its extents passes
+/// through, before it allocates anything proportional to them (chelis#2491).
+///
+/// The metadata is the C runtime's own authority, `chelis_abi`'s
+/// [`ShapeMetadata`], so the checks and their order are the compiled lane's:
+/// the element count, the byte size at the result's representation, and the
+/// stride products each fit i64, and the byte size fits the allocation
+/// domain. A failure is `op`'s [04-NUM-9] trap under the metadata report,
+/// the two lines the C runtime's operation plans (`expand`, `pad`, the
+/// reductions) print for it. Where the compiled lane instead allocates
+/// through bare `chelis_alloc` (`split_keys`, `const`), it prints the same
+/// report under that runtime symbol and no trap line; [04-NUM-9] requires the
+/// trap to name the operation, so this lane does not copy that rendering.
+///
+/// An admitted result can still be one this lane cannot hold: the evaluator
+/// keeps per-element scratch wider than the representation, at most one
+/// index group (`Vec<usize>`) per result element in a reduction. A result
+/// whose scratch would not fit Rust's allocation domain is refused with the
+/// C runtime's allocation failure, which is what C reports at that size: its
+/// request is then at least 2^58 bytes, more than any current 64-bit virtual
+/// address space holds.
+///
+/// Returns the admitted element count.
+fn admit_result(op: &'static str, shape: &[usize], prim: Prim) -> Result<usize, String> {
+    let dtype = prim.runtime_dtype().map_err(|error| error.to_string())?;
+    let metadata = i64_extents(shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.bytes().allocation().map(|_| metadata))
+        .map_err(|error| admission_trap(op, &error))?;
+    metadata
+        .elements()
+        .scratch_len::<Vec<usize>>()
+        .map_err(|_| TENSOR_ALLOCATION_FAILED.to_string())
+}
+
+/// Host extents as the metadata's i64 extents.
+fn i64_extents(extents: &[usize]) -> Result<Vec<i64>, MetadataError> {
+    extents
+        .iter()
+        .map(|&extent| {
+            i64::try_from(extent).map_err(|_| MetadataError::Overflow("extent exceeds i64"))
+        })
+        .collect()
+}
+
+/// A metadata failure in `op`, as the C runtime's `affine_result` prints it:
+/// the metadata report, then [04-NUM-9]'s trap line at i64.
+fn admission_trap(op: &'static str, error: &MetadataError) -> String {
+    let trap = match error {
+        MetadataError::Domain(_) => NumericTrap::Domain {
+            op,
+            prim: Prim::Int64,
+        },
+        MetadataError::Overflow(_) => NumericTrap::Overflow {
+            op,
+            prim: Prim::Int64,
+        },
+    };
+    format!("{error}\n{trap}")
+}
+
 fn concrete_shape(ty: &TensorType) -> Result<Vec<usize>, String> {
     ty.dims
         .iter()
@@ -236,18 +304,18 @@ fn concrete_shape_with(
 }
 
 /// Zero-filled tensor at the type's declared dtype (missing non-strict
-/// Load inputs). Zero is a member of every active dtype, so this cannot
-/// trap.
-fn default_value(ty: &TensorType) -> TensorValue {
+/// Load inputs). Zero is a member of every active dtype, so no value traps;
+/// only the declared extents can fail admission.
+fn default_value(ty: &TensorType) -> Result<TensorValue, String> {
     let shape = concrete_shape(ty).unwrap_or_default();
-    let n = numel(&shape);
+    let n = admit_result("load", &shape, ty.precision)?;
     let storage = if ty.precision.is_float() {
         finalize_tensor("load", ty.precision, RawTensor::Float(vec![0.0; n]))
     } else {
         finalize_tensor("load", ty.precision, RawTensor::Int(vec![0; n]))
     }
     .expect("zero is a member of every active dtype");
-    TensorValue::from_storage(shape, storage)
+    Ok(TensorValue::from_storage(shape, storage))
 }
 
 /// Freeze a raw-f64 host input once at the Load's declared dtype, or accept
@@ -259,18 +327,27 @@ fn ingress_to_declared(
     declared: Prim,
     value: &TensorValue,
 ) -> Result<TensorValue, String> {
+    if value.raw_f64_ingress && declared == Prim::Key {
+        return Err(format!(
+            "input `{name}` declares key, which has no raw numeric ingress; provide key storage"
+        ));
+    }
     if value.raw_f64_ingress {
         let storage = finalize_tensor("load", declared, value.storage().to_raw())
-            .map_err(|trap| format!("input `{name}`: {trap}"))?;
+            .map_err(|trap| format!("input `{name}`\n{trap}"))?;
         return Ok(TensorValue::from_storage(value.shape.clone(), storage));
     }
     if value.prim() == declared {
         return Ok(value.clone());
     }
     Err(format!(
-        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)",
+        "input `{name}` carries dtype {} but the Load declares {}; provide a value with the declared dtype (casts are explicit in Chelis)\n{}",
         value.prim().name(),
-        declared.name()
+        declared.name(),
+        NumericTrap::Domain {
+            op: "load",
+            prim: declared
+        }
     ))
 }
 
@@ -371,55 +448,589 @@ fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, Strin
     Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
-fn dropout(input: &TensorValue, rate: f64, seed: u64, prim: Prim) -> Result<TensorValue, String> {
-    let keep_scale = if rate >= 1.0 {
-        0.0
-    } else {
-        1.0 / (1.0 - rate.max(0.0))
+/// Read a rank-0 value's one scalar.
+fn rank0_scalar(value: &TensorValue, what: &str) -> Result<chelis_types::ScalarValue, String> {
+    if !value.shape.is_empty() || value.len() != 1 {
+        return Err(format!("{what} is not a rank-0 scalar"));
+    }
+    Ok(value.storage().scalar_at(0))
+}
+
+fn rank0_bool(value: &TensorValue, what: &str) -> Result<bool, String> {
+    match rank0_scalar(value, what)?.as_i64_exact() {
+        Some(bits) if value.prim() == Prim::Bool => Ok(bits != 0),
+        _ => Err(format!("{what} is not a rank-0 Bool")),
+    }
+}
+
+/// Where a node checks (`spec/10-serialization.md` §3.2): a node whose
+/// activation is false is still computed, since a `Where` may read its value,
+/// but checks nothing.
+enum Activity {
+    /// The node has no activation, or its activation holds in every row.
+    All,
+    /// The activation holds in no row: the node checks nothing.
+    Inactive,
+    /// A per-row activation (a `vmap`ped `if`): row `r` of the activation's
+    /// shape checks exactly when `rows[r]`.
+    Rows { shape: Vec<usize>, rows: Vec<bool> },
+}
+
+/// The run-time [`Activity`] of `node`, read from its owner's activation.
+fn node_activity(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Activity, String> {
+    let Some(activation) = node.owner.activation else {
+        return Ok(Activity::All);
     };
-    let data = input
-        .to_f64_lossy_vec()
+    let value = values.get(&activation).ok_or_else(|| {
+        format!(
+            "node {}'s activation {} is not available",
+            node.id.0, activation.0
+        )
+    })?;
+    if value.prim() != Prim::Bool {
+        return Err(format!(
+            "node {}'s activation {} is not a Bool",
+            node.id.0, activation.0
+        ));
+    }
+    let rows = value
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view")
         .into_iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let sample = dropout_sample(seed, index as u64);
-            if sample < rate {
-                0.0
-            } else {
-                value * keep_scale
+        .map(|bit| bit != 0)
+        .collect::<Vec<_>>();
+    Ok(if rows.iter().all(|row| *row) {
+        Activity::All
+    } else if !rows.iter().any(|row| *row) {
+        Activity::Inactive
+    } else {
+        Activity::Rows {
+            shape: value.shape.clone(),
+            rows,
+        }
+    })
+}
+
+/// `value` with the elements of the rows its node checks nothing in
+/// replaced by `neutral`; `value`'s leading axes are the activation's `shape`.
+fn neutral_rows(value: &TensorValue, rows: &[bool], neutral: i64) -> Result<TensorValue, String> {
+    let len = value.len();
+    let per_row = if rows.is_empty() { 0 } else { len / rows.len() };
+    let mask = (0..len)
+        .map(|index| i64::from(rows[index / per_row.max(1)]))
+        .collect::<Vec<_>>();
+    let mask = finalize_wide_int("activation", Prim::Bool, value.shape.clone(), mask)?;
+    let fill = finalize_wide(
+        "activation",
+        value.prim(),
+        value.shape.clone(),
+        vec![neutral as f64; len],
+    )?;
+    where_elementwise(&mask, value, &fill)
+}
+
+/// Replace the operands of a gated `node` ([`crate::dag::TrapSeeds::is_activation_gated`],
+/// `gated`) whose activation is false, in the rows where it is false, with
+/// values its checks accept ([`DagNode::inactive_operand`]), so the node
+/// computes a value and reports nothing.
+/// Returns the replaced values, which the caller restores once the node has
+/// run: its operands' other consumers read them unchanged.
+fn neutralize_inactive_operands(
+    node: &DagNode,
+    gated: bool,
+    values: &mut UnordMap<NodeId, TensorValue>,
+) -> Result<Vec<(NodeId, TensorValue)>, String> {
+    if !gated || node.inactive_operand(0).is_none() {
+        return Ok(Vec::new());
+    }
+    let activity = node_activity(node, values)?;
+    if matches!(activity, Activity::All) {
+        return Ok(Vec::new());
+    }
+    // One operand may fill several slots (`x / x`); the larger neutral
+    // (one) is accepted in every slot. A slot with no inactive value (a
+    // guarded abort's fallback) is read unchanged.
+    let mut neutrals = Vec::<(NodeId, i64)>::new();
+    for (slot, input) in node.inputs.iter().enumerate() {
+        let Some(neutral) = node.inactive_operand(slot) else {
+            continue;
+        };
+        match neutrals.iter_mut().find(|(id, _)| id == input) {
+            Some((_, existing)) => *existing = (*existing).max(neutral),
+            None => neutrals.push((*input, neutral)),
+        }
+    }
+    // Under a per-row activation, a rank-0 operand is the same scalar in
+    // every row; it takes each row's shape so each row decides on its own.
+    let carrier = match &activity {
+        Activity::Rows { shape, .. } => neutrals
+            .iter()
+            .filter_map(|(id, _)| values.get(id))
+            .find(|value| !value.shape.is_empty() && value.shape.starts_with(shape))
+            .map(|value| value.shape.clone()),
+        _ => None,
+    };
+    let mut replaced = Vec::new();
+    for (id, neutral) in neutrals {
+        let original = values
+            .get(&id)
+            .ok_or_else(|| format!("node {} reads missing operand {}", node.id.0, id.0))?;
+        let neutralized = match &activity {
+            Activity::All => continue,
+            Activity::Inactive => finalize_wide(
+                "activation",
+                original.prim(),
+                original.shape.clone(),
+                vec![neutral as f64; original.len()],
+            )?,
+            Activity::Rows { shape, rows } => {
+                if !original.shape.is_empty() && original.shape.starts_with(shape) {
+                    neutral_rows(original, rows, neutral)?
+                } else if let Some(carrier) = carrier.as_ref().filter(|_| original.shape.is_empty())
+                {
+                    neutral_rows(&splat_rank0(original, carrier), rows, neutral)?
+                } else {
+                    // An operand no row indexes: some row checks it.
+                    continue;
+                }
             }
-        })
-        .collect();
-    finalize_wide("dropout", prim, input.shape.clone(), data)
+        };
+        let original = values.insert(id, neutralized).expect("operand present");
+        replaced.push((id, original));
+    }
+    Ok(replaced)
 }
 
-fn dropout_sample(seed: u64, index: u64) -> f64 {
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+/// The keys a key-operand random primitive draws with
+/// (`spec/10-serialization.md` §3.2).
+enum KeyOperand<'a> {
+    /// A rank-0 activation is false: the primitive validates and draws
+    /// nothing and produces positive zeros.
+    Inactive,
+    /// A rank-0 key.
+    Scalar(RandomKey),
+    /// A key batch of `shape`, any positive rank: row `b` of the data, the
+    /// elements whose leading indices are the key index `b` in row-major
+    /// order, draws with `keys[b]`, and only when `active` is absent or its
+    /// element for row `b` is true.
+    Rows {
+        keys: &'a [RandomKey],
+        shape: &'a [usize],
+        active: Option<&'a TensorValue>,
+    },
 }
 
-fn uniform_like(
+impl KeyOperand<'_> {
+    fn row_active(&self, row: usize) -> bool {
+        match self {
+            Self::Rows {
+                keys,
+                active: Some(active),
+                ..
+            } => {
+                let element = leading_row(row, keys.len(), active.len());
+                active.storage().scalar_at(element).as_bool_exact() == Some(true)
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The element that row `row` of `rows` reads from an operand of `len`
+/// elements shaped like the keys' leading axes: the row's index over those
+/// axes. A nonempty key batch has a nonempty leading part, so `len > 0`
+/// whenever a row exists.
+fn leading_row(row: usize, rows: usize, len: usize) -> usize {
+    row / (rows / len)
+}
+
+/// A key-operand random primitive's keys, under the node's own activation
+/// ([`crate::dag::Owner::activation`]). A key that has no value under an
+/// active primitive is a malformed graph.
+fn draw_keys<'a>(
+    node: &DagNode,
+    key_slot: usize,
+    values: &'a UnordMap<NodeId, TensorValue>,
+) -> Result<KeyOperand<'a>, String> {
+    let activation = match node.owner.activation {
+        Some(activation) => Some(
+            values
+                .get(&activation)
+                .ok_or("random primitive activation is not available")?,
+        ),
+        None => None,
+    };
+    if let Some(activation) = activation
+        && activation.shape.is_empty()
+        && !rank0_bool(activation, "random primitive activation")?
+    {
+        return Ok(KeyOperand::Inactive);
+    }
+    let key = node
+        .inputs
+        .get(key_slot)
+        .and_then(|key| values.get(key))
+        .ok_or_else(|| {
+            format!(
+                "random primitive at node {} is active but its key's draw was not",
+                node.id.0
+            )
+        })?;
+    let keys = key
+        .storage()
+        .keys()
+        .ok_or_else(|| format!("random primitive at node {} has a non-key key", node.id.0))?;
+    if key.shape.is_empty() {
+        return Ok(KeyOperand::Scalar(keys[0]));
+    }
+    let active = activation.filter(|activation| !activation.shape.is_empty());
+    if active.is_some_and(|active| !key.shape.starts_with(&active.shape)) {
+        return Err(format!(
+            "random primitive at node {}: a batched activation must be shaped like a leading part of its keys' shape {:?}",
+            node.id.0, key.shape
+        ));
+    }
+    Ok(KeyOperand::Rows {
+        keys,
+        shape: &key.shape,
+        active,
+    })
+}
+
+/// Row `row` of a batched draw's control: the one scalar of a rank-0
+/// control, or the element a control shaped like the keys' leading axes
+/// holds for the row.
+fn row_control(
+    value: &TensorValue,
+    row: usize,
     shape: &[usize],
-    low: f64,
-    high: f64,
-    seed: u64,
+    what: &str,
+) -> Result<chelis_types::ScalarValue, String> {
+    if value.shape.is_empty() {
+        return rank0_scalar(value, what);
+    }
+    if !shape.starts_with(&value.shape) {
+        return Err(format!(
+            "{what} must be rank 0 or shaped like a leading part of its keys' shape {shape:?}"
+        ));
+    }
+    Ok(value
+        .storage()
+        .scalar_at(leading_row(row, numel(shape), value.len())))
+}
+
+/// A key-operand random primitive's key batch against its operands, checked
+/// before it reads one, in [`RiscOp::draw_batch_layout`]'s order and with
+/// the C lane's report (spec/10 §3.2, rule V5): a key batch's shape is its
+/// data's leading axes, and each per-row control, then the node's own
+/// activation, is a leading part of that shape. The verifier relates the declared dims; this
+/// relates the values, so no row index rests on an extent nothing has
+/// checked. A key an inactive draw key withheld is rank 0, so it batches
+/// nothing. This lane builds each result from its data's shape, so it reads
+/// no declared result extent.
+fn check_draw_extents(
+    dag: &Dag,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<(), String> {
+    let layout = node
+        .op
+        .draw_batch_layout()
+        .ok_or("check_draw_extents reads only a key-operand random primitive")?;
+    let op = layout.op;
+    let value = |slot: usize| node.inputs.get(slot).and_then(|input| values.get(input));
+    let Some(key) = value(layout.key).filter(|key| !key.shape.is_empty()) else {
+        return Ok(());
+    };
+    let key_dims = &dag
+        .get(node.inputs[layout.key])
+        .ok_or("random primitive key is not in its graph")?
+        .output_type
+        .dims;
+    let data = value(layout.data_input).ok_or("random primitive data is not available")?;
+    let operands = std::iter::once((layout.data_input, data, key.shape.len())).chain(
+        layout
+            .per_row
+            .iter()
+            .filter_map(|slot| value(*slot).map(|operand| (*slot, operand, operand.shape.len()))),
+    );
+    for (slot, operand, axes) in operands {
+        if axes > key.shape.len() || operand.shape.len() < axes {
+            return Err(format!(
+                "{op} input {slot} has rank {}, which its rank-{} key batch does not index",
+                operand.shape.len(),
+                key.shape.len()
+            ));
+        }
+        check_operand_extents(op, key_dims, key, &format!("input {slot}"), operand, axes)?;
+    }
+    if let Some(activation) = node
+        .owner
+        .activation
+        .and_then(|activation| values.get(&activation))
+    {
+        let axes = activation.shape.len();
+        if axes > key.shape.len() {
+            return Err(format!(
+                "{op} activation has rank {axes}, which its rank-{} key batch does not index",
+                key.shape.len()
+            ));
+        }
+        check_operand_extents(op, key_dims, key, "activation", activation, axes)?;
+    }
+    Ok(())
+}
+
+/// `operand`, which the report calls `what` (its input slot, `input 1`, or
+/// the node's `activation`), against `reference`, whose declared axes are
+/// `reference_dims`, on its first `axes` extents: the first that disagrees
+/// reports the reference's claim and traps `Domain` in `op` at i64, the C
+/// lane's operand extent guard's report.
+fn check_operand_extents(
+    op: &'static str,
+    reference_dims: &[DimInfo],
+    reference: &TensorValue,
+    what: &str,
+    operand: &TensorValue,
+    axes: usize,
+) -> Result<(), String> {
+    for axis in 0..axes {
+        let (claimed, observed) = (reference.shape[axis], operand.shape[axis]);
+        if claimed != observed {
+            let claim = match reference_dims.get(axis) {
+                Some(DimInfo::Lit(value)) => value.to_string(),
+                Some(DimInfo::Named(name, _)) => name.clone(),
+                None => claimed.to_string(),
+            };
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} {what} axis {axis} = {observed}\n\
+                 {}",
+                NumericTrap::Domain {
+                    op,
+                    prim: Prim::Int64
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The element count of each row of `data` that a batch of keys of `shape`
+/// splits it into: the data's leading axes are the keys' shape.
+fn batched_row_len(data: &TensorValue, shape: &[usize], node: &DagNode) -> Result<usize, String> {
+    if !data.shape.starts_with(shape) {
+        return Err(format!(
+            "random primitive at node {}: its keys of shape {shape:?} must match its data's leading axes",
+            node.id.0
+        ));
+    }
+    // An empty row's trailing extents need not have a representable
+    // product; `numel` answers zero without folding them.
+    Ok(numel(&data.shape[shape.len()..]))
+}
+
+fn row_of(storage: &TensorStorage, row: usize, row_len: usize) -> TensorStorage {
+    let indices = (row * row_len..(row + 1) * row_len).collect::<Vec<_>>();
+    storage.reuse_gather(&indices)
+}
+
+/// Positive zeros at `prim`, the value of an inactive draw or row.
+fn zero_storage(prim: Prim, len: usize) -> Result<TensorStorage, String> {
+    finalize_tensor("random", prim, RawTensor::Float(vec![0.0; len]))
+        .map_err(|trap| trap.to_string())
+}
+
+/// Concatenate row results into one buffer in row order.
+fn concat_rows(prim: Prim, rows: &[TensorStorage]) -> TensorStorage {
+    let scalars = rows
+        .iter()
+        .flat_map(|row| (0..row.len()).map(|index| row.scalar_at(index)))
+        .collect::<Vec<_>>();
+    tensor_from_scalars(prim, &scalars)
+}
+
+/// A draw over `data`'s elements at `prim`, as the stack of its rows' draws
+/// (`spec/10-serialization.md` §3.2): a rank-0 key is one row of every
+/// element, and a key batch splits the data by its leading axes. `draw`
+/// receives each active row's index, key, key shape and element count, and
+/// is the only place a row's controls are read and validated. So a batch
+/// validates exactly its active rows, and one with no rows validates
+/// nothing, as `vmap` over no calls does. An inactive row, and every row
+/// under a false rank-0 activation, is positive zeros.
+fn stack_draw_rows(
+    node: &DagNode,
+    data: &TensorValue,
     prim: Prim,
+    keys: KeyOperand<'_>,
+    mut draw: impl FnMut(usize, RandomKey, &[usize], usize) -> Result<TensorStorage, String>,
+) -> Result<TensorStorage, String> {
+    match keys {
+        KeyOperand::Inactive => zero_storage(prim, data.len()),
+        KeyOperand::Scalar(key) => draw(0, key, &[], data.len()),
+        KeyOperand::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(data, shape, node)?;
+            let keys = KeyOperand::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
+            let mut out = Vec::with_capacity(rows.len());
+            for (row, key) in rows.iter().enumerate() {
+                out.push(if keys.row_active(row) {
+                    draw(row, *key, shape, row_len)?
+                } else {
+                    zero_storage(prim, row_len)?
+                });
+            }
+            Ok(concat_rows(prim, &out))
+        }
+    }
+}
+
+/// `[05-OP-37]`'s dropout (or its replay, on the cotangent) under `keys`.
+fn eval_dropout(
+    node: &DagNode,
+    data: &TensorValue,
+    rate: &TensorValue,
+    keys: KeyOperand<'_>,
 ) -> Result<TensorValue, String> {
-    let low_f = low as f32;
-    let high_f = high as f32;
-    let values = (0..numel(shape))
-        .map(|index| uniform_sample(prim, low_f, high_f, seed, index as u64))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())?;
-    Ok(TensorValue::from_storage(
-        shape.to_vec(),
-        tensor_from_scalars(prim, &values),
-    ))
+    let storage = stack_draw_rows(node, data, data.prim(), keys, |row, key, shape, row_len| {
+        let gathered;
+        let input = if row_len == data.len() {
+            data.storage()
+        } else {
+            gathered = row_of(data.storage(), row, row_len);
+            &gathered
+        };
+        let rate = row_control(rate, row, shape, "dropout rate")?;
+        PreparedDropout::new(input, rate)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(TensorValue::from_storage(data.shape.clone(), storage))
+}
+
+/// `[05-OP-8]`'s sampler for a template of `shape` under `keys`.
+fn eval_uniform_like(
+    node: &DagNode,
+    template: &TensorValue,
+    low: &TensorValue,
+    high: &TensorValue,
+    prim: Prim,
+    keys: KeyOperand<'_>,
+) -> Result<TensorValue, String> {
+    let storage = stack_draw_rows(node, template, prim, keys, |row, key, shape, row_len| {
+        let low = row_control(low, row, shape, "uniform_like low bound")?;
+        let high = row_control(high, row, shape, "uniform_like high bound")?;
+        PreparedUniformLike::new(prim, row_len, low, high)
+            .and_then(|prepared| prepared.apply(key))
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(TensorValue::from_storage(template.shape.clone(), storage))
+}
+
+/// `[05-OP-8]`'s bound adjoint of the cotangent `g` under `keys`. A batched
+/// draw's adjoint has its bound's shape, the keys' leading `c` axes: each
+/// element is one balanced tree over the contributions, in row-major order,
+/// of the rows that share that bound element. Rank 0 folds every row, and
+/// the keys' own shape folds each row alone.
+fn eval_uniform_bound_adjoint(
+    node: &DagNode,
+    g: &TensorValue,
+    bound: crate::dag::UniformBound,
+    prim: Prim,
+    keys: KeyOperand<'_>,
+) -> Result<TensorValue, String> {
+    let bound = match bound {
+        crate::dag::UniformBound::Low => chelis_types::UniformBound::Low,
+        crate::dag::UniformBound::High => chelis_types::UniformBound::High,
+    };
+    match keys {
+        KeyOperand::Inactive => {
+            zero_tensor("uniform_like", &concrete_shape(&node.output_type)?, prim)
+        }
+        KeyOperand::Scalar(key) => {
+            let value = uniform_like_bound_adjoint(g.storage(), key, bound)
+                .map_err(|error| error.to_string())?;
+            Ok(TensorValue::from_storage(
+                Vec::new(),
+                tensor_from_scalars(prim, &[value]),
+            ))
+        }
+        KeyOperand::Rows {
+            keys: rows,
+            shape,
+            active,
+        } => {
+            let row_len = batched_row_len(g, shape, node)?;
+            let keys = KeyOperand::Rows {
+                keys: rows,
+                shape,
+                active,
+            };
+            let masked = (0..rows.len())
+                .map(|row| {
+                    if keys.row_active(row) {
+                        Ok(row_of(g.storage(), row, row_len))
+                    } else {
+                        zero_storage(prim, row_len)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let out_shape = shape.get(..node.output_type.dims.len()).ok_or_else(|| {
+                format!(
+                    "uniform bound adjoint at node {}: its result is not a leading part of its keys' shape {shape:?}",
+                    node.id.0
+                )
+            })?;
+            // Row `b` joins the group of the result element it would read as
+            // a control of the result's shape; each group is contiguous.
+            let groups_len = admit_result("uniform_like", out_shape, prim)?;
+            let mut groups = vec![Vec::new(); groups_len];
+            for row in 0..rows.len() {
+                groups[leading_row(row, rows.len(), groups_len)].push(row);
+            }
+            let values = groups
+                .iter()
+                .map(|group| {
+                    let cotangent = group
+                        .iter()
+                        .map(|row| masked[*row].clone())
+                        .collect::<Vec<_>>();
+                    let keys = group.iter().map(|row| rows[*row]).collect::<Vec<_>>();
+                    uniform_like_bound_adjoint_rows(&concat_rows(prim, &cotangent), &keys, bound)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(TensorValue::from_storage(
+                out_shape.to_vec(),
+                tensor_from_scalars(prim, &values),
+            ))
+        }
+    }
+}
+
+fn key_value(
+    value: &TensorValue,
+    storage: Result<TensorStorage, chelis_types::NumericKernelError>,
+) -> Result<TensorValue, String> {
+    let storage = storage.map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(value.shape.clone(), storage))
+}
+
+fn zero_tensor(op: &'static str, shape: &[usize], prim: Prim) -> Result<TensorValue, String> {
+    let len = admit_result(op, shape, prim)?;
+    let storage = finalize_tensor("random", prim, RawTensor::Float(vec![0.0; len]))
+        .map_err(|trap| trap.to_string())?;
+    Ok(TensorValue::from_storage(shape.to_vec(), storage))
 }
 
 /// Closed elementwise binary vocabulary for the IR evaluator. The enum is
@@ -434,6 +1045,7 @@ enum ElementwiseBinOp {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     Max,
     Min,
 }
@@ -447,6 +1059,7 @@ impl ElementwiseBinOp {
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
+            Self::Mod => "mod",
             Self::Max => "max_elem",
             Self::Min => "min_elem",
         }
@@ -459,6 +1072,7 @@ impl ElementwiseBinOp {
             Self::Mul => Some(IntBinOp::Mul),
             Self::FloorDiv => Some(IntBinOp::FloorDiv),
             Self::TruncDiv => Some(IntBinOp::TruncDiv),
+            Self::Mod => Some(IntBinOp::Rem),
             Self::Max => Some(IntBinOp::Max),
             Self::Min => Some(IntBinOp::Min),
             Self::Div => None,
@@ -474,7 +1088,7 @@ impl ElementwiseBinOp {
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
-            Self::TruncDiv => None,
+            Self::TruncDiv | Self::Mod => None,
         }
     }
 }
@@ -496,27 +1110,58 @@ fn shape_disagreement(lhs: &TensorValue, rhs: &TensorValue) -> String {
     )
 }
 
-/// Lane preservation for the one operand disagreement that is not an error.
-/// The lowerer gives a comparison's scalar operand a rank-0 `Const`
-/// (`lower_builtin_app`'s `cmplt`/`lt` arm in `lower.rs`), and the C kernel
-/// it emits indexes that operand at 0 for every output element: `emit_binary`
-/// in `crates/chelis-backend-c/src/emit.rs` falls through to its strided loop
-/// when the operand sizes differ, and `chelis_indices_to_flat(indices,
-/// t->strides, t->rank)` is 0 at rank 0. `spec/05-risc-primitives.md`
-/// section 2.4.1, lines 778-781 (the runtime-guard prose that [05-MOV-1]'s
-/// "Eval, C, HIP, and Metal execute the same runtime values and traps"
-/// governs), names that idiom and exempts it from the elementwise
-/// operand-agreement guard: "rank-0 scalar operands are the backend's
-/// broadcast idiom and are exempt" (chelis#664). Before host-lane def
-/// applications were routed through this evaluator (chelis#1277 B2h) no DAG
-/// carrying a rank-0 operand reached it; now `gt(to_tensor([..]), 1.5)`,
-/// which `check` admits at score 1 and the compiled C runs, does. This
-/// broadcast makes the two lanes agree on today's answer and takes no
-/// position on whether the form should be admitted at all: chelis#1506
-/// records that [05-OP-36] admits two scalars or two same-dimension tensors
-/// and calls the mixed form a type error. If chelis#1506 resolves by
-/// rejecting, this is the site to remove. The bound is rank 0 in either
-/// position and nothing wider; every other disagreement is the typed error.
+/// Validate a producer's complete positive-rank agreement relation before
+/// reading the extent used by its declared-result claim.
+fn same_shape_agreement_extent(
+    agreement: &crate::axis_sources::SameShapeAgreement,
+    axis: usize,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<usize, String> {
+    let first_id = *agreement
+        .members()
+        .first()
+        .ok_or("same-shape result has no positive-rank agreement member")?;
+    let first = values.get(&first_id).ok_or_else(|| {
+        format!(
+            "same-shape agreement member {} is not available",
+            first_id.0
+        )
+    })?;
+    if first.shape.is_empty() {
+        return Err(format!(
+            "same-shape agreement member {} realized rank zero",
+            first_id.0
+        ));
+    }
+    for member in &agreement.members()[1..] {
+        let value = values
+            .get(member)
+            .ok_or_else(|| format!("same-shape agreement member {} is not available", member.0))?;
+        if value.shape != first.shape {
+            return Err(shape_disagreement(first, value));
+        }
+    }
+    first.shape.get(axis).copied().ok_or_else(|| {
+        format!(
+            "same-shape result axis {axis} is outside agreed rank {}",
+            first.shape.len()
+        )
+    })
+}
+
+/// Broadcast a rank-0 operand over the other's shape, and report any other
+/// disagreement as a typed error.
+///
+/// spec/05 §2.4.1 permits rank-zero operands as the backend's broadcast
+/// idiom. Compiler-generated arithmetic, including Tier 2 lowering, uses it.
+/// Source-level arithmetic and comparisons still require matching surfaces;
+/// #1621 enforces that rule for bounded scalar dtype binders as well. The
+/// comparison evaluator separately requires matching shapes under [05-OP-36].
+///
+/// The shape check below is a third job and belongs to neither: it is what
+/// makes `[4]` against `[3]` report the interpreter's own phrase, which
+/// `an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic`
+/// locks.
 fn broadcast_rank0_operands<'a>(
     lhs: &'a TensorValue,
     rhs: &'a TensorValue,
@@ -545,6 +1190,17 @@ fn splat_rank0(value: &TensorValue, shape: &[usize]) -> TensorValue {
     }
 }
 
+/// Elementwise comparison operands must agree on shape exactly. chelis#1506
+/// removed the rank-0 broadcast from this family: `[05-OP-36]` makes a scalar
+/// beside a tensor a type error, so the lane preservation B2h added for it has
+/// no admitted program left to preserve.
+fn require_matching_comparison_shapes(lhs: &TensorValue, rhs: &TensorValue) -> Result<(), String> {
+    if lhs.shape == rhs.shape {
+        return Ok(());
+    }
+    Err(shape_disagreement(lhs, rhs))
+}
+
 fn binary_elementwise(
     op: ElementwiseBinOp,
     lhs: &TensorValue,
@@ -552,37 +1208,11 @@ fn binary_elementwise(
 ) -> Result<TensorValue, String> {
     let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
     let (lhs, rhs) = (&*lhs, &*rhs);
-    let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
-        let lhs_values = lhs
-            .storage()
-            .to_i64_exact_vec()
-            .expect("sealed bool storage has an exact integer view");
-        let rhs_values = rhs
-            .storage()
-            .to_i64_exact_vec()
-            .expect("sealed bool storage has an exact integer view");
-        let values = match op {
-            // Tier-2 lowers `and` and `or` to these two RISC operations.
-            // They remain logical operations over sealed bool storage; no
-            // numeric-family kernel or raw closure is involved.
-            ElementwiseBinOp::Mul => lhs_values
-                .into_iter()
-                .zip(rhs_values)
-                .map(|(lhs, rhs)| i64::from(lhs != 0 && rhs != 0))
-                .collect(),
-            ElementwiseBinOp::Max => lhs_values
-                .into_iter()
-                .zip(rhs_values)
-                .map(|(lhs, rhs)| i64::from(lhs != 0 || rhs != 0))
-                .collect(),
-            _ => {
-                return Err(format!(
-                    "{}: bool storage cannot enter a numeric IR kernel",
-                    op.name()
-                ));
-            }
-        };
-        return finalize_wide_int(op.name(), Prim::Bool, lhs.shape.clone(), values);
+    let storage = if lhs.prim() == Prim::Bool || rhs.prim() == Prim::Bool {
+        return Err(format!(
+            "{}: bool storage cannot enter a numeric IR kernel",
+            op.name()
+        ));
     } else if lhs.prim().is_integer() {
         let kernel = op.int_op().ok_or_else(|| {
             format!(
@@ -711,11 +1341,118 @@ fn compare_elementwise(
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<TensorValue, String> {
-    let (lhs, rhs) = broadcast_rank0_operands(lhs, rhs)?;
-    let (lhs, rhs) = (&*lhs, &*rhs);
+    require_matching_comparison_shapes(lhs, rhs)?;
     let storage =
         compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
     Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
+}
+
+fn comparison_kernel(kind: ComparisonKind) -> CompareOp {
+    match kind {
+        ComparisonKind::CmpLt | ComparisonKind::Lt => CompareOp::Lt,
+        ComparisonKind::Eq => CompareOp::Eq,
+        ComparisonKind::Neq => CompareOp::Ne,
+        ComparisonKind::Gt => CompareOp::Gt,
+        ComparisonKind::Gte => CompareOp::Gte,
+        ComparisonKind::Lte => CompareOp::Lte,
+    }
+}
+
+fn logical_elementwise(
+    kind: LogicalKind,
+    lhs: &TensorValue,
+    rhs: Option<&TensorValue>,
+) -> Result<TensorValue, String> {
+    if lhs.prim() != Prim::Bool {
+        return Err(format!(
+            "{}: logical operands must have bool storage",
+            kind.surf_name()
+        ));
+    }
+    let lhs_values = lhs
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view");
+    let values = match kind {
+        LogicalKind::Not => lhs_values
+            .into_iter()
+            .map(|value| i64::from(value == 0))
+            .collect(),
+        LogicalKind::And | LogicalKind::Or => {
+            let rhs = rhs.ok_or_else(|| format!("{} requires two operands", kind.surf_name()))?;
+            if rhs.prim() != Prim::Bool {
+                return Err(format!(
+                    "{}: logical operands must have bool storage",
+                    kind.surf_name()
+                ));
+            }
+            require_matching_comparison_shapes(lhs, rhs)?;
+            let rhs_values = rhs
+                .storage()
+                .to_i64_exact_vec()
+                .expect("sealed bool storage has an exact integer view");
+            lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| match kind {
+                    LogicalKind::And => i64::from(lhs != 0 && rhs != 0),
+                    LogicalKind::Or => i64::from(lhs != 0 || rhs != 0),
+                    LogicalKind::Not => unreachable!(),
+                })
+                .collect()
+        }
+    };
+    finalize_wide_int(kind.surf_name(), Prim::Bool, lhs.shape.clone(), values)
+}
+
+fn where_elementwise(
+    condition: &TensorValue,
+    then_value: &TensorValue,
+    else_value: &TensorValue,
+) -> Result<TensorValue, String> {
+    if condition.prim() != Prim::Bool {
+        return Err("where: condition must have bool storage".into());
+    }
+    if then_value.prim() != else_value.prim() {
+        return Err("where: branch dtypes must match exactly".into());
+    }
+    let condition_values = condition
+        .storage()
+        .to_i64_exact_vec()
+        .expect("sealed bool storage has an exact integer view");
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked,
+    // so a condition selecting one branch everywhere yields that branch, and
+    // an empty condition yields an empty result of its own shape.
+    let then_selected = condition_values.iter().any(|selected| *selected != 0);
+    let else_selected = condition_values.contains(&0);
+    let shape_error = || "where: condition and branch shapes must match exactly".to_string();
+    match (then_selected, else_selected) {
+        (true, false) if condition.shape != then_value.shape => return Err(shape_error()),
+        (true, false) => return Ok(then_value.clone()),
+        (false, true) if condition.shape != else_value.shape => return Err(shape_error()),
+        (false, true) => return Ok(else_value.clone()),
+        (false, false) => {
+            return Ok(TensorValue::from_storage(
+                condition.shape.clone(),
+                tensor_from_scalars(then_value.prim(), &[]),
+            ));
+        }
+        (true, true) => {}
+    }
+    if condition.shape != then_value.shape || then_value.shape != else_value.shape {
+        return Err(shape_error());
+    }
+    let writes = condition_values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, selected)| (selected != 0).then_some((index, index)));
+    Ok(TensorValue::from_storage(
+        then_value.shape.clone(),
+        else_value
+            .storage()
+            .reuse_overwrite(then_value.storage(), writes),
+    ))
 }
 
 fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValue, String> {
@@ -725,9 +1462,10 @@ fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValu
     let k = lhs.shape[1];
     assert_eq!(rhs.shape[0], k);
     let n = rhs.shape[1];
+    let len = admit_result("matmul", &[m, n], prim)?;
     let a = lhs.to_f64_lossy_vec();
     let b = rhs.to_f64_lossy_vec();
-    let mut data = vec![0.0; m * n];
+    let mut data = vec![0.0; len];
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0;
@@ -751,12 +1489,15 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
     let k = lhs.shape[rank - 1];
     assert_eq!(rhs.shape[rank - 2], k);
     let n = rhs.shape[rank - 1];
-    let batch_count = batch.iter().product::<usize>();
     let mut out_shape = batch.to_vec();
     out_shape.extend([m, n]);
+    let len = admit_result("matmul", &out_shape, prim)?;
+    // An empty result has no element to compute, and its batch extents'
+    // product need not be representable: `[2^62, 2^62, 0, 0]` is admitted.
+    let batch_count = if len == 0 { 0 } else { len / (m * n) };
     let a = lhs.to_f64_lossy_vec();
     let b = rhs.to_f64_lossy_vec();
-    let mut data = vec![0.0; batch_count * m * n];
+    let mut data = vec![0.0; len];
     for batch_idx in 0..batch_count {
         let lhs_base = batch_idx * m * k;
         let rhs_base = batch_idx * k * n;
@@ -776,7 +1517,7 @@ fn batched_matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<Te
 
 /// Read one gather/scatter index tensor element: exact for the integer
 /// family, the pre-refactor f64 truncation for float storage (index
-/// tensors are int64-typed after ingress, so the float arm is legacy
+/// tensors are i64-typed after ingress, so the float arm is legacy
 /// tolerance for f64-storage fixtures driving untyped index inputs).
 fn index_at(indices: &TensorValue, linear: usize) -> isize {
     match indices.storage().to_raw() {
@@ -785,15 +1526,16 @@ fn index_at(indices: &TensorValue, linear: usize) -> isize {
     }
 }
 
-fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorValue {
+fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> Result<TensorValue, String> {
     assert!(axis < values.shape.len());
     let index_rank = indices.shape.len();
     let mut out_shape = Vec::with_capacity(values.shape.len() - 1 + index_rank);
     out_shape.extend_from_slice(&values.shape[..axis]);
     out_shape.extend_from_slice(&indices.shape);
     out_shape.extend_from_slice(&values.shape[axis + 1..]);
-    let mut picks = Vec::with_capacity(numel(&out_shape));
-    for out_linear in 0..numel(&out_shape) {
+    let out_len = admit_result("gather", &out_shape, values.prim())?;
+    let mut picks = Vec::with_capacity(out_len);
+    for out_linear in 0..out_len {
         let out_index = linear_to_index(out_linear, &out_shape);
         let mut idx_index = Vec::with_capacity(index_rank);
         for pos in 0..index_rank {
@@ -811,7 +1553,10 @@ fn gather(values: &TensorValue, indices: &TensorValue, axis: usize) -> TensorVal
         picks.push(index_to_linear(&value_index, &values.shape));
     }
     // reuse_* contract: gather is element-preserving (section C3).
-    TensorValue::from_storage(out_shape.clone(), values.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape.clone(),
+        values.storage().reuse_gather(&picks),
+    ))
 }
 
 fn scatter_add(
@@ -1145,12 +1890,19 @@ fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usi
 }
 
 /// Build the exact, ordered source-index group for every output element of
-/// an axis reduction. Shape planning remains local; arithmetic does not.
-fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec<Vec<usize>>) {
+/// an axis reduction. Shape planning remains local; arithmetic does not. The
+/// result is admitted as `op`'s at `prim` first: removing an axis of an empty
+/// operand can leave extents whose product is not representable.
+fn axis_reduction_groups(
+    op: &'static str,
+    prim: Prim,
+    input_shape: &[usize],
+    axis: usize,
+) -> Result<(Vec<usize>, Vec<Vec<usize>>), String> {
     assert!(axis < input_shape.len());
     let mut out_shape = input_shape.to_vec();
     let axis_len = out_shape.remove(axis);
-    let out_len = numel(&out_shape);
+    let out_len = admit_result(op, &out_shape, prim)?;
     let mut groups = Vec::with_capacity(out_len);
     for out_flat in 0..out_len {
         let out_index = linear_to_index(out_flat, &out_shape);
@@ -1170,12 +1922,19 @@ fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec
         }
         groups.push(group);
     }
-    (out_shape, groups)
+    Ok((out_shape, groups))
 }
 
 /// Axis reduction through the closed Phase 2 typed kernel.
-fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<TensorValue, String> {
-    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+/// `name` is the primitive's [04-NUM-9] name and `result` its result dtype.
+fn reduce(
+    name: &'static str,
+    input: &TensorValue,
+    axis: usize,
+    op: TensorReduceOp,
+    result: Prim,
+) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(name, result, &input.shape, axis)?;
     let storage =
         reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
@@ -1185,20 +1944,63 @@ fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<Tensor
 /// `better(current_best, candidate)`. Used for Argmax / Argmin.
 ///
 /// Ties are broken by the smallest index (first-seen wins), matching numpy's
-/// default argmax/argmin semantics. The output holds exact int64 indices
+/// default argmax/argmin semantics. The output holds exact i64 indices
 /// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
 /// f64-image detour of chelis#233).
 fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
-    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let name = match op {
+        ArgReduceOp::Argmax => "argmax_reduce",
+        ArgReduceOp::Argmin => "argmin_reduce",
+    };
+    let (out_shape, groups) = axis_reduction_groups(name, Prim::Int64, &input.shape, axis)?;
     let storage =
         arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
+fn is_runtime_mean_div(dag: &Dag, node: &DagNode) -> bool {
+    let [sum_id, divisor_id] = node.inputs.as_slice() else {
+        return false;
+    };
+    let storage_sum = |id| {
+        let node = dag.get(id)?;
+        match node.op {
+            RiscOp::Cast { new_precision }
+                if node.inputs.len() == 1 && new_precision == node.output_type.precision =>
+            {
+                dag.get(node.inputs[0])
+            }
+            _ => Some(node),
+        }
+    };
+    let (Some(sum), Some(divisor)) = (storage_sum(*sum_id), storage_sum(*divisor_id)) else {
+        return false;
+    };
+    let (
+        RiscOp::Sum { axis: sum_axis, .. },
+        RiscOp::Sum {
+            axis: count_axis, ..
+        },
+    ) = (&sum.op, &divisor.op)
+    else {
+        return false;
+    };
+    if sum_axis != count_axis {
+        return false;
+    }
+    let Some(ones) = divisor.inputs.first().and_then(|input| dag.get(*input)) else {
+        return false;
+    };
+    matches!(
+        ones.op,
+        RiscOp::Const { value } if value.as_f64_lossy() == 1.0
+    )
+}
+
 /// [05-OP-29] multi-axis bool count. Source elements are partitioned into
 /// result groups by removing the selected coordinates. Each group is filled
 /// by scanning the input in its original row-major order. Arithmetic and the
-/// canonical adjacent-pair checked-int64 tree live only in the typed kernel.
+/// canonical adjacent-pair checked-i64 tree live only in the typed kernel.
 pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     if axes.is_empty()
         || axes.iter().any(|&axis| axis >= input.shape.len())
@@ -1216,7 +2018,7 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
         .enumerate()
         .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
         .collect();
-    let mut groups = vec![Vec::<usize>::new(); numel(&out_shape)];
+    let mut groups = vec![Vec::<usize>::new(); admit_result("count", &out_shape, Prim::Int64)?];
     for flat in 0..input.len() {
         let input_coord = linear_to_index(flat, &input.shape);
         let output_coord: Vec<usize> = input_coord
@@ -1239,10 +2041,13 @@ fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
     TensorValue::from_storage(shape, input.storage().clone())
 }
 
-fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
+/// A permutation keeps the element count but not the stride products: an
+/// empty `[2^62, 2^62, 0]` admits and its `[0, 2^62, 2^62]` does not, so the
+/// result is admitted as the C runtime's permutation plan admits it.
+fn permute(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     assert_eq!(axes.len(), input.shape.len());
     let out_shape: Vec<usize> = axes.iter().map(|&axis| input.shape[axis]).collect();
-    let out_len = numel(&out_shape);
+    let out_len = admit_result("permute", &out_shape, input.prim())?;
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
         let out_index = linear_to_index(flat_idx, &out_shape);
@@ -1253,12 +2058,22 @@ fn permute(input: &TensorValue, axes: &[usize]) -> TensorValue {
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: permute is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
-fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>) -> TensorValue {
+/// `op` is the expansion's primitive, `expand` or `insert`, whose result is
+/// admitted before its index map is built.
+fn expand(
+    op: &'static str,
+    input: &TensorValue,
+    axis: usize,
+    out_shape: Vec<usize>,
+) -> Result<TensorValue, String> {
     assert!(axis <= input.shape.len());
-    let out_len = numel(&out_shape);
+    let out_len = admit_result(op, &out_shape, input.prim())?;
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
         let out_index = linear_to_index(flat_idx, &out_shape);
@@ -1274,13 +2089,16 @@ fn expand(input: &TensorValue, axis: usize, _size: usize, out_shape: Vec<usize>)
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: expand is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
 fn one_hot(indices: &TensorValue, vocab: usize, prim: Prim) -> Result<TensorValue, String> {
     let mut out_shape = indices.shape.clone();
     out_shape.push(vocab);
-    let mut out = vec![0i64; numel(&out_shape)];
+    let mut out = vec![0i64; admit_result("one_hot", &out_shape, prim)?];
     for index_linear in 0..indices.len() {
         let class = index_at(indices, index_linear);
         assert!(
@@ -1322,7 +2140,7 @@ fn resolve_eval_bound(
             }
             let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
                 format!(
-                    "movement bound at node {}: bound-source input slot {i} must be int64",
+                    "movement bound at node {}: bound-source input slot {i} must be i64",
                     node.id.0
                 )
             })?;
@@ -1401,19 +2219,69 @@ fn resolve_eval_pairs(
         .collect()
 }
 
+/// The stride operation's runtime domain failure, in the compiled lane's
+/// exact words. The signed step is checked against this domain before any
+/// unsigned conversion, extent division, allocation, or element access.
+const STRIDE_DOMAIN_TRAP: &str = "Domain: stride step must be positive\n\
+                                  numeric trap: domain in stride at i64";
+
+fn resolve_eval_stride_step(
+    step: &RtDim,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    input_extent: usize,
+) -> Result<std::num::NonZeroUsize, String> {
+    let resolved = match step {
+        RtDim::Lit(value) => *value,
+        RtDim::Node(i) => {
+            let src = values.get(&node.inputs[*i]).ok_or_else(|| {
+                format!(
+                    "stride step at node {}: missing value for step-source input slot {i}",
+                    node.id.0
+                )
+            })?;
+            if src.is_empty() {
+                return Err(format!(
+                    "stride step at node {}: step-source input slot {i} is empty",
+                    node.id.0
+                ));
+            }
+            let raw = src.storage().scalar_at(0).as_i64_exact().ok_or_else(|| {
+                format!(
+                    "stride step at node {}: step-source input slot {i} must be i64",
+                    node.id.0
+                )
+            })?;
+            if raw <= 0 {
+                return Err(STRIDE_DOMAIN_TRAP.to_string());
+            }
+            usize::try_from(raw).map_err(|_| {
+                format!(
+                    "stride step at node {}: step-source input slot {i} exceeds host extent capacity: {raw}",
+                    node.id.0
+                )
+            })?
+        }
+        RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => {
+            resolve_eval_bound(step, node, values, input_extent)?
+        }
+    };
+    std::num::NonZeroUsize::new(resolved).ok_or_else(|| STRIDE_DOMAIN_TRAP.to_string())
+}
+
 /// chelis#616: resolve a `Stride` step list against the input shape.
 fn resolve_eval_strides(
     strides: &[RtDim],
     node: &DagNode,
     values: &UnordMap<NodeId, TensorValue>,
     input_shape: &[usize],
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<std::num::NonZeroUsize>, String> {
     strides
         .iter()
         .enumerate()
         .map(|(axis, b)| {
             let extent = input_shape.get(axis).copied().unwrap_or(0);
-            resolve_eval_bound(b, node, values, extent)
+            resolve_eval_stride_step(b, node, values, extent)
         })
         .collect()
 }
@@ -1424,13 +2292,23 @@ fn pad(
     fill: chelis_types::ScalarValue,
 ) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
-    let out_shape: Vec<usize> = input
-        .shape
+    // The padded extents are the C runtime's `ShapeMetadata::padded`, so an
+    // extent past i64 is its `Overflow`, before anything is allocated.
+    let (before, after): (Vec<usize>, Vec<usize>) = padding.iter().copied().unzip();
+    let dtype = input
+        .prim()
+        .runtime_dtype()
+        .map_err(|error| error.to_string())?;
+    let padded = i64_extents(&input.shape)
+        .and_then(|extents| ShapeMetadata::contiguous(&extents, dtype))
+        .and_then(|metadata| metadata.padded(&i64_extents(&before)?, &i64_extents(&after)?))
+        .map_err(|error| admission_trap("pad", &error))?;
+    let out_shape: Vec<usize> = padded
+        .shape()
         .iter()
-        .zip(padding.iter())
-        .map(|(dim, (before, after))| dim + before + after)
-        .collect();
-    let mut map: Vec<Option<usize>> = vec![None; numel(&out_shape)];
+        .map(|&extent| usize::try_from(extent).map_err(|_| "padded extent exceeds usize"))
+        .collect::<Result<_, _>>()?;
+    let mut map: Vec<Option<usize>> = vec![None; admit_result("pad", &out_shape, input.prim())?];
     for flat_idx in 0..input.len() {
         let in_index = linear_to_index(flat_idx, &input.shape);
         let out_index: Vec<usize> = in_index
@@ -1455,7 +2333,39 @@ fn pad(
     ))
 }
 
-fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
+/// The out-of-domain `shrink` bound rejection, in the compiled lane's exact
+/// words.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1 makes "a shrink range overshoot"
+/// one of the runtime-bound errors that "are validated in every execution mode
+/// with matching language errors", so this lane does not get to invent its own
+/// text for it. The compiled lane reaches the same rejection through
+/// `chelis_tensor_affine_plan`: `ShapeMetadata::shrunk`
+/// (`crates/chelis-abi/src/metadata.rs`) answers a negative start, an inverted
+/// pair, or an end past the operand extent with ONE `Domain` message, and
+/// `affine_result` (`crates/chelis-runtime/src/lib.rs`) prints that message and
+/// then [04-NUM-9]'s trap line before exiting. These are those two lines,
+/// verbatim and in that order.
+///
+/// The three conditions share one message because the compiled lane gives them
+/// one message. Splitting them here to name the axis would read better in
+/// isolation and would be a lane divergence in exactly the sentence section
+/// 2.4.1 writes, so the compiled lane's wording wins.
+///
+/// The eval lane's reporter prefixes `error: ` to the first line of every
+/// diagnostic it raises, as it does to the extent guard's [04-NUM-9] line; the
+/// message body below is what the two lanes hold in common. Where this lane
+/// raises the diagnostic DIRECTLY that prefix is the whole of the difference.
+/// A host transform adds its own wrapper above it: `grad` renders
+/// ``host runtime `grad` evaluation failed: `` before this text
+/// (`chelis-compiler-api/src/runtime/transforms.rs`). That wrapper is
+/// pre-existing and uniform over every error it carries, so chelis#1797
+/// neither introduces nor closes it; the text is merely newly reachable there,
+/// because the same program used to panic. The exit status agrees either way.
+const SHRINK_DOMAIN_TRAP: &str = "Domain: shrink bounds outside input extent\n\
+                                  numeric trap: domain in shrink at i64";
+
+fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> Result<TensorValue, String> {
     assert_eq!(bounds.len(), input.shape.len());
     // chelis#368: defensive backstop for the `SHRINK_TO_END` full-axis
     // sentinel (the Pad adjoint of the differentiable `concat` over an
@@ -1466,38 +2376,30 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
     // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
     // "to the end of this axis", which is exactly `input.shape[axis]` — rather
     // than letting `end - start = usize::MAX` overflow `numel`.
-    // chelis#523: loud bounds clamp. `verify`'s C10 shrink check runs BEFORE
-    // `bind_symbolic_dims` and skips symbolic axes, so a shrink whose `end`
-    // exceeds the (now concrete) input extent, or whose `start > end`, could
-    // reach here and either underflow `end - start` (usize) or read
-    // out-of-bounds in the copy loop below (a silent wrong gradient on higher
-    // rank, where the flat index can alias a valid slot). This is not an active
-    // wrong-result today (a type-checker symbol-identity invariant keeps it
-    // unreachable), but a future pass that rewrites a Stride/Shrink's input vs
-    // output symbols independently would break that invariant. Fail loud here
-    // rather than silently corrupt — do NOT clamp to a valid range (that would
-    // hide the producing-pass bug).
-    let out_shape: Vec<usize> = input
-        .shape
-        .iter()
-        .zip(bounds.iter())
-        .enumerate()
-        .map(|(axis, (extent, (start, end)))| {
-            let end = if *end == SHRINK_TO_END { *extent } else { *end };
-            assert!(
-                *start <= end,
-                "eval::shrink: axis {axis} bound start {start} exceeds end {end} \
-                 (input extent {extent}); the producing IR pass emitted an inverted \
-                 shrink (chelis#523)"
-            );
-            assert!(
-                end <= *extent,
-                "eval::shrink: axis {axis} bound end {end} exceeds input extent {extent}; \
-                 out-of-bounds shrink (chelis#523)"
-            );
-            end - start
-        })
-        .collect();
+    // chelis#523: out-of-domain bounds. `verify`'s C10 shrink check runs BEFORE
+    // `bind_symbolic_dims` and skips symbolic axes, and
+    // `verify_bound_movement_node` can only check a compile-time `(Lit, Lit)`
+    // pair, so a shrink whose `end` exceeds the (now concrete) input extent, or
+    // whose `start > end`, reaches here and would either underflow
+    // `end - start` (usize) or read out-of-bounds in the copy loop below (a
+    // silent wrong gradient on higher rank, where the flat index can alias a
+    // valid slot). Do NOT clamp to a valid range: that would hide the producing
+    // pass's bug.
+    //
+    // chelis#1797: this rejection is a typed `Err`, not an `assert!`. A runtime
+    // (`RtDim::Node`) end is a perfectly ordinary user-reachable value - the
+    // issue's reproducer computes `shape(x, 0) + 3` - so the answer to it is
+    // the language error section 2.4.1 names, which the lane boundary renders
+    // as a diagnostic. A panic was neither that error nor any other, and it
+    // exited 101 where the compiled lane exits 1.
+    let mut out_shape: Vec<usize> = Vec::with_capacity(input.shape.len());
+    for (extent, (start, end)) in input.shape.iter().zip(bounds.iter()) {
+        let end = if *end == SHRINK_TO_END { *extent } else { *end };
+        if *start > end || end > *extent {
+            return Err(SHRINK_DOMAIN_TRAP.to_string());
+        }
+        out_shape.push(end - start);
+    }
     let out_len = numel(&out_shape);
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
@@ -1510,22 +2412,19 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: shrink is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
-fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
+fn stride(input: &TensorValue, strides: &[std::num::NonZeroUsize]) -> TensorValue {
     assert_eq!(strides.len(), input.shape.len());
     let out_shape: Vec<usize> = input
         .shape
         .iter()
         .zip(strides.iter())
-        .map(|(dim, step)| {
-            if *step == 0 {
-                *dim
-            } else {
-                (*dim).div_ceil(*step)
-            }
-        })
+        .map(|(dim, step)| (*dim).div_ceil(step.get()))
         .collect();
     let out_len = numel(&out_shape);
     let mut picks = Vec::with_capacity(out_len);
@@ -1534,7 +2433,7 @@ fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
         let in_index: Vec<usize> = out_index
             .iter()
             .zip(strides.iter())
-            .map(|(idx, step)| idx * step.max(&1))
+            .map(|(idx, step)| idx * step.get())
             .collect();
         picks.push(index_to_linear(&in_index, &input.shape));
     }
@@ -1608,7 +2507,23 @@ fn validate_shape_against_type(
 /// silent out-of-bounds read in the evaluator. Scoped to shrink/stride bounds
 /// on live nodes only: the full structural `verify` would reject the dead
 /// symbolic-dim-source Loads that root-scoped eval keeps alive.
-fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), String> {
+/// The post-bind movement-bound failure of each live node. Each is raised
+/// when its node's turn comes, so an earlier node's trap, a draw's rate
+/// validation among them, is reported first as the sequential reading orders
+/// it.
+fn bound_movement_failures(dag: &Dag, live: Option<&[bool]>) -> UnordMap<NodeId, String> {
+    dag.nodes()
+        .iter()
+        .filter(|node| live.is_none_or(|mask| mask.get(node.id.0).copied().unwrap_or(false)))
+        .filter_map(|node| {
+            verify_bound_movement_node(dag, node)
+                .err()
+                .map(|error| (node.id, error))
+        })
+        .collect()
+}
+
+fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
     fn known_size(dim: &DimInfo) -> Option<usize> {
         match dim {
             DimInfo::Lit(n) => Some(*n),
@@ -1616,67 +2531,93 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
             DimInfo::Named(_, None) => None,
         }
     }
-    for node in dag.nodes() {
-        if let Some(mask) = live
-            && !mask.get(node.id.0).copied().unwrap_or(false)
-        {
-            continue;
-        }
-        let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
-            Some(input) => &input.output_type.dims,
-            None => continue,
-        };
-        match &node.op {
-            RiscOp::Shrink { bounds } => {
-                for (axis, (start, end)) in bounds.iter().enumerate() {
-                    // chelis#616: a `ToEnd` sentinel is resolved to the axis
-                    // extent by `bind_symbolic_dims`, and a runtime `Node` bound
-                    // is validated by the evaluator (it needs the input values).
-                    // Only compile-time `(Lit, Lit)` bounds are statically
-                    // checkable here.
-                    let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
-                        continue;
-                    };
-                    if start > end {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
+    let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
+        Some(input) => &input.output_type.dims,
+        None => return Ok(()),
+    };
+    match &node.op {
+        RiscOp::Shrink { bounds } => {
+            for (axis, (start, end)) in bounds.iter().enumerate() {
+                // chelis#616: a `ToEnd` sentinel is resolved to the axis
+                // extent by `bind_symbolic_dims`, and a runtime `Node` bound
+                // is validated by the evaluator (it needs the input values).
+                // Only compile-time `(Lit, Lit)` bounds are statically
+                // checkable here.
+                //
+                // chelis#1797: "validated by the evaluator" now means what it
+                // says. The runtime case is checked in `shrink` itself, where
+                // the resolved bounds and the operand's realized shape both
+                // exist, and it returns `SHRINK_DOMAIN_TRAP` - section 2.4.1's
+                // overshoot error in the compiled lane's words - rather than
+                // asserting. The gap this comment used to describe was that
+                // the sentence was true of the check's LOCATION and false of
+                // its outcome.
+                let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
+                    continue;
+                };
+                if start > end {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
                              (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                    if let Some(in_size) = input_dims.get(axis).and_then(known_size)
-                        && end > in_size
-                    {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: end {end} > input extent \
+                        node.id.0
+                    ));
+                }
+                if let Some(in_size) = input_dims.get(axis).and_then(known_size)
+                    && end > in_size
+                {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: end {end} > input extent \
                              {in_size} (chelis#523)",
-                            node.id.0
-                        ));
-                    }
+                        node.id.0
+                    ));
                 }
             }
-            RiscOp::Stride { strides } => {
-                for (axis, step) in strides.iter().enumerate() {
-                    if step.as_lit() == Some(0) {
-                        return Err(format!(
-                            "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                }
-            }
-            _ => {}
         }
+        RiscOp::Stride { strides } => {
+            for step in strides {
+                if step.as_lit() == Some(0) {
+                    return Err(STRIDE_DOMAIN_TRAP.to_string());
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
 
+/// The pre-eval bindings for every runtime extent a caller supplies.
+///
+/// chelis#1566: this reads the scoped derivation
+/// ([`crate::axis_sources::derive_dim_witnesses`]), which is the same
+/// derivation the C and HIP prologues declare and guard from, so the three
+/// lanes cannot disagree about which axes are one extent. The legacy
+/// name-keyed grouping it replaces put two independent signatures that merely
+/// SPELL a binder `seq` into one group and rejected a correct merged kernel;
+/// `split_by_scope` separates them by the results they reach.
+///
+/// **One structural limit, stated rather than papered over.** The map
+/// [`crate::dag::bind_symbolic_dims`] consumes is keyed by NAME, so two
+/// scopes of one name that resolve to DIFFERENT extents cannot both be
+/// represented. The honest rule is therefore: bind the name once when the
+/// scopes agree, and bind nothing for it when they disagree. Nothing is lost
+/// silently - an unbound multi-scope name leaves every axis carrying it to be
+/// computed from actual values, and a live node that reads the name BY VALUE
+/// (a `Reshape` target's `RtDim::Sym`) still refuses in `bind_symbolic_dims`.
+/// The structural fix is a per-scope rename and belongs to the claim
+/// transport, not here.
+///
+/// The second return value is exactly the names this function deliberately
+/// leaves for run-time binding: names whose supplied scopes disagree, plus a
+/// name whose selected origin is a local scalar input to its declaring
+/// operation. The former cannot be re-derived because disagreement belongs
+/// to the supplied values; the latter is explicit in `dim_extent_origins` and
+/// does not exist until that operation executes. Neither case excuses an
+/// omitted external binding.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
-    required_symbols: &UnordSet<String>,
-    live: Option<&[bool]>,
-) -> Result<UnordMap<String, usize>, String> {
+    selection: &SymbolicInputSelection,
+) -> Result<(UnordMap<String, usize>, UnordSet<String>), String> {
     let mut bindings = UnordMap::new();
     let mut load_types = UnordMap::<String, TensorType>::new();
 
@@ -1694,6 +2635,116 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
+    let read_axis = |label: &str, axis: usize, claim: &str| -> Result<usize, String> {
+        let value = inputs.get(label).ok_or_else(|| {
+            format!("missing required input `{label}` for symbolic dimension `{claim}`")
+        })?;
+        value.shape.get(axis).copied().ok_or_else(|| {
+            format!("input `{label}` is missing axis {axis} for symbolic dimension `{claim}`")
+        })
+    };
+
+    let mut per_scope: Vec<(String, usize)> = Vec::new();
+    for choice in &selection.witnesses {
+        let SymbolicWitnesses {
+            name,
+            canonical: (canonical_label, canonical_axis),
+            remaining,
+        } = choice.as_ref().map_err(Clone::clone)?;
+        let value = read_axis(canonical_label, *canonical_axis, name)?;
+        for (label, axis) in remaining {
+            let other = read_axis(label, *axis, name)?;
+            if other != value {
+                return Err(format!(
+                    "symbolic dimension `{name}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {label}[{axis}] = {other}",
+                ));
+            }
+        }
+        per_scope.push((name.clone(), value));
+    }
+    let mut folded: Vec<(String, Option<usize>)> = Vec::new();
+    for (name, value) in per_scope {
+        match folded.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, resolved)) => {
+                if *resolved != Some(value) {
+                    *resolved = None;
+                }
+            }
+            None => folded.push((name, Some(value))),
+        }
+    }
+    let mut deliberately_unbound = UnordSet::new();
+    for (name, value) in folded {
+        match value {
+            Some(value) => {
+                bindings.insert(name, value);
+            }
+            None => {
+                deliberately_unbound.insert(name);
+            }
+        }
+    }
+
+    // Class-answered names were excluded by the same selection consumed above.
+    // In particular fallback cannot overrule deliberately differing scopes.
+    for (name, origin) in &selection.fallback {
+        match *origin {
+            crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
+                let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                    continue;
+                };
+                // Absence is not an error here: the name may belong to a dead
+                // scope the caller supplied nothing for, and a live one that
+                // genuinely needs it fails loudly in `bind_symbolic_dims`.
+                if let Some(value) = inputs.get(label.as_str())
+                    && let Some(extent) = value.shape.get(axis)
+                {
+                    bindings.insert(name.clone(), *extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::Literal(extent) => {
+                if let Ok(extent) = usize::try_from(extent) {
+                    bindings.insert(name.clone(), extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::OpComputed { .. } => {}
+            crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {
+                // A node-valued reshape/expand target has no entry value to
+                // bind. `bind_symbolic_dims` may leave its output type
+                // symbolic; `op_declared_axes_by_node` binds the exact
+                // observed extent immediately after the owner executes.
+                deliberately_unbound.insert(name.clone());
+            }
+        }
+    }
+
+    Ok((bindings, deliberately_unbound))
+}
+
+#[derive(Default)]
+struct SymbolicInputSelection {
+    witnesses: Vec<Result<SymbolicWitnesses, String>>,
+    fallback: Vec<(String, crate::axis_sources::ExtentOrigin)>,
+    required_shape_inputs: UnordSet<String>,
+}
+
+struct SymbolicWitnesses {
+    name: String,
+    canonical: (String, usize),
+    remaining: Vec<(String, usize)>,
+}
+
+/// Extract the inference's structural choice once. Errors are pending actions:
+/// ingress validation and provider effects still precede inference diagnostics.
+fn select_symbolic_inputs(
+    dag: &Dag,
+    required_symbols: &UnordSet<String>,
+    live: Option<&[bool]>,
+) -> SymbolicInputSelection {
+    let mut selected = SymbolicInputSelection::default();
+    if required_symbols.is_empty() {
+        return selected;
+    }
     let live_loads = dag
         .nodes()
         .iter()
@@ -1703,116 +2754,102 @@ fn infer_symbolic_bindings_from_inputs(
             _ => None,
         })
         .collect::<UnordSet<_>>();
-
-    for binding in symbolic_bindings(dag)
-        .into_iter()
-        .filter(|binding| required_symbols.contains(&binding.name))
-    {
-        let mut occurrences = std::iter::once(&binding.canonical)
-            .chain(binding.others.iter())
-            .collect::<Vec<_>>();
-        let has_live_op_declaration = occurrences.iter().any(|occurrence| {
-            matches!(
-                occurrence.source,
-                SymbolicDimSource::OpDeclared { node, .. }
-                    if live.is_none_or(|mask| mask[node.0])
-            )
-        });
-        let live_load_occurrences = occurrences
+    let op_declared = crate::dag::op_declared_dim_names(dag);
+    let mut claimed = UnordSet::new();
+    for class in crate::axis_sources::derive_dim_witnesses(dag) {
+        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+            continue;
+        };
+        if !required_symbols.contains(&name) {
+            continue;
+        }
+        let mut witnesses = class
+            .members
             .iter()
-            .copied()
-            .filter(|occurrence| {
-                matches!(
-                    &occurrence.source,
-                    SymbolicDimSource::Load { input_label, .. }
-                        if live_loads.contains(input_label.as_str())
-                )
+            .filter_map(|member| {
+                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                    return None;
+                };
+                Some((label.as_str(), axis))
             })
             .collect::<Vec<_>>();
-        if !live_load_occurrences.is_empty() {
-            occurrences = live_load_occurrences;
-        } else if has_live_op_declaration {
-            // chelis#616: a live op-declared dim has no external input;
-            // the evaluator resolves it from the owning op's actual values.
+        let has_live_local_source = class.members.iter().any(|member| {
+            matches!(
+                member.source,
+                crate::axis_sources::AxisSource::OpComputed { .. }
+                    | crate::axis_sources::AxisSource::ScalarInput { .. }
+            ) && live.is_none_or(|mask| mask[member.node.0])
+        });
+        let live_witnesses = witnesses
+            .iter()
+            .copied()
+            .filter(|(label, _)| live_loads.contains(label))
+            .collect::<Vec<_>>();
+        if !live_witnesses.is_empty() {
+            witnesses = live_witnesses;
+        } else if has_live_local_source && op_declared.contains(&name) {
+            claimed.insert(name);
             continue;
         } else {
-            // chelis#351: a shape-only dependency Load can be outside the
-            // value-live mask. With exactly one declaration its shape is the
-            // required source. Two dead declarations reusing the same symbol
-            // are indistinguishable after lowering; accepting whichever input
-            // happens to be supplied lets an unrelated declaration satisfy a
-            // live shape obligation (chelis#991). Fail closed on that
-            // ambiguity instead of guessing from caller inputs.
-            let mut dead_loads = occurrences
+            let mut dead_loads = witnesses
                 .iter()
-                .filter_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
+                .map(|(label, _)| *label)
                 .collect::<Vec<_>>();
             dead_loads.sort_unstable();
             dead_loads.dedup();
             if dead_loads.len() > 1 {
-                return Err(format!(
-                    "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
-                    dead_loads, binding.name
-                ));
+                selected.witnesses.push(Err(format!(
+                    "ambiguous dead-load sources {dead_loads:?} for live symbolic dimension `{name}`"
+                )));
+                // Later witnesses/fallback cannot authorize initialization:
+                // inference will stop at this action, after earlier reads.
+                return selected;
             }
         }
-
-        let Some((canonical_label, canonical_axis)) =
-            occurrences
-                .iter()
-                .find_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, axis } => Some((input_label, axis)),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
-        else {
+        let Some((canonical, remaining)) = witnesses.split_first() else {
             continue;
         };
-        let canonical_value = inputs.get(canonical_label).ok_or_else(|| {
-            format!(
-                "missing required input `{canonical_label}` for symbolic dimension `{}`",
-                binding.name
-            )
-        })?;
-        let value = *canonical_value.shape.get(*canonical_axis).ok_or_else(|| {
-            format!(
-                "input `{canonical_label}` is missing axis {canonical_axis} for symbolic \
-                 dimension `{}`",
-                binding.name
-            )
-        })?;
-        bindings.insert(binding.name.clone(), value);
-
-        for occurrence in occurrences.into_iter().skip(1) {
-            // Op-declared guard sites are checked at run time by the C
-            // backend and from actual values by the evaluator, not here.
-            let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
-                continue;
-            };
-            let other_value = inputs.get(input_label).ok_or_else(|| {
-                format!(
-                    "missing required input `{input_label}` for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
-            let other = *other_value.shape.get(*axis).ok_or_else(|| {
-                format!(
-                    "input `{input_label}` is missing axis {axis} for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
-            if other != value {
-                return Err(format!(
-                    "symbolic dimension `{}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {input_label}[{axis}] = {other}",
-                    binding.name,
-                ));
+        claimed.insert(name.clone());
+        for (label, _) in &witnesses {
+            if !live_loads.contains(label) {
+                selected.required_shape_inputs.insert((*label).to_owned());
             }
         }
+        selected.witnesses.push(Ok(SymbolicWitnesses {
+            name,
+            canonical: (canonical.0.to_owned(), canonical.1),
+            remaining: remaining
+                .iter()
+                .map(|(label, axis)| ((*label).to_owned(), *axis))
+                .collect(),
+        }));
     }
-
-    Ok(bindings)
+    selected.fallback = crate::axis_sources::dim_extent_origins(dag)
+        .into_iter()
+        .filter(|(name, _)| required_symbols.contains(name) && !claimed.contains(name))
+        .collect();
+    // Observe the ACTUAL binder traversal only when an uncovered external
+    // source could demand an otherwise unselected input.
+    let mut prebinding = None;
+    for (name, origin) in &selected.fallback {
+        let crate::axis_sources::ExtentOrigin::ExternalAxis { load, .. } = origin else {
+            continue;
+        };
+        let Some(RiscOp::Load { name: label }) = dag.get(*load).map(|node| &node.op) else {
+            continue;
+        };
+        if !live_loads.contains(label.as_str())
+            && prebinding
+                .get_or_insert_with(|| crate::dag::required_prebinding_symbols(dag))
+                .contains(name)
+        {
+            selected
+                .required_shape_inputs
+                .insert(label.as_str().to_owned());
+        }
+    }
+    selected
 }
 
 fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
@@ -1879,12 +2916,14 @@ fn resolve_load_inputs<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     symbolic_dim_load_inputs: &UnordSet<&str>,
+    required_shape_inputs: &UnordSet<String>,
     mut load_input: F,
-) -> Result<UnordMap<String, TensorValue>, String>
+) -> Result<(UnordMap<String, TensorValue>, Vec<NodeId>), String>
 where
-    F: FnMut(&str) -> Option<TensorValue>,
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     let mut inputs = UnordMap::new();
+    let mut resolved_loads = Vec::new();
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -1900,9 +2939,17 @@ where
         if inputs.contains_key(name.as_str()) {
             continue;
         }
-        match load_input(name.as_str()) {
+        let demand = if is_live {
+            TensorInputDemand::Selected
+        } else if required_shape_inputs.contains(name.as_str()) {
+            TensorInputDemand::RequiredShape
+        } else {
+            TensorInputDemand::AvailableShape
+        };
+        match load_input(name.as_str(), demand)? {
             Some(value) => {
                 inputs.insert(name.as_str().to_string(), value);
+                resolved_loads.push(node.id);
             }
             None if strict_loads && is_live => {
                 return Err(format!("missing required input `{name}`"));
@@ -1910,12 +2957,80 @@ where
             None => {}
         }
     }
-    Ok(inputs)
+    Ok((inputs, resolved_loads))
 }
 
+/// The nodes `roots` need, with every observable root
+/// ([`crate::dag::TrapSeeds::is_observable_root`]) of a declaration the selection enters.
 fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
+    let unselected = dag.outside_selection(roots);
+    live_mask_from(dag, roots.to_vec(), &unselected)
+}
+
+/// The names of the `Load`s an evaluation of `roots` reads: every `Load` in
+/// its live set ([`live_mask_for_roots`]), which is the roots' value graphs
+/// plus every observable root of a declaration the selection enters
+/// (spec/06 §5.2). This is exactly the set `resolve_load_inputs` demands, so
+/// an input router that reads it can never filter away a binding the
+/// evaluator then reports missing: a discarded trapping node's parameter is
+/// required although no root's value reads it.
+pub fn required_load_names(dag: &Dag, roots: &[NodeId]) -> BTreeSet<String> {
+    let live = live_mask_for_roots(dag, roots);
+    dag.nodes()
+        .iter()
+        .filter(|node| live[node.id.0])
+        .filter_map(|node| match &node.op {
+            RiscOp::Load { name } => Some(name.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether an evaluation of `roots` runs a node none of their values reads:
+/// an observable root ([`crate::dag::TrapSeeds::is_observable_root`]) of a
+/// declaration the selection enters that sits outside every root's value
+/// graph, such as the trap of a discarded `let` (spec/06 §5.2, spec/03
+/// §4.4), or a node only such a root reads. It compares the evaluator's own
+/// live set ([`live_mask_for_roots`]) with the roots' value graphs.
+///
+/// A lane that implements a graph by its roots' values alone, returning a
+/// parameter unchanged or calling one runtime routine for a recognized root
+/// operation, agrees with the evaluator exactly when this is false; where it
+/// is true that lane would drop the discarded work, and with it the trap.
+pub fn runs_discarded_work(dag: &Dag, roots: &[NodeId]) -> bool {
+    let live = live_mask_for_roots(dag, roots);
+    let values = dependency_closure(dag, roots.to_vec());
+    live.iter()
+        .zip(&values)
+        .any(|(live, value)| *live && !*value)
+}
+
+fn live_mask_from(dag: &Dag, mut stack: Vec<NodeId>, unselected: &[bool]) -> Vec<bool> {
+    // chelis#2368: effect nodes are live because they are effects, not
+    // because a value reaches them; chelis#2440 and chelis#2413: so is a
+    // potentially trapping node, numeric or random. One predicate names the
+    // class ([`crate::dag::TrapSeeds::is_observable_root`]).
+    //
+    // chelis#2476 scopes it to the selection ([`Dag::outside_selection`]).
+    // An abort, or a trap, in a declaration this evaluation does not enter is
+    // not its concern, so firing it would abort on behalf of code the caller
+    // excluded, and would demand that declaration's parameters as inputs. The
+    // seed still reaches every observable root of the declarations the
+    // selection enters, including the discarded ones, which is what
+    // [05-OP-68] is about.
+    let seeds = dag.trap_seeds();
+    stack.extend(
+        dag.nodes()
+            .iter()
+            .filter(|node| seeds.is_observable_root(node) && !unselected[node.id.0])
+            .map(|node| node.id),
+    );
+    dependency_closure(dag, stack)
+}
+
+/// The nodes `stack` reaches through everything a node reads to run.
+fn dependency_closure(dag: &Dag, mut stack: Vec<NodeId>) -> Vec<bool> {
     let mut live = vec![false; dag.len()];
-    let mut stack: Vec<NodeId> = roots.to_vec();
     while let Some(id) = stack.pop() {
         if live[id.0] {
             continue;
@@ -1923,92 +3038,226 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
         live[id.0] = true;
         if let Some(node) = dag.get(id) {
             stack.extend(node.inputs.iter().copied());
-            // chelis#616: a runtime-dim declarer kept via `shape_deps` must
-            // actually EVALUATE so the mid-evaluation binding sees its
-            // extent (the consumer reads the dim, not the value).
+            // chelis#616: a runtime-dim declarer kept via `shape_deps`
+            // must actually EVALUATE so the mid-evaluation binding sees
+            // its extent (the consumer reads the dim, not the value).
             stack.extend(node.shape_deps.iter().copied());
+            stack.extend(node.result_claim_deps.iter().copied());
+            // A node reads its activation to decide whether it checks.
+            stack.extend(node.owner.activation);
         }
     }
     live
 }
 
-/// The eval lane's entry guards: for each `Entry`-placed class, the claim
-/// name and the two input-tensor axes a guard compares, named by input label
-/// so the caller's own bindings answer them.
+/// The node selection an evaluation runs under, and which of its values the
+/// caller needs back.
 ///
-/// One derivation, three lanes (C2.7): this reads the same
-/// `derive_runtime_dim_classes` and the same `member_load_axis` the C and HIP
-/// emitters read, so a claim cannot be identified one way for a compiled
-/// program and another way for an evaluated one.
-type EntryDimGuard = (String, (String, usize), (String, usize));
-
-/// The unit-extent claims this graph checks at entry, as
-/// `(input label, axis)` pairs to read.
+/// chelis#828 work class 1. The evaluator used to hold every executed node's
+/// tensor until it returned, so peak host memory tracked the number of
+/// EXECUTED NODES rather than the number of tensors simultaneously reachable.
+/// A deep feed-forward model therefore paid for every activation it had ever
+/// computed, which is why an operator-complete model is OOM-killed under
+/// `chelis eval` (`Chelis-Lang/hydronnx#54`).
 ///
-/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
-/// canonical witness to carry: the guard compares one read against a constant.
-/// Everything else is shared with the class path, `derive_unit_extent_claims`
-/// and `member_load_axis` included, so a claim cannot be identified one way
-/// for a compiled program and another way for an evaluated one.
-fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
-    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
-        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
-        _ => None,
-    };
-    let mut guards = Vec::new();
-    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
-        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
-            continue;
-        }
-        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
-            continue;
-        };
-        let Some(name) = label(load) else {
-            continue;
-        };
-        guards.push((name, axis));
-    }
-    guards
+/// The distinction this enum draws is the one the caller already makes. An
+/// entrypoint that NAMES ITS ROOTS has said which values are results, so it
+/// asks for [`EvaluationScope::Roots`] and the evaluation loop drops every
+/// other value once the last step that reads it has run. An entrypoint that
+/// names no roots cannot know what to keep, so it keeps everything: that is
+/// the all-values API the tracker preserves, and `eval_tensor`,
+/// `eval_tensor_with`, `eval_tensor_with_strict` and the segment entrypoint
+/// all use it.
+///
+/// The live mask travels with the selection rather than beside it, so a run
+/// cannot mask off one set of nodes while retaining the roots of another.
+#[derive(Clone, Copy)]
+enum EvaluationScope<'a> {
+    /// Execute every node in the graph and return every value.
+    WholeDag,
+    /// Execute only the masked nodes and return every executed value: the
+    /// all-values baseline the reclamation tests measure against.
+    #[cfg(test)]
+    MaskedAllValues(&'a [bool]),
+    /// Execute only the masked nodes and return exactly `roots`. Every other
+    /// value is freed after the last step that reads it.
+    Roots {
+        live: &'a [bool],
+        roots: &'a [NodeId],
+    },
 }
 
-fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
-    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
-        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
-        _ => None,
-    };
-    let mut guards = Vec::new();
-    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
-        if class.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
+impl<'a> EvaluationScope<'a> {
+    fn live(&self) -> Option<&'a [bool]> {
+        match self {
+            Self::WholeDag => None,
+            #[cfg(test)]
+            Self::MaskedAllValues(live) => Some(live),
+            Self::Roots { live, .. } => Some(live),
+        }
+    }
+
+    /// The values this run must keep, or `None` when it keeps all of them.
+    fn retained_roots(&self) -> Option<&'a [NodeId]> {
+        match self {
+            Self::WholeDag => None,
+            #[cfg(test)]
+            Self::MaskedAllValues(_) => None,
+            Self::Roots { roots, .. } => Some(roots),
+        }
+    }
+}
+
+/// One evaluation's outputs, and what holding them cost.
+struct EvaluatedValues {
+    values: UnordMap<NodeId, TensorValue>,
+    /// The most entries `values` ever held at once, sampled after each node's
+    /// own value is inserted and before that step's reclamation runs, so it
+    /// records the true transient rather than the post-reclamation residue.
+    ///
+    /// This is chelis#828's receipt: under [`EvaluationScope::Roots`] it must
+    /// track the live working set instead of the executed node count. It is
+    /// read by this module's reclamation tests; nothing in the shipped lanes
+    /// consumes it, and exporting it would be public surface the tracker did
+    /// not ask for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    peak_live_values: usize,
+    /// The most tensor ELEMENTS `values` ever held at once, by the same
+    /// sampling rule. [`TensorStorage`] owns its buffer outright rather than
+    /// sharing a handle, so removing an entry releases that entry's elements
+    /// and this count is a faithful proxy for the evaluator's own footprint.
+    #[cfg_attr(not(test), allow(dead_code))]
+    peak_live_elements: usize,
+}
+
+/// For each step of `order`, the values that become unreachable once that step
+/// has run.
+///
+/// A value stays reachable while some LATER step still reads it, and this
+/// evaluator reads a value through more edges than [`DagNode::inputs`]:
+///
+/// - a `Const` sizes itself from a `shape_deps` value's realized shape;
+/// - a producer's declared-result obligation names its witness through
+///   `result_claim_deps`;
+/// - a local extent guard reads its `activation`, its declaring
+///   [`crate::axis_sources::CanonicalExtent::Witness`], and every member of a
+///   [`crate::axis_sources::SameShapeAgreement`], all by node id rather than
+///   through the site node's operand list.
+///
+/// Every one of those is a read, so every one of them extends a lifetime here.
+/// Freeing a value one of them still reads would be a wrong answer or a
+/// spurious "not available" error, which is a far worse defect than the memory
+/// growth this reclamation exists to fix. A movement bound (`RtDim::Node`,
+/// `RtDim::InputAxis`) and every `ComputedAxisExtent` observation address the
+/// site node's own `inputs` slots, so `inputs` already covers them.
+///
+/// Steps the live mask skips never run and therefore never read; the scan
+/// skips them for the same reason the evaluation loop does, so a masked-off
+/// consumer does not pin a value its live consumers have finished with.
+///
+/// `retain` is never freed. A node that is both a selected root and an
+/// intermediate is therefore kept, which is what makes overlapping root cones
+/// safe.
+fn value_free_schedule(
+    dag: &Dag,
+    order: &[NodeId],
+    live: Option<&[bool]>,
+    local_guard_sites: &UnordMap<NodeId, Vec<(usize, crate::axis_sources::LocalGuardClaim)>>,
+    retain: &[NodeId],
+) -> Vec<Vec<NodeId>> {
+    let mut last_use: Vec<Option<usize>> = vec![None; dag.len()];
+    let mut produced_at: Vec<Option<usize>> = vec![None; dag.len()];
+    for (index, id) in order.iter().enumerate() {
+        let Some(node) = dag.get(*id) else {
+            continue;
+        };
+        if live.is_some_and(|mask| !mask[node.id.0]) {
             continue;
         }
-        let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
-            continue;
-        };
-        let mut witnesses = class.members.iter().filter_map(|member| {
-            let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
-            Some((label(load)?, axis))
-        });
-        let Some(canonical) = witnesses.next() else {
-            continue;
-        };
-        for witness in witnesses {
-            if witness != canonical {
-                guards.push((name.clone(), canonical.clone(), witness));
+        {
+            let mut read = |source: NodeId| {
+                if let Some(slot) = last_use.get_mut(source.0) {
+                    *slot = Some(index);
+                }
+            };
+            for input in &node.inputs {
+                read(*input);
+            }
+            for dep in &node.shape_deps {
+                read(*dep);
+            }
+            for dep in &node.result_claim_deps {
+                read(*dep);
+            }
+            if let Some(activation) = node.owner.activation {
+                read(activation);
+            }
+            if let Some(sites) = local_guard_sites.get(&node.id) {
+                for (_, claim) in sites {
+                    if let Some(activation) = claim.activation.node() {
+                        read(activation);
+                    }
+                    if let crate::axis_sources::CanonicalExtent::Witness(witness) = &claim.canonical
+                    {
+                        read(*witness);
+                    }
+                    if let crate::axis_sources::LocalGuardObservation::SameShapeAgreement(
+                        agreement,
+                    ) = &claim.observed
+                    {
+                        for member in agreement.members() {
+                            read(*member);
+                        }
+                    }
+                }
             }
         }
+        if let Some(slot) = produced_at.get_mut(node.id.0) {
+            *slot = Some(index);
+        }
     }
-    guards
+
+    let mut retained = vec![false; dag.len()];
+    for root in retain {
+        if let Some(slot) = retained.get_mut(root.0) {
+            *slot = true;
+        }
+    }
+
+    let mut schedule = vec![Vec::new(); order.len()];
+    for (raw, produced) in produced_at.iter().enumerate() {
+        let Some(produced) = *produced else {
+            continue;
+        };
+        if retained[raw] {
+            continue;
+        }
+        // A topologically ordered schedule always reads a value after it is
+        // produced; taking the later of the two costs nothing and keeps a
+        // malformed schedule from scheduling a free before the insert it
+        // would undo.
+        let free_at = last_use[raw].unwrap_or(produced).max(produced);
+        schedule[free_at].push(NodeId(raw));
+    }
+    schedule
 }
 
-fn eval_tensor_internal<F>(
+struct PreparedTensorInputs {
+    inputs: UnordMap<String, TensorValue>,
+    resolved_loads: Vec<NodeId>,
+    required_symbols: UnordSet<String>,
+    needs_symbolic_binding: bool,
+    symbolic_selection: SymbolicInputSelection,
+}
+
+fn prepare_tensor_inputs<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
-    random_counter: u64,
     mut load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+) -> Result<PreparedTensorInputs, String>
 where
-    F: FnMut(&str) -> Option<TensorValue>,
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
 {
     // chelis#1277 C4.1: eval is a production path, so the source check runs
     // here too, before `bind_symbolic_dims` resolves any extent.
@@ -2017,7 +3266,6 @@ where
     {
         return Err(unsupported.to_string());
     }
-    let mut path_random_counter = random_counter;
     let required_symbols = required_symbolic_dims(dag, live);
     let needs_symbolic_binding = !required_symbols.is_empty()
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
@@ -2039,7 +3287,7 @@ where
                 if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
-    // that `symbolic_occurrences` nominates as each dim's declaring
+    // the derivation nominates as each dim's declaring
     // inputs — and such a Load can be DEAD under the roots' live mask
     // while the dim itself is live (e.g. `vmap(grad(f))` where the
     // gradient is constant in `x`: the backward DAG never consumes the
@@ -2070,168 +3318,198 @@ where
     } else {
         UnordSet::new()
     };
-    let resolved_inputs = resolve_load_inputs(
+    let symbolic_selection = select_symbolic_inputs(dag, &required_symbols, live);
+    let (resolved_inputs, resolved_loads) = resolve_load_inputs(
         dag,
         live,
         strict_loads,
         &symbolic_dim_load_inputs,
+        &symbolic_selection.required_shape_inputs,
         &mut load_input,
     )?;
-    // chelis#1277 B2h: both entry guards run BEFORE symbolic-binding
-    // inference. `infer_symbolic_bindings_from_inputs` rejects two `Load`s
-    // that disagree on one binder with its own wording, so with the guards
-    // after it a `Load`/`Load` class on one binder never reached [04-NUM-9]'s
-    // line on eval while the C kernel's prologue rendered it (C2.7). The
-    // inference check remains the backstop for a binder no class covers.
-    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
-    // grouping the C and HIP lanes read. Both derivations call
-    // `axis_sources::split_by_scope`: the prologues read
-    // `derive_dim_witnesses`, the guard sites and this lane read
-    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
-    // the scoping in the first alone, which is two derivations that can
-    // disagree. `spec/04-type-system.md` section 4.7 evaluates
-    // a class whose operands are all interface values "at function entry, in
-    // declared signature order, before any other operation of the function",
-    // so they run here, once every input is resolved and before the first
-    // node evaluates.
-    //
-    // The classes come from `dag`, not `bound_dag`: binding substitutes each
-    // resolved symbol into the types, so on the bound graph the claims are
-    // literals and no `Name` class survives to guard. The EXTENTS come from
-    // `resolved_inputs`, which is the point - a claim is checked against what
-    // the caller actually passed, and reading the inputs rather than the
-    // evaluated `values` keeps the guard independent of the live mask. A
-    // witness the caller did not supply is skipped: chelis#991 makes a dead
-    // generic declaration's input not a requirement of the selected root, and
-    // an absent witness cannot disagree with anything.
-    // chelis#1277 B2h: a declared LITERAL input extent is checked here too,
-    // in declared signature order, before any class guard and before the
-    // first node evaluates. The C lane checks it in the kernel's ABI
-    // preamble (`emit.rs`, the `known_dim_size` arm), which
-    // `spec/design/runtime_extents.md` Slice B narrows to exactly this
-    // complement: an axis whose literal came from a genuine declaration and
-    // that no class covers, because `is_member` keeps an external `Load`
-    // axis out of a `Literal` claim rather than mint a class per
-    // literal-shaped input. A literal result claim propagates onto the input
-    // it reads through inference (chelis#1377's `f(b, x: tensor[n]) ->
-    // tensor[4]` lowers `x` as `[4]`), so on both lanes the disagreement
-    // between the claim and the caller's tensor is visible only here. Before
-    // host-lane def applications were routed through this evaluator no
-    // caller could reach a literal-declared `Load` with a disagreeing
-    // extent; now `chelis eval` does, and without this check it printed the
-    // caller's extent where C traps. The rendering is C's: section 4.7's
-    // context line, then [04-NUM-9]'s complete line with `<op>` = `load`.
-    // The rank check mirrors the same preamble's `expected rank` abort for a
-    // declaration that names every axis; an empty `dims` is skipped because
-    // it is also the lowerer's untyped placeholder (`default_type()`), which
-    // an API binding of any rank legitimately fills.
-    for node in dag.nodes() {
-        let RiscOp::Load { name } = &node.op else {
-            continue;
-        };
-        let Some(value) = resolved_inputs.get(name.as_str()) else {
-            continue;
-        };
-        let dims = &node.output_type.dims;
-        let fully_ranked = !dims.is_empty()
-            && dims
-                .iter()
-                .all(|dim| matches!(dim, DimInfo::Lit(_) | DimInfo::Named(_, _)));
-        if fully_ranked && value.shape.len() != dims.len() {
-            return Err(format!(
-                "input `{name}` expected rank {}, got {}",
-                dims.len(),
-                value.shape.len()
-            ));
-        }
-        for (axis, dim) in dims.iter().enumerate() {
-            let DimInfo::Lit(declared) = dim else {
-                continue;
-            };
-            let Some(observed) = value.shape.get(axis).copied() else {
-                continue;
-            };
-            if observed != *declared {
-                return Err(format!(
-                    "extent `{declared}`: claimed = {declared}, {name} axis {axis} = {observed}\n\
-                     numeric trap: domain in load at int64"
-                ));
+    Ok(PreparedTensorInputs {
+        inputs: resolved_inputs,
+        resolved_loads,
+        required_symbols,
+        needs_symbolic_binding,
+        symbolic_selection,
+    })
+}
+
+fn eval_tensor_internal<F>(
+    dag: &Dag,
+    scope: EvaluationScope<'_>,
+    strict_loads: bool,
+    load_input: F,
+) -> Result<EvaluatedValues, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal_with_result_claims(dag, scope, strict_loads, &[], load_input)
+}
+
+/// One caller's declared-result obligation on a graph's single root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedResultClaim {
+    pub rank: usize,
+    pub axes: Vec<InheritedResultAxis>,
+}
+
+/// One claimed result axis: its required extent and, for a named claim, the
+/// binder and declaring parameter axis its context names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedResultAxis {
+    pub axis: usize,
+    pub required: usize,
+    pub source: Option<crate::axis_sources::ClaimSource>,
+}
+
+fn eval_tensor_internal_with_result_claims<F>(
+    dag: &Dag,
+    scope: EvaluationScope<'_>,
+    strict_loads: bool,
+    result_claims: &[InheritedResultClaim],
+    mut load_input: F,
+) -> Result<EvaluatedValues, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    // Reject an incomplete claim/producer relationship before any input
+    // preparation or entry guard can observe runtime state.
+    let declared_local_guard_sites = crate::axis_sources::local_dim_guard_sites(dag)?;
+    let live = scope.live();
+    let PreparedTensorInputs {
+        inputs: mut resolved_inputs,
+        resolved_loads,
+        required_symbols,
+        needs_symbolic_binding,
+        symbolic_selection,
+    } = prepare_tensor_inputs(dag, live, strict_loads, |name, _| Ok(load_input(name)))?;
+    // Guard claims come from the unbound DAG; observed extents come from
+    // actual caller inputs. Both host lanes consume the same individual
+    // schedule before symbolic inference or dependent operations. Missing
+    // inputs belonging only to an unrelated root remain optional (#991).
+    // chelis#1374: a named witness claim whose pair the entry schedule above
+    // already compares is checked there, once (spec/04 §4.7). The claim stays
+    // in the graph because it is also what retains a declared-but-unread
+    // parameter's interface witness.
+    let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
+    // One IR plan supplies the same slot/axis order to Eval and direct C.
+    // Freeze tagged/raw values at entry, before symbolic binding or body
+    // execution; a Load later reads only its admitted value.
+    for step in crate::axis_sources::entry_validation_plan_for_resolved_loads(dag, &resolved_loads)
+    {
+        use crate::axis_sources::{EntryExtentGuard, EntryValidationStep};
+        match step {
+            EntryValidationStep::DType { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str()) {
+                    let admitted =
+                        ingress_to_declared(name.as_str(), node.output_type.precision, value)?;
+                    resolved_inputs.insert(name.as_str().to_string(), admitted);
+                }
+            }
+            EntryValidationStep::Rank { load } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(value) = resolved_inputs.get(name.as_str())
+                    && value.shape.len() != node.output_type.dims.len()
+                {
+                    return Err(format!(
+                        "input `{name}` expected rank {}, got {}\nnumeric trap: domain in load at i64",
+                        node.output_type.dims.len(),
+                        value.shape.len()
+                    ));
+                }
+            }
+            EntryValidationStep::LiteralAxis {
+                load,
+                axis,
+                required,
+            } => {
+                let node = dag.get(load).expect("entry input");
+                let RiscOp::Load { name } = &node.op else {
+                    unreachable!()
+                };
+                if let Some(observed) = resolved_inputs
+                    .get(name.as_str())
+                    .and_then(|value| value.shape.get(axis))
+                    .copied()
+                    && observed != required
+                {
+                    return Err(format!(
+                        "extent `{required}`: claimed = {required}, {name} axis {axis} = {observed}\nnumeric trap: domain in load at i64"
+                    ));
+                }
+            }
+            EntryValidationStep::Extent(guard) => {
+                let read = |(load, axis): (NodeId, usize)| {
+                    let RiscOp::Load { name } = &dag.get(load)?.op else {
+                        return None;
+                    };
+                    let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
+                    Some((name.as_str(), axis, extent))
+                };
+                let context = match guard {
+                    EntryExtentGuard::Named {
+                        claim,
+                        canonical,
+                        observed,
+                    } => {
+                        let (
+                            Some((left_label, left_axis, left)),
+                            Some((right_label, right_axis, right)),
+                        ) = (read(canonical), read(observed))
+                        else {
+                            continue;
+                        };
+                        if left == right {
+                            continue;
+                        }
+                        format!(
+                            "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
+                        )
+                    }
+                    EntryExtentGuard::Literal { required, observed } => {
+                        let Some((label, axis, actual)) = read(observed) else {
+                            continue;
+                        };
+                        if actual == required {
+                            continue;
+                        }
+                        format!(
+                            "extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}"
+                        )
+                    }
+                };
+                return Err(format!("{context}\nnumeric trap: domain in load at i64"));
             }
         }
     }
 
-    for (name, canonical, member) in entry_dim_guards(dag) {
-        let extent = |witness: (&str, usize)| {
-            resolved_inputs
-                .get(witness.0)
-                .and_then(|value| value.shape.get(witness.1).copied())
-        };
-        let (Some(left), Some(right)) = (
-            extent((canonical.0.as_str(), canonical.1)),
-            extent((member.0.as_str(), member.1)),
-        ) else {
-            continue;
-        };
-        if left == right {
-            continue;
-        }
-        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
-        // `load` because section 4.7 fixes it for a guard whose operands are
-        // all interface values: "the `load` primitive of the later witness in
-        // signature order". The context is its own line, as the same
-        // paragraph requires, and carries the disagreeing names, the axis and
-        // each observed value.
-        return Err(format!(
-            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
-             numeric trap: domain in load at int64",
-            canonical.0, canonical.1, member.0, member.1,
-        ));
-    }
-
-    // The same-rank `expand`'s unit-extent claim, at the same point and by the
-    // same reading of the inputs as the class guard above.
-    // `spec/05-risc-primitives.md` section 2.4.1 makes the operation "a claim
-    // that the operand's extent at `axis` is 1" and sends a symbolic or
-    // runtime extent other than 1 to this guard.
-    //
-    // Order matters and B2h fixed it: the literal-extent check, then the class
-    // guard, then this, and only then `infer_symbolic_bindings_from_inputs`.
-    // The inference is a backstop that reports a targeted error for a symbol
-    // it cannot bind; running a claim guard after it would report the
-    // inference's message for a program whose real fault is a refuted claim.
-    for (label, axis) in entry_unit_extent_guards(dag) {
-        let Some(observed) = resolved_inputs
-            .get(&label)
-            .and_then(|value| value.shape.get(axis).copied())
-        else {
-            continue;
-        };
-        if observed == 1 {
-            continue;
-        }
-        return Err(format!(
-            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
-             numeric trap: domain in load at int64",
-        ));
-    }
-
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
+    let mut movement_failures: UnordMap<NodeId, String> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let mut bindings =
-            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
+        let (mut bindings, deliberately_unbound) =
+            infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &symbolic_selection)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
         // though their nodes cannot execute under this root mask. Live names
         // are never defaulted: they were inferred above or failed loudly.
         if live.is_some() {
-            for binding in symbolic_bindings(dag) {
-                if !required_symbols.contains(&binding.name) {
-                    bindings.entry(binding.name).or_insert(1);
+            for name in crate::axis_sources::rendered_dim_names(dag) {
+                if !required_symbols.contains(&name) {
+                    bindings.entry(name).or_insert(1);
                 }
             }
         }
         prebound_dims = bindings.clone();
-        let bound = bind_symbolic_dims(dag, &bindings)?;
+        let bound = bind_symbolic_dims(dag, &bindings, &deliberately_unbound)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
         // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
         // (extent unknown). Once `bind_symbolic_dims` makes those extents
@@ -2245,13 +3523,20 @@ where
         // bounds on LIVE nodes only — the full `verify` would flag the dead
         // symbolic-dim-source Loads that root-scoped eval deliberately keeps
         // alive ("node N is dangling"), over-rejecting legitimate programs.
-        verify_bound_movement_bounds(&bound, live)?;
+        // Each failure is raised at its node, before the node executes.
+        movement_failures = bound_movement_failures(&bound, live);
         bound
     } else {
         dag.clone()
     };
 
     let mut values: UnordMap<NodeId, TensorValue> = UnordMap::new();
+    // chelis#828's receipt, sampled once per executed node. `live_elements`
+    // is maintained incrementally so the sample costs two comparisons rather
+    // than a walk of the map.
+    let mut live_elements: usize = 0;
+    let mut peak_live_values: usize = 0;
+    let mut peak_live_elements: usize = 0;
 
     // chelis#616: op-declared runtime dims (node-valued movement / reshape
     // output extents) have no pre-eval binding; each binds to its actual
@@ -2260,7 +3545,7 @@ where
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
     // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
-    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // `local_dim_guard_sites` the C emitter reads (C2.5). Derived from `dag`
     // and not from `bound_dag` for the same reason the entry guards are:
     // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
     // the derivation reads a member's own dim to decide whether the checker
@@ -2268,15 +3553,64 @@ where
     // looks statically proved and every site disappears. Node ids survive
     // `bind_symbolic_dims`, which rebuilds the graph to preserve them, so a
     // site derived here addresses the node the loop below evaluates.
+    // The extent each claim states for the node it sizes
+    // ([`crate::axis_sources::GuardActivation::sized_axis`]): the extent that
+    // node declares at that axis where, inactive, it produces zeros.
+    let mut claimed_extents: UnordMap<NodeId, Vec<(usize, crate::axis_sources::CanonicalExtent)>> =
+        UnordMap::new();
+    for (_, claim) in &declared_local_guard_sites {
+        if let Some(axis) = claim.activation.sized_axis() {
+            claimed_extents
+                .entry(claim.activation.claimed())
+                .or_default()
+                .push((axis, claim.canonical.clone()));
+        }
+    }
     let mut local_guard_sites: UnordMap<
         NodeId,
         Vec<(usize, crate::axis_sources::LocalGuardClaim)>,
     > = UnordMap::new();
-    for ((node, axis), claim) in crate::axis_sources::local_dim_guard_sites(dag) {
+    for ((node, axis), claim) in declared_local_guard_sites {
         local_guard_sites
             .entry(NodeId(node))
             .or_default()
             .push((axis, claim));
+    }
+    if !result_claims.is_empty() && dag.roots().len() == 1 {
+        let root = dag.roots()[0];
+        let rank = dag.get(root).expect("result root").output_type.dims.len();
+        let result_sites = crate::axis_sources::result_extent_sites(dag, root);
+        for claim in result_claims.iter().filter(|claim| claim.rank == rank) {
+            for site in &result_sites {
+                let RtAxis::Lit(output_axis) = site.output_axis();
+                let RtAxis::Lit(producer_axis) = site.producer_axis();
+                let Some(axis) = claim
+                    .axes
+                    .iter()
+                    .find(|axis| axis.axis == output_axis as usize)
+                else {
+                    continue;
+                };
+                local_guard_sites.entry(site.producer()).or_default().push((
+                    producer_axis as usize,
+                    crate::axis_sources::LocalGuardClaim {
+                        claim: axis.source.as_ref().map_or_else(
+                            || axis.required.to_string(),
+                            |source| source.claim.clone(),
+                        ),
+                        canonical: crate::axis_sources::CanonicalExtent::Resolved(axis.required),
+                        op: site.operation(),
+                        observed: site.observation().clone(),
+                        activation: crate::axis_sources::GuardActivation::sizing(
+                            dag,
+                            site.producer(),
+                            producer_axis as usize,
+                        )?,
+                        source: axis.source.clone(),
+                    },
+                ));
+            }
+        }
     }
     let mut runtime_dims = prebound_dims;
 
@@ -2287,7 +3621,27 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    for node in bound_dag.nodes() {
+    let order = bound_dag
+        .nodes()
+        .iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+    // chelis#828 work class 1. Built from the BOUND graph, whose node ids
+    // `bind_symbolic_dims` preserves, and from the same live mask and guard
+    // sites the loop below consults, so a step's reads in the scan are exactly
+    // the reads it performs.
+    let free_schedule = scope
+        .retained_roots()
+        .map(|roots| value_free_schedule(&bound_dag, &order, live, &local_guard_sites, roots));
+
+    // One seed query for the walk: the literal result claims a witness
+    // checks are a whole-graph derivation, read from the unbound graph as
+    // the C lane reads them.
+    let seeds = dag.trap_seeds();
+    for (index, id) in order.into_iter().enumerate() {
+        let node = bound_dag
+            .get(id)
+            .ok_or("evaluation schedule references a missing node")?;
         if let Some(cancel) = &cancel
             && cancel.is_cancelled()
         {
@@ -2298,6 +3652,45 @@ where
         {
             continue;
         }
+        // spec/10 §3.2: a node whose activation holds in no row checks
+        // nothing. An operand-value check reads neutral operands below; an
+        // extent or bound check is skipped here, since one tensor's rows
+        // share their extents and it runs when any row is active. Whether
+        // the node is gated is read from the unbound graph, as the C lane
+        // reads it, since binding renames no node.
+        let gated = dag
+            .get(node.id)
+            .is_some_and(|source| seeds.is_activation_gated(source));
+        let claim_sized = gated
+            && dag
+                .get(node.id)
+                .is_some_and(|source| seeds.is_claim_sized(source));
+        let inactive = gated && matches!(node_activity(node, &values)?, Activity::Inactive);
+        if let Some(failure) = movement_failures.remove(&node.id)
+            && !inactive
+        {
+            return Err(failure);
+        }
+        // `spec/05-risc-primitives.md` section 2.4.1 makes every stride step
+        // one operation-level precondition. Resolve the COMPLETE vector once
+        // before any per-axis `StrideSpan` claim can run: otherwise an early
+        // axis's claim mismatch can mask a zero or negative later step. The C
+        // movement plan validates this same vector before emitting any local
+        // extent site. Reuse the resolved vector for both the sites and the
+        // operation so Eval has one signed-validation boundary as well.
+        let resolved_stride_steps = if inactive {
+            None
+        } else if let RiscOp::Stride { strides } = &node.op {
+            let input = values.get(&node.inputs[0]).ok_or_else(|| {
+                format!(
+                    "stride at node {}: missing value for tensor operand",
+                    node.id.0
+                )
+            })?;
+            Some(resolve_eval_strides(strides, node, &values, &input.shape)?)
+        } else {
+            None
+        };
 
         // `spec/04-type-system.md` section 4.7: a guard comparing a locally
         // computed value "takes the source position of the operation that
@@ -2323,17 +3716,105 @@ where
         // existed.
         if let Some(sites) = local_guard_sites.get(&node.id) {
             for (axis, claim) in sites {
-                let crate::axis_sources::LocalGuardObservation::Carrier(carrier) = &claim.observed
-                else {
+                if !local_guard_is_active(claim, &values)? {
                     continue;
+                }
+                // Exhaustive on purpose: a future observation kind has to say
+                // here whether it is readable before the node runs, rather
+                // than falling through a wildcard and disappearing from this
+                // lane while the C lane keeps emitting it.
+                let observed = match &claim.observed {
+                    crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
+                        resolve_eval_bound(carrier, node, &values, 0)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
+                        match computed_axis_extent_value(
+                            computed,
+                            node,
+                            &values,
+                            resolved_stride_steps.as_deref(),
+                        )? {
+                            Some(extent) => extent,
+                            // A span that selects nothing, or that runs past
+                            // the operand's own extent, computes no extent to
+                            // compare, so the guard yields rather than
+                            // comparing a fabricated number.
+                            //
+                            // chelis#1797 added the second of those. An
+                            // overshooting span has an arithmetic width, and
+                            // comparing a claim against it reported a claim
+                            // mismatch for a program whose claim was not the
+                            // defect: `-> tensor[6, f32]` over a span of 6 that
+                            // reads past the end AGREED with the claim and the
+                            // guard passed. `shrink` now returns section
+                            // 2.4.1's overshoot error instead, in the compiled
+                            // lane's words, so declining here is what lets the
+                            // operation report it.
+                            //
+                            // An earlier version of this comment justified the
+                            // decline for the EMPTY case by saying the C
+                            // runtime's movement plan rejects such a span
+                            // before the site is reached. That was checkable
+                            // and false: `ShapeMetadata::shrunk` does not
+                            // reject `start == end` (it rejects a negative
+                            // start, `end < start`, and an overshoot), so an
+                            // empty span builds a plan of extent 0 and C's
+                            // guard runs and reports the claim.
+                            //
+                            // C is the conforming lane there.
+                            // `spec/05-risc-primitives.md` section 2.4.1's
+                            // closed list of runtime-bound errors does not
+                            // include an empty span, and section 4.7.2 makes
+                            // only a NEGATIVE size an error, so an extent-0
+                            // result under a declared `tensor[2, f32]` is a
+                            // claim mismatch. This lane instead rejects the
+                            // span itself under an operation-level admission
+                            // rule the numbered spec does not require; the
+                            // divergence is pre-existing, is tracked by
+                            // chelis#1795, and is pinned rather than repaired
+                            // here.
+                            None => continue,
+                        }
+                    }
+                    crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement) => {
+                        same_shape_agreement_extent(agreement, *axis, &values)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(
+                        reason,
+                    ) => return Err(reason.clone()),
+                    // Read only after the node has produced its value; taken
+                    // by the loop at the foot of the body.
+                    crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,
                 };
-                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
 
+        // spec/10 §3.2: a node under a false activation computes a value
+        // from operands its checks accept, and checks nothing.
+        let inactive_operands = neutralize_inactive_operands(node, gated, &mut values)?;
+        let mut inactive_value = if inactive {
+            inactive_unchecked_value(
+                node,
+                claim_sized,
+                claimed_extents.get(&node.id).map_or(&[], Vec::as_slice),
+                dag,
+                &values,
+                &runtime_dims,
+            )?
+        } else {
+            None
+        };
+        if inactive_value.is_none() {
+            inactive_value = inactive_disagreeing_elementwise(node, &values)?;
+        }
         let out_prim = node.output_type.precision;
         let value = match &node.op {
+            // An extent or bound check under a false activation: the value
+            // of its declared type, checked by nothing.
+            _ if inactive_value.is_some() => inactive_value
+                .take()
+                .expect("an inactive node's unchecked value"),
             RiscOp::Const { value } => {
                 // chelis#616: a Const whose symbolic dims resolve neither
                 // statically nor through the runtime bindings may carry a
@@ -2348,7 +3829,7 @@ where
                             .find_map(|dep| values.get(dep).map(|v| v.shape.clone()))
                     })
                     .unwrap_or_default();
-                let n = numel(&shape);
+                let n = admit_result("const", &shape, out_prim)?;
                 // The SEALED payload materializes exactly (chelis#856):
                 // integer/bool payloads splat through the exact i64
                 // lane (no f64 laundering above 2^53), float payloads
@@ -2362,6 +3843,7 @@ where
             RiscOp::ConstTensor { data } => {
                 let shape =
                     concrete_shape_with(&node.output_type, &runtime_dims).unwrap_or_default();
+                admit_result("const", &shape, out_prim)?;
                 // Sealed per-dtype storage: exact integer lane for
                 // integer/bool payloads, exact f64 images otherwise
                 // (chelis#856).
@@ -2384,10 +3866,161 @@ where
                 })?;
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                requirements,
+                ..
+            } => finalize_wide_int(
+                "shape",
+                out_prim,
+                vec![],
+                vec![
+                    requirements[0]
+                        .as_i64_exact()
+                        .expect("verified literal result requirement"),
+                ],
+            )?,
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                requirements,
+                ..
+            } if !requirements.is_empty() => finalize_wide_int(
+                "shape",
+                out_prim,
+                vec![],
+                vec![
+                    requirements[0]
+                        .as_i64_exact()
+                        .expect("verified local ascription requirement"),
+                ],
+            )?,
+            RiscOp::ExtentWitness {
+                site,
+                parameter,
+                axis,
+                requirements,
+                claims,
+            } => {
+                let operation = match site {
+                    crate::dag::ExtentWitnessSite::Caller => "load",
+                    crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => "shape",
+                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => "shape",
+                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
+                };
+                let parameter = match site {
+                    crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::ResultClaim { .. } => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::LiteralResultClaim => {
+                        unreachable!("literal role handled above")
+                    }
+                    crate::dag::ExtentWitnessSite::LocalExpand => {
+                        format!("node {}", node.inputs[0].0)
+                    }
+                };
+                let crate::dag::RtAxis::Lit(axis) = axis;
+                let input = &values[&node.inputs[0]];
+                let observed = *input
+                    .shape
+                    .get(*axis as usize)
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                for required in requirements
+                    .iter()
+                    .chain(seeds.literal_result_witness_requirements(node.id))
+                {
+                    let required = required
+                        .as_i64_exact()
+                        .ok_or_else(|| "extent witness requires i64".to_string())?;
+                    if i64::try_from(observed).ok() != Some(required) {
+                        return Err(format!(
+                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at i64"
+                        ));
+                    }
+                }
+                // chelis#1374/#1376: §4.7.2's named half. Each requirement
+                // edge is another witness of the same activation, so both
+                // records read a fact the graph states. The declaring side
+                // leads, as `entry_extent_guards` renders the `Load`-witnessed
+                // form of the same contract.
+                for (index, (claim, edge)) in
+                    claims.iter().zip(node.inputs.iter().skip(1)).enumerate()
+                {
+                    if entry_covered.contains(&(node.id, index)) {
+                        continue;
+                    }
+                    let (required_parameter, required_axis) =
+                        match &dag.get(*edge).ok_or("missing extent claim edge")?.op {
+                            RiscOp::ExtentWitness {
+                                parameter,
+                                axis: crate::dag::RtAxis::Lit(axis),
+                                ..
+                            } => (parameter.clone(), *axis),
+                            _ => return Err("extent claim requires a witness edge".into()),
+                        };
+                    let required = values[edge]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or("extent claim requires i64")?;
+                    if i64::try_from(observed).ok() == Some(required) {
+                        continue;
+                    }
+                    let here = format!("{parameter} axis {axis} = {observed}");
+                    let there = format!("{required_parameter} axis {required_axis} = {required}");
+                    let (first, second) = if claim.requirement_declares {
+                        (there, here)
+                    } else {
+                        (here, there)
+                    };
+                    return Err(format!(
+                        "extent `{}`: {first}, {second}\nnumeric trap: domain in {operation} at i64",
+                        claim.claim
+                    ));
+                }
+                finalize_wide_int(
+                    "shape",
+                    out_prim,
+                    vec![],
+                    vec![i64::try_from(observed).map_err(|_| "extent exceeds i64")?],
+                )?
+            }
+            RiscOp::CheckedReshapeExtent {
+                claims,
+                axis: crate::dag::RtAxis::Lit(axis),
+            } => {
+                let actual = values[&node.inputs[0]]
+                    .storage()
+                    .scalar_at(0)
+                    .as_i64_exact()
+                    .ok_or("checked reshape actual must be i64")?;
+                for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
+                    let required = values[input]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or("checked reshape requirement must be i64")?;
+                    if actual != required {
+                        return Err(format!(
+                            "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at i64"
+                        ));
+                    }
+                }
+                values[&node.inputs[0]].clone()
+            }
+            RiscOp::CheckedUnitAxis { .. } => values[&node.inputs[0]].clone(),
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
-                Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
+                // The entry plan freezes the selected declaration once. A
+                // raw, unverified DAG can still contain a second live Load
+                // with this name but a conflicting type; do not silently
+                // hand it the first Load's admitted storage.
+                Some(value) => {
+                    ingress_to_declared(name.as_str(), node.output_type.precision, value)?
+                }
                 None if strict_loads => return Err(format!("missing required input `{name}`")),
-                None => default_value(&node.output_type),
+                None => default_value(&node.output_type)?,
             },
             RiscOp::Store { .. } | RiscOp::Copy | RiscOp::Drop | RiscOp::Realize => {
                 values[&node.inputs[0]].clone()
@@ -2407,11 +4040,25 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
-            RiscOp::Div => binary_elementwise(
-                ElementwiseBinOp::Div,
-                &values[&node.inputs[0]],
-                &values[&node.inputs[1]],
-            )?,
+            RiscOp::Div => {
+                if is_runtime_mean_div(dag, node)
+                    && values[&node.inputs[1]]
+                        .storage()
+                        .to_f64_lossy_vec()
+                        .contains(&0.0)
+                {
+                    return Err(NumericTrap::Domain {
+                        op: "mean",
+                        prim: out_prim,
+                    }
+                    .to_string());
+                }
+                binary_elementwise(
+                    ElementwiseBinOp::Div,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                )?
+            }
             // chelis#178: floor division rounds the quotient toward -inf.
             // For integer-valued operands `(a / b).floor()` yields the
             // integer floored quotient, and for float operands it is
@@ -2429,6 +4076,19 @@ where
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
                 binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
+            }
+            RiscOp::Bitwise(kind) => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                require_matching_comparison_shapes(lhs, rhs)?;
+                let storage = chelis_types::bitwise_tensor(*kind, lhs.storage(), rhs.storage())
+                    .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(lhs.shape.clone(), storage)
+            }
+            RiscOp::Mod => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
             }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
@@ -2459,38 +4119,123 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::UniformLike { low, high, seed } => {
-                let effective_seed = if let Some(activation) = node.inputs.get(1) {
-                    let active = match values[activation].storage().to_raw() {
-                        RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
-                        _ => {
-                            return Err(format!(
-                                "uniform_like path activation at node {} is not a scalar Bool",
-                                node.id.0
-                            ));
-                        }
-                    };
-                    if active {
-                        let effective =
-                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        path_random_counter = path_random_counter.saturating_add(1);
-                        effective
-                    } else {
-                        *seed
-                    }
-                } else {
-                    *seed
-                };
-                uniform_like(
-                    &values[&node.inputs[0]].shape.clone(),
-                    *low,
-                    *high,
-                    effective_seed,
-                    out_prim,
+            RiscOp::Dropout | RiscOp::DropoutReplay => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_dropout(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    draw_keys(node, 2, &values)?,
                 )?
             }
-            RiscOp::Dropout { rate, seed } => {
-                dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
+            RiscOp::UniformLike => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_like(
+                    node,
+                    &values[&node.inputs[0]],
+                    &values[&node.inputs[1]],
+                    &values[&node.inputs[2]],
+                    out_prim,
+                    draw_keys(node, 3, &values)?,
+                )?
+            }
+            RiscOp::UniformBoundAdjoint { bound } => {
+                check_draw_extents(&bound_dag, node, &values)?;
+                eval_uniform_bound_adjoint(
+                    node,
+                    &values[&node.inputs[1]],
+                    *bound,
+                    out_prim,
+                    draw_keys(node, 2, &values)?,
+                )?
+            }
+            RiscOp::KeyFromSeed => {
+                let seeds = &values[&node.inputs[0]];
+                key_value(seeds, key_from_seed_storage(seeds.storage()))?
+            }
+            RiscOp::Split { branch } => {
+                let keys = &values[&node.inputs[0]];
+                key_value(keys, split_key_storage(keys.storage(), branch.half()))?
+            }
+            RiscOp::FoldIn => {
+                let keys = &values[&node.inputs[0]];
+                let ns = &values[&node.inputs[1]];
+                if keys.shape.len() != ns.shape.len() {
+                    return Err(format!(
+                        "fold_in at node {}: key shape {:?} and count shape {:?} must be equal",
+                        node.id.0, keys.shape, ns.shape
+                    ));
+                }
+                // Each count extent against the key's, before either is
+                // read, with the C lane's report.
+                let key_dims = &bound_dag
+                    .get(node.inputs[0])
+                    .ok_or("fold_in key is not in its graph")?
+                    .output_type
+                    .dims;
+                check_operand_extents("fold_in", key_dims, keys, "input 1", ns, keys.shape.len())?;
+                key_value(keys, fold_in_storage(keys.storage(), ns.storage()))?
+            }
+            RiscOp::KeySelect => {
+                // The else keys' extents against the then keys', before
+                // either is read, with the C lane's report.
+                let then_keys = &values[&node.inputs[0]];
+                let key_dims = &bound_dag
+                    .get(node.inputs[0])
+                    .ok_or("join key is not in its graph")?
+                    .output_type
+                    .dims;
+                let else_keys = &values[&node.inputs[1]];
+                if then_keys.shape.len() != else_keys.shape.len() {
+                    return Err(format!(
+                        "join at node {}: then keys {:?} and else keys {:?} must share one shape",
+                        node.id.0, then_keys.shape, else_keys.shape
+                    ));
+                }
+                check_operand_extents(
+                    "if",
+                    key_dims,
+                    then_keys,
+                    "input 1",
+                    else_keys,
+                    then_keys.shape.len(),
+                )?;
+                eval_key_select(node, &values)?
+            }
+            RiscOp::SplitN { count } => {
+                let keys = &values[&node.inputs[0]];
+                let count = if key_operation_is_live(node, &values)? {
+                    // [05-OP-71]: a negative runtime count traps before
+                    // allocation, with the C lane's `Domain` trap.
+                    if let RtDim::Node(slot) = count
+                        && let Some(value) =
+                            node.inputs.get(*slot).and_then(|input| values.get(input))
+                        && rank0_scalar(value, "split_keys count")?
+                            .as_i64_exact()
+                            .is_some_and(|count| count < 0)
+                    {
+                        return Err(NumericTrap::Domain {
+                            op: "split_keys",
+                            prim: Prim::Int64,
+                        }
+                        .to_string());
+                    }
+                    resolve_eval_bound(count, node, &values, 0)?
+                } else {
+                    inactive_split_count(&node.output_type, &runtime_dims)?
+                };
+                let mut shape = keys.shape.clone();
+                shape.push(count);
+                // The key's extents and the count are the result's; every
+                // extent its type declares is a claim about them, checked
+                // before any key exists, as the C lane checks it.
+                check_declared_extents("split_keys", &node.output_type, &shape, &runtime_dims)?;
+                // [05-OP-33]: the result's count and bytes fit their domains
+                // before any key is derived into it (chelis#2491).
+                admit_result("split_keys", &shape, Prim::Key)?;
+                let storage =
+                    split_keys_storage(keys.storage(), count).map_err(|error| error.to_string())?;
+                TensorValue::from_storage(shape, storage)
             }
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
@@ -2536,29 +4281,79 @@ where
                     .map_err(|error| error.to_string())?;
                 TensorValue::from_storage(input.shape.clone(), storage)
             }
-            RiscOp::CmpLt => compare_elementwise(
-                CompareOp::Lt,
+            RiscOp::Compare(kind) => compare_elementwise(
+                comparison_kernel(*kind),
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
+            RiscOp::Logical(kind) => logical_elementwise(
+                *kind,
+                &values[&node.inputs[0]],
+                node.inputs.get(1).map(|input| &values[input]),
+            )?,
+            RiscOp::Where => where_elementwise(
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+                &values[&node.inputs[2]],
+            )?,
+            // chelis#1464 / [05-OP-68]: the guard fires BEFORE the fallback
+            // is carried, so a taken abort never produces a value. Returning
+            // the message as an evaluation error is what makes the evaluator
+            // agree with the compiled lane's `chelis_fail`.
+            RiscOp::GuardedFail {
+                message,
+                trap_on_true,
+            } => {
+                let condition = &values[&node.inputs[0]];
+                if condition.prim() != Prim::Bool {
+                    return Err("guarded_fail: condition must have bool storage".into());
+                }
+                let condition_values = condition
+                    .storage()
+                    .to_i64_exact_vec()
+                    .expect("sealed bool storage has an exact integer view");
+                // A batched condition aborts when ANY mapped element fires
+                // ([05-OP-68]); an unbatched condition has exactly one.
+                if condition_values
+                    .into_iter()
+                    .any(|selected| (selected != 0) == *trap_on_true)
+                {
+                    return Err(message.clone());
+                }
+                values[&node.inputs[1]].clone()
+            }
             RiscOp::Sum { axis, accumulator } => reduce(
+                "sum",
                 &values[&node.inputs[0]],
                 *axis,
                 TensorReduceOp::Sum {
                     accumulator: *accumulator,
                     result: out_prim,
                 },
+                out_prim,
             )?,
             RiscOp::Count { axes } => count_tensor(&values[&node.inputs[0]], axes)?,
-            RiscOp::MaxReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
-            }
-            RiscOp::MinReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MinReduce)?
-            }
-            RiscOp::ProdReduce { axis } => {
-                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::ProdReduce)?
-            }
+            RiscOp::MaxReduce { axis } => reduce(
+                "max_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::MaxReduce,
+                out_prim,
+            )?,
+            RiscOp::MinReduce { axis } => reduce(
+                "min_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::MinReduce,
+                out_prim,
+            )?,
+            RiscOp::ProdReduce { axis } => reduce(
+                "prod_reduce",
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::ProdReduce,
+                out_prim,
+            )?,
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape,
@@ -2609,9 +4404,11 @@ where
                     .collect::<Result<_, _>>()?;
                 // chelis#616: with runtime target extents the numel invariant
                 // is only checkable here — report a clean error (mirrored by
-                // the C backend's runtime numel abort), never a panic.
+                // the C backend's runtime numel abort), never a panic. The
+                // target's count is the admitted one, so an unrepresentable
+                // product traps rather than overflowing (chelis#2491).
                 let input = &values[&node.inputs[0]];
-                let expected: usize = shape.iter().product();
+                let expected = admit_result("reshape", &shape, input.prim())?;
                 // The phrase is the interpreter's and the C runtime's
                 // (`host_emit.rs`), so every lane reports the mismatch alike.
                 if expected != input.len() {
@@ -2623,12 +4420,12 @@ where
                 }
                 reshape(input, shape)
             }
-            RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes),
+            RiscOp::Permute { axes } => permute(&values[&node.inputs[0]], axes)?,
             RiscOp::Expand { axis, size } => {
                 let input = &values[&node.inputs[0]];
                 let size_value = resolve_eval_bound(size, node, &values, 0)?;
                 let mut out_shape = input.shape.clone();
-                if node.output_type.dims.len() == input.shape.len() + 1 {
+                let kind = if node.output_type.dims.len() == input.shape.len() + 1 {
                     if *axis > out_shape.len() {
                         return Err(format!(
                             "expand at node {}: axis {} out of bounds for rank {} tensor",
@@ -2638,6 +4435,7 @@ where
                         ));
                     }
                     out_shape.insert(*axis, size_value);
+                    crate::axis_sources::ExpansionKind::Insert
                 } else if node.output_type.dims.len() == input.shape.len() {
                     let target = out_shape.get_mut(*axis).ok_or_else(|| {
                         format!(
@@ -2648,6 +4446,7 @@ where
                         )
                     })?;
                     *target = size_value;
+                    crate::axis_sources::ExpansionKind::Expand
                 } else {
                     return Err(format!(
                         "expand at node {}: output rank {} must equal input rank {} or {}",
@@ -2656,8 +4455,8 @@ where
                         input.shape.len(),
                         input.shape.len() + 1
                     ));
-                }
-                expand(input, *axis, size_value, out_shape)
+                };
+                expand(kind.primitive_name(), input, *axis, out_shape)?
             }
             RiscOp::OneHot { vocab } => one_hot(&values[&node.inputs[0]], *vocab, out_prim)?,
             RiscOp::Pad { padding, fill } => {
@@ -2679,12 +4478,17 @@ where
                         ));
                     }
                 }
-                shrink(input, &resolved)
+                shrink(input, &resolved)?
             }
-            RiscOp::Stride { strides } => {
+            RiscOp::Stride { .. } => {
                 let input = &values[&node.inputs[0]];
-                let resolved = resolve_eval_strides(strides, node, &values, &input.shape)?;
-                stride(input, &resolved)
+                let resolved = resolved_stride_steps.as_deref().ok_or_else(|| {
+                    format!(
+                        "stride at node {}: prevalidated step vector is missing",
+                        node.id.0
+                    )
+                })?;
+                stride(input, resolved)
             }
             RiscOp::FusedElem { ops } => {
                 // Collect external input TensorValues from the node's DAG inputs.
@@ -2749,11 +4553,6 @@ where
                         )?,
                         FusedStepOp::MinElem => binary_elementwise(
                             ElementwiseBinOp::Min,
-                            resolve(&step.input_indices[0]),
-                            resolve(&step.input_indices[1]),
-                        )?,
-                        FusedStepOp::CmpLt => compare_elementwise(
-                            CompareOp::Lt,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,
@@ -2858,7 +4657,7 @@ where
                 }
             }
             RiscOp::Gather { axis } => {
-                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)
+                gather(&values[&node.inputs[0]], &values[&node.inputs[1]], *axis)?
             }
             RiscOp::ScatterAdd { axis } => scatter_add(
                 &values[&node.inputs[0]],
@@ -2880,6 +4679,9 @@ where
                 *axis,
             ),
         };
+        for (id, original) in inactive_operands {
+            values.insert(id, original);
+        }
         // chelis#616: bind this node's op-declared runtime dims from the
         // value's actual extents. A disagreement with an existing binding
         // (Load-bound or an earlier declarer for the same symbol) is a real
@@ -2924,16 +4726,294 @@ where
                 ) {
                     continue;
                 }
+                if !local_guard_is_active(claim, &values)? {
+                    continue;
+                }
                 let Some(&observed) = value.shape.get(*axis) else {
                     continue;
                 };
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims, &values)?;
             }
         }
-        values.insert(node.id, value);
+        let produced_elements = value.len();
+        if let Some(replaced) = values.insert(node.id, value) {
+            live_elements -= replaced.len();
+        }
+        live_elements += produced_elements;
+        peak_live_values = peak_live_values.max(values.len());
+        peak_live_elements = peak_live_elements.max(live_elements);
+        // Reclaim AFTER the sample above: the sample is the transient this
+        // step actually held, and reclamation is what keeps the next one
+        // bounded. Under an all-values scope there is no schedule and
+        // nothing is removed, so that lane's map is byte-for-byte what it
+        // always was.
+        if let Some(schedule) = &free_schedule {
+            for dead in &schedule[index] {
+                if let Some(freed) = values.remove(dead) {
+                    live_elements -= freed.len();
+                }
+            }
+        }
     }
 
-    Ok((values, path_random_counter))
+    Ok(EvaluatedValues {
+        values,
+        peak_live_values,
+        peak_live_elements,
+    })
+}
+
+/// spec/10 §3.2 for an elementwise node whose activation holds in no row:
+/// its operands' extent agreement is a check, so it checks nothing. An
+/// untaken arm's claim-sized node is zeros at the claimed extent (decisions
+/// section 25), while a node the arm sizes from an unclaimed origin keeps
+/// that origin's extent (a `grad` body's accumulator sized from its
+/// parameter), so an untaken arm's operands can disagree. The node then
+/// yields zeros at its first operand's shape, read only by the arm's own
+/// nodes and by the join, which does not read an unselected branch
+/// ([05-OP-53]). A `where` is one such node: an untaken arm's inner join
+/// checks its condition against no branch, and yields zeros at the
+/// condition's shape. `None` where the operands agree or some row is active.
+fn inactive_disagreeing_elementwise(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Option<TensorValue>, String> {
+    if !matches!(
+        node.op,
+        RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::Bitwise(_)
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::FusedElem { .. }
+            | RiscOp::Where
+    ) {
+        return Ok(None);
+    }
+    let shapes = node
+        .inputs
+        .iter()
+        .filter_map(|input| values.get(input))
+        .map(|value| &value.shape)
+        .filter(|shape| !shape.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first) = shapes.first() else {
+        return Ok(None);
+    };
+    if shapes.iter().all(|shape| shape == first)
+        || !matches!(node_activity(node, values)?, Activity::Inactive)
+    {
+        return Ok(None);
+    }
+    let prim = node.output_type.precision;
+    let len = admit_result("activation", first, prim)?;
+    Ok(Some(TensorValue::from_storage(
+        first.to_vec(),
+        zero_storage(prim, len)?,
+    )))
+}
+
+/// The value a node whose activation holds in no row produces without
+/// checking anything (spec/10 §3.2), for the classes that check an extent or
+/// a bound rather than an operand's values ([`RuntimeCheck`]), and for a
+/// node whose declared extent rests on a claim checked under its activation
+/// (`claim_sized`, [`crate::dag::TrapSeeds::is_claim_sized`]); `None` for a
+/// node that computes from its operands as usual.
+///
+/// A movement node reads no bound and produces zeros of its declared type,
+/// so an empty or out-of-range bound in an untaken arm allocates and traps
+/// on nothing. A claim-sized node produces zeros of its declared type the
+/// same way, so an operand whose extent disagrees with the claim is never
+/// read. In both, an axis nothing has bound yet takes the extent a claim
+/// states for it (`claimed`, the unchecked claim's canonical value), and
+/// otherwise the extent its carrier reads (for a movement, its operand's
+/// axis). A reduction over an empty axis reduces to zeros. An extent claim
+/// compares nothing and produces the value it would have checked.
+fn inactive_unchecked_value(
+    node: &DagNode,
+    claim_sized: bool,
+    claimed: &[(usize, crate::axis_sources::CanonicalExtent)],
+    source: &Dag,
+    values: &UnordMap<NodeId, TensorValue>,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<Option<TensorValue>, String> {
+    let operand = || {
+        node.inputs
+            .first()
+            .and_then(|input| values.get(input))
+            .ok_or_else(|| format!("node {} reads a missing operand", node.id.0))
+    };
+    // All-zero bits, the C lane's zero-fill: positive zeros, and at `key`
+    // the key whose bits are zero (`key_from_seed(0)`).
+    let zeros = |shape: &[usize]| -> Result<TensorValue, String> {
+        let prim = node.output_type.precision;
+        let len = admit_result("activation", shape, prim)?;
+        let storage = if prim == Prim::Key {
+            let seed = chelis_types::scalar_from_i64("activation", Prim::Int64, 0)
+                .map_err(|trap| trap.to_string())?;
+            let zero = RandomKey::from_seed(seed).map_err(|error| error.to_string())?;
+            TensorStorage::from_keys(vec![zero; len])
+        } else {
+            zero_storage(prim, len)?
+        };
+        Ok(TensorValue::from_storage(shape.to_vec(), storage))
+    };
+    // The extent a claim states for `axis`: its resolved size, its declaring
+    // witness's scalar, or its binder as bound.
+    let claimed_extent = |axis: usize| {
+        claimed
+            .iter()
+            .find(|(claimed_axis, _)| *claimed_axis == axis)
+            .and_then(|(_, canonical)| match canonical {
+                crate::axis_sources::CanonicalExtent::Resolved(extent) => Some(*extent),
+                crate::axis_sources::CanonicalExtent::Witness(witness) => {
+                    usize::try_from(values.get(witness)?.storage().scalar_at(0).as_i64_exact()?)
+                        .ok()
+                }
+                crate::axis_sources::CanonicalExtent::Binder(name) => {
+                    runtime_dims.get(name).copied()
+                }
+            })
+    };
+    // The declared type's extents: a literal or a resolved name as stated, a
+    // runtime name as bound, and a name nothing has bound yet as the extent a
+    // claim states for its axis, or else the one `unbound` gives it (the
+    // axis, when neither gives one).
+    let declared_shape = |unbound: &dyn Fn(usize) -> Option<usize>| {
+        node.output_type
+            .dims
+            .iter()
+            .enumerate()
+            .map(|(axis, dim)| match dim {
+                DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => Ok(*extent),
+                DimInfo::Named(name, None) => runtime_dims
+                    .get(name)
+                    .copied()
+                    .or_else(|| claimed_extent(axis))
+                    .or_else(|| unbound(axis))
+                    .ok_or(axis),
+            })
+            .collect::<Result<Vec<_>, usize>>()
+    };
+    match node.runtime_check() {
+        RuntimeCheck::MovementBounds => {
+            let operand = operand()?;
+            // A movement keeps its operand's rank, so the operand has every
+            // axis the node declares.
+            let shape =
+                declared_shape(&|axis| operand.shape.get(axis).copied()).map_err(|axis| {
+                    format!(
+                        "node {} declares axis {axis}, which its operand of rank {} does not have",
+                        node.id.0,
+                        operand.shape.len()
+                    )
+                })?;
+            zeros(&shape).map(Some)
+        }
+        _ if claim_sized => {
+            // An unbound name no claim states takes what the node's own
+            // carrier for its axis reads, an operand's axis or a scalar
+            // operand, as the C lane declares it before the node's branch.
+            let sources = crate::axis_sources::output_axis_sources(source, node.id);
+            let operand = |input: &usize| node.inputs.get(*input).and_then(|id| values.get(id));
+            let carried = |axis: usize| match sources.get(axis)? {
+                crate::axis_sources::AxisSource::InputAxis {
+                    input,
+                    axis: RtAxis::Lit(read),
+                } => operand(input)?
+                    .shape
+                    .get(usize::try_from(*read).ok()?)
+                    .copied(),
+                crate::axis_sources::AxisSource::ScalarInput { input } => {
+                    usize::try_from(operand(input)?.storage().scalar_at(0).as_i64_exact()?).ok()
+                }
+                _ => None,
+            };
+            let shape = declared_shape(&carried).map_err(|axis| {
+                format!(
+                    "node {} declares axis {axis}, which no bound name or operand sizes",
+                    node.id.0
+                )
+            })?;
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::EmptyAxis => {
+            let axis = match &node.op {
+                RiscOp::MaxReduce { axis }
+                | RiscOp::MinReduce { axis }
+                | RiscOp::Argmax { axis }
+                | RiscOp::Argmin { axis } => *axis,
+                _ => return Ok(None),
+            };
+            let operand = operand()?;
+            if operand.shape.get(axis) != Some(&0) {
+                return Ok(None);
+            }
+            let mut shape = operand.shape.clone();
+            shape.remove(axis);
+            zeros(&shape).map(Some)
+        }
+        RuntimeCheck::ExtentClaims => match &node.op {
+            RiscOp::ExtentWitness {
+                axis: RtAxis::Lit(axis),
+                ..
+            } => {
+                let extent = operand()?
+                    .shape
+                    .get(*axis as usize)
+                    .copied()
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                finalize_wide_int(
+                    "shape",
+                    node.output_type.precision,
+                    vec![],
+                    vec![i64::try_from(extent).map_err(|_| "extent exceeds i64")?],
+                )
+                .map(Some)
+            }
+            RiscOp::CheckedReshapeExtent { .. } => Ok(Some(operand()?.clone())),
+            _ => Ok(None),
+        },
+        RuntimeCheck::Nothing
+        | RuntimeCheck::OperandValues
+        | RuntimeCheck::MeanDivisor
+        | RuntimeCheck::Random
+        | RuntimeCheck::Abort
+        | RuntimeCheck::Ungated => Ok(None),
+    }
+}
+
+fn local_guard_is_active(
+    claim: &crate::axis_sources::LocalGuardClaim,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<bool, String> {
+    let Some(activation) = claim.activation.node() else {
+        return Ok(true);
+    };
+    let value = values.get(&activation).ok_or_else(|| {
+        format!(
+            "local extent guard activation at node {} is not available",
+            activation.0
+        )
+    })?;
+    // An extent is shared by every row of its tensor, so under a per-row
+    // activation the guard runs when any row is active.
+    match value.storage().to_raw() {
+        RawTensor::Int(values) if value.prim() == Prim::Bool => {
+            Ok(values.iter().any(|value| *value != 0))
+        }
+        _ => Err(format!(
+            "local extent guard activation at node {} is not a Bool",
+            activation.0
+        )),
+    }
 }
 
 /// One local extent guard, compared and reported.
@@ -2944,52 +5024,377 @@ where
 /// section 4.7's context on its own preceding line, in the C lane's wording:
 /// the two lanes report one guard.
 ///
-/// A binder this lane has not bound supplies no value, so the site is skipped
-/// rather than compared against an invented number.
+/// A binder this lane has not bound yet is BOUND from the first site that
+/// observes it, and every later site is compared against that value. That is
+/// C2.4's rule for a class whose canonical value no literal resolves: the
+/// first member is canonical and the rest guard against it.
 ///
-/// The C lane does NOT match that skip, and saying so is the point. Once
+/// This mirrors the C lane case for case rather than describing it. Once
 /// control reaches `emit_runtime_dim_site`'s GUARD branch it consults no
 /// binding table and emits its comparison against the binder unconditionally,
-/// so where this lane skips, C would emit an identifier its prologue may never
-/// declare. What keeps that from being a live divergence is not the absence of
-/// such a class - one is easy to build, with a `Load` whose only axis is a
-/// literal and two op-declared members - but the branch above it.
-/// `runtime_dim_sites` (`chelis-backend-c/src/emit.rs`) makes the FIRST
-/// op-declared occurrence of a symbol no `Load` declares a DECLARE site, so
-/// `emit_runtime_dim_site` returns before the guard branch for exactly the
-/// symbols this lane has not bound; a later site for that symbol compares
-/// against a variable by then declared. The eval mirror is the `runtime_dims`
-/// insert in the same loop, which binds the same symbol when the same node
-/// evaluates. The lanes line up case by case.
+/// so a lane that SKIPPED an unbound binder would leave C comparing against an
+/// identifier and this lane comparing against nothing. `runtime_dim_sites`
+/// (`chelis-backend-c/src/emit.rs`) makes the FIRST op-declared occurrence of a
+/// symbol no `Load` declares a DECLARE site, emitting `int64_t m = <extent>;`
+/// before its guard; the `runtime_dims` insert below is that declaration on
+/// this lane, at the same site and from the same observed value.
 ///
-/// The residual window is a derivation site that the legacy
-/// `symbolic_occurrences` walk records nowhere, for a symbol nothing declares.
-/// Neither this author nor a reviewer could construct one. It stays a latent
-/// asymmetry in one derivation's two consumers, recorded rather than papered
-/// over, and closing it means giving the derivation the answer rather than
-/// adding a second test in either lane.
+/// The residual this replaces was a derivation site for a symbol nothing
+/// declares, recorded rather than closed because no reviewer could construct a
+/// reaching class. Admitting op-computed members makes one buildable - two axes
+/// of one `shrink` under a result name no parameter declares - so the asymmetry
+/// between the two consumers is removed here instead of being re-recorded.
 fn local_guard_verdict(
-    node_id: usize,
     axis: usize,
     claim: &crate::axis_sources::LocalGuardClaim,
     observed: usize,
-    runtime_dims: &UnordMap<String, usize>,
+    runtime_dims: &mut UnordMap<String, usize>,
+    values: &UnordMap<NodeId, TensorValue>,
 ) -> Result<(), String> {
     let claimed = match &claim.canonical {
         crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
+        crate::axis_sources::CanonicalExtent::Witness(witness) => values
+            .get(witness)
+            .filter(|value| value.shape.is_empty() && value.len() == 1)
+            .and_then(|value| value.storage().scalar_at(0).as_i64_exact())
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("missing or invalid declaring extent witness {}", witness.0))?,
         crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
             Some(value) => *value,
-            None => return Ok(()),
+            None => {
+                runtime_dims.insert(name.clone(), observed);
+                observed
+            }
         },
     };
     if observed != claimed {
+        let canonical = match &claim.source {
+            None => format!("claimed = {claimed}"),
+            Some(source) => format!("{} axis {} = {claimed}", source.parameter, source.axis),
+        };
         return Err(format!(
-            "extent `{}`: claimed = {claimed}, node {node_id} axis {axis} = {observed}\n\
-             numeric trap: domain in {} at int64",
-            claim.claim, claim.op,
+            "extent `{}`: {canonical}, {} axis {axis} = {observed}\n\
+             numeric trap: domain in {} at i64",
+            claim.claim, claim.op, claim.op,
         ));
     }
     Ok(())
+}
+
+/// The extents `shape` an operation computed against the extents its
+/// declared type claims: a literal, a bound name, or a name an earlier
+/// operation declared. A name nothing has bound yet is declared by this
+/// result (`op_declared_axes`), and an anonymous one claims nothing. The
+/// report is [`local_guard_verdict`]'s, which the C lane mirrors.
+/// A branch's join ([`RiscOp::KeySelect`]): element `i` is the then key's
+/// where the then activation holds for its row, and the else key's
+/// elsewhere. An activation is rank 0, or shaped like a leading part of the
+/// keys' shape, and row `r` of `n` keys reads its element `r / (n / len)`, as
+/// a draw's activation does. The C lane selects the same way.
+fn eval_key_select(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<TensorValue, String> {
+    let value = |slot: usize| {
+        node.inputs
+            .get(slot)
+            .and_then(|input| values.get(input))
+            .ok_or_else(|| format!("join at node {} has no input {slot}", node.id.0))
+    };
+    let (then_value, else_value, active) = (value(0)?, value(1)?, value(2)?);
+    let keys = |value: &TensorValue| {
+        value
+            .storage()
+            .keys()
+            .map(<[chelis_types::RandomKey]>::to_vec)
+            .ok_or_else(|| format!("join at node {} reads a non-key key", node.id.0))
+    };
+    if then_value.shape != else_value.shape {
+        return Err(format!(
+            "join at node {}: then keys {:?} and else keys {:?} must share one shape",
+            node.id.0, then_value.shape, else_value.shape
+        ));
+    }
+    if active.prim() != Prim::Bool || !then_value.shape.starts_with(&active.shape) {
+        return Err(format!(
+            "join at node {}: its activation must be a Bool shaped like a leading part of its keys' shape {:?}",
+            node.id.0, then_value.shape
+        ));
+    }
+    let (then_keys, mut selected) = (keys(then_value)?, keys(else_value)?);
+    let (rows, len) = (selected.len(), active.len());
+    for (row, key) in selected.iter_mut().enumerate() {
+        let taken = active.storage().scalar_at(leading_row(row, rows, len));
+        if taken.as_bool_exact() == Some(true) {
+            *key = then_keys[row];
+        }
+    }
+    Ok(TensorValue::from_storage(
+        then_value.shape.clone(),
+        TensorStorage::from_keys(selected),
+    ))
+}
+
+/// Whether a key operation's own activation (spec/10 §3.2,
+/// [`crate::dag::Owner::activation`]) holds in some row: absent, or a Bool
+/// with at least one true element. A key operation whose activation holds in
+/// no row reads no count.
+fn key_operation_is_live(
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<bool, String> {
+    let Some(input) = node.owner.activation else {
+        return Ok(true);
+    };
+    let active = values
+        .get(&input)
+        .ok_or("key operation activation is not available")?;
+    if active.prim() != Prim::Bool {
+        return Err("key operation activation is not a Bool".into());
+    }
+    let storage = active.storage();
+    Ok((0..storage.len()).any(|index| storage.scalar_at(index).as_bool_exact() == Some(true)))
+}
+
+/// The count axis of a `SplitN` whose activation holds in no row
+/// ([`RiscOp::SplitN`]): the extent its type declares where a literal or an
+/// earlier binding fixes it, and zero where the split itself would declare
+/// it. The C lane reads the same declaration.
+fn inactive_split_count(
+    declared: &TensorType,
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<usize, String> {
+    match declared.dims.last() {
+        Some(DimInfo::Lit(value) | DimInfo::Named(_, Some(value))) => Ok(*value),
+        Some(DimInfo::Named(name, None)) => Ok(match runtime_dims.get(name) {
+            Some(value) => *value,
+            // Nothing has bound the name, so the split declares its own
+            // count axis, and an unselected split's axis is empty.
+            None => 0,
+        }),
+        None => Err("split_keys declares no count axis".into()),
+    }
+}
+
+fn check_declared_extents(
+    op: &str,
+    declared: &TensorType,
+    shape: &[usize],
+    runtime_dims: &UnordMap<String, usize>,
+) -> Result<(), String> {
+    if declared.dims.len() != shape.len() {
+        return Err(format!(
+            "{op} computed rank {}, but its type declares rank {}",
+            shape.len(),
+            declared.dims.len()
+        ));
+    }
+    for (axis, (dim, &observed)) in declared.dims.iter().zip(shape).enumerate() {
+        let (claim, claimed) = match dim {
+            DimInfo::Lit(value) => (value.to_string(), *value),
+            DimInfo::Named(name, Some(value)) => (name.clone(), *value),
+            DimInfo::Named(name, None) => match runtime_dims.get(name) {
+                Some(value) => (name.clone(), *value),
+                None => continue,
+            },
+        };
+        if observed != claimed {
+            return Err(format!(
+                "extent `{claim}`: claimed = {claimed}, {op} axis {axis} = {observed}\n\
+                 numeric trap: domain in {op} at i64"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why a selected-input preparation callback is being queried.
+/// This is an input obligation, not declaration identity or a cache certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorInputDemand {
+    /// An executed Load, including shape dependencies and plan-retained Loads.
+    /// Strict preparation refuses absence immediately.
+    Selected,
+    /// An exact external shape source needed outside the execution mask.
+    /// Absence keeps the existing deferred inference/binding diagnostic.
+    RequiredShape,
+    /// A surplus symbolic declarer: return a value only if already available.
+    /// This query does not authorize evaluating an unresolved initializer.
+    AvailableShape,
+}
+
+/// Resolve the inputs selected by strict root evaluation, without evaluating
+/// graph nodes. Empty roots select the whole DAG, as in
+/// [`eval_tensor_roots_with_strict`]. Shape dependencies and optional symbolic
+/// dimension declarers follow the same selection rules as evaluation.
+///
+/// Providers run in DAG order. Successful names are requested once; absent
+/// optional names may be requested repeatedly. Provider errors propagate
+/// unchanged. Axis-source and Drop-root validation precede provider calls;
+/// rank, extent, dtype and numeric validation remain evaluation's responsibility.
+/// Execute the same DAG/roots with a lookup into the returned map to avoid
+/// repeating provider effects. The map is not a certificate of successful execution.
+pub fn prepare_tensor_roots_inputs<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    mut load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str) -> Result<Option<TensorValue>, String>,
+{
+    prepare_tensor_roots_inputs_with_demand(dag, roots, |name, _| load_input(name))
+}
+
+/// Role-aware form of [`prepare_tensor_roots_inputs`], with identical selection,
+/// ordering, deduplication and validation stages. RequiredShape absence remains
+/// deferred; AvailableShape is an available-value query, not initializer demand.
+pub fn prepare_tensor_roots_inputs_with_demand<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    load_input: F,
+) -> Result<UnordMap<String, TensorValue>, String>
+where
+    F: FnMut(&str, TensorInputDemand) -> Result<Option<TensorValue>, String>,
+{
+    reject_drop_roots(dag, roots)?;
+    let live = (!roots.is_empty()).then(|| live_mask_for_roots(dag, roots));
+    prepare_tensor_inputs(dag, live.as_deref(), true, load_input).map(|prepared| prepared.inputs)
+}
+
+/// The extent an op-computed axis is about to produce, read from the site
+/// node's own bounds before that node runs.
+///
+/// `None` means the operation computes no extent here: a `shrink` span whose
+/// start is not below its end selects nothing, so there is nothing to compare
+/// and the guard yields. THIS lane then reports the span itself. The C lane
+/// does not: `spec/05-risc-primitives.md` section 2.4.1's closed list of
+/// runtime-bound errors does not include an empty span, so an extent-0 result
+/// under a declared literal is a claim mismatch there and C reports the claim.
+/// That divergence is chelis#1795's, not this function's; the inline comment
+/// at the call site carries the full argument.
+///
+/// A span whose END exceeds the operand's extent is declined for the same
+/// reason, and chelis#1797 is why it now can be. Such a span is out of domain,
+/// and section 2.4.1 makes "a shrink range overshoot" an error every execution
+/// mode reports with matching language, so the guard must not compare a claim
+/// against the span's arithmetic width and report a claim mismatch: the claim
+/// is not what is wrong. Declining hands the report to the operation, and
+/// `shrink` now answers an out-of-domain bound with `SHRINK_DOMAIN_TRAP`,
+/// which is the compiled lane's own two lines. Before that repair the
+/// operation's answer was an `assert!`, so declining would have traded a guard
+/// naming the wrong reason for a panic, and this slice bounded its cross-lane
+/// claim to IN-DOMAIN spans instead.
+///
+/// This is also the order the compiled lane takes, rather than a choice made
+/// twice: C builds the movement plan before the guard site runs, so
+/// `ShapeMetadata::shrunk` rejects the bounds and the guard never executes.
+fn computed_axis_extent_value(
+    computed: &crate::axis_sources::ComputedAxisExtent,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+    resolved_stride_steps: Option<&[std::num::NonZeroUsize]>,
+) -> Result<Option<usize>, String> {
+    match computed {
+        crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
+            start,
+            end,
+            operand_axis,
+        } => {
+            // `RtDim::ToEnd` resolves to the OPERAND's realized extent, which
+            // is readable here because the operand is one of this node's
+            // producers. `resolve_eval_pairs` resolves the same two bounds
+            // against the same shape when the operation itself runs.
+            //
+            // An absent operand or axis is a malformed graph that `verify`
+            // rejects, and the guard declines rather than substituting a
+            // number for it: a fabricated extent would compare a claim
+            // against a value nothing produced, and the operation's own
+            // failure is the one that names the defect.
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            let start = resolve_eval_bound(start, node, values, extent)?;
+            let end = resolve_eval_bound(end, node, values, extent)?;
+            if end > extent {
+                return Ok(None);
+            }
+            Ok(end.checked_sub(start).filter(|span| *span > 0))
+        }
+        crate::axis_sources::ComputedAxisExtent::PadSpan {
+            before,
+            after,
+            operand_axis,
+        } => {
+            // The operand is this node's producer, so its realized extent is
+            // readable here, before the pad allocates. An absent operand or
+            // axis is a malformed graph the verifier rejects, and the guard
+            // declines rather than substituting a number: a fabricated extent
+            // would compare a claim against a value nothing produced.
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            // `resolve_eval_bound`'s fourth argument resolves `RtDim::ToEnd`,
+            // which a padding bound never is; passing the operand's extent
+            // keeps one resolver for both owners rather than a second that
+            // differs only in what it refuses.
+            let before = resolve_eval_bound(before, node, values, extent)?;
+            let after = resolve_eval_bound(after, node, values, extent)?;
+            // A sum past the host's extent capacity computes no extent. The
+            // pad's own allocation owns that failure, so the guard yields
+            // instead of comparing a wrapped number.
+            Ok(extent
+                .checked_add(before)
+                .and_then(|widened| widened.checked_add(after)))
+        }
+        crate::axis_sources::ComputedAxisExtent::StrideSpan { step, operand_axis } => {
+            // Preserve the operand-axis identity and the signed step carrier
+            // through the shared observation. The complete stride vector was
+            // resolved at the node boundary before ANY local claim, so a
+            // later invalid axis cannot be masked by this axis's mismatch.
+            let Some(carrier) = (match &node.op {
+                RiscOp::Stride { strides } => strides.get(*operand_axis),
+                _ => None,
+            }) else {
+                return Err(format!(
+                    "stride extent at node {}: carrier for axis {} is missing",
+                    node.id.0, operand_axis
+                ));
+            };
+            if carrier != step {
+                return Err(format!(
+                    "stride extent at node {}: carrier for axis {} disagrees with its site",
+                    node.id.0, operand_axis
+                ));
+            }
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            let step = resolved_stride_steps
+                .and_then(|steps| steps.get(*operand_axis))
+                .ok_or_else(|| {
+                    format!(
+                        "stride extent at node {}: prevalidated step for axis {} is missing",
+                        node.id.0, operand_axis
+                    )
+                })?;
+            Ok(Some(extent.div_ceil(step.get())))
+        }
+    }
 }
 
 pub fn eval_tensor_with<F>(
@@ -2999,8 +5404,8 @@ pub fn eval_tensor_with<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(dag, EvaluationScope::WholeDag, false, load_input)
+        .map(|evaluated| evaluated.values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -3010,10 +5415,17 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(dag, EvaluationScope::WholeDag, true, load_input)
+        .map(|evaluated| evaluated.values)
 }
 
+/// Evaluate `roots` and return their values.
+///
+/// The result holds exactly the named roots. Every other value is freed once
+/// the last step that reads it has run, so peak memory tracks the live working
+/// set rather than the executed node count (chelis#828). Empty roots select
+/// the whole DAG and keep the all-values contract, as do [`eval_tensor`],
+/// [`eval_tensor_with`] and [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3023,21 +5435,28 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        // Empty roots select the whole DAG, which is the all-values contract.
+        return eval_tensor_internal(dag, EvaluationScope::WholeDag, false, load_input)
+            .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(
         dag,
-        Some(&live),
+        EvaluationScope::Roots { live: &live, roots },
         false,
-        INITIAL_RANDOM_STREAM_ORDINAL,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
+/// Evaluate `roots` and return their values.
+///
+/// The result holds exactly the named roots. Every other value is freed once
+/// the last step that reads it has run, so peak memory tracks the live working
+/// set rather than the executed node count (chelis#828). Empty roots select
+/// the whole DAG and keep the all-values contract, as do [`eval_tensor`],
+/// [`eval_tensor_with`] and [`eval_tensor_with_strict`].
 pub fn eval_tensor_roots_with_strict<F>(
     dag: &Dag,
     roots: &[NodeId],
@@ -3047,39 +5466,58 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        // Empty roots select the whole DAG, which is the all-values contract.
+        return eval_tensor_internal(dag, EvaluationScope::WholeDag, true, load_input)
+            .map(|evaluated| evaluated.values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
     eval_tensor_internal(
         dag,
-        Some(&live),
+        EvaluationScope::Roots { live: &live, roots },
         true,
-        INITIAL_RANDOM_STREAM_ORDINAL,
         load_input,
     )
-    .map(|(values, _)| values)
+    .map(|evaluated| evaluated.values)
 }
 
-/// Evaluate roots while threading the executed Random path's next ordinal.
-/// Only `UniformLike` nodes carrying a scalar Bool activation participate;
-/// ordinary baked-seed DAGs retain their historical behavior.
-pub fn eval_tensor_roots_with_strict_random_progress<F>(
+/// Evaluate exactly `roots` with strict loads.
+///
+/// The result holds exactly the named roots. Unlike
+/// [`eval_tensor_roots_with_strict`], empty roots select no value node: only
+/// effect nodes and random nodes that can trap by themselves execute.
+pub fn eval_tensor_roots_exact<F>(
     dag: &Dag,
     roots: &[NodeId],
-    random_counter: u64,
     load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
+) -> Result<UnordMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, load_input);
-    }
+    eval_tensor_roots_exact_with_result_claims(dag, roots, &[], load_input)
+}
+
+/// [`eval_tensor_roots_exact`] with invocation-local literal result claims
+/// checked against the realized roots.
+pub fn eval_tensor_roots_exact_with_result_claims<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    result_claims: &[InheritedResultClaim],
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
+    eval_tensor_internal_with_result_claims(
+        dag,
+        EvaluationScope::Roots { live: &live, roots },
+        true,
+        result_claims,
+        load_input,
+    )
+    .map(|evaluated| evaluated.values)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -3122,9 +5560,57 @@ pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId
 mod tests {
     use super::*;
     use crate::dag::RiscOp;
-    use crate::lower::lower_program;
+    use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
+
+    /// [05-OP-53]: the condition's shape equals the shape of every branch it
+    /// selects, and a branch it selects nowhere is neither read nor
+    /// shape-checked. A uniform condition yields the selected branch when
+    /// that branch is shaped like the condition, whatever the other branch's
+    /// shape, and is refused when it is not; an empty one yields an empty
+    /// result of its shape, and a mixed one still requires every shape to
+    /// agree (decisions section 25).
+    ///
+    /// Evidentiary status: REGRESSION TEST for the accepted uniform and
+    /// empty rows (each fails the shape check at 096daea8c) and for the
+    /// refused uniform rows (each returns its selected branch at 1a026f823);
+    /// DISPOSITION LOCK for the mixed rows.
+    #[test]
+    fn where_checks_only_the_branches_its_condition_selects() {
+        let condition = |flags: &[i64]| {
+            finalize_wide_int("where", Prim::Bool, vec![flags.len()], flags.to_vec()).unwrap()
+        };
+        let three = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
+        let two = TensorValue::from_vec(vec![2], vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[1, 1]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![2]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![7.0, 8.0]);
+        let selected = where_elementwise(&condition(&[0, 0, 0]), &two, &three).unwrap();
+        assert_eq!(selected.shape, vec![3]);
+        assert_eq!(selected.to_f64_lossy_vec(), vec![1.0, 2.0, 3.0]);
+        for flags in [&[1, 1, 1][..], &[0, 0][..]] {
+            assert_eq!(
+                where_elementwise(&condition(flags), &two, &three).unwrap_err(),
+                "where: condition and branch shapes must match exactly",
+                "{flags:?}"
+            );
+        }
+        let empty = where_elementwise(&condition(&[]), &two, &three).unwrap();
+        assert_eq!(empty.shape, vec![0]);
+        assert_eq!(empty.prim(), Prim::F64);
+        assert_eq!(
+            where_elementwise(&condition(&[1, 0, 1]), &three, &two).unwrap_err(),
+            "where: condition and branch shapes must match exactly"
+        );
+        let mixed = where_elementwise(
+            &condition(&[1, 0, 1]),
+            &three,
+            &TensorValue::from_vec(vec![3], vec![4.0, 5.0, 6.0]),
+        )
+        .unwrap();
+        assert_eq!(mixed.to_f64_lossy_vec(), vec![1.0, 5.0, 3.0]);
+    }
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -3145,67 +5631,6 @@ mod tests {
     }
 
     #[test]
-    fn path_sensitive_uniform_like_advances_only_active_nodes() {
-        let mut dag = Dag::new();
-        let ty = tensor_ty(&[2], Prim::F32);
-        let template = dag.add_node(
-            RiscOp::Load {
-                name: "template".into(),
-            },
-            vec![],
-            ty.clone(),
-            None,
-        );
-        let inactive = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 0.0),
-            vec![],
-            tensor_ty(&[], Prim::Bool),
-            None,
-        );
-        let active = dag.add_node(
-            RiscOp::synth_const(Prim::Bool, 1.0),
-            vec![],
-            tensor_ty(&[], Prim::Bool),
-            None,
-        );
-        let skipped = dag.add_node(
-            RiscOp::UniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 17,
-            },
-            vec![template, inactive],
-            ty.clone(),
-            None,
-        );
-        let executed = dag.add_node(
-            RiscOp::UniformLike {
-                low: 0.0,
-                high: 1.0,
-                seed: 17,
-            },
-            vec![template, active],
-            ty,
-            None,
-        );
-        dag.add_root(skipped);
-        dag.add_root(executed);
-
-        let roots = dag.roots().to_vec();
-        let (values, next) =
-            eval_tensor_roots_with_strict_random_progress(&dag, &roots, 7, |name| {
-                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
-            })
-            .expect("path-sensitive Random DAG evaluates");
-        assert_eq!(next, 8, "only the active draw consumes an ordinal");
-        let expected_seed = 17 ^ 7_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
-        assert_eq!(values[&executed], expected);
-        let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
-        assert_eq!(values[&skipped], skipped_expected);
-    }
-
-    #[test]
     fn load_ingress_rejects_an_already_tagged_dtype_substitution() {
         let f16 = finalize_tensor("test", Prim::F16, RawTensor::Float(vec![1.5])).unwrap();
         let input = TensorValue::from_storage(vec![1], f16);
@@ -3214,12 +5639,12 @@ mod tests {
         assert!(err.contains("f16"), "source dtype must be named: {err}");
         assert!(err.contains("f32"), "declared dtype must be named: {err}");
 
-        let int8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
-        let input = TensorValue::from_storage(vec![1], int8);
+        let i8 = finalize_tensor("test", Prim::Int8, RawTensor::Int(vec![7])).unwrap();
+        let input = TensorValue::from_storage(vec![1], i8);
         let err = ingress_to_declared("x", Prim::Int64, &input)
-            .expect_err("a tagged int8 input must not be contextually cast to int64");
-        assert!(err.contains("int8"), "source dtype must be named: {err}");
-        assert!(err.contains("int64"), "declared dtype must be named: {err}");
+            .expect_err("a tagged i8 input must not be contextually cast to i64");
+        assert!(err.contains("i8"), "source dtype must be named: {err}");
+        assert!(err.contains("i64"), "declared dtype must be named: {err}");
     }
 
     #[test]
@@ -3259,29 +5684,60 @@ mod tests {
         // 2x3 input [[1,2,3],[4,5,6]]; axis 0 sliced [1,2] (concrete row 1),
         // axis 1 a full-axis identity via the sentinel.
         let input = TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]);
+        let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]).expect("an in-domain slice");
         assert_eq!(out.shape, vec![1, 3]);
         assert_eq!(out.to_f64_lossy_vec(), vec![4.0, 5.0, 6.0]);
     }
 
-    /// chelis#523: `eval::shrink` loud-clamp — a genuine (non-sentinel) `end`
-    /// beyond the input extent must fail loud, not read out of bounds / return
-    /// a silently wrong slice. Do NOT clamp to a valid range (that hides the
-    /// producing-pass bug).
+    /// chelis#1797: a genuine (non-sentinel) `end` beyond the input extent is
+    /// answered with `spec/05-risc-primitives.md` section 2.4.1's overshoot
+    /// error, in the compiled lane's words, rather than read out of bounds or
+    /// returned as a silently wrong slice. Do NOT clamp to a valid range (that
+    /// hides the producing pass's bug), and do not panic (that is neither this
+    /// error nor any other).
+    ///
+    /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
+    /// with `eval::shrink: axis 0 bound end 5 exceeds input extent 3`, which is
+    /// what `#[should_panic(expected = "end 5 exceeds input extent 3")]` pinned.
     #[test]
-    #[should_panic(expected = "end 5 exceeds input extent 3")]
-    fn shrink_asserts_on_end_beyond_extent() {
+    fn shrink_rejects_an_end_beyond_extent_as_a_domain_trap() {
         let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
-        let _ = shrink(&input, &[(0, 5)]);
+        let err = shrink(&input, &[(0, 5)]).expect_err("an overshoot produces no value");
+        assert_eq!(err, SHRINK_DOMAIN_TRAP);
     }
 
-    /// chelis#523: `eval::shrink` loud-clamp — an inverted bound (`start > end`)
-    /// must fail loud rather than underflow `end - start` (usize).
+    /// chelis#1797: an inverted bound (`start > end`) takes the same typed
+    /// rejection rather than underflowing `end - start` (usize), because
+    /// `ShapeMetadata::shrunk` gives it the same `Domain` message on the
+    /// compiled lane.
+    ///
+    /// This kernel branch is a backstop from the DAG evaluator's side: the
+    /// `RiscOp::Shrink` arm rejects `start >= end` first, with chelis#616's
+    /// admission-rule wording, so a program cannot reach this branch through
+    /// that path. That earlier rejection is a separate lane divergence tracked
+    /// by chelis#1795 and is NOT repaired here.
+    ///
+    /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
+    /// with `eval::shrink: axis 0 bound start 3 exceeds end 1`.
     #[test]
-    #[should_panic(expected = "start 3 exceeds end 1")]
-    fn shrink_asserts_on_inverted_bounds() {
+    fn shrink_rejects_inverted_bounds_as_a_domain_trap() {
         let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
-        let _ = shrink(&input, &[(3, 1)]);
+        let err = shrink(&input, &[(3, 1)]).expect_err("an inverted bound produces no value");
+        assert_eq!(err, SHRINK_DOMAIN_TRAP);
+    }
+
+    /// Negative parity for both rows above: an in-domain slice of the same
+    /// operand still produces its elements, so the rejection is keyed on the
+    /// bounds and not on the operation.
+    ///
+    /// EVIDENTIARY STATUS: regression test for the `Result` return, disposition
+    /// lock for the slice itself, which `6abca2406` already produced.
+    #[test]
+    fn shrink_still_slices_an_in_domain_range() {
+        let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
+        let out = shrink(&input, &[(1, 3)]).expect("an in-domain slice");
+        assert_eq!(out.shape, vec![2]);
+        assert_eq!(out.to_f64_lossy_vec(), vec![2.0, 3.0]);
     }
 
     /// chelis#523: the post-bind re-verify. `verify` runs BEFORE
@@ -3294,13 +5750,21 @@ mod tests {
     #[test]
     fn post_bind_reverify_rejects_out_of_bounds_symbolic_shrink() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty,
+            None,
+        );
         // A shrink whose end (10) exceeds the eventual concrete extent (4).
         let shr = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(10))],
             },
@@ -3328,12 +5792,20 @@ mod tests {
     #[test]
     fn post_bind_reverify_allows_in_bounds_symbolic_shrink() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], sym_ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            sym_ty,
+            None,
+        );
         let shr = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
             },
@@ -3498,33 +5970,35 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_grad_max_distributes_to_ties() {
+    fn reduce_window_grad_max_splits_ties() {
         // A flat window: every position equals the max, so each tied
-        // position receives the full upstream gradient (the max_reduce
-        // mask convention), not a 1/k share.
+        // position receives g/k for its owning window.
         let x = TensorValue::from_vec(vec![3], vec![2.0, 2.0, 2.0]);
         let g = TensorValue::from_vec(vec![2], vec![4.0, 4.0]);
         let din = reduce_window_grad(&x, &g, ReduceWindowKind::Max, &[2], &[1], Prim::F64).unwrap();
-        // windows [0,1] and [1,2]: pos0 += 4 (win0), pos1 += 4+4, pos2 += 4.
-        assert_eq!(din.to_f64_lossy_vec(), vec![4.0, 8.0, 4.0]);
+        // windows [0,1] and [1,2]: pos0 += 2, pos1 += 2+2, pos2 += 2.
+        assert_eq!(din.to_f64_lossy_vec(), vec![2.0, 4.0, 2.0]);
     }
 
     #[test]
     fn eval_add() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         let vals = eval_scalar(&dag, &UnordMap::new());
         assert!((vals[&c] - 3.0).abs() < 1e-10);
     }
@@ -3532,9 +6006,22 @@ mod tests {
     #[test]
     fn eval_vector_add() {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec3_f32(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec3_f32(), None);
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec3_f32(), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec3_f32(), None);
         let mut inputs = UnordMap::new();
         inputs.insert(
             "a".into(),
@@ -3552,7 +6039,7 @@ mod tests {
     }
 
     /// [04-NUM-8]/dtype-semantics C5: the IR reference evaluator must call
-    /// the exact-width integer kernel, never project int64 operands through
+    /// the exact-width integer kernel, never project i64 operands through
     /// binary64 before arithmetic.
     #[test]
     fn int64_elementwise_add_is_exact_above_binary64_mantissa() {
@@ -3572,7 +6059,7 @@ mod tests {
             "b".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![2], vec![1, -1]).unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact int64 add");
+        let values = eval_tensor(&dag, &inputs).expect("exact i64 add");
         assert_eq!(
             values[&dag.roots()[0]].storage().to_i64_exact_vec(),
             Some(vec![(1_i64 << 53) + 2, (1_i64 << 53) + 1])
@@ -3594,8 +6081,8 @@ mod tests {
             TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![1, 1]).unwrap(),
         );
         assert_eq!(
-            eval_tensor(&dag, &inputs).expect_err("int8 overflow must trap"),
-            "numeric trap: overflow in add at int8"
+            eval_tensor(&dag, &inputs).expect_err("i8 overflow must trap"),
+            "numeric trap: overflow in add at i8"
         );
     }
 
@@ -3604,10 +6091,23 @@ mod tests {
     #[test]
     fn int64_comparison_is_exact_above_binary64_mantissa() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor_ty(&[2], Prim::Int64);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
-        let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], ty, None);
+        let out = dag.add_node(
+            decl,
+            RiscOp::Compare(ComparisonKind::CmpLt),
+            vec![a, b],
+            tensor_ty(&[2], Prim::Bool),
+            None,
+        );
         dag.add_root(out);
 
         let mut inputs = UnordMap::new();
@@ -3631,7 +6131,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let values = eval_tensor(&dag, &inputs).expect("exact int64 comparison");
+        let values = eval_tensor(&dag, &inputs).expect("exact i64 comparison");
         assert_eq!(values[&out].storage().to_i64_exact_vec(), Some(vec![1, 0]));
     }
 
@@ -3640,16 +6140,24 @@ mod tests {
     #[test]
     fn fused_int64_arithmetic_is_exact_above_binary64_mantissa() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor_ty(&[1], Prim::Int64);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::Load { name: "one".into() },
             vec![],
             ty.clone(),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![a, one], ty.clone(), None);
-        let mul = dag.add_node(RiscOp::Mul, vec![add, one], ty, None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![a, one], ty.clone(), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, one], ty, None);
         dag.add_root(mul);
         let fused = crate::fuse::fuse(&dag);
         assert!(
@@ -3674,7 +6182,7 @@ mod tests {
             "one".into(),
             TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![1], vec![1]).unwrap(),
         );
-        let values = eval_tensor(&fused, &inputs).expect("exact fused int64 arithmetic");
+        let values = eval_tensor(&fused, &inputs).expect("exact fused i64 arithmetic");
         let root = fused.roots()[0];
         assert_eq!(
             values[&root].storage().to_i64_exact_vec(),
@@ -3685,7 +6193,9 @@ mod tests {
     #[test]
     fn eval_sparse_gather_axis1_preserves_outer_and_inner_layout() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -3694,6 +6204,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -3702,6 +6213,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 1 },
             vec![values, indices],
             tensor_ty(&[2, 3, 2], Prim::F32),
@@ -3734,7 +6246,9 @@ mod tests {
     #[test]
     fn eval_sparse_scatter_add_axis1_accumulates_duplicate_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -3743,6 +6257,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -3751,6 +6266,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -3759,6 +6275,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 1 },
             vec![target, indices, updates],
             tensor_ty(&[2, 3, 2], Prim::F32),
@@ -3801,6 +6318,7 @@ mod tests {
     #[test]
     fn eval_same_rank_expand_broadcast() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let in_ty = TensorType {
             dims: vec![DimInfo::Lit(1)],
             precision: Prim::F32,
@@ -3809,8 +6327,9 @@ mod tests {
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+        let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         let y = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::Lit(4),
@@ -3831,11 +6350,24 @@ mod tests {
     #[test]
     fn eval_root_scoped_does_not_require_unrelated_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-        let sum = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
-        let dead = dag.add_node(RiscOp::Add, vec![y, y], ty.clone(), None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sum = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let dead = dag.add_node(decl, RiscOp::Add, vec![y, y], ty.clone(), None);
         dag.add_root(sum);
         dag.add_root(dead);
 
@@ -3858,7 +6390,14 @@ mod tests {
     #[test]
     fn eval_strict_missing_input_is_error() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec3_f32(), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3_f32(),
+            None,
+        );
         let err = eval_tensor_with_strict(&dag, |_| None).unwrap_err();
         assert!(err.contains("missing required input `x`"));
         assert_eq!(x, NodeId(0));
@@ -3867,11 +6406,24 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_only_requires_live_inputs() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec3_f32();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-        let live = dag.add_node(RiscOp::Add, vec![x, x], ty.clone(), None);
-        let _dead = dag.add_node(RiscOp::Add, vec![y, y], ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let live = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let _dead = dag.add_node(decl, RiscOp::Add, vec![y, y], ty, None);
 
         let vals = eval_tensor_roots_with_strict(&dag, &[live], |name| match name {
             "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
@@ -3884,18 +6436,559 @@ mod tests {
         );
     }
 
+    /// Scoping is by declaration: `g`'s nodes are outside a selection of
+    /// `main`, even one `main` reaches, and `main`'s are not. It may only
+    /// ever drop work no selected root needs, so a node of `g` that the
+    /// selected root reaches is still live.
+    #[test]
+    fn a_node_the_selection_reaches_is_live_whatever_its_declaration() {
+        let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
+        let ty = vec3_f32();
+        let shared = dag.add_node(
+            g_decl,
+            RiscOp::Load {
+                name: "shared".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let only_g = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let g = dag.add_node(g_decl, RiscOp::Add, vec![shared, only_g], ty.clone(), None);
+        let main = dag.add_node(main_decl, RiscOp::Neg, vec![shared], ty, None);
+        dag.add_root(g);
+        dag.add_root(main);
+
+        let owned = dag.outside_selection(&[main]);
+        assert!(
+            owned[g.0],
+            "`g`'s own body is owned by the root nobody selected"
+        );
+        assert!(owned[only_g.0], "and so is the input only `g` reads");
+        assert!(owned[shared.0], "as is every node of `g`'s declaration");
+        assert!(!owned[main.0]);
+        assert!(
+            live_mask_for_roots(&dag, &[main])[shared.0],
+            "but a node the selected root reaches is never dropped"
+        );
+
+        assert!(
+            dag.outside_selection(&[main, g]).iter().all(|owned| !owned),
+            "selecting every root leaves nothing unselected"
+        );
+        assert!(
+            dag.outside_selection(&[]).iter().all(|owned| !owned),
+            "and selecting nothing is a no-op, not an exclusion of everything"
+        );
+    }
+
+    /// Liveness follows every backward edge from the selection, into any
+    /// declaration: an abort of the unselected `g` that the selected root
+    /// reaches only through a `shape_deps` or `result_claim_deps` edge
+    /// still executes, although its seed is scoped out.
+    #[test]
+    fn ownership_follows_every_edge_liveness_propagates_over() {
+        for edge in ["shape_dep", "result_claim_dep"] {
+            let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
+            let ty = vec3_f32();
+            let bool_ty = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            };
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let cond = dag.add_node(
+                g_decl,
+                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                vec![z, z],
+                bool_ty,
+                None,
+            );
+            let fallback = dag.add_node(
+                g_decl,
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let abort = dag.add_node(
+                g_decl,
+                RiscOp::GuardedFail {
+                    message: "reached only by a dependency edge".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                ty.clone(),
+                None,
+            );
+            // The unselected root consumes the abort through an ORDINARY
+            // input edge, so it is an ancestor of the abort either way. Only
+            // the dependency edge below can save the seed.
+            let only_unselected = dag.add_node(
+                g_decl,
+                RiscOp::Load {
+                    name: "only_g".into(),
+                },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let unselected = dag.add_node(
+                g_decl,
+                RiscOp::Mul,
+                vec![abort, only_unselected],
+                ty.clone(),
+                None,
+            );
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+            // The selected root reaches the abort ONLY through this edge.
+            match edge {
+                "shape_dep" => dag.add_shape_dep(main, abort),
+                _ => dag.add_result_claim_dep(main, abort),
+            }
+            dag.add_root(unselected);
+            dag.add_root(main);
+
+            let owned = dag.outside_selection(&[main]);
+            assert!(owned[abort.0], "{edge}: the abort is `g`'s");
+            assert!(
+                live_mask_for_roots(&dag, &[main])[abort.0],
+                "{edge}: and it must still execute"
+            );
+            assert!(
+                owned[only_unselected.0],
+                "{edge}: while the input only the unselected root reads is scoped out"
+            );
+            let _ = (unselected, z);
+        }
+    }
+
+    /// chelis#2440's trap seed meets chelis#2476's scoping. The integer
+    /// arithmetic in a declaration nobody selected can overflow, so the seed
+    /// would mark it live and `resolve_load_inputs` would then demand that
+    /// declaration's parameter — the chelis#991 shape, arriving through the
+    /// trap seed instead of the abort one.
+    ///
+    /// The float twin is the control: it cannot trap, so it is never seeded
+    /// and the scoping is not what keeps it dead.
+    #[test]
+    fn a_trapping_node_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        fn program(precision: Prim) -> (Dag, NodeId, NodeId, NodeId) {
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision,
+            };
+            let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let g = dag.add_node(g_decl, RiscOp::Mul, vec![z, z], ty.clone(), None);
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+            dag.add_root(g);
+            dag.add_root(main);
+            (dag, z, g, main)
+        }
+
+        let (dag, z, g, main) = program(Prim::Int32);
+        assert!(
+            dag.trap_seeds()
+                .is_observable_root(dag.get(g).expect("node")),
+            "precondition: integer arithmetic must be a trapping node, or this \
+             test passes for the wrong reason"
+        );
+        let live = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !live[g.0],
+            "a trapping node owned by the unselected root is not seeded"
+        );
+        assert!(
+            !live[z.0],
+            "so its parameter never becomes a required input"
+        );
+        assert!(
+            live_mask_for_roots(&dag, &[main, g])[g.0],
+            "selecting its owner runs it, so the trap still occurs"
+        );
+
+        let (float_dag, float_z, float_g, float_main) = program(Prim::F32);
+        assert!(
+            !float_dag
+                .trap_seeds()
+                .is_observable_root(float_dag.get(float_g).expect("node")),
+            "control: float arithmetic cannot trap, so it is never seeded at all"
+        );
+        let float_live = live_mask_for_roots(&float_dag, &[float_main]);
+        assert!(!float_live[float_g.0] && !float_live[float_z.0]);
+    }
+
+    /// With no declared roots the whole graph is the program, so the scoping
+    /// is a no-op and a discarded trapping node is still seeded — it must
+    /// execute, and its input is genuinely required.
+    #[test]
+    fn a_rootless_dag_still_seeds_its_discarded_trapping_node() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("main");
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::Int32,
+        };
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let live_add = dag.add_node(decl, RiscOp::Add, vec![x, x], ty.clone(), None);
+        let discarded = dag.add_node(decl, RiscOp::Add, vec![y, y], ty, None);
+
+        let live = live_mask_for_roots(&dag, &[live_add]);
+        assert!(
+            live[discarded.0] && live[y.0],
+            "nothing was deselected, so the trap seed still reaches it"
+        );
+    }
+
+    /// chelis#2413: a graph returning its parameter `v` beside a discarded
+    /// integer `add(v, v)` runs discarded work, so no lane may implement it
+    /// by its root's value alone. The float twin cannot trap and runs none,
+    /// and neither does a trapping node the root's value reads.
+    #[test]
+    fn a_discarded_trapping_node_is_work_beyond_the_root_values() {
+        let returns_parameter_beside = |precision: Prim, reads_the_add: bool| {
+            let mut dag = Dag::new();
+            let decl = dag.declare("g");
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision,
+            };
+            let v = dag.add_node(
+                decl,
+                RiscOp::Load { name: "v".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let sum = dag.add_node(decl, RiscOp::Add, vec![v, v], ty.clone(), None);
+            let root = if reads_the_add {
+                sum
+            } else {
+                dag.add_node(decl, RiscOp::Copy, vec![v], ty, None)
+            };
+            dag.add_root(root);
+            dag
+        };
+        let integer = returns_parameter_beside(Prim::Int32, false);
+        assert!(runs_discarded_work(&integer, integer.roots()));
+        let float = returns_parameter_beside(Prim::F32, false);
+        assert!(
+            !runs_discarded_work(&float, float.roots()),
+            "control: a float add cannot trap, so nothing beyond the root runs"
+        );
+        let read = returns_parameter_beside(Prim::Int32, true);
+        assert!(
+            !runs_discarded_work(&read, read.roots()),
+            "control: a trapping node the root reads is the root's own work"
+        );
+    }
+
+    /// chelis#2413 put a trapping draw beside the `[05-OP-68]` abort in the
+    /// same seed, and chelis#2476's rebase scoped both together: they are one
+    /// class under `spec/06` §5.2, so leaving the newer one unscoped would
+    /// re-arm #2476 along the second seed — a draw inside an uncalled `def`
+    /// would demand that def's parameters, and then trap on behalf of code
+    /// the caller excluded.
+    ///
+    /// The graph holds one declaration per root it models. The
+    /// precondition assert keeps the test honest: a draw that cannot trap is
+    /// never seeded, and the assertions below would then pass vacuously.
+    #[test]
+    fn a_trapping_draw_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
+        let ty = vec3_f32();
+        let key_ty = TensorType {
+            dims: vec![],
+            precision: Prim::Key,
+        };
+        // `g(z, rate, k)`: an uncalled declaration holding a trapping draw.
+        let z = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let rate = dag.add_node(
+            g_decl,
+            RiscOp::Load {
+                name: "rate".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        // The draw validates its own runtime rate, so it can trap by itself.
+        let k = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "k".into() },
+            vec![],
+            key_ty,
+            None,
+        );
+        let draw = dag.add_node(g_decl, RiscOp::Dropout, vec![z, rate, k], ty.clone(), None);
+        let x = dag.add_node(
+            main_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+        dag.add_root(draw);
+        dag.add_root(main);
+
+        assert!(
+            dag.random_node_may_trap(dag.get(draw).expect("draw node")),
+            "precondition: this draw must be one that can trap by itself, or \
+             the assertions below pass for the wrong reason"
+        );
+
+        let selected = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !selected[draw.0],
+            "a trapping draw owned by the unselected root `g` must not be seeded"
+        );
+        for (name, id) in [("z", z), ("rate", rate), ("k", k)] {
+            assert!(
+                !selected[id.0],
+                "and `{name}` must stay dead, so it never becomes a required input"
+            );
+        }
+
+        assert!(
+            live_mask_for_roots(&dag, &[main, draw])[draw.0],
+            "selecting its owner runs it, so the [05-OP-37] trap still fires"
+        );
+    }
+
+    /// chelis#2476. A lowered program makes every top-level `def` a DAG
+    /// root, so an uncalled `def g(z)` puts `z` in the DAG as a `Load`
+    /// indistinguishable from the selected root's own input. Value
+    /// reachability ignores it; a seed must too, or `g`'s parameter becomes
+    /// a required input for a program that never calls `g`.
+    ///
+    /// The abort is the seed available to test this today. Both directions
+    /// are asserted: excluded when `g` is not selected, live when it is.
+    #[test]
+    fn an_abort_owned_by_an_unselected_root_is_not_this_evaluation_s_concern() {
+        fn program() -> (Dag, NodeId, NodeId) {
+            let mut dag = Dag::new();
+            let g_decl = dag.declare("g");
+            let main_decl = dag.declare("main");
+            let ty = vec3_f32();
+            // `g(z)`: an uncalled declaration whose body aborts.
+            let z = dag.add_node(
+                g_decl,
+                RiscOp::Load { name: "z".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let cond = dag.add_node(
+                g_decl,
+                RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+                vec![z, z],
+                TensorType {
+                    dims: vec![DimInfo::Lit(3)],
+                    precision: Prim::Bool,
+                },
+                None,
+            );
+            let fallback = dag.add_node(
+                g_decl,
+                RiscOp::synth_const(ty.precision, 0.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let g = dag.add_node(
+                g_decl,
+                RiscOp::GuardedFail {
+                    message: "uncalled".to_string(),
+                    trap_on_true: true,
+                },
+                vec![cond, fallback],
+                ty.clone(),
+                None,
+            );
+            // `main(x)`: the root actually being evaluated.
+            let x = dag.add_node(
+                main_decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+            dag.add_root(g);
+            dag.add_root(main);
+            (dag, g, main)
+        }
+
+        let (dag, g, main) = program();
+        let selected = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            !selected[g.0],
+            "an abort owned by the unselected root `g` must not be seeded"
+        );
+        assert!(
+            selected.iter().enumerate().all(|(id, live)| !live
+                || !matches!(&dag.nodes()[id].op, RiscOp::Load { name } if name.as_str() == "z")),
+            "and `z` must stay dead, so it is never a required input"
+        );
+
+        let both = live_mask_for_roots(&dag, &[main, g]);
+        assert!(
+            both[g.0],
+            "selecting `g` runs it, so its abort is seeded as [05-OP-68] requires"
+        );
+    }
+
+    /// A DISCARDED abort is the case that matters for chelis#2368: nothing
+    /// consumes it and it is no root, so reachability never reaches it, and
+    /// its declaration decides. Discarded in the selected `main`, it is
+    /// seeded; the unselected `g`'s own body is not.
+    #[test]
+    fn an_abort_owned_by_no_root_is_seeded_for_every_selection() {
+        let mut dag = Dag::new();
+        let g_decl = dag.declare("g");
+        let main_decl = dag.declare("main");
+        let ty = vec3_f32();
+        let x = dag.add_node(
+            main_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let cond = dag.add_node(
+            main_decl,
+            RiscOp::Compare(crate::dag::ComparisonKind::Gt),
+            vec![x, x],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let fallback = dag.add_node(
+            main_decl,
+            RiscOp::synth_const(ty.precision, 0.0),
+            vec![],
+            ty.clone(),
+            None,
+        );
+        // Discarded: nothing consumes it and it is not a root.
+        let abort = dag.add_node(
+            main_decl,
+            RiscOp::GuardedFail {
+                message: "discarded".to_string(),
+                trap_on_true: true,
+            },
+            vec![cond, fallback],
+            ty.clone(),
+            None,
+        );
+        let other = dag.add_node(
+            g_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let unselected = dag.add_node(g_decl, RiscOp::Mul, vec![other, other], ty.clone(), None);
+        let main = dag.add_node(main_decl, RiscOp::Add, vec![x, x], ty, None);
+        dag.add_root(unselected);
+        dag.add_root(main);
+
+        let live = live_mask_for_roots(&dag, &[main]);
+        assert!(
+            live[abort.0],
+            "a discarded abort of the selected declaration is seeded"
+        );
+        assert!(
+            !live[unselected.0],
+            "while the unselected root's own body is still excluded"
+        );
+    }
+
     /// chelis#991: a dependency package may contribute generic declarations
     /// outside the selected eval root. Their symbolic inputs are dead and
     /// must not become invented top-level requirements for the live result.
     #[test]
     fn eval_root_scoped_ignores_unrelated_dead_symbolic_input() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let dead_ty = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
-        let _dead = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], dead_ty, None);
+        let _dead = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            dead_ty,
+            None,
+        );
         let live = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 7.0),
             vec![],
             scalar_f32(),
@@ -3910,17 +7003,25 @@ mod tests {
     #[test]
     fn eval_root_scoped_ignores_dead_canonical_source_with_live_same_named_dim() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let symbolic = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
         let _dead = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             symbolic.clone(),
             None,
         );
-        let live = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        let live = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            symbolic,
+            None,
+        );
 
         let values = eval_tensor_roots_with_strict(&dag, &[live], |name| {
             (name == "x").then(|| TensorValue::from_vec(vec![2], vec![3.0, 4.0]))
@@ -3934,23 +7035,27 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_resolves_shape_only_input_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -3980,23 +7085,27 @@ mod tests {
     #[test]
     fn eval_root_scoped_strict_missing_input_axis_witness_is_input_error() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("n".to_string(), None)],
             precision: Prim::F32,
         };
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -4019,29 +7128,34 @@ mod tests {
     #[test]
     fn eval_root_scoped_input_axis_selects_one_exact_shape_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sym_ty = TensorType {
             dims: vec![DimInfo::Named("k".to_string(), None)],
             precision: Prim::F32,
         };
         let _unrelated = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let required = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             sym_ty.clone(),
             None,
         );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -4070,6 +7184,7 @@ mod tests {
     #[test]
     fn eval_root_scoped_accepts_repeated_symbol_axes_from_one_dead_source() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let square_ty = TensorType {
             dims: vec![
                 DimInfo::Named("n".to_string(), None),
@@ -4077,8 +7192,15 @@ mod tests {
             ],
             precision: Prim::F32,
         };
-        let shape_source = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], square_ty, None);
+        let shape_source = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            square_ty,
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             scalar_f32(),
@@ -4089,6 +7211,7 @@ mod tests {
             precision: Prim::F32,
         };
         let ones = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: crate::dag::RtDim::InputAxis {
@@ -4112,6 +7235,10 @@ mod tests {
     }
 
     fn lower(src: &str) -> Dag {
+        lower_library(src).dag().clone()
+    }
+
+    fn lower_library(src: &str) -> LoweredLibrary {
         let exprs = parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
@@ -4119,7 +7246,7 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program(&checked)
+        lower_program_to_library(&checked)
     }
 
     #[test]
@@ -4148,9 +7275,9 @@ mod tests {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
             (def {} y
-              (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} int32))}
+              (cast {type: (t-tensor {} (d-lit {} 3) (t-prim {} i32))}
                     (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
-                    (t-prim {} int32)))
+                    (t-prim {} i32)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();
@@ -4160,8 +7287,8 @@ mod tests {
         );
         let err = eval_tensor(&dag, &inputs).unwrap_err();
         assert_eq!(
-            err, "numeric trap: domain in cast at int32",
-            "fractional cast to int32 must trap in the DAG evaluator (#380)",
+            err, "numeric trap: domain in cast at i32",
+            "fractional cast to i32 must trap in the DAG evaluator (#380)",
         );
     }
 
@@ -4171,12 +7298,12 @@ mod tests {
     /// int->float direction rather than applying the checked int-target rule.
     #[test]
     fn lowered_cast_int_to_float_preserves_value() {
-        // int32 input carries integral f64 storage; cast to f64 must keep it.
+        // i32 input carries integral f64 storage; cast to f64 must keep it.
         let src = r#"
-            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x))
+            (def {} x (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i32))} x))
             (def {} y
               (cast {type: (t-tensor {} (d-lit {} 2) (t-prim {} f64))}
-                    (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} int32))} x)
+                    (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} i32))} x)
                     (t-prim {} f64)))
         "#;
         let dag = lower(src);
@@ -4248,7 +7375,7 @@ mod tests {
             (def {} beta (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} beta))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
+                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();
@@ -4273,15 +7400,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_1x1_has_correct_numeric_result() {
+    fn lowered_conv_1x1_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4291,8 +7419,12 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 1, 1], vec![2.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![2.0, 4.0, 6.0, 8.0])
@@ -4300,15 +7432,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_2x2_has_correct_numeric_result() {
+    fn lowered_conv_2x2_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} i64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} i64)} 0) (lit {type: (t-prim {} i64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4321,126 +7454,105 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])
         );
     }
 
-    #[test]
-    fn lowered_dropout_is_deterministic_for_same_seed() {
-        let src = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 42)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let dag = lower(src);
-        let vals_a = eval_tensor(&dag, &UnordMap::new()).unwrap();
-        let vals_b = eval_tensor(&dag, &UnordMap::new()).unwrap();
-        let out_a = vals_a.get(dag.roots().last().expect("DAG root")).unwrap();
-        let out_b = vals_b.get(dag.roots().last().expect("DAG root")).unwrap();
-        assert_eq!(out_a, out_b);
-        assert!(out_a.to_f64_lossy_vec().contains(&0.0));
-        assert!(out_a.to_f64_lossy_vec().iter().any(|value| *value > 0.0));
+    // [05-RNG-1] transcribed from the spec text, never the kernel.
+    fn spec_uniform_splitmix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 
-    #[test]
-    fn lowered_dropout_changes_with_different_seed() {
-        let src_a = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 42)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let src_b = r#"
-            (def {} x (lit {type: (t-tensor {} (d-lit {} 32) (t-prim {} f32))} 1.0))
-            (def {} y
-              (handle-effect {effect: random}
-                (lit {type: (t-prim {} int64)} 43)
-                (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
-        "#;
-        let dag_a = lower(src_a);
-        let dag_b = lower(src_b);
-        let out_a = eval_tensor(&dag_a, &UnordMap::new())
+    /// The `[05-OP-8]` kernel over a shape, f32 bounds and one draw key.
+    fn uniform_like(
+        shape: &[usize],
+        low: f64,
+        high: f64,
+        key: RandomKey,
+        prim: Prim,
+    ) -> Result<TensorValue, String> {
+        let bound = |value| chelis_types::scalar_from_f64("uniform_like", Prim::F32, value);
+        let prepared = PreparedUniformLike::new(
+            prim,
+            numel(shape),
+            bound(low).map_err(|trap| trap.to_string())?,
+            bound(high).map_err(|trap| trap.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+        Ok(TensorValue::from_storage(shape.to_vec(), storage))
+    }
+
+    /// `[05-OP-69]`'s key of the seed 42.
+    fn spec_uniform_key42() -> RandomKey {
+        RandomKey::from_seed(chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap())
             .unwrap()
-            .remove(&NodeId(dag_a.len() - 1))
-            .unwrap();
-        let out_b = eval_tensor(&dag_b, &UnordMap::new())
-            .unwrap()
-            .remove(&NodeId(dag_b.len() - 1))
-            .unwrap();
-        assert_ne!(out_a, out_b);
+    }
+
+    /// [05-RNG-2]'s `word` and [05-RNG-1]'s unit, transcribed from the spec text.
+    fn spec_uniform_unit(key_bits: u64, index: u64) -> f64 {
+        let word =
+            spec_uniform_splitmix64(key_bits ^ spec_uniform_splitmix64(index).rotate_left(41));
+        (word >> 11) as f64 / (1_u64 << 53) as f64
     }
 
     #[test]
     fn uniform_like_f32_affine_mirrors_c_f32_sampler() {
         // chelis#770: the affine is a single correctly-rounded FMA
         // (`span_f.mul_add(unit_f, low_f)`), conforming to the compiled C
-        // sampler `chelis_uniform_sample_f32` (which the default toolchain
-        // contracts to the same FMA). seed=42, shape=[8], [2,5).
-        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F32).unwrap();
-        // elem[4]: where the OLD f64 affine diverged from the C f32 sampler by
-        // 1 ULP (the #735 sweep: eval 0x404215a9 vs C 0x404215aa).
-        assert_eq!(
-            out.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
-            "elem[4] must be the C f32 sampler value (0x404215aa)",
-        );
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
-        assert_ne!(
-            (out.to_f64_lossy_vec()[4] as f32).to_bits(),
-            (old_f64_affine as f32).to_bits()
-        );
-        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
-        // `low_f + span_f * unit_f` disagree by 1 ULP. Pin the FMA values and
-        // show the two-rounding form does NOT reproduce elem[6] — this is the
-        // exact bit the compiled C lane flips between `-ffp-contract=fast`
-        // (FMA, 0x408f5273) and `-ffp-contract=off` (two roundings, 0x408f5274).
-        assert_eq!(
-            out.to_f64_lossy_vec()[6].to_bits(),
-            (f32::from_bits(0x408f5273) as f64).to_bits(),
-            "elem[6] must be the single-rounding FMA value (0x408f5273)",
-        );
-        assert_eq!(
-            out.to_f64_lossy_vec()[7].to_bits(),
-            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
-            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
-        );
-        let unit6 = dropout_sample(42, 6) as f32;
-        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
-        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
-        assert_ne!(
-            (out.to_f64_lossy_vec()[6] as f32).to_bits(),
-            two_rounding_6.to_bits()
-        );
+        // sampler `chelis_uniform_sample_f32`. Key `key_from_seed(42)`, shape
+        // [12], [2,5); the bits are exact-rational evaluations of [05-RNG-2]'s
+        // word (`key_ref.py`) and [05-OP-8] (`keys-b-h9-probes/port_ref.py`).
+        let key = spec_uniform_key42();
+        let out = uniform_like(&[12], 2.0, 5.0, key, Prim::F32).unwrap();
+        let bits = |index: usize| (out.to_f64_lossy_vec()[index] as f32).to_bits();
+        // elem[11]: where an f64 affine rounded to f32 lands 1 ULP away.
+        assert_eq!(bits(11), 0x406d_6dc6);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * spec_uniform_unit(key.bits(), 11);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x406d_6dc5);
+        // elem[10]: where a plain two-rounding `low_f + span_f * unit_f`
+        // disagrees by 1 ULP, the bit the compiled C lane would flip between
+        // `-ffp-contract=fast` and `-ffp-contract=off` without `fmaf`.
+        assert_eq!(bits(10), 0x4034_fb45);
+        let two_rounding_10 =
+            2.0f32 + (5.0f32 - 2.0f32) * (spec_uniform_unit(key.bits(), 10) as f32);
+        assert_eq!(two_rounding_10.to_bits(), 0x4034_fb44);
+        assert_eq!(bits(7), 0x408f_92d9);
     }
 
     #[test]
     fn uniform_like_f32_affine_negative_range_is_f32() {
-        // chelis#770: negative range at unit level (the C cross-lane path
-        // can't be driven with a bare negative literal — a separate lowering
-        // gap). seed=42, index=3, low=-3.0, high=-1.0 → 0xc010167a.
-        let out = uniform_like(&[8], -3.0, -1.0, 42, Prim::F32).unwrap();
+        // chelis#770: negative range, key `key_from_seed(42)`, index 3, [-3, -1).
+        let out = uniform_like(&[8], -3.0, -1.0, spec_uniform_key42(), Prim::F32).unwrap();
         assert_eq!(
             out.to_f64_lossy_vec()[3].to_bits(),
-            (f32::from_bits(0xc010167a) as f64).to_bits(),
+            (f32::from_bits(0xc027_e1a4) as f64).to_bits(),
         );
     }
 
     #[test]
     fn uniform_like_f64_uses_the_f64_affine() {
-        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F64).unwrap();
-        let expected = (5.0f64 - 2.0).mul_add(dropout_sample(42, 4), 2.0);
+        let key = spec_uniform_key42();
+        let out = uniform_like(&[8], 2.0, 5.0, key, Prim::F64).unwrap();
+        let expected = (5.0f64 - 2.0).mul_add(spec_uniform_unit(key.bits(), 4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4005_8b85_e511_043a);
         assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());
+        // 0x402c5c2f is element 4 of the f32 draw under the same key.
         assert_ne!(
             out.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
+            (f32::from_bits(0x402c_5c2f) as f64).to_bits(),
+            "f64 samples must not be widened f32 values"
         );
     }
 
@@ -4522,7 +7634,9 @@ mod tests {
     ///   [ 3.0, -1.0,  5.0]
     fn build_2x3_with(op: RiscOp) -> (Dag, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 3),
@@ -4541,7 +7655,7 @@ mod tests {
             }
             _ => panic!("unexpected op"),
         };
-        let y = dag.add_node(op, vec![x], out_ty, None);
+        let y = dag.add_node(decl, op, vec![x], out_ty, None);
         (dag, y)
     }
 
@@ -4658,13 +7772,15 @@ mod tests {
             RiscOp::Argmin { axis: 7 },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let x = dag.add_node(
+                decl,
                 RiscOp::synth_const(row_f32(3).precision, 1.0),
                 vec![],
                 row_f32(3),
                 None,
             );
-            dag.add_node(op, vec![x], scalar_f32(), None);
+            dag.add_node(decl, op, vec![x], scalar_f32(), None);
             let errs = verify(&dag);
             assert!(
                 errs.iter().any(|e| e.contains("axis 7")),
@@ -4686,19 +7802,22 @@ mod tests {
 
     fn int_div_dag(op: RiscOp, precision: Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             tensor_ty(&[2], precision),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             tensor_ty(&[2], precision),
             None,
         );
-        let out = dag.add_node(op, vec![a, b], tensor_ty(&[2], precision), None);
+        let out = dag.add_node(decl, op, vec![a, b], tensor_ty(&[2], precision), None);
         dag.add_root(out);
         dag
     }
@@ -4711,12 +7830,52 @@ mod tests {
     }
 
     #[test]
+    fn checked_remainder_preserves_signed_values_and_traps() {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let minimum = match prim {
+                Prim::Int8 => i8::MIN as i64,
+                Prim::Int16 => i16::MIN as i64,
+                Prim::Int32 => i32::MIN as i64,
+                Prim::Int64 => i64::MIN,
+                _ => unreachable!(),
+            };
+            let dag = int_div_dag(RiscOp::Mod, prim);
+            let mut inputs = UnordMap::new();
+            inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![-7.0, 7.0]));
+            inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![2.0, -2.0]));
+            let values = eval_tensor(&dag, &inputs).unwrap();
+            assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![-1.0, 1.0]);
+            let exact = |values: &[i64]| {
+                TensorValue::from_storage(
+                    vec![2],
+                    tensor_from_scalars(
+                        prim,
+                        &values
+                            .iter()
+                            .map(|&n| chelis_types::scalar_from_i64("mod", prim, n).unwrap())
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            };
+            inputs.insert("a".into(), exact(&[minimum, minimum + 1]));
+            inputs.insert("b".into(), exact(&[-1, 2]));
+            let values = eval_tensor(&dag, &inputs).unwrap();
+            assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![0.0, -1.0]);
+            let error = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0])).unwrap_err();
+            assert_eq!(
+                error,
+                format!("numeric trap: division by zero in mod at {}", prim.name())
+            );
+        }
+    }
+
+    #[test]
     fn floor_div_integer_traps_on_zero_divisor() {
         let dag = int_div_dag(RiscOp::FloorDiv, Prim::Int32);
         let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("integer floor_div by zero must trap");
         assert_eq!(
-            err, "numeric trap: division by zero in floor_div at int32",
+            err, "numeric trap: division by zero in floor_div at i32",
             "trap diagnostic must match the shared message exactly"
         );
     }
@@ -4726,7 +7885,7 @@ mod tests {
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
         let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
             .expect_err("integer trunc_div by zero must trap");
-        assert_eq!(err, "numeric trap: division by zero in trunc_div at int64");
+        assert_eq!(err, "numeric trap: division by zero in trunc_div at i64");
     }
 
     #[test]
@@ -4783,25 +7942,35 @@ mod tests {
         // After `fuse`, the divide-by-zero must still trap through the
         // FusedElem path (the trap is gated on the fused output precision).
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
         let d = dag.add_node(
+            decl,
             RiscOp::FloorDiv,
             vec![a, b],
             tensor_ty(&[2], Prim::Int32),
             None,
         );
-        let e = dag.add_node(RiscOp::Add, vec![d, a], tensor_ty(&[2], Prim::Int32), None);
+        let e = dag.add_node(
+            decl,
+            RiscOp::Add,
+            vec![d, a],
+            tensor_ty(&[2], Prim::Int32),
+            None,
+        );
         dag.add_root(e);
         let fused = crate::fuse::fuse(&dag);
         assert!(
@@ -4813,7 +7982,7 @@ mod tests {
         );
         let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("fused integer floor_div by zero must trap");
-        assert_eq!(err, "numeric trap: division by zero in floor_div at int32");
+        assert_eq!(err, "numeric trap: division by zero in floor_div at i32");
     }
 
     fn exact_tensor(prim: Prim, values: RawTensor) -> TensorValue {
@@ -4831,13 +8000,13 @@ mod tests {
         let overflow_first = exact_tensor(Prim::F32, RawTensor::Float(vec![300.0, f64::NAN]));
         assert_eq!(
             cast_tensor(&overflow_first, Prim::F32, Prim::Int8).unwrap_err(),
-            "numeric trap: overflow in cast at int8"
+            "numeric trap: overflow in cast at i8"
         );
 
         let domain_first = exact_tensor(Prim::F32, RawTensor::Float(vec![f64::NAN, 300.0]));
         assert_eq!(
             cast_tensor(&domain_first, Prim::F32, Prim::Int8).unwrap_err(),
-            "numeric trap: domain in cast at int8"
+            "numeric trap: domain in cast at i8"
         );
     }
 
@@ -4853,7 +8022,7 @@ mod tests {
 
         let i64_input = exact_tensor(Prim::Int64, RawTensor::Int(vec![9_007_199_254_740_992, 1]));
         let i64_out = reduce_window(&i64_input, ReduceWindowKind::Sum, &[2], &[1], Prim::Int64)
-            .expect("exact int64 reduction");
+            .expect("exact i64 reduction");
         assert_eq!(
             i64_out.storage().to_i64_exact_vec(),
             Some(vec![9_007_199_254_740_993])
@@ -4865,11 +8034,11 @@ mod tests {
         let input = exact_tensor(Prim::Int8, RawTensor::Int(vec![100, 100, -100]));
         let err = reduce_window(&input, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
             .expect_err("100i8 + 100i8 must trap before the later -100");
-        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at int8");
+        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at i8");
 
         let control = exact_tensor(Prim::Int8, RawTensor::Int(vec![40, 40, -40]));
         let output = reduce_window(&control, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
-            .expect("in-range int8 control");
+            .expect("in-range i8 control");
         assert_eq!(output.storage().to_i64_exact_vec(), Some(vec![40]));
     }
 
@@ -4880,27 +8049,31 @@ mod tests {
             RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
         );
         let err = reduce(
+            "sum",
             &input,
             0,
             TensorReduceOp::Sum {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
+            Prim::Int32,
         )
-        .expect_err("lane0 + lane1 overflows the int32 accumulator");
-        assert_eq!(err, "numeric trap: overflow in sum at int32");
+        .expect_err("lane0 + lane1 overflows the i32 accumulator");
+        assert_eq!(err, "numeric trap: overflow in sum at i32");
 
         let control = exact_tensor(
             Prim::Int32,
             RawTensor::Int(vec![i64::from(i32::MAX) - 1, 1, -1]),
         );
         let output = reduce(
+            "sum",
             &control,
             0,
             TensorReduceOp::Sum {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
+            Prim::Int32,
         )
         .expect("below-overflow control");
         assert_eq!(
@@ -4924,5 +8097,651 @@ mod tests {
         );
         let min_out = reduce_argcmp(&min_input, 0, ArgReduceOp::Argmin).expect("argmin");
         assert_eq!(min_out.storage().to_i64_exact_vec(), Some(vec![1]));
+    }
+}
+
+/// chelis#828 work class 1: values reclaimed after their last use.
+///
+/// The receipt is a counted quantity, not a wall clock: `peak_live_values` is
+/// the most entries the evaluator's value map ever held at once, sampled after
+/// each node's own value lands and before that step's reclamation runs. Under
+/// the all-values contract that number is the executed node count; under a
+/// root-scoped run it must be the live working set.
+///
+/// The negative controls matter more than the receipt, and the two reader
+/// families fail differently. An operand read indexes `values[&node.inputs[i]]`
+/// directly, so freeing one early panics. The `Const` shape-dependency
+/// fallback does not: it ends in a default-empty unwrap, so a freed dependency
+/// silently becomes shape `[]` and the Const materializes one element. That
+/// quiet case is the one worth an evaluator-level test, and
+/// `a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape`
+/// is it.
+///
+/// The remaining edges are covered at the schedule level only. `shape_deps`
+/// now has both; `result_claim_deps` has no evaluator test because this lane
+/// never reads it, and it is in the reader set as a deliberate conservatism;
+/// the three guard edges raise rather than answer wrongly, and building a real
+/// guard site needs the axis-source derivation rather than a hand-built DAG.
+#[cfg(test)]
+mod value_reclamation {
+    use super::*;
+    use crate::dag::RiscOp;
+    use chelis_types::types::Prim;
+
+    fn vec3() -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        }
+    }
+
+    fn x_input() -> TensorValue {
+        TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])
+    }
+
+    fn load_x() -> impl FnMut(&str) -> Option<TensorValue> {
+        |name: &str| (name == "x").then(x_input)
+    }
+
+    /// `Load x` followed by `links` chained `Neg` nodes. Every intermediate
+    /// has exactly one consumer and is dead the moment that consumer runs, so
+    /// the live working set never exceeds two values however long the chain.
+    fn neg_chain(links: usize) -> (Dag, NodeId) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let mut last = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        for _ in 0..links {
+            last = dag.add_node(decl, RiscOp::Neg, vec![last], vec3(), None);
+        }
+        dag.add_root(last);
+        (dag, last)
+    }
+
+    fn run(dag: &Dag, scope: EvaluationScope<'_>) -> EvaluatedValues {
+        eval_tensor_internal(dag, scope, true, load_x()).expect("the fixture evaluates")
+    }
+
+    fn elements(values: &UnordMap<NodeId, TensorValue>, id: NodeId) -> Vec<f64> {
+        values
+            .get(&id)
+            .unwrap_or_else(|| panic!("node {} is absent from the result", id.0))
+            .to_f64_lossy_vec()
+    }
+
+    /// The receipt.
+    ///
+    /// This test was run against this same tree with the reclamation
+    /// neutralized (`free_schedule` forced to `None`), so it is known to fail
+    /// without it. The root-scoped peak then equalled the executed node count:
+    /// `peak_live_values` was 65 for the 64-link chain and 129 for the
+    /// 128-link chain, against the 2 asserted below. (The 128 figure needed
+    /// its own run, because the loop aborts at 64 otherwise.) The all-values
+    /// assertions passed in both configurations, which is the point of
+    /// keeping them here: they pin the contract the tracker asked to
+    /// preserve, and they are what measures 195 and 387 elements.
+    #[test]
+    fn root_scoped_peak_tracks_the_working_set_not_the_executed_node_count() {
+        for links in [64usize, 128] {
+            let (dag, root) = neg_chain(links);
+            let live = live_mask_for_roots(&dag, &[root]);
+
+            let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+            let reclaiming = run(
+                &dag,
+                EvaluationScope::Roots {
+                    live: &live,
+                    roots: &[root],
+                },
+            );
+
+            assert_eq!(
+                retaining.peak_live_values,
+                links + 1,
+                "the all-values contract holds every executed node's value"
+            );
+            assert_eq!(
+                retaining.peak_live_elements,
+                3 * (links + 1),
+                "and every one of their elements"
+            );
+
+            assert_eq!(
+                reclaiming.peak_live_values, 2,
+                "a {links}-link chain is never more than two values wide"
+            );
+            assert_eq!(reclaiming.peak_live_elements, 6);
+            assert_eq!(
+                reclaiming.values.len(),
+                1,
+                "only the selected root survives the run"
+            );
+
+            // Identical, not merely close: the same chain of exact f32
+            // negations either way.
+            let expected = if links % 2 == 0 {
+                vec![1.0, 2.0, 3.0]
+            } else {
+                vec![-1.0, -2.0, -3.0]
+            };
+            assert_eq!(elements(&reclaiming.values, root), expected);
+            assert_eq!(
+                elements(&reclaiming.values, root),
+                elements(&retaining.values, root)
+            );
+        }
+    }
+
+    /// `x` feeds the head of a chain AND its tail, four steps later. Freeing
+    /// it when the first consumer runs would panic in `Add`'s operand index;
+    /// freeing it at the right step still leaves the answer exact.
+    fn diamond() -> (Dag, [NodeId; 5]) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let b = dag.add_node(decl, RiscOp::Neg, vec![a], vec3(), None);
+        let c = dag.add_node(decl, RiscOp::Neg, vec![b], vec3(), None);
+        let d = dag.add_node(decl, RiscOp::Add, vec![c, x], vec3(), None);
+        dag.add_root(d);
+        (dag, [x, a, b, c, d])
+    }
+
+    #[test]
+    fn a_value_with_a_later_second_consumer_outlives_its_first() {
+        let (dag, [x, _a, _b, _c, d]) = diamond();
+        let live = live_mask_for_roots(&dag, &[d]);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &[d],
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        // -x + x, elementwise and exact.
+        assert_eq!(elements(&reclaiming.values, d), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            elements(&reclaiming.values, d),
+            elements(&retaining.values, d)
+        );
+        assert_eq!(reclaiming.values.len(), 1);
+        assert!(
+            reclaiming.values.get(&x).is_none(),
+            "x is not a selected root and does not survive the run"
+        );
+        // Three values are live while the chain passes the retained `x`:
+        // `x` itself, the chain's previous link, and the new one.
+        assert_eq!(reclaiming.peak_live_values, 3);
+        assert_eq!(retaining.peak_live_values, 5);
+    }
+
+    #[test]
+    fn a_selected_root_that_is_also_an_intermediate_is_kept() {
+        let (dag, [_x, _a, b, _c, d]) = diamond();
+        let roots = [b, d];
+        let live = live_mask_for_roots(&dag, &roots);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &roots,
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        // `b` is `-(-x)`, and it still feeds `c`.
+        assert_eq!(elements(&reclaiming.values, b), vec![1.0, 2.0, 3.0]);
+        assert_eq!(elements(&reclaiming.values, d), vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            elements(&reclaiming.values, b),
+            elements(&retaining.values, b)
+        );
+        assert_eq!(
+            elements(&reclaiming.values, d),
+            elements(&retaining.values, d)
+        );
+        assert_eq!(
+            reclaiming.values.len(),
+            2,
+            "both selected roots survive and nothing else does"
+        );
+        assert_eq!(reclaiming.peak_live_values, 4);
+    }
+
+    #[test]
+    fn overlapping_root_cones_share_one_intermediate() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let shared = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let left = dag.add_node(decl, RiscOp::Neg, vec![shared], vec3(), None);
+        let right = dag.add_node(decl, RiscOp::Add, vec![shared, shared], vec3(), None);
+        dag.add_root(left);
+        dag.add_root(right);
+        let roots = [left, right];
+        let live = live_mask_for_roots(&dag, &roots);
+
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &roots,
+            },
+        );
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+
+        assert_eq!(elements(&reclaiming.values, left), vec![1.0, 2.0, 3.0]);
+        assert_eq!(elements(&reclaiming.values, right), vec![-2.0, -4.0, -6.0]);
+        assert_eq!(
+            elements(&reclaiming.values, right),
+            elements(&retaining.values, right)
+        );
+        assert_eq!(reclaiming.values.len(), 2);
+        assert!(
+            reclaiming.values.get(&shared).is_none(),
+            "the shared intermediate is freed once the second cone has read it"
+        );
+    }
+
+    /// The preserved contract. Every entrypoint that names no roots returns
+    /// one entry per executed node, exactly as before chelis#828.
+    #[test]
+    fn the_all_values_entrypoints_still_return_every_executed_node() {
+        let (dag, root) = neg_chain(8);
+        let expected = dag.len();
+
+        let with_strict = eval_tensor_with_strict(&dag, load_x()).expect("whole-DAG eval");
+        assert_eq!(with_strict.len(), expected);
+
+        let lenient = eval_tensor_with(&dag, load_x()).expect("whole-DAG eval");
+        assert_eq!(lenient.len(), expected);
+
+        let mut inputs = UnordMap::new();
+        inputs.insert("x".to_string(), x_input());
+        assert_eq!(eval_tensor(&dag, &inputs).expect("eval").len(), expected);
+
+        // Empty roots select the whole DAG, so they keep the same contract.
+        let empty_roots = eval_tensor_roots_with_strict(&dag, &[], load_x()).expect("eval");
+        assert_eq!(empty_roots.len(), expected);
+
+        // And a named root returns only that root, with the same answer.
+        let scoped = eval_tensor_roots_with_strict(&dag, &[root], load_x()).expect("eval");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(elements(&scoped, root), elements(&with_strict, root));
+    }
+
+    /// The result-claims entry point has no empty-roots fallback, unlike its
+    /// three siblings. Its doc comment now says so; this is the run behind
+    /// that sentence, so the difference is locked rather than asserted from
+    /// reading the branch that is missing.
+    #[test]
+    fn empty_roots_select_nothing_for_the_result_claims_entry_point() {
+        let (dag, root) = neg_chain(4);
+
+        let empty = eval_tensor_roots_exact_with_result_claims(&dag, &[], &[], load_x())
+            .expect("empty roots are not an error");
+        assert!(
+            empty.is_empty(),
+            "every node is masked off, so nothing executes"
+        );
+
+        // Its siblings take the whole DAG instead, which is the rule this
+        // entry point does NOT share.
+        let whole = eval_tensor_roots_with_strict(&dag, &[], load_x()).expect("whole DAG");
+        assert_eq!(whole.len(), dag.len());
+
+        // And with a root named, it returns that root alone.
+        let scoped = eval_tensor_roots_exact_with_result_claims(&dag, &[root], &[], load_x())
+            .expect("named root");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(elements(&scoped, root), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// The one reader edge whose loss is SILENT, exercised through the
+    /// evaluator rather than through the schedule.
+    ///
+    /// `Const` sizes itself from `concrete_shape_with`, and when that fails it
+    /// falls back to a `shape_deps` value's realized shape. That fallback ends
+    /// in a default-empty unwrap, so a freed shape dependency does not raise:
+    /// the shape silently becomes `[]` and the Const materializes one element
+    /// instead of the operand's width. Nothing downstream complains, because a
+    /// rank-zero operand is a legal broadcast.
+    ///
+    /// `x` is reachable ONLY through the shape dependency here. No node takes
+    /// it as an operand, so `inputs` alone gives it no reader and the schedule
+    /// frees it at its own production step.
+    ///
+    /// Measured on this tree with the extra reader edges removed from
+    /// `value_free_schedule` (the `shape_deps`, `result_claim_deps` and guard
+    /// blocks skipped, which is the reviewer's M2 mutation): this test failed
+    /// with `left: ([], [-2.0])` against `right: ([3], [-2.0, -2.0, -2.0])`.
+    /// With the edges in place it passes. It is the evaluator-level binding
+    /// the five schedule tests below do not provide.
+    ///
+    /// `Named("*", None)` is what keeps the fallback reachable:
+    /// `required_symbolic_dims` skips that name, so no symbolic binding runs,
+    /// `runtime_dims` stays empty, and `concrete_shape_with` fails as the
+    /// fallback's own precondition requires.
+    #[test]
+    fn a_const_sized_from_a_freed_shape_dependency_is_silently_the_wrong_shape() {
+        let starred = TensorType {
+            dims: vec![DimInfo::Named("*".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let sized = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 2.0),
+            vec![],
+            starred.clone(),
+            None,
+        );
+        dag.add_shape_dep(sized, x);
+        let out = dag.add_node(decl, RiscOp::Neg, vec![sized], starred, None);
+        dag.add_root(out);
+
+        let live = live_mask_for_roots(&dag, &[out]);
+        let reclaiming = run(
+            &dag,
+            EvaluationScope::Roots {
+                live: &live,
+                roots: &[out],
+            },
+        );
+
+        let value = reclaiming
+            .values
+            .get(&out)
+            .expect("the selected root survives");
+        // Shape and elements in ONE assertion: asserting the shape first would
+        // pre-empt the element vector, and then this comment could only report
+        // half of what a losing run prints.
+        assert_eq!(
+            (value.shape.clone(), value.to_f64_lossy_vec()),
+            (vec![3], vec![-2.0, -2.0, -2.0]),
+            "the Const takes its width from the shape dependency's realized shape"
+        );
+
+        // The same answer through the all-values lane, which frees nothing.
+        let retaining = run(&dag, EvaluationScope::MaskedAllValues(&live));
+        assert_eq!(elements(&retaining.values, out), value.to_f64_lossy_vec());
+    }
+
+    // ------------------------------------------------------------------
+    // The reader edges that are not `DagNode::inputs`. Each test pairs the
+    // extra edge against the same graph without it, so it shows both that
+    // the edge extends the lifetime and that the lifetime would otherwise
+    // end early. Without the pair, the assertion could pass for a schedule
+    // that never frees anything.
+    // ------------------------------------------------------------------
+
+    fn node_order(dag: &Dag) -> Vec<NodeId> {
+        dag.nodes().iter().map(|node| node.id).collect()
+    }
+
+    /// The step index at which `id` is scheduled to be freed, or `None` when
+    /// the schedule keeps it to the end.
+    fn freed_at(schedule: &[Vec<NodeId>], id: NodeId) -> Option<usize> {
+        schedule.iter().position(|step| step.contains(&id))
+    }
+
+    fn schedule_for(dag: &Dag, retain: &[NodeId]) -> Vec<Vec<NodeId>> {
+        value_free_schedule(dag, &node_order(dag), None, &UnordMap::new(), retain)
+    }
+
+    /// A chain plus one spectator node, so a graph without the extra edge
+    /// frees the spectator's source at step 1 and a graph with it does not.
+    fn spectator_graph() -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let late = dag.add_node(decl, RiscOp::Neg, vec![a], vec3(), None);
+        dag.add_root(late);
+        (dag, x, a, late)
+    }
+
+    #[test]
+    fn without_an_extra_edge_the_source_is_freed_at_its_only_consumer() {
+        let (dag, x, _a, late) = spectator_graph();
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(1),
+            "x's only reader is the node at index 1"
+        );
+    }
+
+    #[test]
+    fn a_shape_dependency_extends_the_lifetime_it_reads() {
+        let (mut dag, x, _a, late) = spectator_graph();
+        dag.add_shape_dep(late, x);
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "a Const sizes itself from a shape dependency's realized shape, \
+             so the dependency is a read"
+        );
+    }
+
+    #[test]
+    fn a_result_claim_dependency_extends_the_lifetime_it_reads() {
+        let (mut dag, x, _a, late) = spectator_graph();
+        dag.add_result_claim_dep(late, x);
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "the producer discharges its obligation against the witness's value"
+        );
+    }
+
+    fn guard_claim(
+        canonical: crate::axis_sources::CanonicalExtent,
+        observed: crate::axis_sources::LocalGuardObservation,
+        activation: crate::axis_sources::GuardActivation,
+    ) -> crate::axis_sources::LocalGuardClaim {
+        crate::axis_sources::LocalGuardClaim {
+            claim: "n".to_string(),
+            canonical,
+            op: "expand",
+            observed,
+            activation,
+            source: None,
+        }
+    }
+
+    fn schedule_with_guard(
+        dag: &Dag,
+        site: NodeId,
+        claim: crate::axis_sources::LocalGuardClaim,
+        retain: &[NodeId],
+    ) -> Vec<Vec<NodeId>> {
+        let mut sites = UnordMap::new();
+        sites.insert(site, vec![(0usize, claim)]);
+        value_free_schedule(dag, &node_order(dag), None, &sites, retain)
+    }
+
+    #[test]
+    fn a_guard_activation_extends_the_lifetime_it_reads() {
+        let (mut dag, x, a, late) = spectator_graph();
+        // The guard at `late` is checked under the activation of the node
+        // its claim is about, `a`'s: `x`, which `a` already reads earlier.
+        dag.node_mut(a).expect("a").owner.activation = Some(x);
+        let activation = crate::axis_sources::GuardActivation::reading(&dag, a).unwrap();
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Resolved(3),
+                crate::axis_sources::LocalGuardObservation::RealizedExtent,
+                activation,
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "`local_guard_is_active` reads the activation node's value at the site"
+        );
+    }
+
+    #[test]
+    fn a_guard_witness_extends_the_lifetime_it_reads() {
+        let (dag, x, _a, late) = spectator_graph();
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Witness(x),
+                crate::axis_sources::LocalGuardObservation::RealizedExtent,
+                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(2),
+            "`local_guard_verdict` reads the declaring witness's scalar"
+        );
+    }
+
+    /// A graph whose penultimate node is a same-shape producer over `x`, so
+    /// an agreement derived from it names `x` while the final node does not
+    /// read `x` through any operand slot.
+    fn agreement_graph() -> (Dag, NodeId, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let a = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let mix = dag.add_node(decl, RiscOp::Add, vec![x, a], vec3(), None);
+        let late = dag.add_node(decl, RiscOp::Neg, vec![mix], vec3(), None);
+        dag.add_root(late);
+        (dag, x, mix, late)
+    }
+
+    #[test]
+    fn without_an_agreement_the_last_operand_read_ends_the_lifetime() {
+        let (dag, x, mix, late) = agreement_graph();
+        let schedule = schedule_for(&dag, &[late]);
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(mix.0),
+            "x's last operand reader is the same-shape producer"
+        );
+    }
+
+    #[test]
+    fn a_same_shape_agreement_member_extends_the_lifetime_it_reads() {
+        let (dag, x, mix, late) = agreement_graph();
+        let agreement = crate::axis_sources::same_shape_result_agreement(&dag, mix)
+            .expect("a same-shape producer")
+            .expect("positive rank");
+        assert_eq!(agreement.members(), &[x, NodeId(1)]);
+
+        // The site is the FINAL node, which reads neither member through an
+        // operand slot. Only the agreement keeps them alive that far.
+        let schedule = schedule_with_guard(
+            &dag,
+            late,
+            guard_claim(
+                crate::axis_sources::CanonicalExtent::Resolved(3),
+                crate::axis_sources::LocalGuardObservation::SameShapeAgreement(agreement),
+                crate::axis_sources::GuardActivation::sizing(&dag, late, 0).unwrap(),
+            ),
+            &[late],
+        );
+        assert_eq!(
+            freed_at(&schedule, x),
+            Some(late.0),
+            "`same_shape_agreement_extent` compares every member's realized shape"
+        );
+    }
+
+    #[test]
+    fn a_masked_off_consumer_does_not_pin_a_value() {
+        // `dead` reads `x` but never executes under the root mask, so it must
+        // not hold `x` past the live consumer that finishes with it.
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec3(),
+            None,
+        );
+        let live_use = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        let dead = dag.add_node(decl, RiscOp::Neg, vec![x], vec3(), None);
+        dag.add_root(live_use);
+        dag.add_root(dead);
+
+        let mask = live_mask_for_roots(&dag, &[live_use]);
+        let schedule = value_free_schedule(
+            &dag,
+            &node_order(&dag),
+            Some(&mask),
+            &UnordMap::new(),
+            &[live_use],
+        );
+        assert_eq!(freed_at(&schedule, x), Some(1));
+        assert_eq!(
+            freed_at(&schedule, dead),
+            None,
+            "a node the mask skips produces nothing to free"
+        );
+
+        // And with both selected, the dead consumer runs and pins `x`.
+        let both = live_mask_for_roots(&dag, &[live_use, dead]);
+        let schedule = value_free_schedule(
+            &dag,
+            &node_order(&dag),
+            Some(&both),
+            &UnordMap::new(),
+            &[live_use, dead],
+        );
+        assert_eq!(freed_at(&schedule, x), Some(2));
     }
 }

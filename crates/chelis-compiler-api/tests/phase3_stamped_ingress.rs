@@ -30,7 +30,7 @@ use chelis_compiler_api::schema::{
 /// A well-formed module every door accepts at ingress. It carries the
 /// `target` function the mutating doors address, so a rejection from one of
 /// them is never "no such function".
-const VALID_MODULE: &str = r#"(module {}
+const VALID_MODULE: &str = r#"(module {surf_path: "Phase3.Ingress", doc: "ingress control"}
   phase3.ingress
   (export {} target)
   (defsig {}
@@ -85,6 +85,36 @@ const COMMENTS_ONLY_PROGRAM: &str = "; a comment\n\n; another\n";
 /// with the identification [03-PROG-2] or [03-PROG-3] requires the diagnostic
 /// to carry.
 const REJECTED_MODULES: &[(&str, &str, &str)] = &[
+    (
+        "integer surface path",
+        "(module {surf_path: 1} phase3.ingress (def {} target (lit {} 1)))",
+        "surf_path",
+    ),
+    (
+        "mismatched surface path",
+        "(module {surf_path: \"Other\"} phase3.ingress (def {} target (lit {} 1)))",
+        "surf_path",
+    ),
+    (
+        "nested malformed metadata",
+        "(module {} phase3.ingress (def {property_seed: (lit {span: 1} 1)} target (lit {} 1)))",
+        "span",
+    ),
+    (
+        "bare differentiation name",
+        "(module {} phase3.ingress (def {} target (grad {wrt: unwrapped} (var {} f))))",
+        "wrt",
+    ),
+    (
+        "bare property expression",
+        "(module {} phase3.ingress (def {property_seed: unwrapped} target (lit {} 1)))",
+        "property_seed",
+    ),
+    (
+        "duplicate metadata",
+        "(module {} phase3.ingress (def {span: \"a\", span: \"b\"} target (lit {} 1)))",
+        "span",
+    ),
     (
         "bare name at a RuntimeExpr slot",
         BARE_NAME_BODY_MODULE,
@@ -395,6 +425,18 @@ fn no_module_text_door_rejects_the_well_formed_control_at_ingress() {
     }
 }
 
+#[test]
+fn every_module_text_door_accepts_opaque_data_at_ingress() {
+    let module = VALID_MODULE.replace("doc: \"ingress control\"", "doc: \"ingress control\", tool_data: {type: false, type: (var {}), span: 1, macro: (undefined_macro missing)}");
+    for (door, invoke, _) in module_text_doors() {
+        if let Err(error) = invoke(&module) {
+            // Decompilation explicitly cannot preserve extensions in Surf;
+            // other later-stage failures do not constitute ingress rejection.
+            assert_not_a_deep_ingress_rejection(&error, door);
+        }
+    }
+}
+
 // ── spec/03-deep-syntax.md §7.1 [03-PROG-1] / [03-PROG-2] ────────────
 //
 // The top-level form rule is decided by the numbered spec, and these cases
@@ -410,7 +452,7 @@ const ADMITTED_TOP_LEVEL_FORMS: &[(&str, &str)] = &[
     ("def", "(def {} f (lit {} 1))"),
     (
         "defsig",
-        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} int32)))",
+        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} i32)))",
     ),
     ("deftype", "(deftype {} Color () (variant {} Red))"),
     ("typealias", "(typealias {} Scalar () (t-prim {} f32))"),
@@ -571,9 +613,13 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
     // The lenient ingress re-wrapped every stamp failure as a parse error at
     // offset 0, so the caller could not locate the offending form. The
     // stamped ingress carries the real span.
-    let expected = BARE_NAME_BODY_MODULE
-        .find("unwrapped_name")
-        .expect("fixture contains the offending name");
+    let expected = u64::try_from(
+        BARE_NAME_BODY_MODULE
+            .find("unwrapped_name")
+            .expect("fixture contains the offending name"),
+    )
+    .unwrap();
+    let expected_len = u64::try_from("unwrapped_name".len()).unwrap();
     let error = compiler::parse(ParseRequest {
         source_kind: SourceKind::Deep,
         source: BARE_NAME_BODY_MODULE.to_string(),
@@ -595,14 +641,14 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
         span,
         DiagnosticSpan::Range {
             offset: expected,
-            len: "unwrapped_name".len(),
+            len: expected_len,
         },
         "a measured stamp rejection reports a range covering the form: {}",
         error.errors[0].message
     );
     assert_eq!(
         span.extent(),
-        Some("unwrapped_name".len()),
+        Some(expected_len),
         "the extent is the one the stamp measured, not an invented width"
     );
     assert!(

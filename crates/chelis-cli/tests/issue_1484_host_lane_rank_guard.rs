@@ -53,9 +53,9 @@ fn program(expression: &str) -> String {
     format!(
         "module Repro.HostRank\n\
          \n\
-         def f(x: tensor[n, f32]) = {{\n\
-         \x20 s = stride(x, cast(2, int64))\n\
-         \x20 e = insert(x, cast(0, int32), cast(2, int64))\n\
+         def f[n](x: tensor[n, f32]) = {{\n\
+         \x20 s = stride(x, cast(2, i64))\n\
+         \x20 e = insert(x, cast(0, i32), cast(2, i64))\n\
          \x20 {expression}\n\
          }}\n\
          \n\

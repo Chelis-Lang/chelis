@@ -1,4 +1,6 @@
+use crate::schema::numbers::{NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
+use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6,13 +8,13 @@ use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
 use chelis_deep::Expr as DeepExpr;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId, RiscOp, RtDim,
-    TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp,
+    LogicalKind, NodeId, ReduceWindowKind, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
-    TypeExpr, UnaryOp, Variant, VariantFields,
+    BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern, TypeExpr,
+    UnaryOp, Variant, VariantFields,
 };
 use chelis_types::{
     CheckedProgram,
@@ -37,20 +39,25 @@ use crate::schema::{
     FitnessComponents, GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest,
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
-    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
+    ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireComparisonKind, WireDag,
+    WireDagNode, WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite,
     WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
-    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
+    WireImportKind, WireLetBinding, WireLetPattern, WireLogicalKind, WireMatchArm, WireParam,
+    WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
     WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
     WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
+use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
+));
+const RUNTIME_VIEWS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_views.h"
 ));
 const RUNTIME_DTYPE_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -64,12 +71,24 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
+const DEVICE_OWNER_CPP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.cpp"
+));
+const DEVICE_OWNER_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.h"
+));
+const DEVICE_DESCRIPTOR_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_descriptor.h"
+));
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionDim {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<usize>,
+    pub size: Option<NonnegativeExtent>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -110,6 +129,9 @@ pub struct CompiledExecutionArtifact {
 
 #[derive(Debug, Clone)]
 pub struct CompilerError {
+    /// Output already produced by a failed evaluation, in execution order.
+    /// Empty for failures before execution; never contains fabricated roots.
+    pub transcript: Vec<String>,
     pub stage: String,
     pub errors: Vec<Diagnostic>,
 }
@@ -189,7 +211,15 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
             let decls = parse_surf(&request.source)?;
             Ok(ParseResult {
                 source_kind: SourceKind::Surf,
-                surf_ast: Some(decls.iter().map(wire_decl).collect()),
+                surf_ast: Some(
+                    decls
+                        .iter()
+                        .map(wire_decl)
+                        .collect::<SourceWireResult<_>>()
+                        .map_err(|message| {
+                            stage_error("parse", &message, GeneralKind::ValidationError)
+                        })?,
+                ),
                 deep_ast: None,
             })
         }
@@ -198,7 +228,15 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
             Ok(ParseResult {
                 source_kind: SourceKind::Deep,
                 surf_ast: None,
-                deep_ast: Some(exprs.iter().map(wire_deep_expr).collect()),
+                deep_ast: Some(
+                    exprs
+                        .iter()
+                        .map(wire_deep_expr)
+                        .collect::<SourceWireResult<_>>()
+                        .map_err(|message| {
+                            stage_error("parse", &message, GeneralKind::ValidationError)
+                        })?,
+                ),
             })
         }
     }
@@ -206,10 +244,21 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
 
 pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     let decls = parse_surf(&request.source)?;
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs = chelis_surf::desugar::desugar_program(&decls).map_err(|error| {
+        stage_error_with_span(
+            "desugar",
+            error.to_string(),
+            GeneralKind::TypeMismatch,
+            deep_span_to_diagnostic(error.span()),
+        )
+    })?;
     Ok(DesugarResult {
         deep_text: chelis_deep::printer::print_canonical(&deep_exprs),
-        deep_ast: deep_exprs.iter().map(wire_deep_expr).collect(),
+        deep_ast: deep_exprs
+            .iter()
+            .map(wire_deep_expr)
+            .collect::<SourceWireResult<_>>()
+            .map_err(|message| stage_error("desugar", &message, GeneralKind::ValidationError))?,
     })
 }
 
@@ -375,7 +424,10 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
             .as_ref()
             .map(chelis_deep::printer::print_expr),
         module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
-        renamed_references: edited.renamed_references,
+        renamed_references: edited
+            .renamed_references
+            .try_into()
+            .map_err(|error| stage_error("rename", error, GeneralKind::Other))?,
     })
 }
 
@@ -410,7 +462,10 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
         changed_def_deep: chelis_deep::printer::print_expr(&edited.changed_def),
         changed_defsig_deep: chelis_deep::printer::print_expr(&edited.changed_defsig),
         module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
-        rewritten_calls: edited.rewritten_calls,
+        rewritten_calls: edited
+            .rewritten_calls
+            .try_into()
+            .map_err(|error| stage_error("change-signature", error, GeneralKind::Other))?,
     })
 }
 
@@ -514,7 +569,7 @@ fn require_valid_deep(stage: &str, exprs: &[DeepExpr]) -> Result<()> {
             // chelis#1395: `validate` reports a coordinate and no end, so
             // the location travels as a point rather than an invented range.
             Some(DiagnosticSpan::Point {
-                offset: warning.offset,
+                offset: crate::schema::host_index(warning.offset),
             }),
         )),
     }
@@ -585,6 +640,9 @@ fn authoring_error_to_compiler_error(
             GeneralKind::NameResolutionError,
         ),
         AuthoringError::NoModule | AuthoringError::MultipleModules { .. } => {
+            stage_error(default_stage, error.to_string(), GeneralKind::DeepDeclError)
+        }
+        AuthoringError::Metadata(error) => {
             stage_error(default_stage, error.to_string(), GeneralKind::DeepDeclError)
         }
         AuthoringError::InvalidDecl(message) => {
@@ -737,10 +795,15 @@ fn edit_validation_error_to_compiler_error(
             ..
         } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
-    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    let mut diagnostic = Diagnostic::general(
+        kind,
+        error.message(),
+        crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
+    );
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -772,10 +835,15 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
             ..
         } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
-    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    let mut diagnostic = Diagnostic::general(
+        kind,
+        error.message(),
+        crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
+    );
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -829,20 +897,8 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
     // An embedder can reach this on the public API today by installing a
     // CancelToken (exported since chelis#914) and calling compiler::check.
     bail_if_cancelled("check")?;
-    Ok(CheckResult {
-        score: report.score,
-        components: FitnessComponents {
-            parse: report.components.parse,
-            structure: report.components.structure,
-            names: report.components.names,
-            types: report.components.types,
-        },
-        typed_nodes: report.typed_nodes,
-        untyped_nodes: report.untyped_nodes,
-        total_nodes: report.total_nodes,
-        unresolved_names: report.unresolved_names,
-        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })
+    CheckResult::try_from_fitness(&report)
+        .map_err(|error| stage_error("report", error, GeneralKind::Other))
 }
 
 pub fn lower(request: LowerRequest) -> Result<LowerResult> {
@@ -852,7 +908,8 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.entry.as_deref(),
         Target::Eval,
     )?;
-    let dag = wire_dag(&compiled.dag);
+    let dag = wire_dag(&compiled.dag)
+        .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
     // process edge to the client. A build that emits a `schema_version` it
     // cannot itself interpret must surface a typed `schema`-stage error, not
@@ -863,7 +920,7 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         named_roots: compiled
             .named_roots
             .into_entries()
-            .map(|(name, node)| (name.into_string(), node.0))
+            .map(|(name, node)| (name.into_string(), crate::schema::host_index(node.0)))
             .collect(),
     })
 }
@@ -1037,6 +1094,7 @@ fn project_host_program_to_entry(
                 }
             }
             ConcreteHostExprKind::Builtin { args, .. }
+            | ConcreteHostExprKind::SignatureEntry { args, .. }
             | ConcreteHostExprKind::TensorCall { args, .. } => {
                 for arg in args {
                     collect_expr(arg, bound, out);
@@ -1053,6 +1111,8 @@ fn project_host_program_to_entry(
                 }
             }
             ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => collect_expr(body, bound, out),
+            ConcreteHostExprKind::FormalIngress { value, .. } => collect_expr(value, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,
@@ -1092,7 +1152,8 @@ fn project_host_program_to_entry(
                     collect_expr(default_expr, bound, out);
                 }
             }
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 let mut scoped = bound.clone();
                 for binding in bindings {
                     collect_expr(&binding.value, &scoped, out);
@@ -1122,10 +1183,6 @@ fn project_host_program_to_entry(
                 collect_callback(callback, bound, out);
                 collect_expr(init, bound, out);
                 collect_expr(list, bound, out);
-            }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                collect_expr(seed, bound, out);
-                collect_expr(body, bound, out);
             }
             ConcreteHostExprKind::Int(_)
             | ConcreteHostExprKind::Float(_)
@@ -1183,6 +1240,7 @@ fn project_host_program_to_entry(
         global_tensor_helpers: Vec::new(),
         functions,
         summary_rejections,
+        adt_layouts: program.adt_layouts.clone(),
     })
 }
 
@@ -1324,9 +1382,6 @@ pub enum EntryLaneDecline {
     /// The selected entry def's signature is not tensor-in/tensor-out
     /// (e.g. a scalar `f32 -> f32` def selected by name).
     NotTensorSignature { entry: String },
-    /// The selected entry uses a `grad`/`vmap` form; the host lane owns
-    /// multi-root grad-tuple emission (issue #309).
-    GradLike { entry: String },
     /// `lower_named_tensor_entry_dag` could not lower the entry body.
     LoweringFailed { entry: String },
     /// The entry lowered, but its DAG had no roots after dead-code
@@ -1358,30 +1413,6 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
              supports top-level bindings.",
             GeneralKind::CompileError,
         ),
-        EntryLaneDecline::GradLike { entry } => {
-            unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "a `grad`/`vmap` transform entry (`{entry}`)"
-                )),
-                "the compiled-execution lane (compile_and_load), which emits a single \
-                 entry-scoped tensor kernel and does not yet lower transform entries \
-                 standalone",
-                chelis_types::unsupported::Stage::Codegen("c"),
-                // chelis#1138 owns this capability: the entry-scoped
-                // compiled lane declines grad/vmap transform entries
-                // standalone (the chelis#817/#818 entry-scoping did not
-                // extend to transform entries). Filed and re-pointed from
-                // the provisional chelis#613 citation after the PR #1037
-                // delta red team adjudicated that #613 (the legacy
-                // whole-program build lane, different predicate) does not
-                // govern this decline.
-                chelis_types::unimplemented_rejection!(
-                    1138,
-                    "run the transform through `eval`, or select a non-transform def \
-                     with `entry_name=`"
-                ),
-            ))
-        }
         other => stage_error(
             "compile",
             format!(
@@ -1421,13 +1452,10 @@ enum EntryLaneOutcome<'a> {
 ///     the LEGACY surface declines to whole-program emission);
 ///   - that def is tensor-signature (`NotTensorSignature` otherwise) — a
 ///     scalar/record/ADT entry stays on the host lane;
-///   - the def does NOT use a `grad`/`vmap` form (`GradLike` otherwise) —
-///     the host lane owns multi-root grad-tuple emission (#309), which
-///     `lower_named_tensor_entry_dag` can technically lower but must not
-///     here. NOTE: unlike `grad`, a `vmap` entry does NOT force the host
-///     backend, so its `GradLike` decline reaches the legacy whole-DAG
-///     fallthrough (a loud error on the strict surface, whole-program
-///     emission on the legacy one);
+///   - the checked body lowers to a standalone tensor DAG regardless of
+///     whether it contains `grad` or `vmap`; a tensor-valued projection
+///     of a gradient tuple is one entry result, while a tuple-valued entry
+///     stays on the host lane by its declared signature;
 ///   - the def lowers to a DAG (`LoweringFailed`) that is non-empty after
 ///     DCE (`EmptyAfterDce`);
 ///   - the DAG's `Load` labels are a subset of the def's declared param
@@ -1443,6 +1471,7 @@ fn entry_lane_decision<'a>(
     host_program: &'a chelis_ir::host::ConcreteHostProgram,
     host_only: bool,
     strictness: EntryStrictness,
+    allow_execution: bool,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1460,17 +1489,18 @@ fn entry_lane_decision<'a>(
     {
         return Ok(Decline(EntryLaneDecline::HasGlobals));
     }
-    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only, strictness)?
+    // A callable the C execution lane selected for its dropout must not
+    // inherit the legacy host default of silently choosing the last tensor
+    // def.
+    let legacy_host_selection =
+        host_only && !(allow_execution && strictness == EntryStrictness::Strict);
+    let Some(entry) =
+        resolve_execution_entry(entry_name, host_program, legacy_host_selection, strictness)?
     else {
         return Ok(Decline(EntryLaneDecline::NoEntryResolved));
     };
     if !chelis_ir::host::function_has_tensor_signature(host_program, entry) {
         return Ok(Decline(EntryLaneDecline::NotTensorSignature {
-            entry: entry.to_string(),
-        }));
-    }
-    if chelis_ir::host::named_entry_uses_grad_like(checked, entry) {
-        return Ok(Decline(EntryLaneDecline::GradLike {
             entry: entry.to_string(),
         }));
     }
@@ -1482,6 +1512,11 @@ fn entry_lane_decision<'a>(
     let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
+            entry: entry.to_string(),
+        }));
+    }
+    if dag.roots().len() != 1 {
+        return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
         }));
     }
@@ -1513,19 +1548,80 @@ fn entry_lane_decision<'a>(
 /// (python's `compile_and_load`). STRICT entry integrity: an unknown
 /// `entry_name`, an ambiguous default on a multi-def program, or an
 /// entry-lane decline that would otherwise fall through to merged
-/// whole-program metadata (top-level value bindings, a `grad`/`vmap`
-/// transform entry) is a loud error here, never a silently merged
+/// whole-program metadata is a loud error here, never a silently merged
 /// manifest (#817) and never a debug assert. The C-source surface with
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
     compile_for_execution_impl(request, EntryStrictness::Strict)
 }
 
+/// Opt-in observation of the same strict compilation as [`compile_for_execution`].
+/// The callback sees the actual immutable ownership-verified emission payload.
+/// The separate initial host snapshot is unverified and may contain functions
+/// pruned from that payload; see [`crate::emission_observer::EmissionObservation`].
+/// An observation is not success: later code generation or artifact construction
+/// may still fail. No observer is installed globally or used by ordinary calls.
+#[cfg(feature = "emission-observer")]
+pub fn compile_for_execution_with_observer(
+    request: CompileRequest,
+    observer: &mut dyn FnMut(crate::emission_observer::EmissionObservation<'_>),
+) -> Result<CompiledExecutionArtifact> {
+    let compiled = compile_source_for_codegen(
+        request.source_kind,
+        &request.source,
+        manifest_target(request.target),
+    )?;
+    execution_artifact_from_compiled_observed(
+        compiled,
+        request.target,
+        request.entry_name.as_deref(),
+        EntryStrictness::Strict,
+        Some(crate::emission_observer::Observer::Emission(observer)),
+    )
+}
+
+/// Capture actual selected helper passes without rerunning lowering or AD.
+/// Projection executes at the emission boundary and cannot change the payload.
+/// The returned pairing requires final compilation success and exactly one
+/// selected observation. Missing pass coverage is explicit in the observation;
+/// this API is not a certificate, native execution trace, or numerical proof.
+#[cfg(feature = "compilation-trace")]
+pub fn compile_for_execution_with_trace<T>(
+    request: CompileRequest,
+    project: impl FnOnce(crate::compilation_trace::CompilationObservation<'_>) -> T,
+) -> Result<crate::compilation_trace::TracedCompilation<T>> {
+    let mut capture = crate::compilation_trace::Capture::new();
+    let mut project = Some(project);
+    let mut observer = |observation: crate::compilation_trace::CompilationObservation<'_>| {
+        capture.observe(|| project.take().expect("projection executes only once")(observation))
+    };
+    let artifact = compile_source_scoped_mode(
+        request.source_kind,
+        &request.source,
+        None,
+        manifest_target(request.target),
+        true,
+        true,
+    )
+    .and_then(|compiled| {
+        execution_artifact_from_compiled_observed(
+            compiled,
+            request.target,
+            request.entry_name.as_deref(),
+            EntryStrictness::Strict,
+            Some(crate::emission_observer::Observer::Compilation(
+                &mut observer,
+            )),
+        )
+    });
+    capture.finish(artifact)
+}
+
 fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source_for_target(
+    let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
         manifest_target(request.target),
@@ -1567,11 +1663,11 @@ pub fn compile_for_execution_in_context(
 }
 
 /// Resolve and scope the entry for the in-context compiled path (#816).
-/// (The monolithic path uses [`entry_lane_decision`] instead, which re-lowers
-/// the named def from `compiled.checked` — that works only because the
-/// monolithic `compiled.checked` holds the whole program. In-context it holds
-/// new code only, so re-lowering a def that calls a library function would
-/// fail — the reviewer-flagged Step-1 trap.)
+/// The monolithic path uses [`entry_lane_decision`] instead. In-context,
+/// `compiled.checked` holds new code only, so source execution planning after
+/// selection must compose it with its proof-matched checked library. The
+/// composed library supplies helper definitions, never additional selectable
+/// entries.
 ///
 /// In-context, a clean tensor entry lowers straight into `compiled.dag` as a
 /// DAG root (its library calls already inlined by `compile_new_source_in_context`),
@@ -1733,17 +1829,88 @@ fn execution_artifact_from_compiled(
     entry_name: Option<&str>,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
+    execution_artifact_from_compiled_observed(
+        compiled,
+        target,
+        entry_name,
+        strictness,
+        #[cfg(feature = "emission-observer")]
+        None,
+    )
+}
+
+/// Check actual checked-source Resource regions, never labels inferred from
+/// lowered nodes (where the handler is already erased). Entry selection uses
+/// the source dependency pruner with the checker's lexical binding analysis.
+/// Contextual entry checks include the stored library, without making unused
+/// library helpers impose requirements on the selected artifact.
+fn validate_compiled_resource_target(
+    compiled: &CompiledSource,
+    target: BuildTarget,
+    entry: Option<&str>,
+) -> Result<()> {
+    let mut expressions = compiled
+        .library_runtime
+        .as_ref()
+        .map(|library| library.checked.annotated_exprs().to_vec())
+        .unwrap_or_default();
+    expressions.extend_from_slice(compiled.checked().annotated_exprs());
+    let expressions = match entry {
+        Some(entry) => crate::prune::prune_checked_runtime_to_entry(expressions, entry),
+        None => expressions,
+    };
+    chelis_effects::validate_build_target_expressions(&expressions, target.as_str()).map_err(
+        |errors| CompilerError {
+            transcript: Vec::new(),
+            stage: "effects".into(),
+            errors: errors
+                .iter()
+                .map(|error| {
+                    Diagnostic::from_effect_error(
+                        error,
+                        crate::schema::numbers::UnitInterval::new(0.8).expect("constant severity"),
+                    )
+                })
+                .collect(),
+        },
+    )
+}
+
+fn execution_artifact_from_compiled_observed(
+    mut compiled: CompiledSource,
+    target: CompileTarget,
+    entry_name: Option<&str>,
+    strictness: EntryStrictness,
+    #[cfg(feature = "emission-observer")] mut observer: Option<
+        crate::emission_observer::Observer<'_>,
+    >,
+) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
+    #[cfg(feature = "compilation-trace")]
+    let collect_trace = observer
+        .as_ref()
+        .is_some_and(crate::emission_observer::Observer::captures_lowering);
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
-    let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
-        .map_err(|diagnostic| {
-            stage_error_with_span(
-                "lower",
-                diagnostic.to_string(),
-                GeneralKind::LowerError,
-                deep_span_to_diagnostic(diagnostic.span),
-            )
-        })?;
+    let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
+        && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
+    {
+        (
+            compiled.host_ordinary.take(),
+            compiled.host_execution.take(),
+        )
+    } else {
+        let lowered = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+            .map_err(lower_diagnostic_to_compiler_error)?;
+        (lowered.host, None)
+    };
+    let host_program = execution_host
+        .as_ref()
+        .map(|plan| plan.program())
+        .or(legacy_host.as_ref());
+    // Preserve the actual lowering, not a second independently lowered program.
+    // Ordinary compilation does not clone it, even with the feature enabled.
+    #[cfg(feature = "emission-observer")]
+    let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
     let func_name = execution_c_symbol(entry_name);
 
     // Reject host-runtime-only builtins early for any compiled-backend
@@ -1752,16 +1919,14 @@ fn execution_artifact_from_compiled(
     // unknown compiled-lane builtin; this gate improves ordering and context,
     // and is not the correctness boundary. See spec/05-risc-primitives.md
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
-    if let Some(host_program) = host_compiled.host.as_ref() {
+    if let Some(host_program) = host_program {
         reject_host_only_builtins(host_program, build_target)?;
         reject_eval_only_builtins(host_program, build_target)?;
     }
 
     match target {
         CompileTarget::C => {
-            let host_only = host_compiled
-                .host
-                .as_ref()
+            let host_only = host_program
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
 
@@ -1835,15 +2000,17 @@ fn execution_artifact_from_compiled(
                             GeneralKind::CompileError,
                         ));
                     }
-                    resolved => resolved,
+                    Some((entry, ordinary)) => Some((entry, ordinary)),
+                    None => None,
                 }
-            } else if let Some(host_program) = host_compiled.host.as_ref() {
+            } else if let Some(host_program) = host_program {
                 match entry_lane_decision(
                     entry_name,
                     compiled.checked(),
                     host_program,
                     host_only,
                     strictness,
+                    execution_host.is_some(),
                 )? {
                     EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
                     EntryLaneOutcome::Decline(reason) => {
@@ -1855,15 +2022,21 @@ fn execution_artifact_from_compiled(
                 None
             };
 
-            if let Some((_entry, entry_dag)) = scoped_entry {
+            if let Some((entry, entry_dag)) = scoped_entry {
+                validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
                 reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
-                reject_unsized_named_dims(&entry_dag, "c")?;
-                let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
+                // The C emitter validates each axis's extent source and each
+                // rendered dimension's origin after backend preparation. A
+                // runtime extent is representable when those checks succeed;
+                // rejecting every unsized dimension here also rejects valid
+                // transformed entries with runtime pad/shrink intermediates.
+                let specialized =
+                    chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 let options = chelis_backend_c::CodegenOptions {
                     use_blas: true,
@@ -1878,6 +2051,18 @@ fn execution_artifact_from_compiled(
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    observed_host.as_ref(),
+                    crate::emission_observer::SelectedEmission::Dag {
+                        unfused: &entry_dag,
+                        selected: verified.emission(),
+                    },
+                    #[cfg(feature = "compilation-trace")]
+                    crate::compilation_trace::SelectedLowering::Unavailable,
+                );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
                         .map_err(unsupported_stage_error)?;
@@ -1927,7 +2112,7 @@ fn execution_artifact_from_compiled(
                 ));
             }
 
-            if let Some(host_program) = host_compiled.host.as_ref()
+            if let Some(host_program) = host_program
                 && (host_only || compiled.dag.roots().is_empty())
             {
                 let projected_host_program = match (&entry_lane_decline, strictness) {
@@ -1949,7 +2134,14 @@ fn execution_artifact_from_compiled(
                     _ => None,
                 };
                 let host_program = projected_host_program.as_ref().unwrap_or(host_program);
-                reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::C)?;
+                let resource_entry = match (&entry_lane_decline, strictness) {
+                    (
+                        Some(EntryLaneDecline::NotTensorSignature { entry }),
+                        EntryStrictness::Strict,
+                    ) => Some(entry.as_str()),
+                    _ => None,
+                };
+                validate_compiled_resource_target(&compiled, build_target, resource_entry)?;
                 reject_unsupported_windowed_reductions_in_host_program(
                     host_program,
                     BuildTarget::C,
@@ -1958,19 +2150,67 @@ fn execution_artifact_from_compiled(
                     .globals
                     .iter()
                     .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
-                let selected = projected_host_program
-                    .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
-                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
-                    .map_err(unsupported_stage_error)?;
-                let verified = chelis_ir::ownership::verify_ownership(
+                #[cfg(feature = "compilation-trace")]
+                let mut selected_host_trace = None;
+                let ownership = if let Some(plan) = execution_host.take() {
+                    let selected = match projected_host_program {
+                        Some(projected) => plan
+                            .project_functions(
+                                &projected
+                                    .functions
+                                    .iter()
+                                    .map(|function| function.name.clone())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|message| {
+                                stage_error("ownership", message, GeneralKind::CompileError)
+                            })?,
+                        None => plan,
+                    };
+                    reject_unsupported_effect_ops_in_host_execution_plan(
+                        &selected,
+                        BuildTarget::C,
+                    )?;
+                    let selected =
+                        chelis_backend_c::prepare_host_execution_plan_for_codegen(selected)
+                            .map_err(unsupported_stage_error)?;
+                    #[cfg(feature = "compilation-trace")]
+                    if collect_trace {
+                        selected_host_trace = Some(
+                            crate::compilation_trace::HostLoweringTrace::snapshot(&selected)?,
+                        );
+                    }
+                    chelis_ir::ownership::lower_host_execution_ownership(
+                        &compiled.program,
+                        selected,
+                    )
+                } else {
+                    let selected = projected_host_program
+                        .unwrap_or_else(|| legacy_host.take().expect("ordinary C host selected"));
+                    reject_unsupported_effect_ops_in_host_program(&selected, BuildTarget::C)?;
+                    let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                        .map_err(unsupported_stage_error)?;
                     chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
-                        .map_err(|error| {
-                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                        })?,
-                )
+                }
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                let verified =
+                    chelis_ir::ownership::verify_ownership(ownership).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    observed_host.as_ref(),
+                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                    #[cfg(feature = "compilation-trace")]
+                    selected_host_trace.as_ref().map_or(
+                        crate::compilation_trace::SelectedLowering::Unavailable,
+                        crate::compilation_trace::SelectedLowering::Host,
+                    ),
+                );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
                 // Preserve a more specific host-emitter rejection (for
@@ -1978,8 +2218,8 @@ fn execution_artifact_from_compiled(
                 // scalar-global shape is the one strict #817 fallback that
                 // remains unsafe here: source-level detection sees the global,
                 // while host lowering has no global product to expose. Real
-                // host globals and GradLike entries retain their established
-                // host-lane artifact with an explicit decline reason.
+                // host globals retain their established host-lane artifact
+                // with an explicit decline reason.
                 if strictness == EntryStrictness::Strict
                     && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
                     && scalar_only_globals
@@ -1998,11 +2238,12 @@ fn execution_artifact_from_compiled(
                 artifact.entry_lane_decline = entry_lane_decline;
                 return Ok(artifact);
             }
+            validate_compiled_resource_target(&compiled, build_target, None)?;
             reject_unsupported_effect_ops(&compiled.dag, BuildTarget::C)?;
             reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
             reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
             reject_unsized_named_dims(&compiled.dag, "c")?;
-            let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
+            let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
             let options = chelis_backend_c::CodegenOptions {
                 use_blas: true,
@@ -2017,6 +2258,18 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
+            #[cfg(feature = "emission-observer")]
+            crate::emission_observer::observe(
+                &mut observer,
+                &compiled.program,
+                observed_host.as_ref(),
+                crate::emission_observer::SelectedEmission::Dag {
+                    unfused: &compiled.dag,
+                    selected: verified.emission(),
+                },
+                #[cfg(feature = "compilation-trace")]
+                crate::compilation_trace::SelectedLowering::Unavailable,
+            );
             let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
                 .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
@@ -2031,11 +2284,7 @@ fn execution_artifact_from_compiled(
             // On this legacy whole-DAG path a `Some(decline)` co-occurs with
             // a real (whole-program, merged) manifest — see the
             // `entry_lane_decline` field doc. Every decline reason that
-            // leaves the whole-program DAG rooted can get here, including
-            // `GradLike`: a `vmap` entry declines the lane but, unlike
-            // `grad`, does NOT force the host backend, so it reaches this
-            // path (an earlier revision asserted it could not, and a vmap
-            // entry panicked every debug-built caller). On the STRICT
+            // leaves the whole-program DAG rooted can get here. On the STRICT
             // (callable) surface a merged manifest is the #817 defect, so
             // any decline here is a loud error; on the LEGACY (C-source)
             // surface the whole-program emission is the product contract
@@ -2064,26 +2313,44 @@ fn execution_artifact_from_compiled(
             if compiled.library_runtime.is_some() {
                 return Err(reef_context_hip_unsupported_error());
             }
-            let host_requires_host_backend = host_compiled
-                .host
-                .as_ref()
+            validate_compiled_resource_target(&compiled, build_target, None)?;
+            let host_requires_host_backend = host_program
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry_dag = host_compiled
-                .host
-                .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| {
-                    chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
-                });
-            if compiled.dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
-                && host_requires_host_backend
-                && let Some(host_program) = host_compiled.host.as_ref()
+            let preferred_entry =
+                host_program.and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry_is_host = match preferred_entry {
+                Some(name) => {
+                    crate::target_capability::hip_entry_lane(compiled.checked(), name)
+                        .map_err(unsupported_stage_error)?
+                        == chelis_types::types::Lane::Host
+                }
+                None => false,
+            };
+            let preferred_entry_dag = preferred_entry.and_then(|name| {
+                chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
+            });
+            let has_host_roots = compiled
+                .manifest()
+                .entries
+                .iter()
+                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            if (has_host_roots
+                || preferred_entry_is_host
+                || (compiled.dag.roots().is_empty()
+                    && preferred_entry_dag.is_none()
+                    && host_requires_host_backend))
+                && let Some(host_program) = host_program
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
-                let selected = host_compiled.host.take().expect("host branch selected");
+                let selected = legacy_host.take().expect("host branch selected");
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, &func_name)
+                        .map_err(unsupported_stage_error)?;
                 let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
                     .map_err(unsupported_stage_error)?;
                 let verified = chelis_ir::ownership::verify_ownership(
@@ -2095,12 +2362,22 @@ fn execution_artifact_from_compiled(
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
-                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
-                    .map_err(unsupported_stage_error)?;
+                #[cfg(feature = "emission-observer")]
+                crate::emission_observer::observe(
+                    &mut observer,
+                    &compiled.program,
+                    observed_host.as_ref(),
+                    crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                    #[cfg(feature = "compilation-trace")]
+                    crate::compilation_trace::SelectedLowering::Unavailable,
+                );
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, &func_name, helpers)
+                        .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     &func_name,
                     None,
-                    compile_result_hip_host(target, &func_name, &result),
+                    compile_result_hip_host(target, &func_name, &result)?,
                     manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
@@ -2129,12 +2406,24 @@ fn execution_artifact_from_compiled(
             .map_err(|error| {
                 stage_error("ownership", error.to_string(), GeneralKind::CompileError)
             })?;
+            #[cfg(feature = "emission-observer")]
+            crate::emission_observer::observe(
+                &mut observer,
+                &compiled.program,
+                observed_host.as_ref(),
+                crate::emission_observer::SelectedEmission::Dag {
+                    unfused: &hip_dag,
+                    selected: verified.emission(),
+                },
+                #[cfg(feature = "compilation-trace")]
+                crate::compilation_trace::SelectedLowering::Unavailable,
+            );
             let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
                 &func_name,
                 Some(format!("{func_name}_device")),
-                compile_result_hip(target, &func_name, &result),
+                compile_result_hip(target, &func_name, &result)?,
                 manifest_result(&compiled.program),
                 execution_input_specs(&hip_dag, &result.input_labels)?,
                 execution_output_specs(&hip_dag, &result.output_labels)?,
@@ -2156,6 +2445,15 @@ pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResul
     eval_compiled(&compiled, request.bindings, None)
 }
 
+/// Evaluate the selected roots using only their required tensor bindings.
+/// A selected parameterized declaration becomes owed when those inputs are
+/// present; bindings do not supply live scalar or container parameters.
+/// Admitted selected Host calls receive tensor actuals in authored parameter
+/// order. An available lowered Host kernel also contributes its shape-witness
+/// parameters to input demand; this does not broaden entry/profile admission.
+/// Missing required inputs leave the declaration unentered. Invalid required
+/// wire tensors fail before entry; genuinely dead and unrelated bindings are
+/// not decoded. Host execution still owns lowering errors and executed effects.
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
     eval_selected_for_target(request, selected_root_names, Target::Eval)
 }
@@ -2225,6 +2523,7 @@ pub struct PreparedEval {
 impl PreparedEval {
     /// Evaluate exactly one selected root. Other top-level non-fn bindings
     /// stay registered for lazy reference but are not eagerly evaluated.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -2329,7 +2628,12 @@ fn compile_rewritten_decls_in_context(
 ) -> Result<CompiledSource> {
     let _linked = chelis_types::install_linked_program_guard();
     bail_if_cancelled("desugar")?;
-    let prepared = crate::pipeline::prepare_surf_decls(rewritten, None).map_err(|error| {
+    let prepared = crate::pipeline::prepare_surf_decls_with_context(
+        rewritten,
+        context.checked_library().program().exprs(),
+        None,
+    )
+    .map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
     bail_if_cancelled("check")?;
@@ -2338,9 +2642,8 @@ fn compile_rewritten_decls_in_context(
     // shared effect and linearity transitions.
     let analysis =
         crate::pipeline::analyze_prepared_with_library(prepared, context.checked_library())
-            .map_err(|report| CompilerError {
-                stage: "check".to_string(),
-                errors: report.errors.iter().map(check_error_diagnostic).collect(),
+            .map_err(|report| {
+                crate::compiler::check_errors_to_compiler_error("check", &report.errors)
             })
             .map_err(|error| cancelled_or("check", error))?;
     bail_if_cancelled("effects")?;
@@ -2377,16 +2680,14 @@ fn compile_rewritten_decls_in_context(
     // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
-        exprs: context.library_checked().annotated_exprs().to_vec(),
-        type_env: context.library_checked().type_env().clone(),
-        lowered_names: crate::runtime::library_lowered_names(
-            context.library_checked().annotated_exprs(),
-            context.library_checked().type_env(),
-        ),
+        checked: context.library_checked().clone(),
+        lowered_names: crate::runtime::library_lowered_names(context.library_checked()),
     };
 
     Ok(CompiledSource {
         program: ManifestedProgram::new(new_checked, manifest, target),
+        host_execution: None,
+        host_ordinary: None,
         dag: lowered_parts.dag,
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
@@ -2420,7 +2721,9 @@ pub fn eval_in_context_for_target(
 /// into the evaluator instead of an empty map. This is the reef-aware
 /// analogue of [`eval`] with bindings: it lets the Python `eval(...,
 /// project_root=...)` path resolve library imports (issue #816) while still
-/// binding the new source's free `Load`s to the caller's inputs.
+/// binding the new source's free `Load`s and the selected `main`'s required
+/// tensor parameters to the caller's inputs. The binding and non-observation
+/// rules are the same as [`eval_selected`].
 pub fn eval_in_context_with_bindings(
     context: &crate::context::CompiledContext,
     new_source: &str,
@@ -2445,17 +2748,22 @@ pub fn check_in_context(
     // time and counted there.
     let total_nodes = compiled.checked().exprs().len();
     Ok(CheckResult {
-        score: 1.0,
+        score: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
         components: FitnessComponents {
-            parse: 1.0,
-            structure: 1.0,
-            names: 1.0,
-            types: 1.0,
+            parse: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            structure: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            names: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            types: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
         },
-        typed_nodes: total_nodes,
-        untyped_nodes: 0,
-        total_nodes,
+        typed_nodes: total_nodes
+            .try_into()
+            .map_err(|error| stage_error("report", error, GeneralKind::Other))?,
+        untyped_nodes: crate::schema::numbers::NonnegativeCount::new(0).expect("zero count"),
+        total_nodes: total_nodes
+            .try_into()
+            .map_err(|error| stage_error("report", error, GeneralKind::Other))?,
         unresolved_names: vec![],
+        inferred_signatures: None,
         errors: vec![],
     })
 }
@@ -2504,6 +2812,9 @@ pub struct PreparedEvalInContext {
 
 impl PreparedEvalInContext {
     /// Evaluate exactly one selected root against the prepared compile.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
+    /// Selected Host demand may inspect a new lowering product, including the
+    /// checked library proof; execution does not reuse that speculative plan.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -2555,7 +2866,7 @@ fn eval_compiled(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
-    );
+    )?;
     let manifest = effective_program.manifest();
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
@@ -2611,13 +2922,46 @@ fn eval_compiled(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let active_dag = &compiled.dag;
+    // The evaluator admits exactly the graphs the compiled lanes admit
+    // (spec/10 section 3.2): a lowered program whose keys break the key
+    // rules, or that shares a node that can trap across declarations, is
+    // rejected here as ownership lowering for C rejects it, rather than
+    // evaluated. The wire codec runs the key rules too.
+    let mut key_rule_errors = Vec::new();
+    chelis_ir::verify::verify_random_operands(active_dag, &mut key_rule_errors);
+    if key_rule_errors.is_empty() {
+        chelis_ir::verify::verify_key_rules(active_dag, &mut key_rule_errors);
+    }
+    if !key_rule_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program breaks the key rules: {}",
+                key_rule_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
+    let mut sharing_errors = Vec::new();
+    chelis_ir::verify::verify_declaration_sharing(active_dag, &mut sharing_errors);
+    if !sharing_errors.is_empty() {
+        return Err(stage_error(
+            "eval",
+            format!(
+                "the lowered program shares a node that can trap: {}",
+                sharing_errors.join("; ")
+            ),
+            GeneralKind::LowerError,
+        ));
+    }
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
     } else {
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
         })
-        .map_err(eval_stage_error)?
+        .map_err(|message| eval_stage_error(message, true))?
     };
 
     let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
@@ -2635,8 +2979,7 @@ fn eval_compiled(
                 "the Tensor evaluator returned no value for the owed root",
             )
         })?;
-        let precision = compiled
-            .dag
+        let precision = active_dag
             .get(*node_id)
             .map(|node| node.output_type.precision)
             .ok_or_else(|| {
@@ -2680,10 +3023,12 @@ fn eval_compiled(
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
-            &library.exprs,
-            &library.type_env,
+            Some(&library.checked),
             Some(&library.lowered_names),
-            &tensor_values_by_name,
+            crate::runtime::HostEvaluationInputs {
+                roots: &tensor_values_by_name,
+                bindings: Some(&bindings),
+            },
             host_selected_root_names,
             Some(&manifested_lowered_names),
         )
@@ -2693,15 +3038,35 @@ fn eval_compiled(
             &tensor_values_by_name,
             host_selected_root_names,
             Some(&manifested_lowered_names),
+            Some(&bindings),
         )
     }
-    .map_err(eval_stage_error)?;
+    .map_err(|failure| {
+        let mut error = eval_stage_error(
+            failure.message,
+            failure.kind == crate::runtime::RuntimeFailureKind::NumericTrap,
+        );
+        error.transcript = failure.transcript;
+        error
+    })?;
 
+    let preserve_transcript = |mut error: CompilerError| {
+        error.transcript.clone_from(&host_outcome.transcript);
+        error
+    };
     let roots = observed_entries
         .iter()
         .copied()
         .enumerate()
         .map(|(index, entry)| {
+            // An executed root's failure is already the runtime diagnostic.
+            // Wrapping it as missing output corrupts the required trap line.
+            if let Some(error) = host_outcome.host_root_errors.get(entry.def_name.as_str()) {
+                return Err(eval_stage_error(
+                    error.message.clone(),
+                    error.kind == crate::runtime::RuntimeFailureKind::NumericTrap,
+                ));
+            }
             // A host-lane *zero-argument fn* root is the result of applying
             // the callable, never the closure stored in `host_bindings` when
             // another root resolved that declaration. Prefer the applied
@@ -2730,7 +3095,9 @@ fn eval_compiled(
                     let reason = host_outcome
                         .host_root_errors
                         .get(entry.def_name.as_str())
-                        .map(|error| format!("the Host-lane nullary root failed: {error}"))
+                        .map(|error| {
+                            format!("the Host-lane nullary root failed: {}", error.message)
+                        })
                         .unwrap_or_else(|| {
                             "the assigned lane returned no value for the owed root".to_string()
                         });
@@ -2744,20 +3111,23 @@ fn eval_compiled(
                 .unwrap_or(index);
             Ok((node_id, entry.name.clone(), value))
         })
-        .collect::<Result<Vec<_>>>()?
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?
         .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
-                node_id,
+                node_id: crate::schema::host_index(node_id),
                 name: Some(name),
                 // Render the display text HERE, where the runtime value's
                 // dtype tags still exist; the wire `value` below cannot
                 // carry them (chelis#732 P1, [05-OBS-1]).
                 display: Some(crate::runtime::render_value(&value)),
-                value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
+                value: runtime_value_to_schema(&value)
+                    .map_err(|message| eval_stage_error(message, false))?,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?;
 
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
@@ -2832,22 +3202,23 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
                 .grad_nodes
                 .get(node)
                 .copied()
-                .map(|grad_node| (name.clone(), grad_node.0))
+                .map(|grad_node| (name.clone(), crate::schema::host_index(grad_node.0)))
         })
         .collect();
 
-    let dag = wire_dag(&grad_result.dag);
+    let dag = wire_dag(&grad_result.dag)
+        .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before the gradient DAG crosses
     // the process edge (same rationale as `lower`).
     schema_stage_check(dag.validate_schema_version())?;
     Ok(GradResult {
         dag,
-        output_node: grad_result.output_node.0,
+        output_node: crate::schema::host_index(grad_result.output_node.0),
         grad_nodes_by_name,
         forward_nodes_by_name: compiled
             .forward_node_index
             .into_entries()
-            .map(|(name, node)| (name.into_string(), node.0))
+            .map(|(name, node)| (name.into_string(), crate::schema::host_index(node.0)))
             .collect(),
     })
 }
@@ -2915,35 +3286,44 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
                 Some(parse_error_span_surf(&source, &error)),
             )
         }
+        PipelineRejection::Preparation(PreparationError::SurfDesugar(error)) => {
+            stage_error_with_span(
+                "desugar",
+                error.to_string(),
+                GeneralKind::TypeMismatch,
+                deep_span_to_diagnostic(error.span()),
+            )
+        }
+        PipelineRejection::Preparation(PreparationError::DeepSelector(error)) => {
+            stage_error("validate", error.to_string(), GeneralKind::TypeMismatch)
+        }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
             deep_ingress_error("parse", &error)
         }
         PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
             stage_error("desugar", error.to_string(), GeneralKind::MacroError)
         }
-        PipelineRejection::Type { fitness } => CompilerError {
-            stage: "check".to_string(),
-            errors: fitness.errors.iter().map(check_error_diagnostic).collect(),
-        },
+        PipelineRejection::Type { fitness } => {
+            crate::compiler::check_errors_to_compiler_error("check", &fitness.errors)
+        }
         PipelineRejection::Effects { errors } => CompilerError {
+            transcript: Vec::new(),
             stage: "effects".to_string(),
             errors: errors
                 .iter()
                 .map(|error| {
-                    Diagnostic::general(GeneralKind::EffectError, error.message.clone(), 0.8)
+                    Diagnostic::general(
+                        GeneralKind::EffectError,
+                        error.message.clone(),
+                        crate::schema::numbers::UnitInterval::new(0.8).expect("constant severity"),
+                    )
                 })
                 .collect(),
         },
-        PipelineRejection::Linearity { errors } => CompilerError {
-            stage: "linearity".to_string(),
-            errors: errors.iter().map(check_error_diagnostic).collect(),
-        },
-        PipelineRejection::Lower(diagnostic) => stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            GeneralKind::LowerError,
-            deep_span_to_diagnostic(diagnostic.span),
-        ),
+        PipelineRejection::Linearity { errors } => {
+            crate::compiler::check_errors_to_compiler_error("linearity", &errors)
+        }
+        PipelineRejection::Lower(diagnostic) => lower_diagnostic_to_compiler_error(diagnostic),
         PipelineRejection::RootCount {
             context,
             expected,
@@ -2964,6 +3344,25 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
     }
 }
 
+fn lower_diagnostic_to_compiler_error(
+    diagnostic: chelis_ir::lower::LowerDiagnostic,
+) -> CompilerError {
+    if let Some(unsupported) = diagnostic.unsupported() {
+        let mut error = unsupported_stage_error(unsupported.clone());
+        error.stage = "lower".to_owned();
+        // LowerDiagnostic's renderer also carries the producer's source label.
+        // Kind and structured location come from the typed Unsupported value.
+        error.errors[0].message = diagnostic.to_string();
+        return error;
+    }
+    stage_error_with_span(
+        "lower",
+        diagnostic.to_string(),
+        GeneralKind::LowerError,
+        deep_span_to_diagnostic(diagnostic.span),
+    )
+}
+
 pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
     match result {
         Ok(value) => crate::schema::ApiEnvelope::success(value),
@@ -2973,6 +3372,10 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 
 struct CompiledSource {
     program: ManifestedProgram,
+    // Private C carrier: no second host lowering may replace its execution
+    // metadata between source ingress and selected artifact emission.
+    host_execution: Option<chelis_ir::host::HostExecutionPlan>,
+    host_ordinary: Option<chelis_ir::host::ConcreteHostProgram>,
     dag: Dag,
     // Callable function-entry selection is a separate surface from value-root
     // observation. Keep the pipeline's typed set for that API; eval/build
@@ -3016,7 +3419,7 @@ fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
 }
 
 /// Specialize callable tensor entries selected for evaluation into owed
-/// roots once all authored parameters have bindings. The checked manifest
+/// roots once all required runtime inputs have bindings. The checked manifest
 /// intentionally excludes parameterized declarations in the abstract; this
 /// produces a new `ManifestedProgram` for the concrete evaluation request
 /// rather than reaching around the manifest to the legacy named-root map.
@@ -3024,7 +3427,7 @@ fn manifested_program_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
-) -> ManifestedProgram {
+) -> Result<ManifestedProgram> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
@@ -3128,6 +3531,36 @@ fn manifested_program_for_eval<'a>(
         {
             continue;
         }
+
+        if selected_roots.len() != selected_entries.len() {
+            match selected_host_input_demand(compiled, candidate, &parameter_names) {
+                Ok(Some(inputs)) => {
+                    if inputs.iter().any(|name| {
+                        signature
+                            .params
+                            .iter()
+                            .find(|param| param.name == *name)
+                            .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
+                    }) {
+                        continue;
+                    }
+                    required_inputs.extend(inputs);
+                    if !required_inputs
+                        .iter()
+                        .all(|input| available.contains(input.as_str()))
+                    {
+                        continue;
+                    }
+                }
+                Ok(None) => {}
+                Err(_deferred_lowering) => {
+                    // A failed metadata query does not change admission or
+                    // choose an interpreter fallback. Decode the original
+                    // demanded inputs normally; the unchanged runtime still
+                    // owns lowering and its error at the entered-call boundary.
+                }
+            }
+        }
         let unsupported_prim = selected_roots.iter().find_map(|root| {
             compiled
                 .dag
@@ -3169,11 +3602,47 @@ fn manifested_program_for_eval<'a>(
             .copied()
             .unwrap_or(usize::MAX)
     });
-    ManifestedProgram::new(
+    Ok(ManifestedProgram::new(
         compiled.checked().clone(),
         manifest,
         compiled.program.target(),
-    )
+    ))
+}
+
+/// Refine selected Host-call admission from the same kernel input carrier
+/// that runtime stages, including declared shape witnesses. The temporary
+/// product is never reused for execution: runtime owns its current Random
+/// context and any entered lowering error.
+fn selected_host_input_demand(
+    compiled: &CompiledSource,
+    name: &str,
+    parameters: &BTreeSet<String>,
+) -> std::result::Result<Option<BTreeSet<String>>, chelis_ir::lower::LowerDiagnostic> {
+    let composed;
+    let checked = if let Some(library) = &compiled.library_runtime {
+        composed =
+            CheckedProgram::compose(&library.checked, compiled.checked()).ok_or_else(|| {
+                chelis_ir::lower::LowerDiagnostic::new(
+                    "runtime kernel program lost its checked library proof".to_owned(),
+                    None,
+                    None,
+                )
+            })?;
+        &composed
+    } else {
+        compiled.checked()
+    };
+    let session = chelis_ir::host::HostLoweringSession::new(checked);
+    chelis_ir::host::host_def_kernel(&session, name).map(|kernel| {
+        kernel.map(|kernel| {
+            kernel
+                .inputs
+                .iter()
+                .filter(|input| parameters.contains(&input.name))
+                .map(|input| input.name.clone())
+                .collect()
+        })
+    })
 }
 
 fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
@@ -3241,19 +3710,6 @@ fn checked_def_order(program: &CheckedProgram) -> UnordMap<&str, usize> {
 fn deep_tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
     match expr {
         DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        DeepExpr::List(list, _) => {
-            let tag = list.tag()?;
-            let children = if list.elements.len() > 2
-                && matches!(list.elements.get(1), Some(DeepExpr::Map(_, _)))
-            {
-                &list.elements[2..]
-            } else if list.elements.len() > 1 {
-                &list.elements[1..]
-            } else {
-                &[]
-            };
-            Some((tag, children))
-        }
         _ => None,
     }
 }
@@ -3291,22 +3747,11 @@ fn route_tensor_inputs_from_dag(
 }
 
 fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
-    let mut stack = vec![root];
-    let mut seen = UnordSet::new();
-    let mut required = BTreeSet::new();
-    while let Some(node_id) = stack.pop() {
-        if !seen.insert(node_id) {
-            continue;
-        }
-        let Some(node) = dag.get(node_id) else {
-            continue;
-        };
-        if let RiscOp::Load { name } = &node.op {
-            required.insert(name.as_str().to_string());
-        }
-        stack.extend(node.inputs.iter().copied());
-    }
-    required
+    // The evaluator's own live set (spec/06 §5.2), not the root's data
+    // closure: a discarded trapping node of the root's declaration demands
+    // its parameter, so routing by data dependencies alone would drop a
+    // binding the evaluator then reports missing.
+    chelis_ir::eval::required_load_names(dag, &[root])
 }
 
 /// The library payload threaded through `eval_compiled` so the host
@@ -3314,15 +3759,9 @@ fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
 /// references when called from new code.
 #[derive(Clone)]
 struct LibraryRuntime {
-    /// Library `def` annotated_exprs. Pulled into `top_level_defs`
-    /// before the new-code defs so new-code can shadow on collision.
-    exprs: Vec<DeepExpr>,
-    /// Library-side type-env. Bucket 1 (`grad`/`vmap`/`realize` host
-    /// runtime support) routes through `lower_subexpr_program`, which
-    /// expects the merged library + new-code Deep type-env so a
-    /// library-name reference inside a `grad` body resolves the same
-    /// way it does in the monolithic compile.
-    type_env: BTreeMap<String, DeepExpr>,
+    /// The checked proof, definitions and declarations travel together;
+    /// imported calls consult the same kernel owner as generated C.
+    checked: CheckedProgram,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
@@ -3342,6 +3781,22 @@ fn compile_source_for_target(
     compile_source_scoped(source_kind, source, None, target)
 }
 
+fn compile_source_for_codegen(
+    source_kind: SourceKind,
+    source: &str,
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_source_scoped_mode(
+        source_kind,
+        source,
+        None,
+        target,
+        true,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
 /// program to the defs reachable from that named entry BEFORE the type
 /// checker runs. This is the WI-3 entrypoint-isolation path: it lets a caller
@@ -3356,17 +3811,70 @@ fn compile_source_scoped(
     entry: Option<&str>,
     target: Target,
 ) -> Result<CompiledSource> {
+    compile_source_scoped_mode(
+        source_kind,
+        source,
+        entry,
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
+}
+
+fn compile_source_scoped_mode(
+    source_kind: SourceKind,
+    source: &str,
+    entry: Option<&str>,
+    target: Target,
+    codegen: bool,
+    #[cfg(feature = "compilation-trace")] collect_trace: bool,
+) -> Result<CompiledSource> {
+    // eval_for_target(C) still evaluates a value graph using a C manifest;
+    // requesting that manifest must not silently select native host emission.
+    let planned_c = codegen && target == Target::C;
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind,
         source,
         entry,
-        goal: crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
+        goal: if planned_c {
+            crate::pipeline::PipelineGoal::FullCheck
+        } else {
+            crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly)
+        },
     })
     .map_err(pipeline_rejection_to_compiler_error)
     .map_err(|error| cancelled_or("check", error))?;
-    let crate::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
-        unreachable!("the lower goal returns only a lowered outcome")
+    let (lowered, host_ordinary, host_execution) = match outcome {
+        crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
+        crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
+            // C execution selects host lowering here, before artifact emission.
+            // Preserve the host-only builtin diagnostic before lowering callbacks.
+            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
+            let realizability = chelis_effects::realizability::infer_realizability(
+                checked.program(),
+                crate::target_capability::tensor_capable_prims(target),
+            );
+            let manifest = chelis_effects::realizability::compute_root_manifest(
+                checked.program(),
+                &realizability,
+            );
+            let lower_c = crate::pipeline::lower_checked_for_c_execution;
+            #[cfg(feature = "compilation-trace")]
+            let lower_c = if collect_trace {
+                crate::pipeline::lower_checked_for_c_execution_with_trace
+            } else {
+                lower_c
+            };
+            lower_c(
+                checked,
+                &manifest,
+                crate::pipeline::LoweringMode::AllowHostOnly,
+            )
+            .map_err(pipeline_rejection_to_compiler_error)?
+        }
+        _ => unreachable!("requested source goal returns checked C or lowered source"),
     };
     bail_if_cancelled("lower")?;
     // chelis#1079: realizability is a production phase boundary. The target
@@ -3391,6 +3899,8 @@ fn compile_source_scoped(
 
     Ok(CompiledSource {
         program: ManifestedProgram::new(checked, manifest, target),
+        host_execution,
+        host_ordinary,
         dag: lowered_parts.dag,
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
@@ -3456,8 +3966,8 @@ fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> Co
         // The stamp half carries a measured extent, so it reports a range
         // where the parse half above can only report a point (chelis#1395).
         chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(DiagnosticSpan::Range {
-            offset: stamp_error.span.offset,
-            len: stamp_error.span.len,
+            offset: crate::schema::host_index(stamp_error.span.offset),
+            len: crate::schema::host_index(stamp_error.span.len),
         }),
     };
     stage_error_with_span(stage, error.to_string(), GeneralKind::DeepParseError, span)
@@ -3481,7 +3991,6 @@ fn deep_expr_tag(expr: &DeepExpr) -> Option<DeepTag> {
 
 fn deep_decl_name(expr: &DeepExpr) -> Option<&str> {
     match expr {
-        DeepExpr::List(list, _) => list.elements.get(2).and_then(symbol_name),
         DeepExpr::Node(node, _) => node.children_slice().first().and_then(symbol_name),
         _ => None,
     }
@@ -3496,17 +4005,11 @@ fn deep_def_has_role(expr: &DeepExpr, expected: &str) -> bool {
         return false;
     }
     let meta = match expr {
-        DeepExpr::List(list, _) => match list.elements.get(1) {
-            Some(DeepExpr::Map(meta, _)) => meta,
-            _ => return false,
-        },
         DeepExpr::Node(node, _) => node.meta(),
         _ => return false,
     };
-    meta.entries.iter().any(|(key, value)| {
-        key == "chelis_role"
-            && matches!(value, DeepExpr::Atom(chelis_deep::Atom::Str(role), _) if role == expected)
-    })
+    meta.chelis_role()
+        .is_some_and(|role| role.value() == expected)
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
@@ -3563,6 +4066,10 @@ fn compile_result_c(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
                 contents: RUNTIME_DTYPE_H.to_string(),
             },
@@ -3582,8 +4089,8 @@ fn compile_result_hip(
     target: CompileTarget,
     func_name: &str,
     result: &HipCodegenResult,
-) -> CompileResult {
-    CompileResult {
+) -> Result<CompileResult> {
+    Ok(CompileResult {
         target,
         entry_name: func_name.to_string(),
         files: vec![
@@ -3600,6 +4107,10 @@ fn compile_result_hip(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
                 contents: RUNTIME_DTYPE_H.to_string(),
             },
@@ -3607,52 +4118,118 @@ fn compile_result_hip(
                 path: "chelis_hip_runtime.h".to_string(),
                 contents: HIP_RUNTIME_H.to_string(),
             },
+            GeneratedFile {
+                path: "chelis_device_owner.cpp".to_string(),
+                contents: DEVICE_OWNER_CPP.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.h".to_string(),
+                contents: DEVICE_OWNER_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_descriptor.h".to_string(),
+                contents: DEVICE_DESCRIPTOR_H.to_string(),
+            },
         ],
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
-        peak_device_bytes_estimate: result.peak_device_bytes_estimate,
+        peak_device_bytes_estimate: result
+            .peak_device_bytes_estimate
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|error| stage_error("compile", error, GeneralKind::Other))?,
         manifest: RootManifestResult::default(),
-    }
+    })
 }
 
 fn compile_result_hip_host(
     target: CompileTarget,
     func_name: &str,
-    result: &CodegenResult,
-) -> CompileResult {
-    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    result: &chelis_backend_hip::HipHostProgramCodegenResult,
+) -> Result<CompileResult> {
+    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
     toolchain.compile_flags.retain(|flag| flag != "-fopenmp");
     toolchain.link_flags.retain(|flag| flag != "-fopenmp");
-    CompileResult {
+    let mut files = vec![
+        GeneratedFile {
+            path: format!("{func_name}_hip.cpp"),
+            contents: result.host.c_source.clone(),
+        },
+        GeneratedFile {
+            path: format!("{func_name}_hip.h"),
+            contents: result.host.h_header.clone(),
+        },
+    ];
+    for helper in &result.device_helpers {
+        files.push(GeneratedFile {
+            path: format!("{}_hip.cpp", helper.name),
+            contents: helper.result.c_source.clone(),
+        });
+        for flag in &helper.result.compile_flags {
+            if !toolchain.compile_flags.contains(flag) {
+                toolchain.compile_flags.push(flag.clone());
+            }
+        }
+        for flag in &helper.result.link_flags {
+            if !toolchain.link_flags.contains(flag) {
+                toolchain.link_flags.push(flag.clone());
+            }
+        }
+    }
+    files.extend([
+        GeneratedFile {
+            path: "chelis_runtime.h".to_string(),
+            contents: RUNTIME_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_runtime_views.h".to_string(),
+            contents: RUNTIME_VIEWS_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_runtime_dtype.h".to_string(),
+            contents: RUNTIME_DTYPE_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_hip_runtime.h".to_string(),
+            contents: HIP_RUNTIME_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_owner.cpp".to_string(),
+            contents: DEVICE_OWNER_CPP.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_owner.h".to_string(),
+            contents: DEVICE_OWNER_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_descriptor.h".to_string(),
+            contents: DEVICE_DESCRIPTOR_H.to_string(),
+        },
+    ]);
+    // Device helpers run one at a time from the host wrapper, so the peak
+    // is the largest single helper estimate; an unknown helper estimate
+    // makes the whole estimate unknown rather than silently smaller.
+    let peak_device_bytes_estimate = if result.device_helpers.is_empty() {
+        None
+    } else {
+        result
+            .device_helpers
+            .iter()
+            .map(|helper| helper.result.peak_device_bytes_estimate)
+            .try_fold(0usize, |peak, bytes| bytes.map(|bytes| peak.max(bytes)))
+    };
+    Ok(CompileResult {
         target,
         entry_name: func_name.to_string(),
-        files: vec![
-            GeneratedFile {
-                path: format!("{func_name}_hip.cpp"),
-                contents: result.c_source.clone(),
-            },
-            GeneratedFile {
-                path: format!("{func_name}_hip.h"),
-                contents: result.h_header.clone(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime.h".to_string(),
-                contents: RUNTIME_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime_dtype.h".to_string(),
-                contents: RUNTIME_DTYPE_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_hip_runtime.h".to_string(),
-                contents: HIP_RUNTIME_H.to_string(),
-            },
-        ],
+        files,
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
-        peak_device_bytes_estimate: None,
+        peak_device_bytes_estimate: peak_device_bytes_estimate
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|error| stage_error("compile", error, GeneralKind::Other))?,
         manifest: RootManifestResult::default(),
-    }
+    })
 }
 
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
@@ -3674,7 +4251,9 @@ fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTe
                     GeneralKind::CompileError,
                 )
             })?;
-            Ok(execution_tensor_spec(label.clone(), ty))
+            execution_tensor_spec(label.clone(), ty).map_err(|message| {
+                stage_error("compile", message, GeneralKind::CompileError)
+            })
         })
         .collect()
 }
@@ -3698,7 +4277,9 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
                     )
                 })?
                 .output_type;
-            Ok(execution_tensor_spec(label.clone(), ty))
+            execution_tensor_spec(label.clone(), ty).map_err(|message| {
+                stage_error("compile", message, GeneralKind::CompileError)
+            })
         })
         .collect()
 }
@@ -3733,29 +4314,32 @@ fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
     nodes
 }
 
-fn execution_tensor_spec(name: String, ty: &TensorType) -> ExecutionTensorSpec {
-    ExecutionTensorSpec {
+fn execution_tensor_spec(name: String, ty: &TensorType) -> WireResult<ExecutionTensorSpec> {
+    i32::try_from(ty.dims.len()).map_err(|_| "execution tensor rank exceeds i32".to_string())?;
+    Ok(ExecutionTensorSpec {
         name,
-        dtype: ty.precision.name().to_string(),
+        dtype: ty.precision.interchange_name().to_string(),
         dims: ty
             .dims
             .iter()
-            .map(|dim| match dim {
-                DimInfo::Lit(size) => ExecutionDim {
-                    name: None,
-                    size: Some(*size),
-                },
-                DimInfo::Named(name, Some(size)) => ExecutionDim {
-                    name: Some(name.clone()),
-                    size: Some(*size),
-                },
-                DimInfo::Named(name, None) => ExecutionDim {
-                    name: Some(name.clone()),
-                    size: None,
-                },
+            .map(|dim| {
+                Ok(match dim {
+                    DimInfo::Lit(size) => ExecutionDim {
+                        name: None,
+                        size: Some(NonnegativeExtent::try_from(*size)?),
+                    },
+                    DimInfo::Named(name, Some(size)) => ExecutionDim {
+                        name: Some(name.clone()),
+                        size: Some(NonnegativeExtent::try_from(*size)?),
+                    },
+                    DimInfo::Named(name, None) => ExecutionDim {
+                        name: Some(name.clone()),
+                        size: None,
+                    },
+                })
             })
-            .collect(),
-    }
+            .collect::<WireResult<Vec<_>>>()?,
+    })
 }
 
 fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
@@ -3959,6 +4543,135 @@ fn unsupported_gate_error(
     ))
 }
 
+fn reduction_sum_source(dag: &Dag, result: NodeId) -> Option<(usize, NodeId)> {
+    let mut node = dag.get(result)?;
+    if matches!(node.op, RiscOp::Cast { .. }) {
+        node = dag.get(*node.inputs.first()?)?;
+    }
+    let RiscOp::Sum { axis, .. } = &node.op else {
+        return None;
+    };
+    Some((*axis, *node.inputs.first()?))
+}
+
+/// Recognize the exact Tier-2 graph emitted for [05-OP-11] `mean`.
+///
+/// Mean intentionally remains a composition rather than gaining a duplicate
+/// IR identity. Its numerator is a reduction sum (optionally finalized by a
+/// Cast), and its divisor is either the statically shaped extent Const or the
+/// runtime extent represented by a sum of a shape-dependent ones tensor.
+/// Requiring those shape-dependency edges keeps this check from capturing an
+/// authored `div(sum(x), y)` expression.
+fn is_lowered_mean_result(dag: &Dag, node: &chelis_ir::dag::DagNode) -> bool {
+    if !matches!(node.op, RiscOp::Div) || node.inputs.len() != 2 {
+        return false;
+    }
+
+    let numerator = node.inputs[0];
+    let Some((axis, source)) = reduction_sum_source(dag, numerator) else {
+        return false;
+    };
+    let Some(divisor) = dag.get(node.inputs[1]) else {
+        return false;
+    };
+
+    if matches!(divisor.op, RiscOp::Const { .. }) && divisor.shape_deps.contains(&numerator) {
+        return true;
+    }
+
+    let Some((divisor_axis, divisor_source)) = reduction_sum_source(dag, divisor.id) else {
+        return false;
+    };
+    divisor_axis == axis
+        && dag.get(divisor_source).is_some_and(|ones| {
+            matches!(ones.op, RiscOp::Const { .. }) && ones.shape_deps.contains(&source)
+        })
+}
+
+fn inexact_device_reduction(
+    dag: &Dag,
+    node: &chelis_ir::dag::DagNode,
+) -> Option<(&'static str, Prim)> {
+    let operand_precision = || {
+        node.inputs
+            .first()
+            .and_then(|input| dag.get(*input))
+            .map(|input| input.output_type.precision)
+            .unwrap_or(node.output_type.precision)
+    };
+
+    if is_lowered_mean_result(dag, node) {
+        return Some(("mean", operand_precision()));
+    }
+
+    match &node.op {
+        RiscOp::MaxReduce { .. } => Some(("max_reduce", operand_precision())),
+        RiscOp::MinReduce { .. } => Some(("min_reduce", operand_precision())),
+        RiscOp::Argmax { .. } => Some(("argmax_reduce", operand_precision())),
+        RiscOp::Argmin { .. } => Some(("argmin_reduce", operand_precision())),
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Max,
+            ..
+        } => Some(("reduce_window_max", operand_precision())),
+        RiscOp::ReduceWindow {
+            reducer: ReduceWindowKind::Min,
+            ..
+        } => Some(("reduce_window_min", operand_precision())),
+        RiscOp::ReduceWindowGrad {
+            reducer: ReduceWindowKind::Max,
+            ..
+        } => Some(("reduce_window_max adjoint", operand_precision())),
+        RiscOp::ReduceWindowGrad {
+            reducer: ReduceWindowKind::Min,
+            ..
+        } => Some(("reduce_window_min adjoint", operand_precision())),
+        _ => None,
+    }
+}
+
+/// Fence device reduction cells whose complete exact semantics remain owned
+/// by chelis#2339. C is the canonical implemented lane and must pass through.
+///
+/// Only dtypes admitted by the target capability table receive this
+/// operation-specific receipt. A non-admitted dtype retains its earlier,
+/// target-wide typed rejection instead of being misclassified as #2339 work.
+pub fn reject_inexact_device_reduction_cells(
+    dag: &Dag,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    let device_target = match target {
+        BuildTarget::C => return Ok(()),
+        BuildTarget::Hip => Target::Hip,
+        BuildTarget::Metal => Target::Metal,
+    };
+    let admitted = crate::target_capability::tensor_capable_prims(device_target);
+    for node in dag.nodes() {
+        let Some((operation, precision)) = inexact_device_reduction(dag, node) else {
+            continue;
+        };
+        if !admitted.contains(&precision) {
+            continue;
+        }
+        let target = target.as_str();
+        return Err(unsupported_gate_error(
+            format!(
+                "`chelis build --target {target}` does not yet support exact `{operation}` \
+                 at lowered node {} for `{}`; use `--target c` for the implemented \
+                 [05-OP-11..16]/[05-RWIN-1..2] semantics",
+                node.id.0,
+                precision.name(),
+            ),
+            target,
+            chelis_types::unimplemented_rejection!(
+                2339,
+                "the admitted HIP/Metal reduction cell lacks exact stored-dtype selection, \
+                 empty-domain, index, or extrema-adjoint behavior; use the C target"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject direct host-runtime-only calls on checked Deep before host lowering
 /// descends into their callback arguments. This preserves the owning builtin
 /// diagnostic even when an argument is itself intentionally unrepresentable
@@ -4062,7 +4775,8 @@ pub fn reject_host_only_builtins(
                 scan_expr(then_expr, found);
                 scan_expr(else_expr, found);
             }
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 for binding in bindings {
                     scan_expr(&binding.value, found);
                 }
@@ -4126,10 +4840,8 @@ pub fn reject_host_only_builtins(
                 scan_expr(init, found);
                 scan_expr(list, found);
             }
-            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                scan_expr(seed, found);
-                scan_expr(body, found);
-            }
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => scan_expr(body, found),
+            ConcreteHostExprKind::FormalIngress { value, .. } => scan_expr(value, found),
             _ => {}
         }
     }
@@ -4184,7 +4896,9 @@ pub fn reject_unsupported_effect_ops(
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
-        if matches!(&node.op, RiscOp::Dropout { .. }) {
+        // The C lane emits a key-operand dropout from its draw key; a device
+        // target has no port of the kernel yet.
+        if target != BuildTarget::C && matches!(&node.op, RiscOp::Dropout | RiscOp::DropoutReplay) {
             return Err(unsupported_gate_error(
                 format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
@@ -4222,6 +4936,15 @@ pub fn reject_unsupported_effect_ops_in_host_program(
     for_each_host_helper_dag(program, |dag| reject_unsupported_effect_ops(dag, target))
 }
 
+/// The C execution carrier's helpers take the same effect gate as every other
+/// host program.
+pub fn reject_unsupported_effect_ops_in_host_execution_plan(
+    plan: &chelis_ir::host::HostExecutionPlan,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    reject_unsupported_effect_ops_in_host_program(plan.program(), target)
+}
+
 /// Apply both C windowed-reduction gates to every tensor-helper DAG emitted
 /// with a host program.
 pub fn reject_unsupported_windowed_reductions_in_host_program(
@@ -4234,44 +4957,66 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     })
 }
 
-fn guard_count_for_device(
-    dag: &Dag,
-    target: &'static str,
-) -> std::result::Result<(), CompilerError> {
-    for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Count { .. }) {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target {target}` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated {target} kernel; use `--target c`.",
-                    node.id.0
-                ),
-                target,
-                chelis_types::unimplemented_rejection!(
-                    1291,
-                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
-                ),
-            ));
-        }
-    }
-    Ok(())
+/// Whether a tensor-helper DAG is emitted as device code under a device host
+/// program: every helper containing [05-OP-29] `Count` becomes its own
+/// device translation unit (`codegen_hip_host_program` /
+/// `codegen_metal_host_program`); every other helper keeps the C-host
+/// disposition.
+fn helper_is_device_emitted(dag: &Dag) -> bool {
+    dag.nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::Count { .. }))
 }
 
-/// Reject Count in every tensor-helper DAG emitted with a HIP host program.
-/// Other helper operations retain their C-host fallback semantics; full HIP
-/// capability policy applies only to DAGs emitted as HIP device code.
+/// Fence selected HIP host helpers that would silently execute movement or an
+/// inexact reduction through C. Count-bearing helpers receive the full HIP
+/// device capability policy because they are emitted as HIP code.
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "hip"))
+    for_each_host_helper_dag(program, |dag| {
+        if helper_is_device_emitted(dag) {
+            reject_unsupported_hip_ops(dag)
+        } else {
+            reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)?;
+            for node in dag.nodes() {
+                let operation = match node.op {
+                    RiscOp::Pad { .. } => "pad",
+                    RiscOp::Shrink { .. } => "shrink",
+                    _ => continue,
+                };
+                return Err(unsupported_gate_error(
+                    format!(
+                        "HIP {operation} host fallback is unsupported: lowered node {} would run on the CPU; use `--target c` until HIP device routing is implemented",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        2493,
+                        "HIP pad and shrink device routing is not implemented for C-host tensor helpers; use `--target c`"
+                    ),
+                ));
+            }
+            Ok(())
+        }
+    })
 }
 
-/// Reject Count in every tensor-helper DAG emitted with a Metal host program.
-/// Other helper operations retain their C-host fallback semantics; full Metal
-/// capability policy applies only to DAGs emitted as Metal device code.
+/// Apply the chelis#2339 exact-reduction fence to every Metal host helper:
+/// selecting a host entry must not turn the implemented C reduction into a
+/// silent device fallback. Count-bearing helpers additionally receive the
+/// full Metal device capability policy because they are emitted as Metal
+/// code.
 pub fn reject_unsupported_metal_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "metal"))
+    for_each_host_helper_dag(program, |dag| {
+        if helper_is_device_emitted(dag) {
+            reject_unsupported_metal_ops(dag)
+        } else {
+            reject_inexact_device_reduction_cells(dag, BuildTarget::Metal)
+        }
+    })
 }
 
 /// Metal-specific early capability policy. The IR verifier and backend
@@ -4279,8 +5024,28 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
-    guard_count_for_device(dag, "metal")?;
+    reject_inexact_device_reduction_cells(dag, BuildTarget::Metal)?;
     for node in dag.nodes() {
+        let direct_nonnumeric = match &node.op {
+            RiscOp::Compare(kind) => Some(format!("comparison `{}`", kind.surf_name())),
+            RiscOp::Logical(kind) => Some(format!("logical `{}`", kind.surf_name())),
+            RiscOp::Where => Some("where".to_string()),
+            _ => None,
+        };
+        if let Some(op) = direct_nonnumeric {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not yet support exact direct nonnumeric `{op}` at lowered node {}; use `--target c` or `--target hip`",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    2266,
+                    "the Metal exact comparison, Bool8 logical, and raw stored-bit where kernels are not implemented; use `--target c` or `--target hip`"
+                ),
+            ));
+        }
+
         let direct_arithmetic = match &node.op {
             RiscOp::Sub => Some("sub"),
             RiscOp::MaxElem => Some("max_elem"),
@@ -4306,7 +5071,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                 ),
                 "metal",
                 chelis_types::unimplemented_rejection!(
-                    1306,
+                    2338,
                     "the Metal direct-subtraction/extrema kernel and exact trap/bit-selection cells are not implemented"
                 ),
             ));
@@ -4378,7 +5143,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                     "metal",
                     chelis_types::unimplemented_rejection!(
                         729,
-                        "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/int8/int16/int32/int64/bool (spec/04-type-system.md §1.1.3)"
+                        "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/i8/i16/i32/i64/bool (spec/04-type-system.md §1.1.3)"
                     ),
                 ));
             }
@@ -4405,13 +5170,16 @@ mod metal_runtime_dim_reject_tests {
 
     fn dag_with_scalar() -> (Dag, NodeId, NodeId) {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let m = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             ty(&[], Prim::Int64),
@@ -4423,7 +5191,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_shrink_bound() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
             },
@@ -4441,7 +5211,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_reshape_target() {
         let (mut dag, x, m) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -4459,13 +5231,16 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_literal_movement_and_reshape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let shrunk = dag.add_node(
+            decl,
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
             },
@@ -4474,6 +5249,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
             },
@@ -4487,7 +5263,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -4496,6 +5274,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -4504,6 +5283,7 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -4523,7 +5303,9 @@ mod metal_runtime_dim_reject_tests {
     #[test]
     fn metal_seam_rejects_node_valued_expand_with_issue_1383_receipt() {
         let (mut dag, x, size) = dag_with_scalar();
+        let decl = dag.nodes()[0].owner.decl;
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -4544,50 +5326,47 @@ mod metal_runtime_dim_reject_tests {
     }
 
     #[test]
-    fn metal_seam_rejects_count_with_issue_1291_receipt() {
+    fn metal_seam_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(&[2, 3], Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             ty(&[2], Prim::Int64),
             None,
         );
 
-        let error = reject_unsupported_metal_ops(&dag)
-            .expect_err("Metal must reject Count until its dedicated kernel lands");
-        let message = &error.errors[0].message;
-        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
-        assert!(
-            message.contains("count") && message.contains("--target c"),
-            "{message}"
-        );
-        assert_eq!(
-            error.errors[0].kind(),
-            chelis_vocab::DiagnosticKind::UnsupportedFeature
-        );
+        reject_unsupported_metal_ops(&dag)
+            .expect("Metal must admit Count to its dedicated tensor-entry kernel");
     }
 
     fn direct_arithmetic_dag(op: RiscOp) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             ty(&[4], Prim::F32),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -4601,12 +5380,12 @@ mod metal_runtime_dim_reject_tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        dag.add_node(op, inputs, ty(&[4], Prim::F32), None);
+        dag.add_node(decl, op, inputs, ty(&[4], Prim::F32), None);
         dag
     }
 
     #[test]
-    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_1306() {
+    fn metal_seam_rejects_every_direct_arithmetic_identity_with_issue_2338() {
         let ops = [
             RiscOp::Sub,
             RiscOp::MaxElem,
@@ -4638,7 +5417,7 @@ mod metal_runtime_dim_reject_tests {
             let error = reject_unsupported_metal_ops(&dag)
                 .expect_err("Metal must reject every unimplemented direct arithmetic identity");
             let message = &error.errors[0].message;
-            assert!(message.contains("unimplemented chelis#1306:"), "{message}");
+            assert!(message.contains("unimplemented chelis#2338:"), "{message}");
         }
     }
 
@@ -4651,63 +5430,21 @@ mod metal_runtime_dim_reject_tests {
     }
 }
 
+const HIP_NARROW_FLOAT_KERNEL_HINT: &str =
+    "this operation has no typed HIP narrow-float kernel; see spec/04-type-system.md §1.1.3";
+
+const HIP_UNSUPPORTED_DTYPE_HINT: &str =
+    "this tensor dtype is not admitted by the HIP target; see spec/04-type-system.md §1.1.3";
+
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
-    guard_count_for_device(dag, "hip")?;
+    reject_inexact_device_reduction_cells(dag, BuildTarget::Hip)?;
     for node in dag.nodes() {
-        let fused_direct_ops = match &node.op {
-            RiscOp::FusedElem { ops } => Some(ops),
-            _ => None,
-        };
-        let has_direct_sub = matches!(node.op, RiscOp::Sub)
-            || fused_direct_ops
-                .is_some_and(|ops| ops.iter().any(|step| matches!(step.op, FusedStepOp::Sub)));
-        let has_direct_arithmetic = matches!(
-            node.op,
-            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. }
-        ) || fused_direct_ops.is_some_and(|ops| {
-            ops.iter().any(|step| {
-                matches!(
-                    step.op,
-                    FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
-                )
-            })
-        });
-
-        if has_direct_sub && node.output_type.precision.is_integer() {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target hip` cannot execute checked `{}` subtraction at lowered node {} without a device numeric-trap channel; use `--target c`",
-                    node.output_type.precision.name(),
-                    node.id.0
-                ),
-                "hip",
-                chelis_types::unimplemented_rejection!(
-                    1306,
-                    "checked signed-integer subtraction needs an exact HIP overflow-trap channel; the C target implements this cell"
-                ),
-            ));
-        }
-        if has_direct_arithmetic
-            && matches!(
-                node.output_type.precision,
-                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
-            )
-        {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target hip` does not yet support exact `{}` direct arithmetic at lowered node {}",
-                    node.output_type.precision.name(),
-                    node.id.0
-                ),
-                "hip",
-                chelis_types::unimplemented_rejection!(
-                    1306,
-                    "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented"
-                ),
-            ));
-        }
-
         match &node.op {
+            // Exact direct nonnumeric kernels are an admitted HIP capability.
+            // Keep this explicit so a future broad rejection cannot silently
+            // erase the #1284 target cell.
+            RiscOp::Compare(_) | RiscOp::Logical(_) | RiscOp::Where => {}
+
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
             // `gpu_correctness` manual oracle). No reject arm: they fall
@@ -4784,7 +5521,21 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
-            RiscOp::Shape { .. } => {
+            // chelis#1374/#1376: a witness nothing READS is not a device
+            // computation. It carries a `spec/04-type-system.md` section 4.7
+            // entry obligation that `retain_invocation_witnesses` kept alive
+            // through a `shape_deps` edge, and the HIP host prologue
+            // discharges it beside the other entry guards. [05-SHAPE-1] still
+            // refuses every witness a device node reads, and refuses this one
+            // too when an obligation does not reduce to input reads.
+            RiscOp::ExtentWitness { .. }
+                if chelis_ir::axis_sources::witness_is_entry_obligation(dag, node.id)
+                    && chelis_ir::axis_sources::witness_entry_obligations(dag, node.id)
+                        .is_some() => {}
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not support the runtime `shape` \
@@ -4893,7 +5644,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
-                            "`chelis build --target hip` sparse gather requires int32/int64 indices; \
+                            "`chelis build --target hip` sparse gather requires i32/i64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
@@ -4901,7 +5652,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         "hip",
                         chelis_types::deliberate_rejection!(
                             "[05-SPARSE-1]",
-                            "sparse indices must use the specified int32 or int64 dtype"
+                            "sparse indices must use the specified i32 or i64 dtype"
                         ),
                     ));
                 }
@@ -4981,7 +5732,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 ) {
                     return Err(unsupported_gate_error(
                         format!(
-                            "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
+                            "`chelis build --target hip` sparse {label} requires i32/i64 indices; \
                              node {} uses `{}`",
                             node.id.0,
                             indices.precision.name()
@@ -4989,7 +5740,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         "hip",
                         chelis_types::deliberate_rejection!(
                             "[05-SPARSE-1]",
-                            "sparse indices must use the specified int32 or int64 dtype"
+                            "sparse indices must use the specified i32 or i64 dtype"
                         ),
                     ));
                 }
@@ -5015,9 +5766,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
-    // storage and hipBLAS matmul are implemented, and [05-OP-43]'s dedicated
-    // ReLU identities have exact raw-bit kernels. Other compute nodes would
-    // still reach an unsupported narrow-float path.
+    // storage, exact-bit Realize copies, hipBLAS matmul, and [05-OP-43]'s
+    // dedicated ReLU identities, and raw stored-bit Where selection have
+    // shipped kernels. Other compute nodes still reach an unsupported
+    // narrow-float path.
     let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
         .iter()
@@ -5031,8 +5783,24 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
             | RiscOp::BlasMatmul { .. }
+            | RiscOp::Realize
             | RiscOp::Relu
-            | RiscOp::ReluAdjoint => Some(node.id),
+            | RiscOp::ReluAdjoint
+            | RiscOp::Where
+            | RiscOp::Sub
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. } => Some(node.id),
+            RiscOp::FusedElem { ops }
+                if ops.iter().all(|step| {
+                    matches!(
+                        step.op,
+                        FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Some(node.id)
+            }
             _ => None,
         })
         .collect();
@@ -5048,18 +5816,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int64 => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
-                    let authority = if node.output_type.precision == chelis_types::types::Prim::F16
-                    {
-                        chelis_types::unimplemented_rejection!(
-                            729,
-                            "`f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
-                        )
-                    } else {
-                        chelis_types::unimplemented_rejection!(
-                            729,
-                            "`bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
-                        )
-                    };
                     return Err(unsupported_gate_error(
                         format!(
                             "narrow-float compute at lowered node {} (`{:?}` with `{}`)",
@@ -5068,7 +5824,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                             node.output_type.precision.name(),
                         ),
                         "hip",
-                        authority,
+                        chelis_types::unimplemented_rejection!(729, HIP_NARROW_FLOAT_KERNEL_HINT),
                     ));
                 }
             }
@@ -5076,18 +5832,12 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` DAG path does not support tensor precision \
-                         `{}` (node {}). Supported: f32/f64/bool plus the integer family \
-                         (int8/int16/int32/int64), with bf16/f16 admitted on matmul, \
-                         load/store, and dedicated ReLU nodes. See \
-                         spec/04-type-system.md §5.7.1.",
+                         `{}` at lowered node {}",
                         other.name(),
                         node.id.0,
                     ),
                     "hip",
-                    chelis_types::unimplemented_rejection!(
-                        729,
-                        "the HIP target dtype capability cell is not implemented"
-                    ),
+                    chelis_types::unimplemented_rejection!(729, HIP_UNSUPPORTED_DTYPE_HINT),
                 ));
             }
         }
@@ -5107,13 +5857,39 @@ fn unknown_name_error(stage: &str, field: &str, name: &str) -> CompilerError {
 /// boundary where lane-internal text becomes a structured diagnostic.
 /// Cancellation gets its dedicated kind; genuine evaluation failures retain
 /// the recovery suggestions attached by their owning diagnostic rules.
-fn eval_stage_error(message: String) -> CompilerError {
+fn eval_stage_error(message: String, trusted_numeric_trap: bool) -> CompilerError {
     let kind = if chelis_types::is_cancellation(&message) {
         GeneralKind::Cancelled
+    } else if trusted_numeric_trap
+        && message
+            .lines()
+            .any(chelis_types::NumericTrap::is_canonical_line)
+    {
+        GeneralKind::NumericTrap
     } else {
         GeneralKind::EvalError
     };
-    let cast_domain = message.contains("numeric trap: domain in cast at");
+    // A declared literal result guard attributes its trap to the producing
+    // cast, but it did not reject an element conversion. Recognize the exact
+    // extent context and canonical line before attaching conversion advice.
+    let extent_cast = (|| {
+        let mut lines = message.lines();
+        let context = lines.next()?.strip_prefix("extent `")?;
+        let (claim, comparison) = context.split_once("`: claimed = ")?;
+        let (required, observation) = comparison.split_once(", cast axis ")?;
+        let (axis, observed) = observation.split_once(" = ")?;
+        required.parse::<u64>().ok()?;
+        axis.parse::<usize>().ok()?;
+        observed.parse::<usize>().ok()?;
+        Some(
+            claim == required
+                && lines.next() == Some("numeric trap: domain in cast at i64")
+                && lines.next().is_none(),
+        )
+    })()
+    .unwrap_or(false);
+    let cast_domain =
+        trusted_numeric_trap && !extent_cast && message.contains("numeric trap: domain in cast at");
     let mut error = stage_error("eval", message, kind);
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
@@ -5125,6 +5901,42 @@ fn eval_stage_error(message: String) -> CompilerError {
         );
     }
     error
+}
+
+#[cfg(test)]
+mod eval_trap_classification_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_trap_line_becomes_a_typed_eval_diagnostic() {
+        for message in [
+            "numeric trap: overflow in concat at i64",
+            "extent `3`: claimed = 3, concat axis 1 = 4\nnumeric trap: domain in concat at i64",
+        ] {
+            let error = eval_stage_error(message.to_string(), true);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::NumericTrap
+            );
+            assert_eq!(error.errors[0].message, message);
+        }
+        for message in [
+            "error: numeric trap: domain in concat at i64",
+            "this failure mentions numeric trap: domain in concat at i64",
+        ] {
+            let error = eval_stage_error(message.to_string(), true);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::EvalError
+            );
+        }
+        let user_failure =
+            eval_stage_error("numeric trap: domain in concat at i64".to_string(), false);
+        assert_eq!(
+            user_failure.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::EvalError
+        );
+    }
 }
 
 /// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a
@@ -5161,8 +5973,8 @@ pub(crate) fn schema_stage_check(
 /// ranges and stay on `Span`.
 fn deep_span_to_diagnostic(span: Option<chelis_deep::Span>) -> Option<DiagnosticSpan> {
     span.map(|span| DiagnosticSpan::Range {
-        offset: span.offset,
-        len: span.len,
+        offset: crate::schema::host_index(span.offset),
+        len: crate::schema::host_index(span.len),
     })
 }
 
@@ -5217,11 +6029,14 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
         | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::RetiredRandomness { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
     };
-    DiagnosticSpan::Point { offset }
+    DiagnosticSpan::Point {
+        offset: crate::schema::host_index(offset),
+    }
 }
 
 fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpan {
@@ -5229,10 +6044,14 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpa
         chelis_deep::parser::ParseError::Lex(lex) => deep_lex_error_offset(lex),
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
-        | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
+        | chelis_deep::parser::ParseError::EmptyList { offset }
+        | chelis_deep::parser::ParseError::NestingTooDeep { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
+        chelis_deep::parser::ParseError::Metadata(error) => error.span.offset,
     };
-    DiagnosticSpan::Point { offset }
+    DiagnosticSpan::Point {
+        offset: crate::schema::host_index(offset),
+    }
 }
 
 /// Project a check diagnostic onto the wire carrier.
@@ -5242,26 +6061,40 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpa
 /// carrier, which is the drift the issue exists to remove. The one
 /// implementation lives beside `Diagnostic`; this keeps the name its callers
 /// already use.
-pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    Diagnostic::from_check_error(error)
+pub(crate) fn check_errors_to_compiler_error(stage: &str, errors: &[CheckError]) -> CompilerError {
+    match errors
+        .iter()
+        .map(Diagnostic::try_from_check_error)
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(errors) => CompilerError {
+            transcript: Vec::new(),
+            stage: stage.to_string(),
+            errors,
+        },
+        Err(error) => stage_error("report", error, GeneralKind::Other),
+    }
 }
 
 fn span(span: chelis_deep::Span) -> Span {
     Span {
-        offset: span.offset,
-        len: span.len,
+        offset: crate::schema::host_index(span.offset),
+        len: crate::schema::host_index(span.len),
     }
 }
 
-fn wire_decl(decl: &Decl) -> WireSurfDecl {
-    match decl {
+fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
+    Ok(match decl {
         Decl::Module {
             name,
             decls,
             span: s,
         } => WireSurfDecl::Module {
             name: name.clone(),
-            decls: decls.iter().map(wire_decl).collect(),
+            decls: decls
+                .iter()
+                .map(wire_decl)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Decl::Import {
@@ -5296,11 +6129,16 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             params: params.clone(),
             variants: variants.iter().map(wire_variant).collect(),
             opaque: *opaque,
-            invariant: invariant.as_ref().map(|inv| WireTypeInvariant {
-                binder: inv.binder.clone(),
-                body: wire_expr(&inv.body),
-                span: span(inv.span),
-            }),
+            invariant: invariant
+                .as_ref()
+                .map(|inv| -> SourceWireResult<_> {
+                    Ok(WireTypeInvariant {
+                        binder: inv.binder.clone(),
+                        body: wire_expr(&inv.body)?,
+                        span: span(inv.span),
+                    })
+                })
+                .transpose()?,
             span: span(*s),
         },
         Decl::TypeAlias {
@@ -5322,7 +6160,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         } => WireSurfDecl::MacroDef {
             name: name.clone(),
             params: params.clone(),
-            body: wire_expr(body),
+            body: wire_expr(body)?,
             span: span(*s),
         },
         Decl::FunDef {
@@ -5344,11 +6182,12 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
                 .collect(),
             params: params.iter().map(wire_param).collect(),
             ret_ty: ret_ty.as_ref().map(wire_type_expr),
-            body: wire_expr(body),
+            body: wire_expr(body)?,
             span: span(*s),
         },
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -5356,10 +6195,23 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             span: s,
         } => WireSurfDecl::Property {
             name: name.clone(),
+            type_binders: type_binders
+                .iter()
+                .map(|binder| crate::schema::WireTypeBinder {
+                    name: binder.name.clone(),
+                    bound: binder.bound.map(|family| family.surf_name().to_string()),
+                })
+                .collect(),
             params: params.iter().map(wire_param).collect(),
-            preconditions: preconditions.iter().map(wire_expr).collect(),
-            body: wire_expr(body),
-            options: options.iter().map(wire_property_option).collect(),
+            preconditions: preconditions
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
+            body: wire_expr(body)?,
+            options: options
+                .iter()
+                .map(wire_property_option)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Decl::LetDef {
@@ -5370,35 +6222,37 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         } => WireSurfDecl::LetDef {
             name: name.clone(),
             ty: ty.as_ref().map(wire_type_expr),
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         Decl::Export { names, span: s } => WireSurfDecl::Export {
             names: names.clone(),
             span: span(*s),
         },
-    }
+    })
 }
 
-fn wire_property_option(option: &chelis_surf::ast::PropertyOption) -> WirePropertyOption {
-    match option {
+fn wire_property_option(
+    option: &chelis_surf::ast::PropertyOption,
+) -> SourceWireResult<WirePropertyOption> {
+    Ok(match option {
         chelis_surf::ast::PropertyOption::Tolerance(value, s) => WirePropertyOption::Tolerance {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Seed(value, s) => WirePropertyOption::Seed {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Samples(value, s) => WirePropertyOption::Samples {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Contract(id, s) => WirePropertyOption::Contract {
             id: id.clone(),
             span: span(*s),
         },
-    }
+    })
 }
 
 fn wire_import_kind(kind: &ImportKind) -> WireImportKind {
@@ -5440,10 +6294,10 @@ fn wire_param(param: &Param) -> WireParam {
     }
 }
 
-fn wire_expr(expr: &Expr) -> WireSurfExpr {
-    match expr {
+fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
+    Ok(match expr {
         Expr::Lit(lit, s) => WireSurfExpr::Lit {
-            literal: wire_literal(lit),
+            literal: wire_literal(lit)?,
             span: span(*s),
         },
         Expr::Var(name, s) => WireSurfExpr::Var {
@@ -5455,176 +6309,178 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
             span: span(*s),
         },
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
-            func: Box::new(wire_expr(func)),
-            args: args.iter().map(wire_expr).collect(),
+            func: Box::new(wire_expr(func)?),
+            args: args
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::List(items, s) => WireSurfExpr::List {
-            items: items.iter().map(wire_expr).collect(),
+            items: items
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Record(name, fields, s) => WireSurfExpr::Record {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(field, value)| WireRecordExprField {
-                    name: field.clone(),
-                    value: wire_expr(value),
+                .map(|(field, value)| {
+                    Ok(WireRecordExprField {
+                        name: field.clone(),
+                        value: wire_expr(value)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::RecordUpdate(base, fields, s) => WireSurfExpr::RecordUpdate {
-            base: Box::new(wire_expr(base)),
+            base: Box::new(wire_expr(base)?),
             fields: fields
                 .iter()
-                .map(|(field, value)| WireRecordExprField {
-                    name: field.clone(),
-                    value: wire_expr(value),
+                .map(|(field, value)| {
+                    Ok(WireRecordExprField {
+                        name: field.clone(),
+                        value: wire_expr(value)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Access(inner, field, s) => WireSurfExpr::Access {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             field: field.clone(),
             span: span(*s),
         },
         Expr::TupleGet(inner, index, s) => WireSurfExpr::TupleGet {
-            expr: Box::new(wire_expr(inner)),
-            index: *index,
+            expr: Box::new(wire_expr(inner)?),
+            index: SourceInteger::new(*index),
             span: span(*s),
         },
         Expr::Binary(op, lhs, rhs, s) => WireSurfExpr::Binary {
             op: wire_bin_op(*op),
-            lhs: Box::new(wire_expr(lhs)),
-            rhs: Box::new(wire_expr(rhs)),
+            lhs: Box::new(wire_expr(lhs)?),
+            rhs: Box::new(wire_expr(rhs)?),
             span: span(*s),
         },
         Expr::Unary(op, inner, s) => WireSurfExpr::Unary {
             op: wire_unary_op(*op),
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Pipe(inner, stages, s) => WireSurfExpr::Pipe {
-            expr: Box::new(wire_expr(inner)),
-            stages: stages.iter().map(wire_expr).collect(),
+            expr: Box::new(wire_expr(inner)?),
+            stages: stages
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::If(cond, then_branch, else_branch, s) => WireSurfExpr::If {
-            cond: Box::new(wire_expr(cond)),
-            then_branch: Box::new(wire_expr(then_branch)),
-            else_branch: Box::new(wire_expr(else_branch)),
+            cond: Box::new(wire_expr(cond)?),
+            then_branch: Box::new(wire_expr(then_branch)?),
+            else_branch: Box::new(wire_expr(else_branch)?),
             span: span(*s),
         },
         Expr::Match(inner, arms, s) => WireSurfExpr::Match {
-            expr: Box::new(wire_expr(inner)),
-            arms: arms.iter().map(wire_match_arm).collect(),
+            expr: Box::new(wire_expr(inner)?),
+            arms: arms
+                .iter()
+                .map(wire_match_arm)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Lambda(params, body, s) => WireSurfExpr::Lambda {
             params: params.iter().map(wire_param).collect(),
-            body: Box::new(wire_expr(body)),
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
         Expr::Tuple(items, s) => WireSurfExpr::Tuple {
-            items: items.iter().map(wire_expr).collect(),
+            items: items
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Cast(inner, ty, mode, s) => WireSurfExpr::Cast {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             ty: ty.clone(),
             mode: mode.deep_selector().map(str::to_string),
             span: span(*s),
         },
         Expr::Grad(inner, wrt, s) => WireSurfExpr::Grad {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             wrt: wrt.clone(),
             span: span(*s),
         },
         Expr::Vmap(inner, axis, s) => WireSurfExpr::Vmap {
-            expr: Box::new(wire_expr(inner)),
-            axis: *axis,
+            expr: Box::new(wire_expr(inner)?),
+            axis: axis.map(SourceInteger::new),
             span: span(*s),
         },
         Expr::Jit(inner, s) => WireSurfExpr::Jit {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Realize(inner, s) => WireSurfExpr::Realize {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Copy(inner, s) => WireSurfExpr::Copy {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Borrow(inner, s) => WireSurfExpr::Borrow {
-            expr: Box::new(wire_expr(inner)),
-            span: span(*s),
-        },
-        Expr::WithSeed(seed, body, s) => WireSurfExpr::WithSeed {
-            seed: Box::new(wire_expr(seed)),
-            body: Box::new(wire_expr(body)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::WithDevice(device, body, s) => WireSurfExpr::WithDevice {
-            device: Box::new(wire_expr(device)),
-            body: Box::new(wire_expr(body)),
+            device: Box::new(wire_expr(device)?),
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
         Expr::Par(exprs, s) => WireSurfExpr::Par {
-            exprs: exprs.iter().map(wire_expr).collect(),
+            exprs: exprs
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Do(exprs, s) => WireSurfExpr::Do {
-            exprs: exprs.iter().map(wire_expr).collect(),
+            exprs: exprs
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Quote(expr, s) => WireSurfExpr::Quote {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Unquote(expr, s) => WireSurfExpr::Unquote {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Splice(expr, s) => WireSurfExpr::Splice {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Annotate(inner, ty, s) => WireSurfExpr::Annotate {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             ty: wire_type_expr(ty),
             span: span(*s),
         },
         Expr::Block(bindings, body, s) => WireSurfExpr::Block {
-            bindings: bindings.iter().map(wire_let_binding).collect(),
-            body: Box::new(wire_expr(body)),
+            bindings: bindings
+                .iter()
+                .map(wire_let_binding)
+                .collect::<SourceWireResult<_>>()?,
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
-    }
-}
-
-fn wire_literal(lit: &Literal) -> WireLiteral {
-    match lit {
-        Literal::Int(value) => WireLiteral::Int { value: *value },
-        Literal::Float(value) => WireLiteral::Float { value: *value },
-        // Typed-suffix literals (spec §5.5): preserve the suffix across
-        // the wire boundary so the receiving side sees the same type.
-        Literal::TypedInt(value, suffix) => WireLiteral::TypedInt {
-            value: *value,
-            suffix: suffix.as_str().to_string(),
-        },
-        Literal::TypedFloat(value, suffix) => WireLiteral::TypedFloat {
-            value: *value,
-            suffix: suffix.as_str().to_string(),
-        },
-        Literal::Str(value) => WireLiteral::Str {
-            value: value.clone(),
-        },
-        Literal::Bool(value) => WireLiteral::Bool { value: *value },
-    }
+    })
 }
 
 fn wire_bin_op(op: BinOp) -> WireBinOp {
@@ -5652,60 +6508,68 @@ fn wire_unary_op(op: UnaryOp) -> WireUnaryOp {
     }
 }
 
-fn wire_match_arm(arm: &MatchArm) -> WireMatchArm {
-    WireMatchArm {
-        pattern: wire_pattern(&arm.pattern),
-        guard: arm.guard.as_ref().map(wire_expr),
-        body: wire_expr(&arm.body),
+fn wire_match_arm(arm: &MatchArm) -> SourceWireResult<WireMatchArm> {
+    Ok(WireMatchArm {
+        pattern: wire_pattern(&arm.pattern)?,
+        guard: arm.guard.as_ref().map(wire_expr).transpose()?,
+        body: wire_expr(&arm.body)?,
         span: span(arm.span),
-    }
+    })
 }
 
-fn wire_pattern(pattern: &Pattern) -> WirePattern {
-    match pattern {
+fn wire_pattern(pattern: &Pattern) -> SourceWireResult<WirePattern> {
+    Ok(match pattern {
         Pattern::Wildcard(s) => WirePattern::Wildcard { span: span(*s) },
         Pattern::Var(name, s) => WirePattern::Var {
             name: name.clone(),
             span: span(*s),
         },
         Pattern::Lit(lit, s) => WirePattern::Lit {
-            literal: wire_literal(lit),
+            literal: wire_literal(lit)?,
             span: span(*s),
         },
         Pattern::Constructor(name, args, s) => WirePattern::Constructor {
             name: name.clone(),
-            args: args.iter().map(wire_pattern).collect(),
+            args: args
+                .iter()
+                .map(wire_pattern)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::Tuple(items, s) => WirePattern::Tuple {
-            items: items.iter().map(wire_pattern).collect(),
+            items: items
+                .iter()
+                .map(wire_pattern)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::Record(name, fields, s) => WirePattern::Record {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(name, pattern)| WireRecordPatternField {
-                    name: name.clone(),
-                    pattern: wire_pattern(pattern),
+                .map(|(name, pattern)| {
+                    Ok(WireRecordPatternField {
+                        name: name.clone(),
+                        pattern: wire_pattern(pattern)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::As(name, pattern, s) => WirePattern::As {
             name: name.clone(),
-            pattern: Box::new(wire_pattern(pattern)),
+            pattern: Box::new(wire_pattern(pattern)?),
             span: span(*s),
         },
-    }
+    })
 }
 
-fn wire_let_binding(binding: &LetBinding) -> WireLetBinding {
-    WireLetBinding {
+fn wire_let_binding(binding: &LetBinding) -> SourceWireResult<WireLetBinding> {
+    Ok(WireLetBinding {
         pattern: wire_let_pattern(&binding.pattern),
         ty: binding.ty.as_ref().map(wire_type_expr),
-        value: wire_expr(&binding.value),
-    }
+        value: wire_expr(&binding.value)?,
+    })
 }
 
 fn wire_let_pattern(pattern: &LetPattern) -> WireLetPattern {
@@ -5734,7 +6598,7 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
         },
         TypeExpr::Tensor(dims, precision, s) => WireSurfTypeExpr::Tensor {
             dims: dims.iter().map(wire_type_expr).collect(),
-            precision: precision.clone(),
+            precision: precision.to_string(),
             span: span(*s),
         },
         TypeExpr::Arrow(args, ret, s) => WireSurfTypeExpr::Arrow {
@@ -5763,189 +6627,177 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
     }
 }
 
-fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
-    match expr {
-        DeepExpr::Atom(atom, s) => WireDeepExpr {
-            kind: WireDeepExprKind::Atom {
-                atom: match atom {
-                    chelis_deep::Atom::Name(value) => WireDeepAtom::Symbol {
-                        value: value.clone(),
-                    },
-                    // Serialization boundary (decode-once, chelis#731 Phase
-                    // 3): a decoded tag crosses the wire as its canonical
-                    // string spelling, keeping the wire schema unchanged.
-                    chelis_deep::Atom::Tag(tag) => WireDeepAtom::Symbol {
-                        value: tag.as_str().to_string(),
-                    },
-                    chelis_deep::Atom::Int(value) => WireDeepAtom::Int { value: *value },
-                    chelis_deep::Atom::Float(value) => WireDeepAtom::Float { value: *value },
-                    chelis_deep::Atom::Str(value) => WireDeepAtom::Str {
-                        value: value.clone(),
-                    },
-                    chelis_deep::Atom::Bool(value) => WireDeepAtom::Bool { value: *value },
-                },
-            },
-            span: Some(span(*s)),
-        },
-        DeepExpr::List(list, s) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: list.elements.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(*s)),
-        },
-        DeepExpr::Map(map, s) => WireDeepExpr {
-            kind: WireDeepExprKind::Map {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| WireMetaEntry {
-                        key: key.clone(),
-                        value: wire_deep_expr(value),
-                    })
-                    .collect(),
-            },
-            span: Some(span(*s)),
-        },
-        DeepExpr::MetaExpr(meta, s) => WireDeepExpr {
-            kind: WireDeepExprKind::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| WireMetaEntry {
-                        key: key.clone(),
-                        value: wire_deep_expr(value),
-                    })
-                    .collect(),
-                expr: Box::new(wire_deep_expr(&meta.expr)),
-            },
-            span: Some(span(*s)),
-        },
-        // Bridge: reconstruct List so wire format includes tag and meta (#908)
-        DeepExpr::Node(node, s) => {
-            let bridged = DeepExpr::List(node.to_list(*s), *s);
-            wire_deep_expr(&bridged)
-        }
-        DeepExpr::BareList(elems, s) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: elems.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(*s)),
-        },
-        DeepExpr::UnknownForm(data) => {
-            // Unknown forms retain the same canonical list-shaped wire
-            // representation as known nodes: head, metadata, then children.
-            // Dropping either of the first two elements erases the identity
-            // and diagnostic context that UnknownForm exists to preserve
-            // (chelis#1088; salvaged from PR #1036).
-            let wire_span = Some(span(data.span));
-            let mut elements = Vec::with_capacity(data.children.len() + 2);
-            elements.push(WireDeepExpr {
-                kind: WireDeepExprKind::Atom {
-                    atom: WireDeepAtom::Symbol {
-                        value: data.head.clone(),
-                    },
-                },
-                span: wire_span,
-            });
-            elements.push(WireDeepExpr {
-                kind: WireDeepExprKind::Map {
-                    entries: data
-                        .meta
-                        .entries
-                        .iter()
-                        .map(|(key, value)| WireMetaEntry {
-                            key: key.clone(),
-                            value: wire_deep_expr(value),
-                        })
-                        .collect(),
-                },
-                span: wire_span,
-            });
-            elements.extend(data.children.iter().map(wire_deep_expr));
-            WireDeepExpr {
-                kind: WireDeepExprKind::List { elements },
-                span: wire_span,
-            }
-        }
-    }
+type WireResult<T> = std::result::Result<T, String>;
+
+fn wire_extent(value: usize) -> WireResult<NonnegativeExtent> {
+    NonnegativeExtent::try_from(value)
 }
 
-fn wire_dag(dag: &Dag) -> WireDag {
-    WireDag {
+fn wire_axis(value: usize) -> WireResult<i32> {
+    i32::try_from(value).map_err(|_| "wire axis exceeds i32".to_string())
+}
+
+fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
+    // One row per declaration a node belongs to, in declaration order: a
+    // declaration whose nodes are all gone has no row, so a graph has one
+    // table whatever its passes removed.
+    let mut used = vec![false; dag.declarations().len()];
+    for node in dag.nodes() {
+        used[node.owner.decl.0 as usize] = true;
+    }
+    let mut declarations = Vec::new();
+    let mut rows = vec![None; used.len()];
+    for (index, declaration) in dag.declarations().iter().enumerate() {
+        if used[index] {
+            rows[index] = Some(crate::schema::host_index(declarations.len()));
+            declarations.push(declaration.name.clone());
+        }
+    }
+    let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
-        nodes: dag.nodes().iter().map(wire_dag_node).collect(),
-        roots: dag.roots().iter().map(|id| id.0).collect(),
-    }
+        declarations,
+        nodes: dag
+            .nodes()
+            .iter()
+            .map(|node| {
+                let row =
+                    rows[node.owner.decl.0 as usize].expect("every node's declaration has a row");
+                wire_dag_node(node, row)
+            })
+            .collect::<WireResult<_>>()?,
+        roots: dag
+            .roots()
+            .iter()
+            .map(|id| crate::schema::host_index(id.0))
+            .collect(),
+    };
+    wire.validate_wire_contract()
+        .map_err(|error| error.to_string())?;
+    Ok(wire)
 }
 
-fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireDagNode {
-    WireDagNode {
-        id: node.id.0,
-        op: wire_op(&node.op),
-        inputs: node.inputs.iter().map(|id| id.0).collect(),
-        output_type: wire_tensor_type(&node.output_type),
-    }
+/// `node` on the wire, whose declaration is row `declaration` of the
+/// graph's declaration table.
+fn wire_dag_node(node: &chelis_ir::dag::DagNode, declaration: u64) -> WireResult<WireDagNode> {
+    Ok(WireDagNode {
+        declaration,
+        activation: node
+            .owner
+            .activation
+            .map(|id| crate::schema::host_index(id.0)),
+        shape_deps: node
+            .shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .map(|id| crate::schema::host_index(id.0))
+            .collect(),
+        span_id: node.span_id.clone(),
+        merged_spans: node.merged_spans.clone(),
+        id: crate::schema::host_index(node.id.0),
+        op: wire_op(&node.op)?,
+        inputs: node
+            .inputs
+            .iter()
+            .map(|id| crate::schema::host_index(id.0))
+            .collect(),
+        output_type: wire_tensor_type(&node.output_type)?,
+    })
 }
 
-fn wire_tensor_type(ty: &TensorType) -> WireTensorType {
-    WireTensorType {
-        dims: ty.dims.iter().map(wire_dim).collect(),
-        precision: ty.precision.name().to_string(),
-    }
+fn wire_tensor_type(ty: &TensorType) -> WireResult<WireTensorType> {
+    Ok(WireTensorType {
+        dims: ty.dims.iter().map(wire_dim).collect::<WireResult<_>>()?,
+        precision: ty.precision.interchange_name().to_string(),
+    })
 }
 
-fn wire_dim(dim: &DimInfo) -> WireDimInfo {
-    match dim {
+fn wire_dim(dim: &DimInfo) -> WireResult<WireDimInfo> {
+    Ok(match dim {
         DimInfo::Named(name, size) => WireDimInfo::Named {
             name: name.clone(),
-            size: *size,
+            size: size.map(wire_extent).transpose()?,
         },
-        DimInfo::Lit(size) => WireDimInfo::Lit { size: *size },
-    }
+        DimInfo::Lit(size) => WireDimInfo::Lit {
+            size: wire_extent(*size)?,
+        },
+    })
 }
 
-fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
+fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireResult<WireDimExpr> {
     use chelis_ir::dag::DimExpr;
-    match expr {
-        DimExpr::Concrete(value) => WireDimExpr::Concrete { value: *value },
+    Ok(match expr {
+        DimExpr::Concrete(value) => WireDimExpr::Concrete {
+            value: wire_extent(*value)?,
+        },
         DimExpr::Sym(name) => WireDimExpr::Sym { name: name.clone() },
         DimExpr::Mul(lhs, rhs) => WireDimExpr::Mul {
-            lhs: Box::new(wire_dim_expr(lhs)),
-            rhs: Box::new(wire_dim_expr(rhs)),
+            lhs: Box::new(wire_dim_expr(lhs)?),
+            rhs: Box::new(wire_dim_expr(rhs)?),
         },
         DimExpr::Div(lhs, rhs) => WireDimExpr::Div {
-            lhs: Box::new(wire_dim_expr(lhs)),
-            rhs: Box::new(wire_dim_expr(rhs)),
+            lhs: Box::new(wire_dim_expr(lhs)?),
+            rhs: Box::new(wire_dim_expr(rhs)?),
         },
-    }
+    })
 }
 
 /// chelis#616: map a movement-op / reshape-target [`RtDim`] to its wire form.
-fn wire_bound(b: &RtDim) -> WireRtDim {
-    match b {
-        RtDim::Lit(n) => WireRtDim::Lit { value: *n },
+fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
+    Ok(match b {
+        RtDim::Lit(n) => WireRtDim::Lit {
+            value: wire_extent(*n)?,
+        },
         RtDim::ToEnd => WireRtDim::ToEnd,
-        RtDim::Node(i) => WireRtDim::Node { input: *i },
+        RtDim::Node(i) => WireRtDim::Node {
+            input: crate::schema::host_index(*i),
+        },
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
         RtDim::InputAxis {
             tensor,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
         } => WireRtDim::InputAxis {
-            tensor: *tensor,
+            tensor: crate::schema::host_index(*tensor),
             axis: WireRtAxis::Lit { value: *axis },
         },
-    }
+    })
 }
 
-fn wire_op(op: &RiscOp) -> WireRiscOp {
-    match op {
+fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
+    Ok(match op {
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
-        RiscOp::CmpLt => WireRiscOp::CmpLt,
+        RiscOp::Mod => WireRiscOp::Mod,
+        RiscOp::Bitwise(kind) => WireRiscOp::Bitwise { bitwise: *kind },
+        RiscOp::Compare(kind) => WireRiscOp::Compare {
+            comparison: match kind {
+                ComparisonKind::CmpLt => WireComparisonKind::CmpLt,
+                ComparisonKind::Lt => WireComparisonKind::Lt,
+                ComparisonKind::Eq => WireComparisonKind::Eq,
+                ComparisonKind::Neq => WireComparisonKind::Neq,
+                ComparisonKind::Gt => WireComparisonKind::Gt,
+                ComparisonKind::Gte => WireComparisonKind::Gte,
+                ComparisonKind::Lte => WireComparisonKind::Lte,
+            },
+        },
+        RiscOp::Logical(kind) => WireRiscOp::Logical {
+            logical: match kind {
+                LogicalKind::And => WireLogicalKind::And,
+                LogicalKind::Or => WireLogicalKind::Or,
+                LogicalKind::Not => WireLogicalKind::Not,
+            },
+        },
+        RiscOp::Where => WireRiscOp::Where {},
+        RiscOp::GuardedFail {
+            message,
+            trap_on_true,
+        } => WireRiscOp::GuardedFail {
+            message: message.clone(),
+            trap_on_true: *trap_on_true,
+        },
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
         RiscOp::ExtremaAdjoint { kind, operand } => WireRiscOp::ExtremaAdjoint {
@@ -5973,23 +6825,47 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Floor => WireRiscOp::Floor,
         RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::Round => WireRiscOp::Round,
-        RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
-            low: *low,
-            high: *high,
-            seed: *seed,
+        RiscOp::UniformLike => WireRiscOp::UniformLike {},
+        RiscOp::Dropout => WireRiscOp::Dropout {},
+        RiscOp::DropoutReplay => WireRiscOp::DropoutReplay {},
+        RiscOp::UniformBoundAdjoint { bound } => WireRiscOp::UniformBoundAdjoint {
+            bound: match bound {
+                chelis_ir::dag::UniformBound::Low => crate::schema::WireUniformBound::Low,
+                chelis_ir::dag::UniformBound::High => crate::schema::WireUniformBound::High,
+            },
         },
-        RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
-            rate: *rate,
-            seed: *seed,
+        RiscOp::KeyFromSeed => WireRiscOp::KeyFromSeed {},
+        RiscOp::Split { branch } => WireRiscOp::Split {
+            branch: match branch {
+                chelis_ir::dag::KeyBranch::Left => crate::schema::WireKeyBranch::Left,
+                chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
+            },
+        },
+        RiscOp::FoldIn => WireRiscOp::FoldIn {},
+        RiscOp::KeySelect => WireRiscOp::KeySelect {},
+        RiscOp::SplitN { count } => WireRiscOp::SplitN {
+            count: wire_bound(count)?,
         },
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
-            axis: *axis,
+            axis: wire_axis(*axis)?,
             accumulator: accumulator.name().to_string(),
         },
-        RiscOp::Count { axes } => WireRiscOp::Count { axes: axes.clone() },
-        RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
-        RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
-        RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
+        RiscOp::Count { axes } => WireRiscOp::Count {
+            axes: axes
+                .iter()
+                .copied()
+                .map(wire_axis)
+                .collect::<WireResult<_>>()?,
+        },
+        RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::MinReduce { axis } => WireRiscOp::MinReduce {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce {
+            axis: wire_axis(*axis)?,
+        },
         RiscOp::ReduceWindow {
             reducer,
             window_shape,
@@ -6001,8 +6877,16 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
                 chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
-            window_shape: window_shape.clone(),
-            strides: strides.clone(),
+            window_shape: window_shape
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
+            strides: strides
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::ReduceWindowGrad {
             reducer,
@@ -6015,39 +6899,125 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
                 chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
-            window_shape: window_shape.clone(),
-            strides: strides.clone(),
+            window_shape: window_shape
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
+            strides: strides
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
         },
-        RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
-        RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
+        RiscOp::Argmax { axis } => WireRiscOp::Argmax {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::Argmin { axis } => WireRiscOp::Argmin {
+            axis: wire_axis(*axis)?,
+        },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
-            new_shape: new_shape.iter().map(wire_bound).collect(),
+            new_shape: new_shape
+                .iter()
+                .map(wire_bound)
+                .collect::<WireResult<_>>()?,
         },
-        RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
+        RiscOp::Permute { axes } => WireRiscOp::Permute {
+            axes: axes
+                .iter()
+                .copied()
+                .map(wire_axis)
+                .collect::<WireResult<_>>()?,
+        },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
-            axis: *axis,
-            size: wire_bound(size),
+            axis: wire_axis(*axis)?,
+            size: wire_bound(size)?,
         },
-        RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
+        RiscOp::OneHot { vocab } => WireRiscOp::OneHot {
+            vocab: wire_extent(*vocab)?,
+        },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
             padding: padding
                 .iter()
-                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
-                .collect(),
+                .map(|(s, e)| Ok((wire_bound(s)?, wire_bound(e)?)))
+                .collect::<WireResult<_>>()?,
             fill: *fill,
         },
         RiscOp::Shrink { bounds } => WireRiscOp::Shrink {
             bounds: bounds
                 .iter()
-                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
-                .collect(),
+                .map(|(s, e)| Ok((wire_bound(s)?, wire_bound(e)?)))
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::Stride { strides } => WireRiscOp::Stride {
-            strides: strides.iter().map(wire_bound).collect(),
+            strides: strides.iter().map(wire_bound).collect::<WireResult<_>>()?,
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
-        RiscOp::Shape { axis } => WireRiscOp::Shape { axis: *axis },
+        RiscOp::Shape { axis } => WireRiscOp::Shape {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ExtentWitness {
+            site,
+            parameter,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+            requirements,
+            claims,
+        } => WireRiscOp::ExtentWitness {
+            site: match site {
+                chelis_ir::dag::ExtentWitnessSite::LiteralResultClaim => {
+                    WireExtentWitnessSite::LiteralResultClaim
+                }
+                chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
+                chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
+                    WireExtentWitnessSite::LocalExpand
+                }
+                chelis_ir::dag::ExtentWitnessSite::ResultClaim {
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::ResultClaim {
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id,
+                    binding,
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: *ascription_id,
+                    binding: binding.clone(),
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
+            },
+            parameter: parameter.clone(),
+            axis: WireRtAxis::Lit { value: *axis },
+            requirements: requirements
+                .iter()
+                .copied()
+                .map(NonnegativeExtent::try_from)
+                .collect::<WireResult<_>>()?,
+            claims: claims
+                .iter()
+                .map(|claim| crate::schema::WireExtentClaim {
+                    claim: claim.claim.clone(),
+                    requirement_declares: claim.requirement_declares,
+                })
+                .collect(),
+        },
+        RiscOp::CheckedReshapeExtent {
+            claims,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedReshapeExtent {
+            claims: claims.clone(),
+            axis: WireRtAxis::Lit { value: *axis },
+        },
+        RiscOp::CheckedUnitAxis {
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedUnitAxis {
+            axis: WireRtAxis::Lit { value: *axis },
+        },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),
         },
@@ -6058,10 +7028,10 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
         RiscOp::CastTrunc { new_precision } => WireRiscOp::CastTrunc {
-            new_precision: new_precision.name().to_string(),
+            new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
-            new_precision: new_precision.name().to_string(),
+            new_precision: new_precision.interchange_name().to_string(),
         },
         RiscOp::FusedElem { ops } => WireRiscOp::FusedElem {
             ops: ops
@@ -6076,7 +7046,6 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         FusedStepOp::TruncDiv => WireFusedStepOp::TruncDiv,
                         FusedStepOp::MaxElem => WireFusedStepOp::MaxElem,
                         FusedStepOp::MinElem => WireFusedStepOp::MinElem,
-                        FusedStepOp::CmpLt => WireFusedStepOp::CmpLt,
                         FusedStepOp::Neg => WireFusedStepOp::Neg,
                         FusedStepOp::Recip => WireFusedStepOp::Recip,
                         FusedStepOp::Exp => WireFusedStepOp::Exp,
@@ -6095,12 +7064,12 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         .input_indices
                         .iter()
                         .map(|input| match input {
-                            FusedInput::External(index) => {
-                                WireFusedInput::External { index: *index }
-                            }
-                            FusedInput::PreviousStep(index) => {
-                                WireFusedInput::PreviousStep { index: *index }
-                            }
+                            FusedInput::External(index) => WireFusedInput::External {
+                                index: crate::schema::host_index(*index),
+                            },
+                            FusedInput::PreviousStep(index) => WireFusedInput::PreviousStep {
+                                index: crate::schema::host_index(*index),
+                            },
                         })
                         .collect(),
                 })
@@ -6113,27 +7082,643 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             k,
             accumulator,
         } => WireRiscOp::BlasMatmul {
-            batch_dims: batch_dims.iter().map(wire_dim_expr).collect(),
-            m: wire_dim_expr(m),
-            n: wire_dim_expr(n),
-            k: wire_dim_expr(k),
+            batch_dims: batch_dims
+                .iter()
+                .map(wire_dim_expr)
+                .collect::<WireResult<_>>()?,
+            m: wire_dim_expr(m)?,
+            n: wire_dim_expr(n)?,
+            k: wire_dim_expr(k)?,
             accumulator: accumulator.name().to_string(),
         },
-        RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
-        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
-        RiscOp::Scatter { axis } => WireRiscOp::Scatter { axis: *axis },
-        RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements { axis: *axis },
-    }
+        RiscOp::Gather { axis } => WireRiscOp::Gather {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::Scatter { axis } => WireRiscOp::Scatter {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements {
+            axis: wire_axis(*axis)?,
+        },
+    })
 }
+
+#[cfg(test)]
+use crate::schema::ExecutionValue;
+
+#[cfg(test)]
+#[path = "../../../tests/support/wire_values.rs"]
+pub(crate) mod wire_values;
 
 #[cfg(test)]
 #[allow(deprecated)] // exercises eval_many for behavior parity; deprecation is for external callers
 mod tests {
     use super::*;
     use crate::schema::ExecutionValue;
+    use crate::schema::{WireDeepAtom, WireDeepExprKind};
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    /// chelis#2413: the wire decoder's key rules read each input slot as the
+    /// IR's do. For every operation that reads an extent through a slot,
+    /// with its bounds read by value and by axis, the encoded operation
+    /// declares the same read at every slot, and every kind of extent slot
+    /// is reached.
+    ///
+    /// Evidentiary status: LOCK. Both tables are new in this change.
+    #[test]
+    fn the_wire_and_the_ir_declare_the_same_extent_slots() {
+        use chelis_ir::dag::{ExtentWitnessSite, RtAxis};
+        use chelis_ir::verify::{ExtentSlot, SlotRead, slot_read};
+        let axis = |tensor| RtDim::InputAxis {
+            tensor,
+            axis: RtAxis::Lit(0),
+        };
+        let ops = [
+            RiscOp::Shape { axis: 0 },
+            RiscOp::ExtentWitness {
+                site: ExtentWitnessSite::Caller,
+                parameter: "ks".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![],
+                claims: vec![],
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: axis(1),
+            },
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Node(1),
+            },
+            RiscOp::Reshape {
+                new_shape: vec![axis(1), RtDim::Node(2), axis(3)],
+            },
+            RiscOp::zero_pad(Prim::F32, vec![(axis(1), RtDim::Node(2))]),
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Node(1), axis(2))],
+            },
+            RiscOp::Stride {
+                strides: vec![axis(1)],
+            },
+            RiscOp::SplitN { count: axis(1) },
+            RiscOp::SplitN {
+                count: RtDim::Node(1),
+            },
+            RiscOp::Add,
+            RiscOp::Copy,
+        ];
+        let mut reached = std::collections::BTreeSet::new();
+        for op in &ops {
+            let wire = wire_op(op).unwrap();
+            for slot in 0..4 {
+                let read = slot_read(op, slot);
+                assert_eq!(
+                    crate::schema::wire_slot_read(&wire, slot),
+                    read,
+                    "{op:?} slot {slot}"
+                );
+                if let SlotRead::Extent(kind) = read {
+                    reached.insert(kind);
+                }
+            }
+        }
+        assert_eq!(reached, std::collections::BTreeSet::from(ExtentSlot::ALL));
+    }
+
+    #[test]
+    fn ordinary_lowering_prose_cannot_create_unsupported_identity() {
+        for message in [
+            "ordinary lowering failure",
+            "unsupported: ordinary lowering failure",
+        ] {
+            let diagnostic = chelis_ir::lower::LowerDiagnostic::new(message, None, None);
+            let error = lower_diagnostic_to_compiler_error(diagnostic);
+            assert_eq!(error.stage, "lower");
+            assert_eq!(error.errors.len(), 1);
+            let diagnostic = &error.errors[0];
+            assert_eq!(diagnostic.kind(), chelis_vocab::DiagnosticKind::LowerError);
+            assert_eq!(diagnostic.message, message);
+            assert!(diagnostic.unsupported_identity().is_none());
+            assert_eq!(
+                serde_json::to_value(diagnostic).unwrap()["kind"],
+                "lower_error"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_host_failed_demand_query_preserves_wire_and_entered_error_boundaries() {
+        // This checked helper has an actual fatal static-DAG lowering, not a
+        // mocked diagnostic. Tensorizing its scalar sink makes every live
+        // parameter admissible through EvalRequest without changing the concat.
+        let mut source = include_str!("../../../tests/support/helper_summary_fatal.ch")
+            .split("def zero_qk()")
+            .next()
+            .unwrap()
+            .replace("causal_sdpa_with_sink", "bad")
+            .replace(
+                "-> f32 -> tensor[s, d, f32]",
+                "-> &tensor[f32] -> tensor[s, d, f32]",
+            )
+            .replace("scalar_to_tensor(sink)", "copy(sink)");
+        source.push_str("def entry[s, d](q: &tensor[s, d, f32], k: &tensor[s, d, f32], v: &tensor[s, d, f32], scale: &tensor[s, s, f32], mask: &tensor[s, s, f32], sink: &tensor[f32]) -> tensor[s, d, f32] = { _ = print(\"entry\")\n bad(q, k, v, scale, mask, sink) }\ndef good() -> i32 = 7i32\n");
+        let compiled = compile_source(SourceKind::Surf, &source).unwrap();
+        let parameters = ["q", "k", "v", "scale", "mask", "sink"]
+            .map(str::to_owned)
+            .into();
+        let lowering_message = "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906) at source span `surf:940..946`";
+        assert_eq!(
+            selected_host_input_demand(&compiled, "bad", &parameters)
+                .unwrap_err()
+                .to_string(),
+            lowering_message,
+        );
+        let tensor = |shape: &[i64], data| crate::schema::TensorValue {
+            shape: shape.into(),
+            data: wire_values::storage_f32(data),
+        };
+        for (root, q_shape) in [
+            ("bad", None),
+            ("bad", Some(vec![2, 3])),
+            ("bad", Some(vec![-1])),
+            ("good", Some(vec![-1])),
+            ("entry", Some(vec![2, 3])),
+        ] {
+            let mut bindings = BTreeMap::from([
+                ("k".into(), tensor(&[2, 3], vec![0.0; 6])),
+                (
+                    "v".into(),
+                    tensor(&[2, 3], vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0]),
+                ),
+                ("scale".into(), tensor(&[2, 2], vec![1.0; 4])),
+                ("mask".into(), tensor(&[2, 2], vec![0.0; 4])),
+                ("sink".into(), tensor(&[], vec![0.0])),
+            ]);
+            if let Some(shape) = &q_shape {
+                bindings.insert("q".into(), tensor(shape, vec![0.0; 6]));
+            }
+            let result = eval_compiled(&compiled, bindings, Some(&[root.into()]));
+            if q_shape.is_none() || root == "good" {
+                let result = result.unwrap();
+                assert!(result.transcript.is_empty(), "{result:?}");
+                assert_eq!(result.manifest.entries.len(), 1, "{result:?}");
+                assert_eq!(result.manifest.entries[0].name, "good");
+                assert!(result.manifest.entries[0].required_inputs.is_empty());
+                if root == "good" {
+                    assert_eq!(result.roots.len(), 1, "{result:?}");
+                    assert_eq!(result.roots[0].name.as_deref(), Some("good"));
+                    assert_eq!(
+                        serde_json::to_value(&result.roots[0].value).unwrap(),
+                        serde_json::json!({"type":"scalar","value":{"dtype":"int32","value":7}})
+                    );
+                } else {
+                    assert!(result.roots.is_empty(), "{result:?}");
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.stage, "eval");
+                assert_eq!(error.errors.len(), 1, "{error:?}");
+                assert_eq!(
+                    error.errors[0].message,
+                    if q_shape == Some(vec![-1]) {
+                        "binding `q`: tensor extent must be a nonnegative int64"
+                    } else {
+                        lowering_message
+                    }
+                );
+                assert_eq!(
+                    error.transcript,
+                    if root == "entry" {
+                        vec!["entry"]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+
+    fn native_wire_witness_fixture() -> Dag {
+        use chelis_ir::dag::RtAxis;
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("rows".into(), None)],
+                precision: Prim::F32,
+            },
+            Some("input-span".into()),
+        );
+        let requirements = [4, 4, 9]
+            .into_iter()
+            .map(|value| chelis_types::scalar_from_i64("load", Prim::Int64, value).unwrap())
+            .collect();
+        let witness = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: chelis_ir::dag::ExtentWitnessSite::Caller,
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements,
+                claims: Vec::new(),
+            },
+            vec![input],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            Some("call-span".into()),
+        );
+        dag.node_mut(witness).unwrap().merged_spans = vec!["result-span".into()];
+        let root = dag.add_node(
+            decl,
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("load", Prim::Int64, 9).unwrap(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.node_mut(root).unwrap().shape_deps = vec![witness];
+        dag.add_root(root);
+        dag
+    }
+
+    /// chelis#2413 step 1: every explicit key operation projects onto its
+    /// schema-18 variant, and the projection decodes back to itself.
+    #[test]
+    fn explicit_key_operations_project_onto_wire_v18_and_round_trip() {
+        let ty = |dims: &[usize], precision| chelis_ir::dag::TensorType {
+            dims: dims
+                .iter()
+                .map(|extent| chelis_ir::dag::DimInfo::Lit(*extent))
+                .collect(),
+            precision,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let seed = dag.add_node(
+            decl,
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", chelis_types::types::Prim::Int64, -3)
+                    .unwrap(),
+            },
+            vec![],
+            ty(&[], chelis_types::types::Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let left = dag.add_node(
+            decl,
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Left,
+            },
+            vec![root],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let right = dag.add_node(
+            decl,
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Right,
+            },
+            vec![root],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let folded = dag.add_node(
+            decl,
+            RiscOp::FoldIn,
+            vec![left, seed],
+            ty(&[], chelis_types::types::Prim::Key),
+            None,
+        );
+        let rows = dag.add_node(
+            decl,
+            RiscOp::SplitN {
+                count: chelis_ir::dag::RtDim::Lit(3),
+            },
+            vec![folded],
+            ty(&[3], chelis_types::types::Prim::Key),
+            None,
+        );
+        dag.add_root(rows);
+        dag.add_root(right);
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["schema_version"], 20);
+        let kinds: Vec<&serde_json::Value> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| &node["op"])
+            .collect();
+        assert_eq!(kinds[1], &serde_json::json!({"kind":"key_from_seed"}));
+        assert_eq!(
+            kinds[2],
+            &serde_json::json!({"kind":"split","branch":"left"})
+        );
+        assert_eq!(
+            kinds[3],
+            &serde_json::json!({"kind":"split","branch":"right"})
+        );
+        assert_eq!(kinds[4], &serde_json::json!({"kind":"fold_in"}));
+        assert_eq!(
+            kinds[5],
+            &serde_json::json!({"kind":"split_n","count":{"bound":"lit","value":3}})
+        );
+        let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    /// Rule I on the wire (spec/10 §3.2, §3.4): a key parameter is its
+    /// declaration and its name. New code that redefines a library's `keep`
+    /// replaces it in a composed lowering, and the composed graph holds both
+    /// declarations called `keep`, each consuming its own parameter `k`. The
+    /// wire keeps them apart: each node names its declaration by its row in
+    /// the graph's declaration table, and the two rows share a name.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At 441e5c8b2 a node carried its
+    /// declaration's name, so the two parameters merged and `wire_dag`
+    /// rejected the graph because one key was consumed twice.
+    #[test]
+    fn a_replaced_definitions_key_parameter_stays_its_own_on_the_wire() {
+        let source =
+            "def keep(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5f32)\n";
+        let exprs =
+            chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
+                .unwrap();
+        let (type_env, library) = chelis_types::build_compiled_library_context(&exprs).unwrap();
+        let library = chelis_effects::check_program(&library).unwrap();
+        let library = chelis_types::check_linearity(&library).unwrap();
+        let lowered = chelis_ir::lower::lower_program_to_library(&library);
+        let new = chelis_types::check_ir_with_context(&type_env, &exprs).unwrap();
+        let new = chelis_effects::check_effects_with_context(&library, &new).unwrap();
+        let new = chelis_types::check_linearity_with_context(&library, &new).unwrap();
+        let dag = chelis_ir::lower::try_lower_program_with_context(&lowered, &new)
+            .unwrap()
+            .dag;
+        let keeps = dag
+            .declarations()
+            .iter()
+            .filter(|declaration| declaration.name == "keep")
+            .count();
+        assert_eq!(keeps, 2, "{:?}", dag.declarations());
+        let wire = wire_dag(&dag).unwrap_or_else(|error| panic!("{error}"));
+        let key_loads = wire
+            .nodes
+            .iter()
+            .filter(
+                |node| matches!(&node.op, crate::schema::WireRiscOp::Load { name } if name == "k"),
+            )
+            .map(|node| node.declaration)
+            .collect::<Vec<_>>();
+        assert_eq!(key_loads.len(), 2, "{wire:?}");
+        assert_ne!(key_loads[0], key_loads[1]);
+        for row in key_loads {
+            let row = usize::try_from(row).unwrap();
+            assert_eq!(wire.declarations[row], "keep");
+        }
+        let json = serde_json::to_value(&wire).unwrap();
+        let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_witness_projection_preserves_exact_claims_and_provenance() {
+        let dag = native_wire_witness_fixture();
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(
+            json["schema_version"],
+            crate::schema::WIRE_DAG_SCHEMA_VERSION
+        );
+        assert_eq!(
+            json["nodes"][1]["op"]["requirements"],
+            serde_json::json!([4, 4, 9])
+        );
+        assert_eq!(
+            json["nodes"][1]["op"]["axis"],
+            serde_json::json!({"axis":"lit","value":0})
+        );
+        assert_eq!(json["nodes"][1]["span_id"], "call-span");
+        assert_eq!(
+            json["nodes"][1]["merged_spans"],
+            serde_json::json!(["result-span"])
+        );
+        assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
+        assert_eq!(json["nodes"][2]["span_id"], serde_json::Value::Null);
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_projection_preserves_anonymous_where_shape_producers() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let condition = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "condition".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        let values = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("runtime".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let zero = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let selected = dag.add_node(
+            decl,
+            RiscOp::Where,
+            vec![condition, values, zero],
+            TensorType {
+                dims: vec![DimInfo::Named(String::new(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(selected);
+        assert_eq!(dag.get(zero).unwrap().shape_deps, vec![values]);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+
+        let projected = wire_dag(&dag)
+            .expect("WireDag v15 must preserve producer-aware anonymous where shape semantics");
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_projection_preserves_live_local_ascription_claims() {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(x: tensor[*, f32]) -> tensor[*, f32] = {\n  \
+             y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+             y\n\
+             }\n",
+        )
+        .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        let site = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|node| node["op"]["site"].get("local_ascription_claim"))
+            .expect("native lowering projects the local claim into WireDag");
+        assert_eq!(site["ascription_id"], 0);
+        assert_eq!(site["binding"], "y");
+        assert_eq!(site["claim"], "2");
+        assert_eq!(site["axis"], serde_json::json!({"axis": "lit", "value": 0}));
+        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+            .expect("the projected current-version artifact validates");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_projection_preserves_local_claim_runtime_branch_activation() {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+             if flag then {\n  \
+               y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+               y\n\
+             } else x\n",
+        )
+        .unwrap();
+        let deep = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let checked = chelis_types::check_ir_program(&deep).unwrap();
+        let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f").unwrap();
+        let projected = wire_dag(&dag).unwrap();
+        let claim = projected
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.op,
+                    WireRiscOp::ExtentWitness {
+                        site: WireExtentWitnessSite::LocalAscriptionClaim { .. },
+                        ..
+                    }
+                )
+            })
+            .expect("native lowering projects the path-local claim");
+        let owner = projected
+            .nodes
+            .iter()
+            .find(|node| node.shape_deps.contains(&claim.id))
+            .expect("the initializer owns the projected claim");
+        // The claim's activation is its carrier's owner activation (spec/10
+        // section 3.2), so it crosses the boundary as that node's
+        // `activation`, one exact scalar Bool.
+        let activation = owner
+            .activation
+            .and_then(|activation| projected.nodes.get(usize::try_from(activation).ok()?))
+            .expect("the claim's carrier crosses the boundary under the arm's activation");
+        assert!(
+            activation.output_type.dims.is_empty() && activation.output_type.precision == "bool",
+            "one exact scalar Bool activation crosses the artifact boundary"
+        );
+        let json = serde_json::to_value(&projected).unwrap();
+        let decoded = WireDag::from_validated_json(&serde_json::to_string(&projected).unwrap())
+            .expect("the projected path-local artifact validates");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_witness_projection_rejects_invalid_requirements_and_edges() {
+        use chelis_ir::dag::{NodeId, RtAxis};
+        for (invalid, expected) in [
+            (
+                chelis_types::scalar_from_i64("load", Prim::Int64, -1).unwrap(),
+                "dimension extent must be a nonnegative int64",
+            ),
+            (
+                chelis_types::scalar_from_i64("load", Prim::Int32, 4).unwrap(),
+                "source integer requires exact int64 dtype",
+            ),
+        ] {
+            let mut dag = native_wire_witness_fixture();
+            let RiscOp::ExtentWitness { requirements, .. } =
+                &mut dag.node_mut(NodeId(1)).unwrap().op
+            else {
+                unreachable!()
+            };
+            requirements[0] = invalid;
+            assert_eq!(wire_dag(&dag).unwrap_err(), expected);
+        }
+        for mutation in 0..4 {
+            let mut dag = native_wire_witness_fixture();
+            match mutation {
+                0 => dag.node_mut(NodeId(2)).unwrap().shape_deps = vec![NodeId(2)],
+                1 => dag.node_mut(NodeId(1)).unwrap().inputs.clear(),
+                2 => dag.node_mut(NodeId(1)).unwrap().output_type.precision = Prim::F32,
+                3 => {
+                    let RiscOp::ExtentWitness { axis, .. } =
+                        &mut dag.node_mut(NodeId(1)).unwrap().op
+                    else {
+                        unreachable!()
+                    };
+                    *axis = RtAxis::Lit(1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(wire_dag(&dag).is_err(), "native mutation {mutation}");
+        }
+    }
+
+    #[test]
+    fn wire_producer_rejects_numeric_narrowing_instead_of_repairing_ir() {
+        assert_eq!(wire_axis(0).unwrap(), 0);
+        assert!(wire_axis(usize::MAX).is_err());
+        assert_eq!(wire_extent(0).unwrap().get(), 0);
+        #[cfg(target_pointer_width = "64")]
+        assert!(wire_extent(usize::MAX).is_err());
+    }
 
     /// chelis#1395 [04-FIT-16]: a lexer error carries a byte offset, so the
     /// carrier transports it.
@@ -6160,7 +7745,7 @@ mod tests {
         assert_eq!(
             span,
             DiagnosticSpan::Point {
-                offset: source.find('"').expect("the fixture has a quote"),
+                offset: u64::try_from(source.find('"').expect("the fixture has a quote")).unwrap(),
             },
             "the point must be the offset the lexer reported"
         );
@@ -6185,7 +7770,7 @@ mod tests {
         assert_eq!(
             span,
             DiagnosticSpan::Point {
-                offset: source.find('"').expect("the fixture has a quote"),
+                offset: u64::try_from(source.find('"').expect("the fixture has a quote")).unwrap(),
             }
         );
     }
@@ -6232,13 +7817,26 @@ mod tests {
     }
 
     #[test]
+    fn opaque_extension_wire_is_explicit_and_preserves_scalar_spelling() {
+        let payload = "{type: false, type: (var {}), value: 1e-3f32}";
+        let exprs = chelis_deep::parse_and_stamp_file(&format!(
+            "(def {{tool_data: {payload}}} f (lit {{}} 1))"
+        ))
+        .unwrap();
+        let wire = serde_json::to_value(wire_deep_expr(&exprs[0])).unwrap();
+        let text = wire.to_string();
+        assert!(text.contains("extension_data"), "{text}");
+        assert!(text.contains(payload), "{text}");
+        assert!(chelis_deep::parse_and_stamp_file("(def {type: false} f (lit {} 1))").is_err());
+    }
+
+    #[test]
     fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
-        let exprs =
-            chelis_deep::parse_and_stamp_file("(def {source: \"test\"} root (var {} value))")
-                .expect("typed Deep must parse and stamp");
+        let exprs = chelis_deep::parse_and_stamp_file("(def {doc: \"test\"} root (var {} value))")
+            .expect("typed Deep must parse and stamp");
         assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
 
-        let wire = wire_deep_expr(&exprs[0]);
+        let wire = wire_deep_expr(&exprs[0]).expect("finite Deep source must encode");
         let WireDeepExprKind::List { elements } = wire.kind else {
             panic!("a typed node must cross the wire as its canonical list shape");
         };
@@ -6257,7 +7855,7 @@ mod tests {
             panic!("def metadata must remain at wire element 1");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "source");
+        assert_eq!(entries[0].key, "doc");
         assert!(matches!(
             &entries[0].value.kind,
             WireDeepExprKind::Atom {
@@ -6330,7 +7928,7 @@ mod tests {
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -6359,19 +7957,23 @@ mod tests {
 
     fn hip_direct_arithmetic_dag(op: RiscOp, precision: chelis_types::types::Prim) -> Dag {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "lhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "rhs".into() },
             vec![],
             tensor_type(vec![4], precision),
             None,
         );
         let gradient = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "gradient".into(),
             },
@@ -6385,7 +7987,7 @@ mod tests {
             RiscOp::ExtremaAdjoint { .. } => vec![lhs, rhs, gradient],
             _ => vec![lhs, rhs],
         };
-        let result = dag.add_node(op, inputs, tensor_type(vec![4], precision), None);
+        let result = dag.add_node(decl, op, inputs, tensor_type(vec![4], precision), None);
         dag.add_root(result);
         dag
     }
@@ -6442,23 +8044,15 @@ mod tests {
     }
 
     #[test]
-    fn hip_seam_rejects_unimplemented_direct_arithmetic_cells_with_issue_1306() {
+    fn hip_direct_arithmetic_accepts_non_metal_issue_1306_residuals() {
         for precision in [
             chelis_types::types::Prim::Int8,
             chelis_types::types::Prim::Int16,
             chelis_types::types::Prim::Int32,
             chelis_types::types::Prim::Int64,
         ] {
-            let error =
-                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
-                    .expect_err("HIP integer subtraction needs a device trap channel");
-            assert!(
-                error.errors[0]
-                    .message
-                    .contains("unimplemented chelis#1306:"),
-                "{}",
-                error.errors[0].message
-            );
+            reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(RiscOp::Sub, precision))
+                .expect("HIP checked integer subtraction now has a device trap channel");
         }
 
         for precision in [
@@ -6474,15 +8068,8 @@ mod tests {
                     operand: ExtremaOperand::Left,
                 },
             ] {
-                let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
-                    .expect_err("HIP narrow-float direct arithmetic is not implemented");
-                assert!(
-                    error.errors[0]
-                        .message
-                        .contains("unimplemented chelis#1306:"),
-                    "{}",
-                    error.errors[0].message
-                );
+                reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(op, precision))
+                    .expect("HIP narrow-float direct arithmetic now has exact kernels");
             }
         }
 
@@ -6493,28 +8080,36 @@ mod tests {
             }],
         };
         for precision in [
-            chelis_types::types::Prim::Int32,
             chelis_types::types::Prim::F16,
+            chelis_types::types::Prim::Bf16,
         ] {
-            let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
-                fused_sub.clone(),
-                precision,
-            ))
-            .expect_err("fused subtraction inherits the direct target disposition");
-            assert!(
-                error.errors[0]
-                    .message
-                    .contains("unimplemented chelis#1306:"),
-                "{}",
-                error.errors[0].message
-            );
+            reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(fused_sub.clone(), precision))
+                .expect("fused narrow-float subtraction is admitted");
         }
+    }
+
+    #[test]
+    fn hip_direct_arithmetic_keeps_unrelated_narrow_float_compute_typed_rejected() {
+        let error = reject_unsupported_hip_ops(&hip_direct_arithmetic_dag(
+            RiscOp::Add,
+            chelis_types::types::Prim::F16,
+        ))
+        .expect_err("shipping direct arithmetic must not silently admit every narrow-float op");
+        assert!(
+            error.errors[0]
+                .message
+                .contains("unimplemented chelis#729:"),
+            "{}",
+            error.errors[0].message
+        );
     }
 
     #[test]
     fn hip_sparse_gather_is_supported_with_integer_indices() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -6523,6 +8118,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -6531,6 +8127,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -6542,39 +8139,34 @@ mod tests {
     }
 
     #[test]
-    fn hip_rejects_count_with_issue_1291_receipt() {
+    fn hip_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Count { axes: vec![1] },
             vec![input],
             tensor_type(vec![2], chelis_types::types::Prim::Int64),
             None,
         );
 
-        let error = reject_unsupported_hip_ops(&dag)
-            .expect_err("HIP must reject Count until its dedicated kernel lands");
-        let message = &error.errors[0].message;
-        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
-        assert!(
-            message.contains("count") && message.contains("--target c"),
-            "{message}"
-        );
-        assert_eq!(
-            error.errors[0].kind(),
-            chelis_vocab::DiagnosticKind::UnsupportedFeature
-        );
+        reject_unsupported_hip_ops(&dag)
+            .expect("HIP must admit Count to its dedicated tensor-entry kernel");
     }
 
     #[test]
     fn hip_seam_accepts_input_axis_expand_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -6583,6 +8175,7 @@ mod tests {
             None,
         );
         let witness = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "witness".into(),
             },
@@ -6591,6 +8184,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -6610,7 +8204,9 @@ mod tests {
     #[test]
     fn hip_seam_rejects_node_valued_expand_with_issue_1298_receipt() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -6619,6 +8215,7 @@ mod tests {
             None,
         );
         let size = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "size".into(),
             },
@@ -6627,6 +8224,7 @@ mod tests {
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -6649,7 +8247,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_float_indices_with_deciding_atom() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -6658,6 +8258,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -6666,6 +8267,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -6681,7 +8283,9 @@ mod tests {
     #[test]
     fn hip_internal_one_hot_rejection_names_specialization_invariant() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 4 },
             vec![],
             tensor_type(vec![2, 4], chelis_types::types::Prim::F32),
@@ -6697,13 +8301,16 @@ mod tests {
     #[test]
     fn hip_shape_rejection_names_the_target_authority() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let shape = dag.add_node(
+            decl,
             RiscOp::Shape { axis: 0 },
             vec![input],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
@@ -6719,7 +8326,9 @@ mod tests {
     #[test]
     fn hip_sparse_gather_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -6728,6 +8337,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int64).precision,
                 0.0,
@@ -6737,6 +8347,7 @@ mod tests {
             None,
         );
         let gather = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 0 },
             vec![values, indices],
             tensor_type(vec![4, 2], chelis_types::types::Prim::F32),
@@ -6755,7 +8366,9 @@ mod tests {
     #[test]
     fn hip_sparse_scatter_add_rejects_non_load_integer_index_producer() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -6764,6 +8377,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::synth_const(
                 tensor_type(vec![4], chelis_types::types::Prim::Int32).precision,
                 0.0,
@@ -6773,6 +8387,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -6781,6 +8396,7 @@ mod tests {
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F32),
@@ -6807,13 +8423,16 @@ mod tests {
     fn reduce_window_node_dag(out_dims: Vec<DimInfo>, window: Vec<usize>) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![2, 8], chelis_types::types::Prim::F32),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: window,
@@ -6915,13 +8534,16 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     fn reduce_window_dag_with_precision(prec: chelis_types::types::Prim) -> Dag {
         use chelis_ir::dag::ReduceWindowKind;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![1, 1, 4, 4], prec),
             None,
         );
         let rw = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2, 2],
@@ -6966,11 +8588,10 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             .expect("f32 reduce_window must be allowed");
     }
 
-    // --- reduce_window: HIP build rejects the node cleanly (no todo! panic) ---
+    // --- reduce_window extrema: HIP build returns the #2339 typed fence ---
     //
-    // HIP windowed-reduction codegen is excluded by [05-RWIN-2].
-    // The build must reject a `ReduceWindow` node with a clean
-    // `unsupported_feature` error before it reaches the launch-emit `todo!`.
+    // The build must reject an inexact `ReduceWindow` extrema node with a
+    // typed `unsupported_feature` receipt before it reaches device codegen.
     #[test]
     fn hip_rejects_reduce_window_node_with_clean_message() {
         let dag = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
@@ -6981,7 +8602,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             message.contains("reduce_window") && message.contains("--target hip"),
             "unexpected message: {message}"
         );
-        assert!(message.contains("deliberate [05-RWIN-2]:"));
+        assert!(message.contains("unimplemented chelis#2339:"));
         assert_eq!(
             err.errors[0].kind(),
             chelis_vocab::DiagnosticKind::UnsupportedFeature
@@ -6989,23 +8610,27 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     }
 
     #[test]
-    fn hip_rejects_reduce_window_grad_with_the_same_target_authority() {
+    fn hip_rejects_reduce_window_extrema_grad_with_issue_2339_authority() {
         use chelis_ir::dag::ReduceWindowKind;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             tensor_type(vec![3], chelis_types::types::Prim::F32),
             None,
         );
         let grad = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: ReduceWindowKind::Max,
                 window_shape: vec![2],
@@ -7020,8 +8645,8 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         let err = reject_unsupported_hip_ops(&dag)
             .expect_err("HIP must reject reduce_window adjoint codegen");
         let message = &err.errors[0].message;
-        assert!(message.contains("ReduceWindowGrad"), "{message}");
-        assert!(message.contains("deliberate [05-RWIN-2]:"), "{message}");
+        assert!(message.contains("reduce_window_max adjoint"), "{message}");
+        assert!(message.contains("unimplemented chelis#2339:"), "{message}");
     }
 
     /// chelis#616: a runtime (node-valued) reshape target extent is C-only;
@@ -7030,7 +8655,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_rejects_node_valued_reshape_target_with_clean_message() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             tensor_type(vec![4], chelis_types::types::Prim::F32),
@@ -7039,12 +8666,14 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
         // A rank-0 integer Load, not a `Shape` read: the seam blanket-rejects
         // `RiscOp::Shape` first, and this test must exercise the reshape arm.
         let extent = dag.add_node(
+            decl,
             RiscOp::Load { name: "m".into() },
             vec![],
             tensor_type(vec![], chelis_types::types::Prim::Int32),
             None,
         );
         dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Node(1)],
             },
@@ -7069,7 +8698,9 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn hip_sparse_scatter_f64_rejection_names_atomic_blocker() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -7078,6 +8709,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -7086,6 +8718,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -7094,6 +8727,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
             None,
         );
         let scatter = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             tensor_type(vec![3, 2], chelis_types::types::Prim::F64),
@@ -7143,7 +8777,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     fn compile_source_arrow_form_def_appears_in_manifest() {
         // Issue #947: arrow-form `def n() -> T = body` must appear in
         // the production manifest so eval_compiled can surface it.
-        let source = "def n() -> int32 = add(cast(20, int32), cast(22, int32))\n";
+        let source = "def n() -> i32 = add(cast(20, i32), cast(22, i32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
             compiled
@@ -7368,11 +9002,17 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             artifact.inputs
         );
         assert_eq!(artifact.outputs.len(), 1, "{:?}", artifact.outputs);
-        let input_dims: Vec<Option<usize>> =
-            artifact.inputs[0].dims.iter().map(|d| d.size).collect();
+        let input_dims: Vec<Option<usize>> = artifact.inputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(input_dims, vec![Some(2)], "main's input is tensor[2, f32]");
-        let output_dims: Vec<Option<usize>> =
-            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        let output_dims: Vec<Option<usize>> = artifact.outputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(output_dims, vec![Some(2)]);
     }
 
@@ -7381,8 +9021,8 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     // actually computes, and the numeric value proves the correct library def
     // is invoked (identity `consume`, so `main([3, 4]) == [3, 4]`). The runtime
     // numeric-through-cc leg is the manual oracle's job (it needs
-    // CHELIS_RUNTIME_DIR + a C toolchain); this gate proves eval and the
-    // compiled interface agree without either.
+    // a C toolchain); this gate proves eval and the
+    // compiled interface agree without one.
     #[test]
     fn in_context_compiled_metadata_agrees_with_eval() {
         let (_dir, root) = copy_drop_context_fixture();
@@ -7396,7 +9036,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let eval_result = eval_in_context_with_bindings(&context, source, bindings)
@@ -7419,7 +9059,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         };
         assert_eq!(
             data,
-            crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            wire_values::storage_f32(vec![3.0, 4.0]),
             "identity consume(x) == x"
         );
 
@@ -7430,8 +9070,11 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             1,
             "compiled output arity agrees with the single eval root"
         );
-        let output_dims: Vec<Option<usize>> =
-            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        let output_dims: Vec<Option<usize>> = artifact.outputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(
             output_dims,
             vec![Some(2)],
@@ -7446,7 +9089,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "live".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7474,14 +9117,14 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         bindings.insert(
             "y".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7525,7 +9168,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7548,14 +9191,14 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         bindings.insert(
             "y".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let source = "type Pair =\n\
@@ -7602,7 +9245,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         let source = "type Pair =\n\
@@ -7783,12 +9426,12 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
     #[test]
     fn compile_source_accepts_typed_param_named_let() {
         let source = r#"
-def id(let: int64) -> int64 = let
+def id(let: i64) -> i64 = let
 "#;
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         let deep = chelis_deep::printer::print_canonical(compiled.checked().exprs());
-        assert!(deep.contains("^{:type (t-prim {} int64)} let"));
+        assert!(deep.contains("^{:type (t-prim {} i64)} let"));
     }
 
     #[test]
@@ -7818,7 +9461,7 @@ def id(let: int64) -> int64 = let
         let source = r#"
 type Jsonish =
   | JsonNull
-  | JsonInt(int64)
+  | JsonInt(i64)
   | JsonString(string)
   | JsonArray(List[Jsonish])
 
@@ -7830,7 +9473,7 @@ def describe(value: Jsonish) -> string =
     | JsonArray(items) => to_string(len(items))
   }
 
-sample = JsonArray([JsonString("hi"), JsonInt(cast(3, int64))])
+sample = JsonArray([JsonString("hi"), JsonInt(cast(3, i64))])
 result = describe(sample)
 "#;
 
@@ -7877,7 +9520,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![2, 3],
-                    data: crate::schema::TensorElements::F32(vec![0.0; 6]),
+                    data: wire_values::storage_f32(vec![0.0; 6]),
                 },
             )]),
         })
@@ -7889,21 +9532,21 @@ dims = (rank(x), shape(x, 1), numel(x))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.0")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.1")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 3 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(3)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.2")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(6)))
         );
     }
 
@@ -7916,7 +9559,10 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![1],
-                    data: crate::schema::TensorElements::F16(vec![1.5]),
+                    data: serde_json::from_value(
+                        serde_json::json!({"dtype":"f16","bits":["3e00"]}),
+                    )
+                    .unwrap(),
                 },
             )]),
         })
@@ -7945,7 +9591,7 @@ dims = (rank(x), shape(x, 1), numel(x))
             source: r#"
 parsed = match to_int(" 42 ") with {
   | Some(n) => n
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
 
 cleaned = string_trim("  ckpt-42.safetensors  ")
@@ -7954,7 +9600,7 @@ matches_path = and(
   string_starts_with(cleaned, "ckpt-"),
   string_contains(cleaned, "42")
 )
-result = if matches_path then parsed else cast(0, int64)
+result = if matches_path then parsed else cast(0, i64)
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -7966,7 +9612,7 @@ result = if matches_path then parsed else cast(0, int64)
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("result")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 42 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(42)))
         );
         assert_eq!(result.transcript, vec!["ckpt-42.safetensors".to_string()]);
     }
@@ -7976,9 +9622,9 @@ result = if matches_path then parsed else cast(0, int64)
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-bits = bitxor(bitand(cast(7, int64), cast(3, int64)), shl(cast(1, int64), cast(2, int64)))
-rem = mod(cast(17, int64), cast(5, int64))
-shifted = shr(cast(8, int64), cast(1, int64))
+bits = bitxor(bitand(cast(7, i64), cast(3, i64)), shl(cast(1, i64), cast(2, i64)))
+rem = mod(cast(17, i64), cast(5, i64))
+shifted = shr(cast(8, i64), cast(1, i64))
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -7990,21 +9636,21 @@ shifted = shr(cast(8, int64), cast(1, int64))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("bits")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 7 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(7)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("rem")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("shifted")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 4 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(4)))
         );
     }
 
@@ -8013,10 +9659,10 @@ shifted = shr(cast(8, int64), cast(1, int64))
         let result = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-def sum_to(n: int64) -> int64 =
-  if lte(n, cast(0, int64)) then cast(0, int64) else add(n, sum_to(sub(n, cast(1, int64))))
+def sum_to(n: i64) -> i64 =
+  if lte(n, cast(0, i64)) then cast(0, i64) else add(n, sum_to(sub(n, cast(1, i64))))
 
-value = sum_to(cast(3, int64))
+value = sum_to(cast(3, i64))
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -8028,7 +9674,7 @@ value = sum_to(cast(3, int64))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("value")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(6)))
         );
     }
 
@@ -8041,9 +9687,9 @@ module Demo.Main
 
 parsed = match to_int("7") with {
   | Some(value) => value
-  | None => cast(0, int64)
+  | None => cast(0, i64)
 }
-label = if gt(parsed, cast(0, int64)) then "ready" else "waiting"
+label = if gt(parsed, cast(0, i64)) then "ready" else "waiting"
 view = print(label)
 "#
             .to_string(),
@@ -8067,11 +9713,11 @@ view = print(label)
             source_kind: SourceKind::Surf,
             source: r#"
 type Date =
-  | Date { year: int64, month: int64, day: int64 }
+  | Date { year: i64, month: i64, day: i64 }
 
-mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+mk_date = Date { year: cast(2024, i64), month: cast(2, i64), day: cast(29, i64) }
 year = mk_date.year
-label = if eq(year, cast(2024, int64)) then "leap" else "plain"
+label = if eq(year, cast(2024, i64)) then "leap" else "plain"
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -8083,7 +9729,7 @@ label = if eq(year, cast(2024, int64)) then "leap" else "plain"
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("year")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2024 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2024)))
         );
         assert!(
             result
@@ -8100,9 +9746,9 @@ label = if eq(year, cast(2024, int64)) then "leap" else "plain"
             source_kind: SourceKind::Surf,
             source: r#"
 type Date =
-  | Date { year: int64, month: int64, day: int64 }
+  | Date { year: i64, month: i64, day: i64 }
 
-mk_date = Date { year: cast(2024, int64), month: cast(2, int64), day: cast(29, int64) }
+mk_date = Date { year: cast(2024, i64), month: cast(2, i64), day: cast(29, i64) }
 year = mk_date.year
 "#
             .to_string(),
@@ -8143,7 +9789,7 @@ type Jsonish =
   | JsonObject(Dict[string, Jsonish])
 
 type Tokenizer =
-  | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
+  | BpeTokenizer(Dict[string, i64], Dict[string, i64], Dict[i64, string], i64)
 
 def parse_line(line: string) -> Option[List[string]] =
   Some([])
@@ -8159,7 +9805,7 @@ def json_string(value: Option[Jsonish]) -> Option[string] =
   }
 
 def load_tokenizer(path: string) -> Option[Tokenizer] =
-  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, int64)))
+  Some(BpeTokenizer(dict_of([]), dict_of([]), dict_of([]), cast(0, i64)))
 "#,
         )
         .expect("compile");
@@ -8236,7 +9882,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         // `b` is intentionally omitted so that evaluating root `b` fails.
@@ -8300,6 +9946,20 @@ b: tensor[2, f32] = b
     }
 
     #[test]
+    fn c_manifest_evaluation_retains_its_value_root_ingress() {
+        let source = "input: tensor[2, f32] = input\n";
+        let compiled = compile_source_for_target(SourceKind::Surf, source, Target::C).unwrap();
+        assert!(compiled.host_execution.is_none());
+        assert!(!compiled.dag.roots().is_empty());
+        assert!(
+            compiled
+                .named_roots
+                .get(&crate::pipeline::IrName::new("input"))
+                .is_some()
+        );
+    }
+
+    #[test]
     fn manifested_host_root_inherits_only_its_top_level_input_dependency() {
         let compiled = compile_source_for_target(
             SourceKind::Surf,
@@ -8323,7 +9983,7 @@ b: tensor[2, f32] = b
 
     #[test]
     fn unavailable_owed_root_fails_with_named_lane_and_authority() {
-        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, int32)\n")
+        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, i32)\n")
             .expect("compile fault-injection fixture");
         let mut manifest = compiled.manifest().clone();
         let mut unavailable = manifest.entries[0].clone();
@@ -8362,7 +10022,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
 
@@ -8416,17 +10076,17 @@ b: tensor[2, f32] = b
     fn eval_rejects_negative_shape_axis_with_signed_diagnostic() {
         // The -1 is laundered through runtime arithmetic (`0 - 1`) so
         // the checker cannot see it and the runtime `shape` arm owns
-        // the rejection. The original form `cast(-1, int32)` stopped
+        // the rejection. The original form `cast(-1, i32)` stopped
         // exercising this path with issue #308: the desugarer now
         // folds the sign into the literal (spec §5.6 position 4), so
         // the binding takes the same tensor lane the positive-literal
-        // form `cast(1, int32)` always took, and the axis arrives as a
+        // form `cast(1, i32)` always took, and the axis arrives as a
         // rank-0 tensor rather than a host int scalar.
         let error = eval(EvalRequest {
             source_kind: SourceKind::Surf,
             source: r#"
-axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, int32)))
-bad = shape(scalar_to_tensor(cast(3, int64)), axis)
+axis = tensor_to_scalar(scalar_to_tensor(cast(0 - 1, i32)))
+bad = shape(scalar_to_tensor(cast(3, i64)), axis)
 "#
             .to_string(),
             bindings: BTreeMap::new(),
@@ -8450,6 +10110,7 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
     fn wire_dag_at_version(version: u32) -> WireDag {
         WireDag {
             schema_version: version,
+            declarations: Vec::new(),
             nodes: Vec::new(),
             roots: Vec::new(),
         }

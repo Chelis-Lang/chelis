@@ -106,9 +106,10 @@ fn eval_process_run_missing_binary_fails_cleanly() {
     );
 }
 
-/// Passing a non-list value where `args: List[String]` is expected is a clean
-/// evaluation error, not a panic. Mirrors the missing-binary failure on the
-/// argument-shape axis.
+/// Passing a non-list value where `args: List[String]` is expected is a type
+/// error the checker reports before evaluation (chelis#2524: [05-OP-38] makes
+/// the signature exact), never a panic. Mirrors the missing-binary failure on
+/// the argument-shape axis.
 #[test]
 fn eval_process_run_rejects_non_list_args() {
     let output = Command::cargo_bin("chelis")
@@ -121,8 +122,8 @@ fn eval_process_run_rejects_non_list_args() {
         .clone();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("expected list arg"),
-        "expected a clean list-arg error, got stderr={stderr}"
+        stderr.contains("type mismatch: List string vs string"),
+        "expected the checker's argument-type error, got stderr={stderr}"
     );
     assert!(
         !stderr.contains("panicked"),

@@ -22,7 +22,6 @@ use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,64 +72,6 @@ fn write_temp_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
 
 fn metal_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_metal::runtime_dir())
-}
-
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-metal manual tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
 }
 
 fn require_clangxx() {
@@ -261,7 +202,8 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         "chelis_metal_runtime.h",
         &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h")).expect("metal runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.mm", &result.mm_source);
     write_temp_file(
         tmp.path(),
@@ -277,8 +219,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
     compile_cmd.arg(tmp.path().join("driver.mm"));
     compile_cmd.arg(tmp.path().join("model.mm"));
     compile_cmd.arg(format!("-I{}", tmp.path().display()));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.args(&result.link_flags);
     compile_cmd.arg("-o");
     compile_cmd.arg(&bin_path);
@@ -355,9 +296,22 @@ fn assert_close(actual: &[f32], expected: &[f32], abs_tol: f32, rel_tol: f32, la
 #[ignore]
 fn m6_elementwise_add_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -373,9 +327,22 @@ fn m6_elementwise_add_matches_evaluator() {
 #[ignore]
 fn m6_elementwise_mul_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
     dag.add_root(s);
 
     let inputs = vec![
@@ -391,8 +358,15 @@ fn m6_elementwise_mul_matches_evaluator() {
 #[ignore]
 fn m6_unary_neg_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.5, -2.5, 0.0, 3.25])];
@@ -405,8 +379,15 @@ fn m6_unary_neg_matches_evaluator() {
 #[ignore]
 fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
     dag.add_root(e);
 
     let inputs = vec![TestInput::new("a", &[4], &[0.0, 0.5, 1.0, 1.5])];
@@ -420,8 +401,15 @@ fn m6_unary_exp_matches_evaluator_with_fastmath_tolerance() {
 #[ignore]
 fn m6_unary_sqrt_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let s = dag.add_node(RiscOp::Sqrt, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Sqrt, vec![a], vec_f32(4), None);
     dag.add_root(s);
 
     let inputs = vec![TestInput::new("a", &[4], &[1.0, 4.0, 9.0, 16.0])];
@@ -435,12 +423,31 @@ fn m6_unary_sqrt_matches_evaluator() {
 fn m6_chained_elementwise_matches_evaluator() {
     // exp(add(mul(a, b), c)) — three kernels, single output.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8), None);
-    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let c = dag.add_node(
+        decl,
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let inputs = vec![
@@ -458,8 +465,16 @@ fn m6_chained_elementwise_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_sum_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -490,8 +505,16 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
     // n=50 returned 32, n=100 returned 64, n=200 returned 128.
     for &n in &[33usize, 50, 100, 200, 333, 1000] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
         let s = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -521,8 +544,16 @@ fn m6_full_axis_sum_reduction_non_power_of_two_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_max_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let m = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
@@ -544,8 +575,16 @@ fn m6_full_axis_max_reduction_matches_evaluator() {
 #[ignore]
 fn m6_full_axis_min_reduction_matches_evaluator() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(64), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(64),
+        None,
+    );
     let m = dag.add_node(
+        decl,
         RiscOp::MinReduce { axis: 0 },
         vec![a],
         TensorType::scalar_f32(),
@@ -584,19 +623,23 @@ fn m6_tiled_matmul_matches_evaluator() {
     let k = 16usize;
     let n = 16usize;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(m, k),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(k, n),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(n),
@@ -606,6 +649,7 @@ fn m6_tiled_matmul_matches_evaluator() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(m),
@@ -614,8 +658,9 @@ fn m6_tiled_matmul_matches_evaluator() {
         tensor3_f32(m, k, n),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(m, k, n), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -672,18 +717,26 @@ fn m6_span_attributed_program_compiles_and_matches_evaluator() {
     // S4 oracle, but with shapes/ops that all hit the M2/M4 supported
     // surface so compile-success is meaningful.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(8),
         Some("op.load_a".into()),
     );
-    let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(8), Some("op.neg".into()));
+    let neg = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(8),
+        Some("op.neg".into()),
+    );
     {
         let node = dag.node_mut(neg).unwrap();
         node.merged_spans = vec!["op.merged_b".into(), "op.merged_a".into()];
     }
-    let exp = dag.add_node(RiscOp::Exp, vec![neg], vec_f32(8), None);
+    let exp = dag.add_node(decl, RiscOp::Exp, vec![neg], vec_f32(8), None);
     {
         // merged_spans only (no canonical) — the defensive case the
         // emitter must still handle correctly.
@@ -811,7 +864,8 @@ int main(void) {{
             &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h"))
                 .expect("metal runtime header"),
         );
-        copy_runtime_artifacts(tmp.path());
+        let staged = chelis_runtime_bundle::stage(tmp.path())
+            .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
         write_temp_file(tmp.path(), "model.mm", &result.mm_source);
         write_temp_file(
             tmp.path(),
@@ -827,8 +881,7 @@ int main(void) {{
         compile_cmd.arg(tmp.path().join("driver.mm"));
         compile_cmd.arg(tmp.path().join("model.mm"));
         compile_cmd.arg(format!("-I{}", tmp.path().display()));
-        compile_cmd.arg(format!("-L{}", tmp.path().display()));
-        compile_cmd.arg("-lchelis_runtime");
+        compile_cmd.arg(&staged.archive);
         compile_cmd.args(&result.link_flags);
         compile_cmd.arg("-o");
         compile_cmd.arg(&bin_path);
@@ -877,13 +930,16 @@ int main(void) {{
     const N: usize = 4;
     for (prec, value, expected_bits, func_name) in cases {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(prec, value),
             vec![],
             vec_prec(N, prec),
             None,
         );
         let stored = dag.add_node(
+            decl,
             RiscOp::Store { name: "out".into() },
             vec![c],
             vec_prec(N, prec),
@@ -927,8 +983,16 @@ fn mat_f32(r: usize, c: usize) -> TensorType {
 #[ignore]
 fn m6_pad_1d_zero_fill_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
@@ -948,8 +1012,16 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
 #[ignore]
 fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::pad(
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(1))],
             chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
@@ -969,13 +1041,16 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
 #[ignore]
 fn m6_pad_2d_asymmetric_matches_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(2, 3),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![
@@ -1002,8 +1077,16 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
 #[ignore]
 fn m6_shrink_1d_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
@@ -1022,13 +1105,16 @@ fn m6_shrink_1d_matches_evaluator() {
 #[ignore]
 fn m6_shrink_2d_matches_evaluator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![
                 (chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(3)),
@@ -1056,8 +1142,16 @@ fn m6_shrink_2d_matches_evaluator() {
 #[ignore]
 fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(2))],
@@ -1067,6 +1161,7 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(6))],
         },
@@ -1085,4 +1180,310 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
         REL_TOL,
         "pad then shrink roundtrip",
     );
+}
+
+// ===========================================================================
+// chelis#1291: dedicated [05-OP-29] Count kernel, GPU == evaluator exactly.
+//
+// The C lane's agreement with the evaluator is #1287's core receipt
+// (`scripts/dtype_count_oracle.py`), so exact agreement with the evaluator
+// here is exact agreement with compiled C as well. Every test is part of the
+// manual hardware gate:
+//
+//     cargo test -p chelis-backend-metal --test gpu_correctness count_ -- --ignored --test-threads=1
+// ===========================================================================
+
+fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let mask = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "mask".into(),
+        },
+        vec![],
+        input,
+        None,
+    );
+    let count = dag.add_node(decl, RiscOp::Count { axes }, vec![mask], output, None);
+    dag.add_root(count);
+    dag
+}
+
+fn bool_tensor(dims: &[usize]) -> TensorType {
+    TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision: Prim::Bool,
+    }
+}
+
+fn i64_tensor(dims: &[usize]) -> TensorType {
+    TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision: Prim::Int64,
+    }
+}
+
+/// Deterministic mask: element `i` is true when `(i * 7 + 3) % 5 < 2`.
+fn count_mask(len: usize) -> Vec<bool> {
+    (0..len).map(|i| (i * 7 + 3) % 5 < 2).collect()
+}
+
+/// Driver for one `Bool8` input and one int64 output. `bytes` are written
+/// verbatim into the `CHELIS_DTYPE_BOOL` allocation (one byte per element),
+/// so a test can also plant a byte outside {0, 1}.
+fn build_count_driver_mm(func_name: &str, shape: &[usize], bytes: &[u8]) -> String {
+    let mut body = Vec::new();
+    let (ndim, dims) = c_shape(shape);
+    if ndim == 0 {
+        body.push(
+            "    chelis_tensor *input_storage[1] = { chelis_alloc(0, NULL, CHELIS_DTYPE_BOOL) };"
+                .to_string(),
+        );
+    } else {
+        let dims = dims
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        body.push(format!("    int64_t shape_0[{ndim}] = {{ {dims} }};"));
+        body.push(
+            "    chelis_tensor *input_storage[1] = { chelis_alloc(1, shape_0, CHELIS_DTYPE_BOOL) };"
+                .replace("chelis_alloc(1,", &format!("chelis_alloc({ndim},")),
+        );
+    }
+    body.push(
+        "    chelis_tensor_write *guard = chelis_tensor_begin_write(input_storage[0]);".to_string(),
+    );
+    body.push("    chelis_write_view view = chelis_tensor_write_view(guard);".to_string());
+    for (idx, byte) in bytes.iter().enumerate() {
+        body.push(format!("    ((uint8_t *)view.data)[{idx}] = {byte};"));
+    }
+    body.push("    chelis_tensor_end_write(guard);".to_string());
+    body.push("    chelis_tensor *outputs[1] = {0};".to_string());
+    body.push(format!("    {func_name}(input_storage, 1, outputs, 1);"));
+    body.push(
+        "    if (outputs[0] == NULL) { fprintf(stderr, \"output 0 is NULL\\n\"); return 2; }"
+            .to_string(),
+    );
+    body.push(
+        "    chelis_read_view output_view = chelis_tensor_read_view(outputs[0]);".to_string(),
+    );
+    body.push("    for (int i = 0; i < chelis_tensor_numel(outputs[0]); i++) {".to_string());
+    body.push("        if (i > 0) printf(\" \");".to_string());
+    body.push(
+        "        printf(\"%lld\", (long long)((const int64_t *)output_view.data)[i]);".to_string(),
+    );
+    body.push("    }".to_string());
+    body.push("    printf(\"\\n\");".to_string());
+    body.push("    chelis_tensor_release(outputs[0]);".to_string());
+    body.push("    chelis_tensor_release(input_storage[0]);".to_string());
+    format!(
+        r#"#import <Foundation/Foundation.h>
+#include "chelis_runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in,
+                            chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+    @autoreleasepool {{
+{body}
+    }}
+    return 0;
+}}
+"#,
+        body = body.join("\n")
+    )
+}
+
+/// Build, link, and run a Count DAG over raw `Bool8` bytes. `Ok` carries
+/// the int64 output; `Err` carries the failed binary's stderr so a test
+/// can assert on the typed trap text.
+fn compile_and_run_count(
+    dag: &Dag,
+    func_name: &str,
+    shape: &[usize],
+    bytes: &[u8],
+) -> Result<Vec<i64>, String> {
+    require_clangxx();
+    let result = codegen_metal(dag, func_name);
+    assert_eq!(result.output_labels.len(), 1);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let metal_rt = metal_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_metal_runtime.h",
+        &fs::read_to_string(metal_rt.join("chelis_metal_runtime.h")).expect("metal runtime header"),
+    );
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    write_temp_file(tmp.path(), "model.mm", &result.mm_source);
+    write_temp_file(
+        tmp.path(),
+        "driver.mm",
+        &build_count_driver_mm(func_name, shape, bytes),
+    );
+
+    let bin_path = tmp.path().join("metal_count_bin");
+    let mut compile_cmd = Command::new("xcrun");
+    compile_cmd.args(["-sdk", "macosx", "clang++"]);
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("driver.mm"));
+    compile_cmd.arg(tmp.path().join("model.mm"));
+    compile_cmd.arg(format!("-I{}", tmp.path().display()));
+    compile_cmd.arg(&staged.archive);
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run clang++");
+    assert!(
+        compile.status.success(),
+        "clang++ failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.mm_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run metal binary");
+    if !run.status.success() {
+        return Err(format!(
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(run.stdout).expect("utf8 stdout");
+    Ok(stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|token| token.parse::<i64>().expect("parse output i64"))
+        .collect())
+}
+
+fn evaluator_count(dag: &Dag, shape: &[usize], mask: &[bool]) -> Vec<i64> {
+    let value = TensorValue::from_vec(
+        shape.to_vec(),
+        mask.iter().map(|bit| f64::from(u8::from(*bit))).collect(),
+    );
+    let roots = dag.roots();
+    let outputs =
+        eval_tensor_roots_with_strict(dag, roots, |name| (name == "mask").then(|| value.clone()))
+            .expect("evaluator failure on Metal Count DAG");
+    outputs[&roots[0]]
+        .to_f64_lossy_vec()
+        .iter()
+        .map(|&v| v as i64)
+        .collect()
+}
+
+fn assert_count_gpu_matches_eval_exactly(
+    dag: &Dag,
+    func_name: &str,
+    shape: &[usize],
+    mask: &[bool],
+) {
+    let bytes = mask.iter().map(|bit| u8::from(*bit)).collect::<Vec<_>>();
+    let actual = compile_and_run_count(dag, func_name, shape, &bytes)
+        .unwrap_or_else(|failure| panic!("{func_name}: Metal binary failed:\n{failure}"));
+    let expected = evaluator_count(dag, shape, mask);
+    assert_eq!(
+        actual, expected,
+        "{func_name}: GPU Count must equal the evaluator exactly"
+    );
+}
+
+#[test]
+#[ignore]
+fn count_positional_multi_axis_gpu_matches_eval() {
+    let dag = count_dag(bool_tensor(&[2, 3, 5]), vec![2, 0], i64_tensor(&[3]));
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_positional_multi_axis",
+        &[2, 3, 5],
+        &count_mask(30),
+    );
+}
+
+#[test]
+#[ignore]
+fn count_named_fixed_axes_gpu_matches_eval() {
+    let dag = count_dag(
+        TensorType {
+            dims: vec![
+                DimInfo::Named("batch".into(), Some(2)),
+                DimInfo::Named("seq".into(), Some(4)),
+                DimInfo::Named("feature".into(), Some(3)),
+            ],
+            precision: Prim::Bool,
+        },
+        vec![1],
+        TensorType {
+            dims: vec![
+                DimInfo::Named("batch".into(), Some(2)),
+                DimInfo::Named("feature".into(), Some(3)),
+            ],
+            precision: Prim::Int64,
+        },
+    );
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_named_fixed_axes",
+        &[2, 4, 3],
+        &count_mask(24),
+    );
+}
+
+#[test]
+#[ignore]
+fn count_empty_selected_extent_gpu_is_zero() {
+    let dag = count_dag(bool_tensor(&[2, 0, 5]), vec![1], i64_tensor(&[2, 5]));
+    let actual = compile_and_run_count(&dag, "count_empty_selected_extent", &[2, 0, 5], &[])
+        .unwrap_or_else(|failure| panic!("Metal binary failed:\n{failure}"));
+    assert_eq!(actual, vec![0; 10]);
+    assert_eq!(evaluator_count(&dag, &[2, 0, 5], &[]), vec![0; 10]);
+}
+
+#[test]
+#[ignore]
+fn count_odd_leaf_count_gpu_matches_eval() {
+    let dag = count_dag(bool_tensor(&[3, 7]), vec![1], i64_tensor(&[3]));
+    assert_count_gpu_matches_eval_exactly(&dag, "count_odd_leaf_count", &[3, 7], &count_mask(21));
+}
+
+#[test]
+#[ignore]
+fn count_large_leaf_count_gpu_matches_eval() {
+    // 4097 leaves per output element: an odd count deeper than any
+    // power-of-two split, so the explicit balanced-tree stack is exercised
+    // well past its first frames.
+    let dag = count_dag(bool_tensor(&[2, 4097]), vec![1], i64_tensor(&[2]));
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_large_leaf_count",
+        &[2, 4097],
+        &count_mask(2 * 4097),
+    );
+}
+
+#[test]
+#[ignore]
+fn count_input_with_a_non_bool_payload_traps_at_the_runtime_write_boundary() {
+    // A `Bool8` byte outside {0, 1} is not a member of the dtype. The
+    // runtime's `chelis_tensor_end_write` rejects it with a loud domain
+    // trap before the entry is ever called, which is why the kernel's own
+    // status-code-1 check is a backstop rather than the primary guard: no
+    // runtime-produced tensor can reach the kernel with such a byte.
+    let dag = count_dag(bool_tensor(&[4]), vec![0], i64_tensor(&[]));
+    let failure = compile_and_run_count(&dag, "count_non_bool_payload", &[4], &[1, 0, 2, 1])
+        .expect_err("a non-bool payload must trap instead of producing a count");
+    assert!(
+        failure.contains("Domain") && failure.contains("noncanonical byte 2"),
+        "expected the runtime Bool8 domain trap in:\n{failure}"
+    );
+    assert!(!failure.contains("count returned"), "{failure}");
 }

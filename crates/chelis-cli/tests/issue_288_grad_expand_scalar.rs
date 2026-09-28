@@ -6,8 +6,8 @@
 //! ```chelis
 //! module Repro.GradExpandConst
 //! def f(x: tensor[2, f32]) -> f32 = {
-//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))
-//!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
+//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))
+//!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
 //! ```
@@ -31,13 +31,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use chelis_backend_c::GeneratedHeader;
 use serde_json::Value;
 use tempfile::tempdir;
 
 const REPRO: &str = "module Repro.GradExpandConst\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int64))\n\
-  tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
+  k = insert(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i64))\n\
+  tensor_to_scalar(sum(mul(x, k), cast(0, i32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
 out = df(to_tensor([3.0, 4.0]))\n";
@@ -94,6 +95,39 @@ fn run_build_c(source: &str, stem: &str) -> (tempfile::TempDir, PathBuf, std::pr
         .output()
         .expect("run chelis build");
     (dir, kernel_c, output)
+}
+
+fn assert_exact_f_export(kernel_c: &Path) {
+    let emitted = fs::read_to_string(kernel_c).expect("emitted C kernel must exist");
+    let header_path = kernel_c.with_extension("h");
+    let header = fs::read_to_string(&header_path).expect("generated header must exist");
+    let generated = GeneratedHeader::parse(&header).expect("generated declaration metadata");
+    generated
+        .validate_source(&emitted)
+        .expect("generated declaration must match the emitted definition");
+    let declaration = generated
+        .declaration("f")
+        .expect("authored `f` declaration");
+    assert_eq!(declaration.symbol(), "chelis_fn_66");
+    assert_eq!(
+        declaration.declaration(),
+        "float chelis_fn_66(chelis_tensor* x);"
+    );
+    assert!(
+        emitted.contains("chelis_fn_66__chelis_owned_body("),
+        "the public declaration and owned-body call must share the canonical identity"
+    );
+
+    let stale_header = header.replace("chelis_fn_66", "f");
+    assert!(
+        GeneratedHeader::parse(&stale_header).is_err(),
+        "tampering with declaration bytes without its structural record must fail parsing"
+    );
+    let stale_source = emitted.replace("chelis_fn_66(", "f(");
+    assert!(
+        generated.validate_source(&stale_source).is_err(),
+        "a mutated emitted definition must fail agreement"
+    );
 }
 
 /// `chelis check` already passes today; pin it so a fix that
@@ -169,10 +203,5 @@ fn issue_288_build_c_emits_kernel() {
         "build --target c must succeed; stderr={}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let emitted = fs::read_to_string(&kernel_c).expect("emitted C kernel must exist");
-    assert!(
-        emitted.contains("f("),
-        "emitted C must define the gradient function `f`; got {} bytes",
-        emitted.len(),
-    );
+    assert_exact_f_export(&kernel_c);
 }

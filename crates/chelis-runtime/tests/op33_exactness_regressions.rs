@@ -198,11 +198,11 @@ fn integer_trace_balancing_avoids_spurious_overflow_but_traps_true_overflow() {
     for (case, diagnostic) in [
         (
             "trace-i32-overflow",
-            "numeric trap: overflow in trace at int32",
+            "numeric trap: overflow in trace at i32",
         ),
         (
             "trace-i64-overflow",
-            "numeric trap: overflow in trace at int64",
+            "numeric trap: overflow in trace at i64",
         ),
     ] {
         let output = child_output(test_name, case);

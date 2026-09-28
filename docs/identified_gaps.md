@@ -299,10 +299,11 @@ and Tier 2 lowering layers. M3b extends the IR-level BLAS specializer to
 symbolic and batched matmul when the operands have contiguous trailing
 matrix slices. The C backend emits runtime-sized `cblas_sgemm` calls,
 looping over batch slices for rank ≥ 3. The HIP backend now defaults to
-`hipblasSgemmStridedBatched` on uniformly strided batched layouts
-(Perf-F1, shipped) and retains the per-batch hipBLAS helper loop only as
-a fallback for broadcasted leading axes or otherwise non-uniform leading
-strides.
+typed `hipblasSgemmStridedBatched` after explicitly materializing BLAS
+operands into owned contiguous storage (Perf-F1, shipped). Broadcast
+views therefore use the strided helper after realization; the per-batch
+hipBLAS helper loop remains for forms outside the strided plan, including
+symbolic matrix dimensions.
 
 **Original observation:** Chelis's `matmul` was hard rank-2 at the
 type-checker level. PyTorch's canonical MHA form
@@ -336,14 +337,13 @@ emitters to carry runtime `DimExpr` sizes into BLAS calls.
 
 **Spec coverage:**
 - `spec/design/chelis_canonical_reference.md:438-445` documents
-  runtime-sized symbolic/batched BLAS as shipped behavior, with
-  `hipblasSgemmStridedBatched` now the HIP default on uniform layouts
-  and the helper loop retained only as the fallback for broadcasted /
-  non-uniform leading strides.
+  runtime-sized symbolic/batched BLAS as shipped behavior, with HIP
+  operand realization before typed strided-batched dispatch and the
+  helper loop retained for forms outside that plan.
 - `spec/design/phase1d_flattening.md:40-49` scopes the hipBLAS path to
   contiguous matrix slices and names the
-  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
-  structural test as the strided-batched-default lock.
+  `crates/chelis-backend-hip/tests/strided_batched_dispatch.rs`
+  structural test as the realize-then-strided lock.
 - `spec/design/chelis_phase2_plan.md:561` notes batched matmul
   remains correct via generic expand+mul+sum decomposition (i.e.,
   the rank-3+ case works numerically, just slowly).
@@ -357,12 +357,13 @@ emitters to carry runtime `DimExpr` sizes into BLAS calls.
 - **Addressed by M3b:** symbolic and batched matmul specialize to
   runtime-sized BLAS when trailing matrix slices are contiguous. The
   C backend loops over batch slices.
-- **Addressed by Perf-F1:** HIP defaults to
-  `hipblasSgemmStridedBatched` on uniformly strided batched layouts
-  and falls back to the per-batch helper loop only for broadcasted
-  leading axes or otherwise non-uniform leading strides. Locked by
-  `crates/chelis-backend-hip/tests/perf_f1_strided_batched_default.rs`
-  with exact-line matching; validated numerically by
+- **Addressed by Perf-F1:** HIP explicitly realizes BLAS operands into
+  owned contiguous storage, then defaults eligible `f32`/`f64` batched
+  forms to typed `hipblasSgemmStridedBatched`, including source broadcast
+  views. The per-batch helper loop remains for forms outside the strided
+  plan, including symbolic matrix dimensions. Locked by
+  `crates/chelis-backend-hip/tests/strided_batched_dispatch.rs` with
+  exact descriptor-derived call matching; validated numerically by
   `g15_hipblas_strided_batched_symbolic_batch_matches_eval` and
   `g15_hipblas_batched_matmul_matches_eval` on the HIP manual gate.
 

@@ -58,7 +58,7 @@ fn assert_deferred_diagnostic(source: &str, name: &str, position: &str) {
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -75,6 +75,17 @@ fn messages(source: &str) -> Vec<String> {
             .map(|error| error.message.clone())
             .collect(),
     }
+}
+
+fn assert_forbidden_surf_binder(source: &str, name: &str, position: &str) {
+    let error = parse_str(source).expect_err("reserved dtype vocabulary cannot be rebound");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("`{name}`"))
+            && message.contains("cannot be a declaration binder"),
+        "the binder-list diagnostic for `{name}` in {position} must name the \
+         spelling and reject it as a declaration binder; got: {message}"
+    );
 }
 
 /// The three things the diagnostic owes a reader per §1.1.1 / §1.1.2: the
@@ -103,8 +114,10 @@ fn assert_unsigned_diagnostic(source: &str, name: &str, position: &str) {
          §1.1.2; got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|message| message
-            .contains("active set: f32, f64, bf16, f16, bool, int8, int16, int32, int64")),
+        messages
+            .iter()
+            .any(|message| message
+                .contains("active set: f32, f64, bf16, f16, bool, i8, i16, i32, i64")),
         "the diagnostic for `{name}` in {position} must offer the active \
          primitive set as the remedy; got: {messages:?}"
     );
@@ -180,7 +193,7 @@ fn a_typealias_body_is_rejected_with_the_spec_diagnostic() {
 fn a_lambda_annotation_is_rejected_with_the_spec_diagnostic() {
     for name in UNSIGNED {
         assert_unsigned_diagnostic(
-            &format!("module P.M\nexport (f)\ndef f() -> int32 = (fn (x: {name}) -> 1i32)(1i32)\n"),
+            &format!("module P.M\nexport (f)\ndef f() -> i32 = (fn (x: {name}) -> 1i32)(1i32)\n"),
             name,
             "a lambda parameter annotation",
         );
@@ -193,7 +206,7 @@ fn a_lambda_annotation_is_rejected_with_the_spec_diagnostic() {
 fn a_cast_target_still_carries_the_spec_diagnostic() {
     for name in UNSIGNED {
         assert_unsigned_diagnostic(
-            &format!("module P.M\nexport (f)\ndef f() -> int32 = cast(1i32, {name})\n"),
+            &format!("module P.M\nexport (f)\ndef f() -> i32 = cast(1i32, {name})\n"),
             name,
             "a cast target",
         );
@@ -201,12 +214,13 @@ fn a_cast_target_still_carries_the_spec_diagnostic() {
 }
 
 /// DISPOSITION LOCK. Green in both states. The `tensor[...]` precision slot is
-/// the positive precedent this change copies.
+/// the positive precedent this change copies. Its dimension binder is explicit
+/// under chelis#1854.
 #[test]
 fn a_tensor_precision_slot_still_carries_the_spec_diagnostic() {
     for name in UNSIGNED {
         let messages = messages(&format!(
-            "module P.M\nexport (f)\nsig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "module P.M\nexport (f)\nsig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x\n"
         ));
         assert!(
@@ -220,14 +234,13 @@ fn a_tensor_precision_slot_still_carries_the_spec_diagnostic() {
     }
 }
 
-/// DISPOSITION LOCK. Green in both states, and the neighbour this change must
-/// not disturb: a lowercase name that is not a reserved dtype spelling is still
-/// an implicitly quantified type variable and the program still checks clean.
+/// DISPOSITION LOCK. An ordinary explicitly listed lowercase binder still
+/// checks clean.
 #[test]
-fn a_genuine_lowercase_name_still_quantifies_and_checks_clean() {
+fn a_genuine_explicit_lowercase_binder_still_checks_clean() {
     for source in [
-        "module P.M\nexport (f)\ndef f(x: a) -> a = x\n",
-        "module P.M\nexport (f)\nsig f: a -> a\ndef f(x) = x\n",
+        "module P.M\nexport (f)\ndef f[a](x: a) -> a = x\n",
+        "module P.M\nexport (f)\nsig f[a]: a -> a\ndef f(x) = x\n",
     ] {
         let messages = messages(source);
         assert!(
@@ -240,12 +253,12 @@ fn a_genuine_lowercase_name_still_quantifies_and_checks_clean() {
 
 /// DISPOSITION LOCK. Green in both states. Negative parity for the predicate:
 /// the SIGNED spellings, including chelis#1587's short aliases, must not match
-/// the unsigned family. `int8`..`int64` share the suffix digits and `int8`
+/// the unsigned family. `i8`..`i64` share the suffix digits and `i8`
 /// contains no `uint8` only because the check is exact.
 #[test]
 fn signed_spellings_do_not_match_the_unsigned_family() {
     for name in [
-        "int8", "int16", "int32", "int64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
+        "i8", "i16", "i32", "i64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
     ] {
         let messages = messages(&format!(
             "module P.M\nexport (f)\ndef f(x: {name}) -> {name} = x\n"
@@ -264,30 +277,27 @@ fn signed_spellings_do_not_match_the_unsigned_family() {
 #[test]
 fn an_explicit_binder_does_not_rebind_a_reserved_name() {
     for name in UNSIGNED {
-        assert_unsigned_diagnostic(
+        assert_forbidden_surf_binder(
             &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
             name,
             "an explicit binder in a scalar position",
         );
-        let tensor = messages(&format!(
-            "module P.M\nexport (f)\n\
-             def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
-        ));
-        assert!(
-            tensor
-                .iter()
-                .any(|message| message.contains("unsigned integer types are deferred")),
-            "an explicit binder must not rebind `{name}` in a tensor precision \
-             slot; got: {tensor:?}"
+        assert_forbidden_surf_binder(
+            &format!(
+                "module P.M\nexport (f)\n\
+                 def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
+            ),
+            name,
+            "an explicit binder in a tensor precision position",
         );
     }
     for name in DEFERRED {
-        assert_deferred_diagnostic(
+        assert_forbidden_surf_binder(
             &format!("module P.M\nexport (f)\ndef f[{name}](x: {name}) -> {name} = x\n"),
             name,
             "an explicit binder in a scalar position",
         );
-        assert_deferred_diagnostic(
+        assert_forbidden_surf_binder(
             &format!(
                 "module P.M\nexport (f)\n\
                  def f[{name}](x: tensor[3, {name}]) -> tensor[3, {name}] = x\n"
@@ -341,7 +351,7 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 "scalar",
                 format!(
                     "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-                     (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+                     (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
                      (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
                      (var {{}} x))))\n"
                 ),
@@ -350,7 +360,7 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 "tensor precision",
                 format!(
                     "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-                     (defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
+                     (defsig {{}} f ({name}) (t-fn {{}} (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name})) \
                      (t-tensor {{}} (d-lit {{}} 3) (t-var {{}} {name}))))\n  \
                      (def {{}} f (fn {{}} (params {{}} x) (var {{}} x))))\n"
                 ),
@@ -365,9 +375,9 @@ fn a_deep_type_variable_naming_a_rejected_spelling_is_rejected() {
                 messages
                     .iter()
                     .any(|message| message.contains(&format!("`{name}`"))
-                        && message.contains("spec/04-type-system.md §1.1.1")),
+                        && message.contains("cannot be a `defsig` binder")),
                 "a Deep type variable named `{name}` in a {label} position must \
-                 reach the §1.1.1 rejection; got: {messages:?}"
+                 be rejected by the explicit binder-list owner; got: {messages:?}"
             );
         }
     }
@@ -380,7 +390,7 @@ fn an_ordinary_deep_type_variable_still_checks_clean() {
     for name in ["a", "p", "elem"] {
         let source = format!(
             "(module {{surf_path: \"P.M\"}}\n  p.m\n  (export {{}} f)\n  \
-             (defsig {{}} f (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
+             (defsig {{}} f ({name}) (t-fn {{}} (t-var {{}} {name}) (t-var {{}} {name})))\n  \
              (def {{}} f (fn {{}} (params {{}} (x {{type: (t-var {{}} {name})}})) \
              (var {{}} x))))\n"
         );

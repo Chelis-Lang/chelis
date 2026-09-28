@@ -55,6 +55,8 @@ const TENSOR_MODULE: &str = r#"(module {}
       (var {} x))))
 "#;
 
+/// A declared-pure function whose body performs `IO` through `debug`. (A
+/// random draw is no effect: it takes an explicit key.)
 const ADD_EFFECTING: &str = r#"(defsig {}
   noisy
   (t-fn {eff: (effects {})}
@@ -65,7 +67,7 @@ const ADD_EFFECTING: &str = r#"(defsig {}
   (fn {}
     (params {}
       (x {type: (t-tensor {} (d-lit {} 4) (t-prim {} f32))}))
-    (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))
+    (app {} (var {} debug) (var {} x))))
 "#;
 
 const ADD_LINEARITY_VIOLATION: &str = r#"(defsig {}
@@ -158,17 +160,12 @@ fn module_decl_exprs(exprs: &[Expr]) -> Vec<Expr> {
     exprs
         .iter()
         .find_map(|expr| match expr {
-            Expr::List(list, _) if is_tag(list, "module") => Some(list.elements[3..].to_vec()),
             Expr::Node(node, _) if node.tag() == chelis_deep::DeepTag::Module => {
                 Some(node.children_slice()[1..].to_vec())
             }
             _ => None,
         })
         .expect("single module")
-}
-
-fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.tag(), Some(found) if found.as_str() == tag)
 }
 
 fn assert_insertion_faithful(original: &str, rewritten: &str, inserted: &str, index: usize) {
@@ -274,7 +271,7 @@ fn rename_fails_closed_on_stale_preimage_and_cascades_calls() {
         ok.module_deep
             .contains("(app {} (var {} renamed) (var {} x))")
     );
-    assert_eq!(ok.renamed_references, 1);
+    assert_eq!(ok.renamed_references.get(), 1);
     assert_full_check_has_no_fitness_errors(&ok.module_deep);
 }
 
@@ -354,7 +351,7 @@ fn replace_function_and_change_signature_validate_whole_module() {
             .module_deep
             .contains("(app {} (var {} pair) (var {} b) (var {} a))")
     );
-    assert_eq!(changed.rewritten_calls, 1);
+    assert_eq!(changed.rewritten_calls.get(), 1);
     assert_full_check_has_no_fitness_errors(&changed.module_deep);
 }
 
@@ -392,7 +389,7 @@ fn change_signature_rewrites_property_precondition_metadata_calls() {
         "property precondition call arguments must be reordered: {}",
         changed.module_deep
     );
-    assert_eq!(changed.rewritten_calls, 1);
+    assert_eq!(changed.rewritten_calls.get(), 1);
     assert_full_check_has_no_fitness_errors(&changed.module_deep);
 }
 

@@ -1,5 +1,5 @@
 //! WS-A0 RT-1 fixup D1: bare integer literals out of range for the
-//! int32 default emit a §5.3 diagnostic before silently narrowing.
+//! i32 default emit a §5.3 diagnostic before silently narrowing.
 //!
 //! Per spec/04-type-system.md §5.3 last paragraph: "the lexer parses
 //! an unsuffixed integer or float literal token at i64/f64 precision
@@ -14,7 +14,7 @@ use chelis_types::check_ir_program;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -25,18 +25,18 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 /// diagnostic that suggests an `i64` suffix or explicit cast.
 #[test]
 fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
-    let src = "def main() -> int32 = 2147483648";
+    let src = "def main() -> i32 = 2147483648";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err(
         "spec §5.3: literal 2147483648 must be diagnosed as out-of-range \
-         before defaulting to int32",
+         before defaulting to i32",
     );
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("literal 2147483648 out of range for default int32")),
+            .any(|m| m.contains("literal 2147483648 out of range for default i32")),
         "expected D1 range diagnostic; got: {messages:?}"
     );
     assert!(
@@ -44,11 +44,9 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
         "diagnostic must suggest the i64 suffix workaround; got: {messages:?}"
     );
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("cast(2147483648, int64)")),
+        messages.iter().any(|m| m.contains("cast(2147483648, i64)")),
         "diagnostic must suggest the explicit cast workaround spelled \
-         with the prec type name `int64` (the `i64` spelling is only \
+         with the prec type name `i64` (the `i64` spelling is only \
          the literal suffix and is not a valid cast target); got: \
          {messages:?}"
     );
@@ -64,7 +62,7 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
 /// type-check cleanly. Off-by-one regression check.
 #[test]
 fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
-    let src = "def main() -> int32 = 2147483647";
+    let src = "def main() -> i32 = 2147483647";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -75,38 +73,38 @@ fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
 }
 
 /// Issue #308 sibling: the explicit-cast escape hatch the D1
-/// diagnostic itself recommends must actually work. `cast(N, int64)`
-/// binds the literal at int64 (spec §5.6 position 4 applied to a bare
-/// scalar literal), so the int32 range check does not fire. Before
-/// the #308 desugar fix, the literal kept the int32 default inside
+/// diagnostic itself recommends must actually work. `cast(N, i64)`
+/// binds the literal at i64 (spec §5.6 position 4 applied to a bare
+/// scalar literal), so the i32 range check does not fire. Before
+/// the #308 desugar fix, the literal kept the i32 default inside
 /// the cast and this exact form was rejected with the same diagnostic
 /// that suggested it.
 #[test]
 fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
-    let src = "def main() -> int64 = cast(2147483648, int64)";
+    let src = "def main() -> i64 = cast(2147483648, i64)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
-        "spec §5.3 + §5.6: cast(2147483648, int64) is the documented \
+        "spec §5.3 + §5.6: cast(2147483648, i64) is the documented \
          escape hatch and must type-check cleanly; got: {:?}",
         res.err().map(|e| e.errors)
     );
 }
 
 /// Negative-parity twin for the escape hatch: wrapping the literal in
-/// a cast to a type it still does not fit (int32 itself) must keep the
+/// a cast to a type it still does not fit (i32 itself) must keep the
 /// range diagnostic — the adoption rule re-binds the literal at the
 /// target, it does not bypass range checking.
 #[test]
 fn cast_to_int32_of_out_of_range_literal_still_rejected() {
-    let src = "def main() -> int32 = cast(2147483648, int32)";
+    let src = "def main() -> i32 = cast(2147483648, i32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_err(),
-        "cast(2147483648, int32) must still be diagnosed: the literal \
-         re-binds at int32 and 2^31 is out of int32 range"
+        "cast(2147483648, i32) must still be diagnosed: the literal \
+         re-binds at i32 and 2^31 is out of i32 range"
     );
 }
 
@@ -115,13 +113,13 @@ fn cast_to_int32_of_out_of_range_literal_still_rejected() {
 /// hit the D1 path on the inner literal — so this test pins the
 /// expected behavior. If the negation path produces the same out-of-
 /// range diagnostic, that is documented here as the implementation
-/// surface (the user-facing workaround is `cast(N, int64)`).
+/// surface (the user-facing workaround is `cast(N, i64)`).
 #[test]
 fn literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic() {
     // `-2147483649` = -(2^31 + 1) is out of i32 range on the negative
     // side. The inner literal is parsed at i64 so we can diagnose
     // before defaulting.
-    let src = "def main() -> int32 = -2147483649";
+    let src = "def main() -> i32 = -2147483649";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     // The negation path may parse as `(neg LIT)` where LIT is the

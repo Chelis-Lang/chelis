@@ -8,7 +8,7 @@ fn has_any_root(result: &chelis_e2e::pipeline::PipelineResult, names: &[&str]) -
 
 #[test]
 fn pipeline_smoke_test_relu() {
-    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
+    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src);
     assert!(result.is_ok(), "pipeline failed: {:?}", result.err());
     let dag = result.unwrap().dag;
@@ -58,7 +58,7 @@ def forward(
     scores = matmul(q, permute(k, 1, 0))
     probs = softmax(scores, 1)
     attn = matmul(matmul(probs, v), wo)
-    out = layer_norm(add(x, attn), gamma, beta)
+    out = layer_norm(add(x, attn), gamma, beta, 0.00001f32)
     _ = drop(q)
     _ = drop(k)
     _ = drop(v)
@@ -92,7 +92,7 @@ fn pipeline_transformer_model_lowers() {
 fn pipeline_tier2_relu_preserves_identity() {
     // ReLU reaches the DAG as the [05-OP-43] identity so AD can attach its
     // zero-boundary convention before any backend lowering.
-    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
+    let src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src).unwrap();
     let dag = result.dag;
 
@@ -107,7 +107,7 @@ fn pipeline_tier2_relu_preserves_identity() {
 fn pipeline_macro_composition_lowers() {
     let src = r#"
 macro residual_relu(x) = add(copy(x), relu(x))
-def f(x: tensor[n, f32]) -> tensor[n, f32] = residual_relu(x)
+def f[n](x: tensor[n, f32]) -> tensor[n, f32] = residual_relu(x)
 "#;
     let result = compile_surf(src).expect("macro program should compile");
     assert!(
@@ -193,8 +193,8 @@ fn pipeline_preserves_the_empty_host_only_root_product() {
 #[test]
 fn pipeline_preserves_canonical_root_order_and_node_mapping() {
     let source = r#"
-def first(x: tensor[n, f32]) -> tensor[n, f32] = copy(x)
-def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
+def first[n](x: tensor[n, f32]) -> tensor[n, f32] = copy(x)
+def pair[n](x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
 "#;
     let result = compile_surf(source).expect("ordered tuple roots must lower");
     let roots = result.dag.roots();
@@ -209,10 +209,10 @@ def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
 fn pipeline_preserves_rejection_stage_messages() {
     let fixtures = [
         ("def broken(\n", "Surf parse error:"),
-        ("def broken() -> int32 = missing\n", "Type errors:"),
+        ("def broken() -> i32 = missing\n", "Type errors:"),
         (
-            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
-            "Random",
+            "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = debug(x)\n",
+            "performs effects `{IO}`",
         ),
         (
             "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",

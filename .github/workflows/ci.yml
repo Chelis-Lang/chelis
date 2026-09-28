@@ -1,16 +1,49 @@
 name: CI
 
+run-name: ${{ inputs.retarget_token != '' && format('Retarget CI {0}', inputs.retarget_token) || github.workflow }}
+
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose synthetic merge must be tested
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact open pull-request head
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact retargeted base commit
+        required: true
+        type: string
+      retarget_token:
+        description: Unique coordinator token
+        required: true
+        type: string
+      execution_target:
+        description: Protected self-hosted execution requires separate exact-candidate admission
+        required: false
+        default: github-hosted
+        type: choice
+        options: [github-hosted, self-hosted]
+      expected_candidate_sha:
+        description: Exact synthetic merge SHA required for protected self-hosted execution
+        required: false
+        type: string
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Generic PR edits never enter this workflow. Exact-base retarget dispatches
+  # and normal PR updates share the implementation group for the same PR.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}-implementation
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,85 +64,588 @@ jobs:
   # runs the full suite, per the WS-7 spend-trim scope.
   changes:
     name: Detect docs-only changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
-      rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
       diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
+      ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
+      candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
+      preflight_reason: ${{ steps.candidate-preflight.outputs.preflight_reason }}
+      rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
+      rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
+      rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
+      rebase_run_rust: ${{ steps.rebase-reuse.outputs.rebase_run_rust }}
+      rebase_run_script_unit: ${{ steps.rebase-reuse.outputs.rebase_run_script_unit }}
+      rebase_run_integration: ${{ steps.rebase-reuse.outputs.rebase_run_integration }}
+      rebase_run_smt: ${{ steps.rebase-reuse.outputs.rebase_run_smt }}
+      rebase_run_backend: ${{ steps.rebase-reuse.outputs.rebase_run_backend }}
+      rebase_run_diagnostic: ${{ steps.rebase-reuse.outputs.rebase_run_diagnostic }}
+      rebase_run_hull: ${{ steps.rebase-reuse.outputs.rebase_run_hull }}
+      rebase_packages: ${{ steps.rebase-reuse.outputs.rebase_packages }}
     steps:
-      # Shallow checkout (depth 1); the detect step deepens to the PR
-      # commit range. GitHub Actions expressions have no arithmetic, so
-      # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
-      # On push the detect step short-circuits without needing history.
-      - name: Checkout
-        if: github.event_name == 'pull_request'
+      - name: Checkout trusted retarget validator
+        id: checkout-trusted-retarget
+        continue-on-error: true
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.expected_base_sha }}
+          path: trusted
           fetch-depth: 1
-      - name: Compute docs_only
-        id: detect
+
+      # Shallow checkout (depth 1); the detect step deepens to the PR
+      # commit range. A retarget dispatch with a pinned candidate checks out
+      # that exact merge commit by SHA (it stays reachable through the
+      # reviewer's refs/ci-candidates/<token> pin) and both parents so the
+      # trusted validator can bind them. Depth 2, not 0: expressions treat 0
+      # as false, so `&& 0 || 1` is 1.
+      - name: Checkout exact candidate
+        id: checkout-candidate
+        continue-on-error: true
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.expected_candidate_sha != '' && inputs.expected_candidate_sha || (github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha) }}
+          path: candidate
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
+
+      - name: Checkout trusted rebase reuse verifier
+        id: checkout-trusted-rebase
+        continue-on-error: true
+        if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-rebase
+          fetch-depth: 1
+
+      - name: Validate exact retarget candidate
+        id: validate-retarget
+        continue-on-error: true
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        working-directory: candidate
+        run: |
+          # A pinned candidate is a fixed merge of the reviewed base and the
+          # head. Bind its parents, not the live pull-request base: GitHub
+          # recomputes that base on every main push, and whether main moved
+          # is decided at merge time, not by rerunning this review.
+          if [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            base_args=(--checkout-base-sha "$EXPECTED_BASE_SHA" --expected-base-ref main)
+          else
+            base_args=(--expected-base-sha "$EXPECTED_BASE_SHA")
+          fi
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "${{ inputs.expected_head_sha }}" \
+            "${base_args[@]}" \
+            --validate-checkout
+
+      - name: Record exact candidate
+        id: candidate
+        continue-on-error: true
+        env:
+          EXECUTION_TARGET: ${{ inputs.execution_target }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        working-directory: candidate
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          if [ "$EXECUTION_TARGET" = self-hosted ] || [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+               [ "$candidate" != "$EXPECTED_CANDIDATE_SHA" ]; then
+              echo "::error::The server-controlled candidate differs from the reviewed synthetic merge."
+              exit 1
+            fi
+          fi
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap CI contract preflight selection
+        id: ci-contract-bootstrap
+        continue-on-error: true
+        if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+        run: |
+          # Bootstrap before project activation without consulting a checkout-controlled PATH.
+          trusted_git=/usr/bin/git
+          trusted_python=/usr/bin/python3
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+            trusted_git=/run/current-system/sw/bin/git
+            trusted_python=/run/current-system/sw/bin/python3
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            classifier="trusted/scripts/ci_contract_paths.py"
+          else
+            classifier="$RUNNER_TEMP/ci-contract-paths.py"
+            if ! "$trusted_git" -C candidate show \
+              "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
+              echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          set -o pipefail
+          if ! GIT_NO_REPLACE_OBJECTS=1 "$trusted_git" -C candidate \
+            -c core.quotePath=true diff --name-only --no-renames \
+            --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
+            | "$trusted_python" "$classifier"; then
+            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # One step owns this clone's shape, and every verifier after it reads
+      # a stated property rather than whatever the previous step's fetches
+      # happened to leave behind. Two defects came from the latter:
+      # chelis#2228, where the base backstop's `--depth=1` grafted the
+      # target snapshot out of the identity step's reach, and chelis#2234,
+      # where the head deepen's own boundary grafted the target tip out of
+      # the classifier's. Both were a verifier depending on execution order.
+      #
+      # An invariant that a later fetch can violate is worse than none,
+      # because it reads as a guarantee. A fetch can only add history, with
+      # one exception: a depth-limited fetch adds a graft. So this step owns
+      # every depth-limited fetch in the job, and
+      # scripts/test_ci_establish_candidate_clone.py fails if another step
+      # acquires one.
+      - name: Establish the candidate clone
+        id: clone
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
           COMMITS: ${{ github.event.pull_request.commits }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          # Every command in this preamble is guarded. Under errexit an
+          # unguarded one exits the step, and this step's outcome now gates
+          # the candidate preflight, so a transient `gh` blip would close
+          # required contexts with nothing said about the candidate. Worse,
+          # `Compute docs_only` reads the clone this step establishes and
+          # cannot tolerate a failure of its own, so dying here would fail
+          # the whole job and leave required contexts with no check run at
+          # all, which is chelis#2228's unmergeable shape. The module below
+          # already fails closed *with information*; this preamble has to
+          # do the same rather than fail closed with none.
+          current_pr="$RUNNER_TEMP/current-pr.json"
+          target_tip=""
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"; then
+            # A bare assignment is not a guard. `// ""` defaults a null
+            # field; it does not survive a malformed document, and jq exits
+            # 5 on an array or on non-JSON written under a zero exit code,
+            # and 127 when it is absent. The same applies to the rev-parse
+            # below, which is reachable after a successful fetch.
+            if ! base_ref=$(jq -r '.base.ref // ""' "$current_pr"); then
+              base_ref=""
+            fi
+            # Pre-existing and unguarded until now: a base branch renamed
+            # upstream leaves `refs/heads/$base_ref` gone (chelis#2240).
+            if [ -n "$base_ref" ] &&
+               git fetch --no-tags origin "refs/heads/$base_ref" &&
+               target_tip=$(git rev-parse FETCH_HEAD); then
+              :
+            else
+              target_tip=""
+              echo "could not resolve the target tip for base ref" \
+                "'${base_ref:-<unreadable>}'; the clone is established" \
+                "without it and the classifier will fail safe" >&2
+            fi
+          else
+            echo "could not read the live pull request; the target tip is" \
+              "unresolved and the clone is established without it" >&2
+          fi
+          echo "target_tip=$target_tip" >> "$GITHUB_OUTPUT"
+          args=(--base "$BASE" --head "$HEAD" --commits "$COMMITS"
+                --github-output "$GITHUB_OUTPUT")
+          # Named explicitly, and not redundantly: `--unshallow`
+          # un-truncates what the refspec reaches rather than discovering
+          # commits, so a pre-push head unreachable from any live ref after
+          # a force-push stays absent unless it is asked for by name.
+          if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
+            args+=(--before "$BEFORE")
+          fi
+          if [ -n "$target_tip" ]; then
+            args+=(--target-tip "$target_tip")
+          fi
+          python3 ../candidate/scripts/ci_establish_candidate_clone.py "${args[@]}"
+
+      - name: Compute docs_only
+        id: detect
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+        working-directory: candidate
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             # push-to-main (or any non-PR event) always runs the full
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
             echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          # Deepen head to the PR commit count + 1 (the +1 reaches the
-          # base tip's parent so base..head resolves), then backstop-fetch
-          # the base commit so it is present as an object even on a stale
-          # count (force-push between the event and the run).
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # No fetching here. `Establish the candidate clone` owns the
+          # shape of this clone and has already asserted that base and head
+          # are present and comparable, so this step reads a stated
+          # property instead of inheriting whatever ran before it
+          # (chelis#2228, chelis#2234).
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
-  # [05-UNS-5] issue authority is admitted through a checked-in membership
-  # manifest, so edits to that admission path require a live exists/kind/state
-  # check before merge. The offline generator and Rust constructors establish
-  # shape and membership; this job prevents a same-PR manifest edit from
-  # blessing a closed issue, pull request, or missing object (chelis#730 §C2.1).
-  rejection-authority-liveness:
-    name: Rejection Authority Liveness
-    runs-on: ubuntu-latest
-    needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
-    permissions:
-      contents: read
-      issues: read
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv
-        run: uv venv --python 3.11
-
-      - name: Validate rejection authority construction boundary
-        run: .venv/bin/python scripts/check_rejection_authority_boundary.py
-
-      - name: Validate rejection issue authorities against GitHub
+      - name: Validate candidate lifecycle
+        id: candidate-lifecycle
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: .venv/bin/python scripts/validate_rejection_issue_manifest.py
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          args=(--event "$GITHUB_EVENT_PATH")
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # No fetching here either. `Establish the candidate clone`
+            # wrote current-pr.json, resolved the target tip and asserted
+            # that this classifier's commits are walkable; this step
+            # consumes that rather than re-deriving it (chelis#2234).
+            current_pr="$RUNNER_TEMP/current-pr.json"
+            timeline="$RUNNER_TEMP/pr-timeline.json"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
+            args+=(
+              --current-pr "$current_pr"
+              --target-tip "${{ steps.clone.outputs.target_tip }}"
+              --timeline "$timeline"
+            )
+          fi
+          python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
+
+      - name: Select targeted rebase lane
+        id: rebase-reuse
+        continue-on-error: true
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LIFECYCLE: ${{ steps.candidate-lifecycle.outcome }}
+          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: |
+          record_frontier_defaults() {
+            echo "rebase_packages=" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_rust=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_script_unit=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_integration=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_smt=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_backend=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_diagnostic=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_hull=false" >> "$GITHUB_OUTPUT"
+          }
+          record_full() {
+            echo "rebase_lane=full" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
+          }
+          record_ordinary() {
+            echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
+          }
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            record_full "trusted exact-candidate dispatch"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] ||
+             [ "$ACTION" != "synchronize" ] ||
+             [ "$LIFECYCLE" != "success" ]; then
+            record_ordinary "not an eligible synchronize event"
+            exit 0
+          fi
+          verifier="../trusted-rebase/scripts/ci_rebase_reuse.py"
+          if [ ! -f "$verifier" ]; then
+            record_full "trusted rebase verifier is not available on the base"
+            exit 0
+          fi
+          if ! python3 "$verifier" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-path . \
+            --event "$GITHUB_EVENT_PATH" \
+            --current-pr "$RUNNER_TEMP/current-pr.json" \
+            --timeline "$RUNNER_TEMP/pr-timeline.json" \
+            --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}" \
+            --output "$RUNNER_TEMP/rebase-reuse/decision.json" \
+            --github-output "$GITHUB_OUTPUT"; then
+            record_full "trusted rebase verifier failed closed"
+          fi
+
+      - name: Publish targeted rebase decision for review
+        id: publish-rebase-decision
+        continue-on-error: true
+        if: always()
+        run: |
+          decision="$RUNNER_TEMP/rebase-reuse/decision.json"
+          if [ -f "$decision" ]; then
+            {
+              echo "### Targeted rebase decision"
+              echo
+              echo '```json'
+              cat "$decision"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install uv for CI contract preflight
+        id: install-uv
+        continue-on-error: true
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Validate changed CI contracts before build fan-out
+        id: ci-contract
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
+        continue-on-error: true
+        working-directory: candidate
+        run: >-
+          uv run --managed-python --python 3.11 --no-project
+          --with PyYAML==6.0.3 python -m unittest
+          scripts.test_check_agent_skills
+          scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_establish_candidate_clone
+          scripts.test_ci_preflight_carrier
+          scripts.test_ci_candidate_identity
+          scripts.test_ci_candidate_receipt
+          scripts.test_ci_rebase_reuse
+          scripts.test_ci_change_owned
+          scripts.test_ci_contract_paths
+          scripts.test_ci_detect_docs_only
+          scripts.test_ci_validate_pr_candidate
+          scripts.test_pr_workflow_routing
+          scripts.test_change_owned_workflow
+          scripts.test_hosted_validation
+          scripts.test_regenerate_conformance_assets
+          scripts.test_gate.DocsOnlySkipTests
+          scripts.test_gate.CiParityTests
+          scripts.test_gate.RejectionAuthorityPrBoundaryTests
+
+      # Split from the verdict so the identity step can sit between them:
+      # it needs a gate to run behind, and the verdict needs its outcome.
+      # This half covers everything that establishes and classifies the
+      # candidate; the verdict below adds what this gate then permitted.
+      #
+      # Every step in this job is `continue-on-error`, so the job always
+      # completes and always emits its outputs. Job setup is the exception
+      # that no step condition reaches: an unresolvable `uses:` or a lost
+      # runner still fails the job, and the required Docs context reports
+      # that case.
+      #
+      # The reason names the first failure in THIS list's order, which is
+      # not step order. With two steps failing it names whichever this
+      # checks first, which is deliberate: one stated cause beats a
+      # concatenation, and the job log has the rest. That is the point: a hard
+      # failure here used to leave required contexts with no check run at
+      # all, which cannot be waited out, re-run into existence or
+      # overridden (chelis#2228). Tolerating a step must not make its
+      # failure ignorable, so every one of them is read below, and
+      # scripts/test_ci_preflight_carrier.py fails if a tolerated step is
+      # missing from this list.
+      - name: Compute the candidate preflight gate
+        id: preflight-gate
+        if: always()
+        continue-on-error: true
+        run: |
+          checkout="${{ steps.checkout-candidate.outcome }}"
+          candidate="${{ steps.candidate.outcome }}"
+          candidate_sha="${{ steps.candidate.outputs.candidate_sha }}"
+          clone="${{ steps.clone.outcome }}"
+          clone_invariant="${{ steps.clone.outputs.clone_invariant }}"
+          bootstrap="${{ steps.ci-contract-bootstrap.outcome }}"
+          detect_outcome="${{ steps.detect.outcome }}"
+          lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          rebase="${{ steps.rebase-reuse.outcome }}"
+          publish="${{ steps.publish-rebase-decision.outcome }}"
+          install_uv="${{ steps.install-uv.outcome }}"
+          contract="${{ steps.ci-contract.outcome }}"
+          retarget_checkout="${{ steps.checkout-trusted-retarget.outcome }}"
+          retarget_validate="${{ steps.validate-retarget.outcome }}"
+          rebase_checkout="${{ steps.checkout-trusted-rebase.outcome }}"
+          detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
+          bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
+          rebase_contract="${{ steps.rebase-reuse.outputs.rebase_contract_changed }}"
+          contract_changed=unknown
+          if [ "$detected_contract" = "true" ] ||
+             [ "$bootstrap_contract" = "true" ] ||
+             [ "$rebase_contract" = "true" ]; then
+            contract_changed=true
+          elif [ "$detected_contract" = "false" ] &&
+               [ "$bootstrap_contract" = "false" ] &&
+               { [ "$rebase_contract" = "false" ] || [ -z "$rebase_contract" ]; }; then
+            contract_changed=false
+          fi
+          gate=success
+          reason=""
+          fail() {
+            gate=failure
+            if [ -z "$reason" ]; then
+              reason="$1"
+            fi
+          }
+          if [ "$checkout" = "failure" ]; then
+            fail "the candidate could not be checked out"
+          fi
+          if [ "$candidate" = "failure" ] || [ -z "$candidate_sha" ]; then
+            fail "the exact candidate commit could not be recorded"
+          fi
+          if [ "$retarget_checkout" = "failure" ]; then
+            fail "the trusted retarget validator could not be checked out"
+          fi
+          if [ "$retarget_validate" = "failure" ]; then
+            fail "the retargeted candidate did not validate"
+          fi
+          if [ "$rebase_checkout" = "failure" ]; then
+            fail "the trusted rebase verifier could not be checked out"
+          fi
+          if [ "$clone" = "failure" ] || [ "$clone_invariant" = "failed" ]; then
+            fail "the candidate clone could not be established"
+          fi
+          if [ "$bootstrap" = "failure" ]; then
+            fail "the CI contract bootstrap selection failed"
+          fi
+          if [ "$detect_outcome" = "failure" ]; then
+            fail "the docs-only detector failed"
+          fi
+          if [ "$lifecycle" != "success" ]; then
+            fail "the candidate update could not be classified"
+          fi
+          if [ "$rebase" = "failure" ]; then
+            fail "the targeted rebase lane could not be selected"
+          fi
+          if [ "$publish" = "failure" ]; then
+            fail "the targeted rebase decision could not be published"
+          fi
+          if [ "$install_uv" = "failure" ]; then
+            fail "uv could not be installed for the CI contract suite"
+          fi
+          if [ "$contract_changed" = "true" ]; then
+            if [ "$contract" != "success" ]; then
+              fail "the changed CI contracts did not validate"
+            fi
+          elif [ "$contract_changed" != "false" ]; then
+            fail "whether the CI contracts changed could not be determined"
+          fi
+          echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "gate_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "preflight gate=$gate${reason:+ ($reason)}; combined CI contract=$contract_changed"
+
+      # Ahead of the verdict, so its outcome can reach it. Its gate is the
+      # same condition it had when it sat after the verdict -- an
+      # established clone, a classified lifecycle and a satisfied CI
+      # contract -- computed from the step outcomes rather than from the
+      # verdict it now precedes. Moving it must not make it run on a
+      # candidate the verdict would have stopped.
+      - name: Record immutable candidate identity
+        id: identity
+        continue-on-error: true
+        if: ${{ github.event_name == 'pull_request' && steps.preflight-gate.outputs.gate == 'success' }}
+        working-directory: candidate
+        run: >-
+          python3 scripts/ci_candidate_identity.py
+          --repository "${{ github.repository }}"
+          --workflow-file ci.yml
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --head-sha "${{ github.event.pull_request.head.sha }}"
+          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
+          --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
+
+      - name: Upload immutable candidate identity
+        continue-on-error: true
+        id: upload-identity
+        if: ${{ github.event_name == 'pull_request' && steps.identity.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-identity-ci
+          path: ${{ runner.temp }}/candidate-identity/candidate-identity.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # The stated reason, which the required Docs context prints. An unevaluable
+      # candidate produces a red check saying what could not be evaluated,
+      # instead of a job that never reported at all, which is the shape
+      # that made a pull request unmergeable rather than merely red.
+      - name: Record candidate preflight verdict
+        id: candidate-preflight
+        if: always()
+        continue-on-error: true
+        run: |
+          gate="${{ steps.preflight-gate.outputs.gate }}"
+          reason="${{ steps.preflight-gate.outputs.gate_reason }}"
+          identity="${{ steps.identity.outcome }}"
+          upload="${{ steps.upload-identity.outcome }}"
+          verdict="$gate"
+          if [ "$verdict" = "success" ] && [ "$identity" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be recorded"
+          fi
+          if [ "$verdict" = "success" ] && [ "$upload" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be uploaded"
+          fi
+          if [ -z "$verdict" ]; then
+            verdict=failure
+            reason="the candidate preflight gate did not report"
+          fi
+          echo "ci_contract_changed=${{ steps.preflight-gate.outputs.ci_contract_changed }}" >> "$GITHUB_OUTPUT"
+          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
+          echo "preflight_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "candidate preflight=$verdict${reason:+: $reason}"
 
   # C2.2's producer seal depends on same-crate privacy, which an external
   # compile-fail doctest cannot distinguish from pub(crate). Run the actual
   # controlled mutations whenever any owner/oracle/control input changes.
   diagnostic-kind-oracle:
     name: Diagnostic Kind Mutation Oracle
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && needs.changes.outputs.rebase_lane != 'docs' && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_diagnostic == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.diagnostic_kind_changed != 'false')) }}
     permissions:
       contents: read
     env:
@@ -118,35 +654,42 @@ jobs:
       CARGO_TARGET_DIR: target/diagnostic-kind-oracle
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and mutation-oracle build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           workspaces: . -> target/diagnostic-kind-oracle
 
       - name: Run C2.2 controlled mutations
-        run: .venv/bin/python scripts/diagnostic_kind_oracle.py
+        run: python scripts/diagnostic_kind_oracle.py
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   lint-rust:
     name: Rust Policy (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # Reserve headroom for cold Devenv and optional native dependencies.
+    timeout-minutes: 75
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_rust == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -160,110 +703,171 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py): the hosted runner's apt
-      # mirror intermittently resets the connection mid-download, flaking the
-      # job with no code change. The helper retries the update+install pair on
-      # a transient failure; a genuine packaging error still fails after the
-      # attempts are exhausted.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python` so the
-      # `chelis-python` link step finds the project-pinned interpreter
-      # on every developer's machine. CI runners don't ship a `.venv/`
-      # by default, so `scripts/ci_setup_uv_python.py` creates one with
-      # the same uv-managed Python the project policy requires, then
-      # appends the interpreter's `sysconfig.LIBDIR` to `$GITHUB_ENV` as
-      # `LD_LIBRARY_PATH` (Linux) or `DYLD_LIBRARY_PATH` (macOS) so the
-      # `chelis-python` test binaries can dlopen `libpython3.X.so` at
-      # runtime. pyo3-build-config is a transitive build-dep of pyo3
-      # and runs even when only its dependents are compiled, so this
-      # step must precede every cargo invocation — including the
-      # cache restore below, which is future-proofed against a
-      # Swatinem version that might invoke `cargo` directly.
-      - name: Install uv
-        # Pinned to v8.1.0 (specific patch) rather than @v8 because
-        # astral-sh/setup-uv does not yet publish a rolling `v8` major
-        # tag — only the explicit v8.0.0 and v8.1.0 patch tags exist.
-        # Using `@v8` resolves to "unable to find version `v8`" on the
-        # runner. Bump this pin when astral-sh publishes either a `v8`
-        # rolling tag or a newer patch.
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       # The Rust-policy gate subset (clippy, fmt, chelis lint --check,
       # doctests, and compile guards) is defined once in scripts/gate.py.
       # Clippy already compiles every workspace target, so a preceding
       # standalone `cargo build --workspace --all-targets` is redundant.
-      # `gate.py lint-and-unit`. Do not hand-inline cargo/chelis
-      # commands into this job: scripts/test_gate.py greps this file
-      # and fails if any gate step is not produced by gate.py. See
-      # docs/investigations/test_toolchain_guards_design.md.
+      # Keep the complete Rust-policy selection in gate.py rather than
+      # hand-inlining a second list in this workflow.
+      # The static LP64 OpenBLAS provider is part of the self-hosted profile
+      # only; hosted runners lint with the bundled provider, as main does.
       - name: Gate (lint-and-unit subset)
-        run: python3 scripts/gate.py lint-and-unit
+        if: needs.changes.outputs.rebase_lane != 'targeted' || needs.changes.outputs.rebase_packages == ''
+        run: |
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = self-hosted ]; then
+            chelis-gate lint-and-unit-nix
+          else
+            chelis-gate lint-and-unit
+          fi
+
+      - name: Run affected Rust policy and units for targeted rebase
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_packages != ''
+        env:
+          CHELIS_TARGETED_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
+        run: chelis-gate targeted-units
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   script-unit:
     name: Script and Python Unit Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # The hosted wheel consumer intentionally runs for docs-only changes too:
+    # distribution behavior needs an executable receipt on every pull request.
+    timeout-minutes: 90
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_script_unit == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true') || needs.changes.outputs.docs_only == 'true') }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      # A small number of workflow guards inspect Cargo metadata. They do not
-      # compile the workspace, but they require the stable cargo executable.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      # Python execution ownership is explicit, independent of installed tools.
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
 
-      # cargo-nextest is intentionally absent, so the expensive structural
-      # profile oracle self-skips here and runs once on workspace shard 1.
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
       - name: Script unit tests (scripts/test_*.py)
-        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
+        run: python scripts/ci_script_tests.py pr
 
-      - name: Install Python binding ingress test dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+      # Keep the privacy and source-usage construction boundary in script-unit
+      # without querying mutable GitHub issue state. The always-running Docs
+      # Phase 4B oracle owns fresh compiler closure and generated agreement;
+      # the standing nightly owns exists/kind/open liveness.
+      - name: Validate rejection authority construction boundary
+        run: python scripts/check_rejection_authority_boundary.py
 
       - name: Python binding ingress unit tests
-        run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+        run: python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
+      - name: Build and exercise Python distributions
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/python-wheel-smoke/cargo
+          CARGO_INCREMENTAL: 0
+        if: ${{ !cancelled() }}
+        run: >-
+          python bindings/python/tests/python_wheel_smoke.py
+          --crossed-bundle
+          --receipt "$CARGO_TARGET_DIR/wheel-smoke.json"
+
+      - name: Upload Python distribution evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-wheel-smoke
+          path: |
+            target/python-wheel-smoke/cargo/wheel-smoke.json
+            target/python-wheel-smoke/cargo/wheel-smoke-failures/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload script selection and timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-pr
+          path: target/ci-script-tests/pr
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   # Preserve the required branch-protection context while the independent
   # Rust and Python policy workers execute in parallel.
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
     needs: [changes, lint-rust, script-unit]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true')) || needs.changes.outputs.docs_only == 'true') }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      - name: Require every lint and unit worker
-        run: python3 scripts/ci_require_success.py lint-rust=${{ needs.lint-rust.result }} script-unit=${{ needs.script-unit.result }}
+      - name: Require the selected lint and unit frontier
+        env:
+          REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
+          RUN_RUST: ${{ needs.changes.outputs.rebase_run_rust }}
+          RUN_SCRIPT_UNIT: ${{ needs.changes.outputs.rebase_run_script_unit }}
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+        run: |
+          args=()
+          if [ "$DOCS_ONLY" != "true" ] &&
+             { [ "$REBASE_LANE" != "targeted" ] || [ "$RUN_RUST" = "true" ]; }; then
+            args+=("lint-rust=${{ needs.lint-rust.result }}")
+          fi
+          if [ "$REBASE_LANE" != "targeted" ] ||
+             [ "$RUN_SCRIPT_UNIT" = "true" ] ||
+             [ "$DOCS_ONLY" = "true" ]; then
+            args+=("script-unit=${{ needs.script-unit.result }}")
+          fi
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "trusted rebase selected no lint or unit owner"
+          else
+            python3 scripts/ci_require_success.py "${args[@]}"
+          fi
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
@@ -274,20 +878,18 @@ jobs:
   # Runbook: docs/smt_build_setup.md.
   smt-build:
     name: SMT Feature Build (Linux)
-    runs-on: ubuntu-latest
-    # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
-    # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
-    # so it runs ~3m warm. The from-source cvc5 compile (~22m) is off the
-    # per-PR path: it only recurs on a cvc5-sys version bump before
-    # build-cvc5.yml republishes the asset (see docs/smt_build_setup.md for the
-    # bump runbook). 25m covers a warm link plus a fully cold Rust workspace
-    # recompile (e.g. after a stable-toolchain bump) with margin, and fails
-    # fast instead of silently absorbing a stray from-source cvc5 build.
-    timeout-minutes: 25
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # The self-hosted profile realizes its own cvc5 closure from the private
+    # cache; the hosted lane links the prebuilt release asset below. Budget
+    # for a cold Devenv and a cold from-source cvc5 build.
+    timeout-minutes: 90
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_smt == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # cvc5 builds from source into target/ on top of the workspace build —
     # the heaviest disk consumer of any Linux job — so it gets both the
     # free-disk reclaim and the debuginfo strip (chelis#392). It was the
@@ -297,59 +899,43 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo + cvc5 build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        # apt-get under retry (scripts/ci_apt_get.py) so a transient
-        # mirror reset does not flake the cvc5 smoke job. This fast lane
-        # does not install Z3, Gappa, or Arb-only tools; those live in
-        # the non-required full prove workflow.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
+        with:
+          profile: ci-smt
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
-      # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
-      # (see docs/smt_build_setup.md and scripts/ci_cvc5_cache.py):
-      #   1. DURABLE (primary): a GitHub Release asset published by
-      #      build-cvc5.yml, keyed on the cvc5-sys version + namespace (NOT
-      #      Cargo.lock, NOT rustc). A Release asset has no 10GB LRU budget, no
-      #      7-day TTL, and no branch scope, so a stable-toolchain bump or a
-      #      quiet stretch no longer forces a cold rebuild. `fetch`
-      #      sha256-verifies and extracts it; on ANY miss it exits 0 with
-      #      warm=false.
-      #   2. FALLBACK (secondary): the stable-key Actions cache, restored only
-      #      when the durable fetch missed (the cvc5-sys-bump window before
-      #      build-cvc5.yml republishes). Best-effort; a hiccup degrades to
-      #      from-source, never fails the job.
-      # `activate` exports CVC5_DIR only when the store is complete (verified by
-      # ci_cvc5_cache.py's sentinel); otherwise the normal from-source path
+      # Hosted runners cannot reach the private Nix cache, so they take main's
+      # prebuilt path: a durable Release asset, then the Actions cache, then a
+      # from-source build that the harvest below saves for the next run.
+      # `activate` exports CVC5_DIR only when the store is complete (verified
+      # by ci_cvc5_cache.py's sentinel); otherwise the normal from-source path
       # runs. (A PR branch DOES inherit main's caches/assets; only a PR's own
       # cache SAVE is branch-scoped.)
       - name: Compute cvc5 cache key
         id: cvc5key
+        if: runner.environment == 'github-hosted'
         run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
 
       - name: Fetch durable prebuilt cvc5 (Release asset)
         id: cvc5fetch
+        if: runner.environment == 'github-hosted'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
 
       - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
+        if: runner.environment == 'github-hosted' && steps.cvc5fetch.outputs.warm != 'true'
         uses: actions/cache/restore@v4
         # Best-effort: a cache-service hiccup must degrade to a from-source
         # build, never fail this job (chelis#583).
@@ -359,14 +945,14 @@ jobs:
           key: ${{ steps.cvc5key.outputs.key }}
 
       - name: Activate prebuilt cvc5 (link instead of rebuild)
+        if: runner.environment == 'github-hosted'
         run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # cvc5 builds from source into target/; share the former
-          # smt-build cache namespace with the optional full-prove lane
-          # while keeping the gate jobs lean.
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
+          # Keep Nix Cargo outputs separate from the native full-prove lane.
           shared-key: smt-smt-build
           # Persist a warm workspace cache even if a later step fails, so a
           # slow cold run is not re-paid on the next attempt (chelis#583).
@@ -375,13 +961,14 @@ jobs:
       - name: Build smt feature
         run: cargo build -p chelis-cli --features smt
 
-      # Cold runs only (no CVC5_DIR active): copy the freshly built cvc5
-      # artifacts into the stable-key cache dir so the next Cargo.lock churn
-      # links them instead of rebuilding. `complete=true` is emitted only
-      # after a fully-verified harvest; the save step below is gated on it,
-      # so a partial/failed build never poisons the stable-key cache.
+      # Cold hosted runs only (no CVC5_DIR active): copy the freshly built
+      # cvc5 artifacts into the stable-key cache dir so the next Cargo.lock
+      # churn links them instead of rebuilding. `complete=true` is emitted
+      # only after a fully-verified harvest; the save step below is gated on
+      # it, so a partial/failed build never poisons the stable-key cache.
       - name: Harvest cvc5 build for cache
         id: cvc5harvest
+        if: runner.environment == 'github-hosted'
         run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
 
       - name: Save prebuilt cvc5
@@ -393,11 +980,17 @@ jobs:
           path: ${{ steps.cvc5key.outputs.dir }}
           key: ${{ steps.cvc5key.outputs.key }}
 
+
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/debug/chelis
 
       - name: Run cvc5 engine smoke tests
         run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
+
+      # Integration binaries link chelis-prove without cfg(test). Exercise
+      # their explicit libtest worker route as well as the unit-test route.
+      - name: Run SMT integration containment controls
+        run: cargo test -p chelis-prove --features smt --test integration_solver_isolation
 
       # chelis#1125 PP7: `crates/chelis-cli/tests/prove_deep_obligations.rs` is
       # `#![cfg(feature = "smt")]` and had NO invocation anywhere. The gate
@@ -420,6 +1013,12 @@ jobs:
       - name: Clippy over the cvc5 feature configuration
         run: cargo clippy --workspace --all-targets --features chelis-cli/smt,chelis-prove/smt,chelis-tide/smt -- -D warnings
 
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
+
   # chelis#422 (WS-4) PROVE-IN-CI lanes. release.yml ships
   # `chelis-cli --features smt` on three targets; cvc5 builds from
   # source (cmake/g++/libgmp) and is only PROVEN on ubuntu-latest by the
@@ -437,8 +1036,9 @@ jobs:
   smt-build-glibc231:
     name: SMT Feature Build (Linux, glibc 2.31)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_smt == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     # The immutable digest supplies Python, git, curl, and CA certificates
     # before checkout while retaining Debian 11's glibc 2.31. After checkout,
     # ci_apt_get replaces its moving mirrors with the repository-pinned
@@ -450,6 +1050,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # m4 is required by GMP's configure; cmake/g++/libclang support the cvc5
       # source build. The pinned snapshot makes package indices and payloads
@@ -534,842 +1136,381 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  smt-build-darwin-arm64:
-    name: SMT Feature Build (darwin-arm64)
-    runs-on: macos-latest
+  ci-fast:
+    name: Fast Tests (Linux)
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
+    # Hosted for ordinary events, like every other job here (chelis#2543). On
+    # the two-runner warm pool this pull-request critical path queued behind
+    # the nightly, and the pool admits pull requests only against main.
+    # Explicit dispatches keep their existing target selection.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Assert Apple Silicon runner
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = "arm64"
-
-      # CMake, Python (3.11+, so cvc5's TOML codegen uses stdlib
-      # tomllib), and libclang ship in the macos-latest image and Xcode
-      # CLT; cvc5 auto-downloads and builds its own static GMP, so no
-      # brew installs are required for the cvc5 source build. `cmake` is
-      # installed defensively in case a future image drops it from PATH.
-      - name: Install build prerequisites
-        run: |
-          set -euo pipefail
-          brew list cmake >/dev/null 2>&1 || brew install cmake
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
-      # cache restores a previously-built cvc5 from target/, AND the
-      # chelis#583 cvc5 cache below restores a prebuilt libcvc5.a, so on a
-      # warm cache this job can pass WITHOUT ever re-running the cold cvc5
-      # source build (cmake configure + the C++ compile). A break that only
-      # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
-      # toolchain change on the macos-latest image -- would then stay green
-      # here until a cache-key change or a cache eviction forces the cold
-      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
-      # override) and no cvc5 cache, so it does not share either cache and is
-      # the authoritative cold-build proof for the SHIPPED artifact; treat a
-      # release-job cvc5 failure as real even when this per-PR lane is green.
-      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
-      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
-      # the same PR so both cold paths are proven before release relies on it.
-      #
-      # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
-      # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
-      # Cargo.lock, so an unrelated bump would otherwise re-pay the ~30m cvc5
-      # build). On a warm hit cvc5-sys links the prebuilt lib. See smt-build.
-      - name: Compute cvc5 cache key
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
-
-      # Durable Release asset first, Actions cache fallback second; see the
-      # smt-build job for the full rationale.
-      - name: Fetch durable prebuilt cvc5 (Release asset)
-        id: cvc5fetch
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace darwin-arm64 --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Restore prebuilt cvc5 (Actions cache fallback)
-        id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
-        uses: actions/cache/restore@v4
-        # Best-effort: a cache-service hiccup must degrade to a from-source
-        # build, never fail this job (chelis#583).
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
-
-      - name: Activate prebuilt cvc5 (link instead of rebuild)
-        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: smt-darwin-arm64
-          cache-on-failure: true
-
-      - name: Build chelis-cli (release, smt)
-        run: cargo build --release -p chelis-cli --features smt
-
-      - name: Harvest cvc5 build for cache
-        id: cvc5harvest
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Save prebuilt cvc5
-        if: always() && steps.cvc5harvest.outputs.complete == 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the cvc5 cache must never fail the build.
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
-
-      - name: Verify packaged binary architecture
-        run: |
-          set -euo pipefail
-          file target/release/chelis | grep -E 'arm64|aarch64'
-
-      - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
-
-  workspace-tests-shard:
-    name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    runs-on: ubuntu-latest
-    # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes]` is what makes the output readable.
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
-      # job for the transient-mirror-reset rationale.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # See lint-rust for why this runs before the cargo cache
-      # and why the version is pinned to v8.1.0 rather than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
           shared-key: linux-workspace
-          # Both shards restore the same warm workspace cache. Only shard 1
-          # publishes a new entry, avoiding a same-key save race.
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
-      # The workspace has ~200 integration test binaries. `cargo test
-      # --workspace --tests` runs them one binary at a time, serializing
-      # the heavyweight binaries (each test compiles/checks/builds
-      # chelis-std). `cargo nextest` schedules tests from all binaries in
-      # a single global thread pool, overlapping the heavyweight work.
-      # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
-      #
-      # The integration nextest command is defined once in scripts/gate.py.
-      # Each worker selects one of two deterministic, disjoint hash
-      # partitions. The `ci` nextest profile writes per-test JUnit
-      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
-      # both artifacts and reports their combined timings. Do not hand-inline
-      # cargo commands into this job (see scripts/test_gate.py parity lock).
-      - name: Gate (workspace test shard)
+      - name: Gate (units and reviewed integrations)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
+        run: chelis-gate ci-fast
 
-      # Shard 2 already has the feature-complete workspace build warm. Run
-      # each non-test integration oracle exactly once here instead of paying
-      # for a third independently compiled worker.
-      - name: Gate (integration support subset)
-        if: matrix.shard == 2
-        run: python3 scripts/gate.py integration --support-only
-
-      # This structural oracle needs cargo-nextest. Execute it exactly once on
-      # shard 1, balancing its hosted cost against shard 2's exact-once
-      # integration support subset. It lists only the default feature
-      # configuration this shard has already built; the generalization lane's
-      # feature-enabled listing runs on generalization shard 1 for the same
-      # reason.
-      - name: Verify nextest profile coverage
-        if: matrix.shard == 1
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
-
-      - name: Upload workspace JUnit shard
+      - name: Upload fast JUnit
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-linux-workspace-${{ matrix.shard }}
-          path: target/nextest/ci/junit.xml
+          name: junit-linux-fast
+          path: target/nextest/ci-fast/junit.xml
           if-no-files-found: error
           retention-days: 14
 
-  workspace-tests:
-    name: Workspace Tests (Linux)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, workspace-tests-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Require every workspace test worker
-        run: python3 scripts/ci_require_success.py workspace-tests-shard=${{ needs.workspace-tests-shard.result }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Download workspace JUnit shard 1
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-1
-          path: target/test-telemetry/input/workspace-1
-
-      - name: Download workspace JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-2
-          path: target/test-telemetry/input/workspace-2
-
-      - name: Merge disjoint workspace timing reports
-        run: >-
-          uv run --managed-python --python 3.11 --no-project python
-          scripts/ci_test_telemetry.py
-          --shard workspace-1=target/test-telemetry/input/workspace-1/junit.xml
-          --shard workspace-2=target/test-telemetry/input/workspace-2/junit.xml
-          --require-disjoint
-          --merged-junit target/test-telemetry/workspace-junit.xml
-          --json target/test-telemetry/workspace-report.json
-          --summary target/test-telemetry/workspace-summary.md
-          --github-summary "${GITHUB_STEP_SUMMARY}"
-
-      # The baseline comes from the exact two-shard hosted runner. A later
-      # unchanged-code run produced scheduler-sensitive relative and absolute
-      # outliers, so both stay visible without false-redding the required gate.
-      # Missing, malformed, empty, or invalid telemetry remains blocking.
-      - name: Validate and report test timing
-        run: >-
-          uv run --managed-python --python 3.11 --no-project python
-          scripts/test_timing_check.py
-          --junit target/test-telemetry/workspace-junit.xml
-          --informational
-
-      - name: Upload merged workspace telemetry
+      - name: Upload selection and build timing receipts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-telemetry-linux-workspace
+          name: ci-fast-receipts
           path: |
-            target/test-telemetry/workspace-junit.xml
-            target/test-telemetry/workspace-report.json
-            target/test-telemetry/workspace-summary.md
+            target/ci-fast
+            target/gate-reports
           if-no-files-found: error
           retention-days: 14
 
-  # Run the inherited Phase 0-3 acceptance contract beside the workspace
-  # nextest suite. On the measured #1118 run these steps took 7m22s after a
-  # 14m56s workspace gate; making them independent removes that serial tail.
-  dtype-phase3-oracle:
-    name: Dtype Phase 0-3 Oracle
-    runs-on: ubuntu-latest
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
+
+  integration-plan:
+    name: Plan Changed Integration Tests
+    timeout-minutes: 10
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
-      issues: read
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
 
-      - name: Install dtype-oracle Python dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          # Both parallel jobs restore the same cache; only matrix shard 1 of
-          # workspace-tests-shard saves it, avoiding a second multi-GB entry.
-          save-if: false
-
-      # The wire and bindings census binaries both invoke nested cargo rustdoc
-      # in this shared ~500 MB target. Restore it independently of the normal
-      # workspace cache so those exact nested builds survive across runs.
-      - name: Restore capacity rustdoc build
-        uses: actions/cache/restore@v4
-        with:
-          path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Dtype Phase 0-3 oracle
+      - name: Derive the change-owned and package-expansion plan
         env:
-          GH_TOKEN: ${{ github.token }}
-          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: .venv/bin/python scripts/dtype_phase3_oracle.py
+          EVENT_NAME: ${{ github.event_name == 'workflow_dispatch' && 'pull_request' || github.event_name }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ needs.changes.outputs.candidate_sha }}
+          REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
+          REBASE_BEFORE: ${{ needs.changes.outputs.rebase_before }}
+          REBASE_PACKAGES: ${{ needs.changes.outputs.rebase_packages }}
+        run: |
+          event_name="$EVENT_NAME"
+          before="$BEFORE"
+          if [ "$REBASE_LANE" = "targeted" ]; then
+            event_name=targeted_rebase
+            before="$REBASE_BEFORE"
+          fi
+          .venv/bin/python scripts/ci_change_owned.py plan \
+            --event-name "$event_name" \
+            --pr-head "$PR_HEAD" \
+            --before "$before" \
+            --after "$AFTER" \
+            --targeted-packages "$REBASE_PACKAGES" \
+            --output target/integration-change/plan.json
 
-      - name: Validate and report test timing
-        run: >-
-          .venv/bin/python scripts/test_timing_check.py
-          --junit target/nextest/ci-full/junit.xml
-          --informational
-
-      - name: Upload dtype JUnit
-        if: always()
+      - name: Upload integration change plan
         uses: actions/upload-artifact@v7
         with:
-          name: junit-linux-dtype
-          path: target/nextest/ci-full/junit.xml
+          name: integration-change-plan
+          path: target/integration-change/plan.json
           if-no-files-found: error
           retention-days: 14
 
-      # Pull requests only consume the last main-produced cache. One
-      # successful push-to-main writer avoids duplicate multi-hundred-MB
-      # entries and same-key races across the parallel consumers.
-      - name: Save capacity rustdoc build
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@v4
-        with:
-          path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-
-  # Keep the #732 Phase 2 acceptance contract executable as its own blocking
-  # leg. This is deliberately not appended to the dtype job: each phase oracle
-  # has an independently visible result and failure boundary.
-  faithful-observation-phase2-oracle:
-    name: Faithful Observation Phase 2 Oracle
-    runs-on: ubuntu-latest
+  change-owned-shard:
+    name: Change-Owned Integration Tests (bucket ${{ matrix.shard }})
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 85
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     permissions:
       contents: read
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          # Restore the workspace cache but leave the single writer in matrix
-          # shard 1 of workspace-tests-shard, avoiding another multi-GB entry.
-          save-if: false
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Faithful observation Phase 2 oracle
-        env:
-          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: .venv/bin/python scripts/faithful_observation_phase2_oracle.py
-
-  # Freeze chelis#1286's complete initial ownership fixture universe and its
-  # typed expected-failure receipts before production ownership changes begin.
-  # This phase is hardware-independent; the HIP hardware row becomes mandatory
-  # in Phase 3.
-  compiled-value-ownership-phase0-oracle:
-    name: Compiled Value Ownership Phase 2 Oracle
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          # Restore the workspace cache while leaving shard 1 of the workspace
-          # suite as the single writer for this namespace.
-          save-if: false
-
-      - name: Compiled value ownership Phase 2 oracle
-        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase 2
-
-      - name: Compiled value ownership launch subset
-        run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
-
-  # chelis#893 Phase 0's authoritative oracle is the `runtime-representation`
-  # gate stage. It runs release-profile reproducers whose artifacts are never
-  # in the shared cache plus 37 serial controlled mutations, about eleven
-  # hosted minutes: measured on push run 33653771041 it took workspace shard
-  # 2's support step from 2.1 to 13.0 minutes and the shard from 14.4 to 25.9.
-  # Like the other phase oracles it therefore gets its own runner and its own
-  # failure boundary, aggregated under the required Integration Tests (Linux)
-  # context. `clang` is the oracle's C/Objective-C front end.
-  runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 0 Oracle
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          # Restore the workspace cache; matrix shard 1 of workspace-tests-shard
-          # remains the single writer for this namespace.
-          save-if: false
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      # The stage is defined once in scripts/gate.py; scripts/test_gate.py
-      # pins this job's run commands like the other gate-owned workers.
-      - name: Gate (runtime representation stage)
-        run: python3 scripts/gate.py runtime-representation
-
-  # chelis#1207's authoritative parity corpus compares every production
-  # level-based generalization with the retained reference sweep and bypasses
-  # nextest's default filter so no discovered non-ignored test is omitted.
-  # Split the one corpus over four deterministic hash partitions: each shard
-  # still compiles the exact feature-enabled workspace, while the expensive
-  # test execution runs on four hosted runners in parallel. The aggregate job
-  # below retains a stable oracle status and fails closed unless all four
-  # disjoint partitions succeed; the directly required Integration Tests (Linux)
-  # context transitively gates that aggregate.
-  generalize-sweep-oracle-shard:
-    name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
+    needs: [changes, integration-plan]
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.integration-plan.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+        shard: [0, 1, 2, 3]
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
+
+      - name: Download integration change plan for shard selection
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: ${{ runner.temp }}/integration-change
+
+      - name: Preserve empty-shard evidence or request execution
+        shell: bash
+        id: shard-selection
+        run: >-
+          python3 scripts/ci_change_owned.py prepare-shard
+          --plan "${{ runner.temp }}/integration-change/plan.json"
+          --lane change-owned
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/change-owned-${{ matrix.shard }}
+          --github-output "$GITHUB_OUTPUT"
 
       - name: Free disk space (Ubuntu)
+        if: steps.shard-selection.outputs.has_targets == 'true' && runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up project CI
+        id: build-cache
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        uses: ./.github/actions/setup-project-ci
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Restore cargo registry and build cache
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Install Python binding dependencies
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      # Cache restoration can replace target/; install the current plan last.
+      - name: Download integration change plan
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
+
+      - name: Execute the exact change-owned shard
+        if: steps.shard-selection.outputs.has_targets == 'true'
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+          CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/integration-change/change-owned-${{ matrix.shard }}/census-timings
+        run: >-
+          python scripts/ci_change_owned.py run-shard
+          --plan target/integration-change/plan.json
+          --lane change-owned
+          --shard ${{ matrix.shard }}
+          --output target/integration-change/change-owned-${{ matrix.shard }}
+
+      - name: Upload change-owned shard receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-change-owned-${{ matrix.shard }}
+          path: target/integration-change/change-owned-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
+
+  change-owned-report:
+    name: Change-Owned Integration Report
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    needs: [changes, ci-fast, integration-plan, change-owned-shard]
+    if: ${{ always() && github.event_name != 'push' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
 
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-workspace
-          save-if: false
-
-      - name: Restore capacity rustdoc build
-        uses: actions/cache/restore@v4
-        with:
-          path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Typecheck level generalization oracle
+      - name: Require the planner and every change-owned shard
         env:
-          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+          REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
+        run: |
+          args=(
+            "integration-plan=${{ needs.integration-plan.result }}"
+            "change-owned-shard=${{ needs.change-owned-shard.result }}"
+          )
+          if [ "$REBASE_LANE" != "targeted" ]; then
+            args+=("ci-fast=${{ needs.ci-fast.result }}")
+          fi
+          python3 scripts/ci_require_success.py "${args[@]}"
 
-      # The generalization-lane selection census lists this exact feature
-      # configuration, which is warm only here. On workspace shard 1 the same
-      # listing recompiled the workspace under a second feature set and cost
-      # 4.4 minutes per run; here it is one `cargo nextest list` on the build
-      # the oracle step just produced. Shard 1 runs it once.
-      - name: Verify generalization lane selection
-        if: matrix.shard == 1
-        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
+      - name: Download integration change plan
+        uses: actions/download-artifact@v7
+        with:
+          name: integration-change-plan
+          path: target/integration-change
 
-      - name: Validate and report test timing
-        run: >-
-          .venv/bin/python scripts/test_timing_check.py
-          --junit target/nextest/ci-full/junit.xml
-          --informational
+      - name: Download change-owned shard receipts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: integration-change-owned-*
+          path: target/integration-change/receipts/change-owned
 
-      - name: Upload generalization JUnit shard
+      - name: Download standing coverage receipt
+        if: needs.changes.outputs.rebase_lane != 'targeted'
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-fast-receipts
+          path: target/integration-change/standing
+
+      - name: Validate required change-owned execution
+        env:
+          REBASE_LANE: ${{ needs.changes.outputs.rebase_lane }}
+        run: |
+          standing=()
+          if [ "$REBASE_LANE" != "targeted" ]; then
+            standing+=(
+              --standing-coverage
+              target/integration-change/standing/ci-fast/coverage.json
+            )
+          fi
+          .venv/bin/python scripts/ci_change_owned.py report \
+            --plan target/integration-change/plan.json \
+            --lane change-owned \
+            --receipts-root target/integration-change/receipts/change-owned \
+            --output target/integration-change/change-owned-report \
+            --required \
+            "${standing[@]}"
+
+      - name: Publish required change-owned summary
+        if: always()
+        run: |
+          if [ -f target/integration-change/change-owned-report/summary.md ]; then
+            cat target/integration-change/change-owned-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload required change-owned report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-linux-generalization-${{ matrix.shard }}
-          path: target/nextest/ci-full/junit.xml
-          if-no-files-found: error
+          name: integration-change-owned-report
+          path: target/integration-change/change-owned-report
+          if-no-files-found: warn
           retention-days: 14
 
-  generalize-sweep-oracle:
-    name: Typecheck Level Generalization Oracle
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, generalize-sweep-oracle-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    steps:
-      - uses: actions/checkout@v6
 
-      - name: Require every generalization-oracle shard
-        run: python3 scripts/ci_require_success.py generalize-sweep-oracle-shard=${{ needs.generalize-sweep-oracle-shard.result }}
-
-  # Keep the existing required status context while making the expensive
-  # legs parallel. `always()` makes the stable required context inspect every
-  # dependency result, including cancellation, instead of being skipped green.
   integration:
     name: Integration Tests (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    needs: [changes, ci-fast, change-owned-report]
+    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane != 'docs' && (needs.changes.outputs.rebase_lane == 'targeted' || needs.changes.outputs.docs_only != 'true'))) }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
-      - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} compiled-value-ownership-phase0-oracle=${{ needs.compiled-value-ownership-phase0-oracle.result }} runtime-representation-phase0-oracle=${{ needs.runtime-representation-phase0-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
+      - name: Require the fixed main integration suite
+        if: github.event_name == 'push'
+        run: >-
+          python3 scripts/ci_require_success.py
+          ci-fast=${{ needs.ci-fast.result }}
+
+      - name: Require all ordinary pull-request integration legs
+        if: github.event_name != 'push' && needs.changes.outputs.rebase_lane != 'targeted'
+        run: >-
+          python3 scripts/ci_require_success.py
+          ci-fast=${{ needs.ci-fast.result }}
+          change-owned-report=${{ needs.change-owned-report.result }}
+
+      - name: Require targeted rebase integration
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration == 'true'
+        run: >-
+          python3 scripts/ci_require_success.py
+          change-owned-report=${{ needs.change-owned-report.result }}
+
+      - name: Preserve integration context for an owner-only rebase
+        if: needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_integration != 'true'
+        run: echo "trusted rebase selected no package integration frontier"
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
   # commit to main on every merge. See WS-7 / spend-trim.
 
-  macos-workspace-shard:
-    name: macOS Workspace (shard ${{ matrix.shard }}/2)
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    runs-on: macos-latest
-    # Successful runs normally finish in 14-16 minutes, but hosted-runner
-    # variance can push the workspace suite past the old 20-minute job cap.
-    # Keep a hard ceiling while leaving measured headroom for the post-test
-    # architecture, manifested-C-ABI, and Metal smoke checks.
-    timeout-minutes: 30
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. macOS Smoke is the authoritative workspace oracle, so it
-    # runs on every code PR and every push; only a pure-prose PR skips it.
-    needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Every other cargo *test* job in this workflow drops debuginfo; this
-    # one was the only omission, and it is the workflow's critical path
-    # (the `Workspace tests` step alone is longer than any whole job).
-    # macOS pays for debuginfo twice: rustc emits it, then the linker
-    # walks the debug map for every test binary the workspace produces.
-    # Nothing here reads debuginfo -- the job asserts binary architecture
-    # and runs two codegen smoke scripts -- so the only visible cost is
-    # unsymbolicated frames in a `RUST_BACKTRACE` dump on failure, which
-    # is exactly the tradeoff the Linux jobs already accept. The release
-    # SMT jobs are deliberately not in this set: they build `--release`,
-    # which these dev/test profile vars do not reach.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # See lint-rust for why this runs before the cargo cache
-      # and why the version is pinned to v8.1.0 rather than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: macos-workspace
-          save-if: ${{ matrix.shard == 1 }}
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Assert Apple Silicon runner
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = "arm64"
-
-      # Run the real workspace test suite on macOS so macOS-only failures
-      # (e.g., test harnesses that miss `-framework Accelerate` on linking
-      # generated C, or Metal codegen-structure regressions) actually turn
-      # this job red. Before this step existed, macOS-only breakage was
-      # silently invisible to CI because the job only built and ran a
-      # narrow Accelerate smoke shell script. `cargo nextest run
-      # --workspace` builds everything it needs as part of test
-      # compilation, so a separate `cargo build --workspace` step
-      # beforehand is redundant under Swatinem's rust-cache. nextest's
-      # cross-binary parallelism keeps this job off the same ~200-binary
-      # serialization bloat as the Linux workspace workers; see
-      # docs/investigations/ci_integration_test_runtime_diagnosis.md.
-      - name: Workspace tests
-        env:
-          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --partition hash:${{ matrix.shard }}/2
-
-      - name: Upload macOS workspace JUnit shard
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: junit-macos-workspace-${{ matrix.shard }}
-          path: target/nextest/ci-full/junit.xml
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Verify packaged binary architecture
-        if: matrix.shard == 2
-        run: |
-          set -euo pipefail
-          file target/debug/chelis | grep -E 'arm64|aarch64'
-
-      - name: Smoke test manifested C callable ABI
-        if: matrix.shard == 2
-        run: python3 .github/scripts/smoke_macos_manifested_callable.py ./target/debug/chelis
-
-      # Phase M smoke: emit `.mm` from the Metal backend and link it
-      # against the Metal/Foundation frameworks. Compile-and-link only
-      # — no kernel dispatch — because MTLCreateSystemDefaultDevice may
-      # return null on macos-latest CI VMs. Real GPU correctness lives
-      # in the M6 manual gate (`cargo test -p chelis-backend-metal
-      # --test gpu_correctness -- --ignored`) on a real workstation.
-      - name: Smoke test Metal backend codegen + link
-        if: matrix.shard == 2
-        run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
-
-      - name: Validate and report test timing
-        run: >-
-          .venv/bin/python scripts/test_timing_check.py
-          --junit target/nextest/ci-full/junit.xml
-          --informational
-
-  # Keep the exact branch-protection context stable and fail closed if either
-  # disjoint full-workspace partition fails.
-  macos-smoke:
-    name: macOS Smoke
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, macos-workspace-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Require every macOS workspace shard
-        run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
-
-  # Preserve every partition's nextest timing as a durable artifact and one
-  # cross-platform report. Overlap between semantic lanes is intentional and
-  # remains visible; the workspace aggregate separately proves its hash
-  # partitions are disjoint before producing their validated timing report.
-  # Dtype, generalization, and macOS producers validate and report the same
-  # diagnostic thresholds before their own required aggregates.
-  #
-  # Every JUnit producer must have SUCCEEDED. This job downloads nine
-  # named artifacts with no fallback, and a producer that did not finish
-  # uploads none of its own: a hosted-runner allocation failure cancels
-  # the job before its first step, and a producer that dies at its own
-  # upload step leaves the artifact equally absent. Without that gate a
-  # run gains a second red job whose only message is `Artifact not found
-  # for name: junit-macos-workspace-1`, which reads as a repository
-  # defect rather than as the producer failure the required aggregate
-  # already reports. Skipping is safe here and only here: this is a
-  # non-required reporting aggregate, the run is already red from the
-  # producer itself, and each producer separately validates and reports
-  # its own lane timing through scripts/test_timing_check.py. Required
-  # aggregates keep `always()` and stay fail-closed.
   test-telemetry:
     name: CI Test Telemetry
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
     permissions:
       contents: read
-    needs: [changes, workspace-tests-shard, dtype-phase3-oracle, generalize-sweep-oracle-shard, macos-workspace-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.workspace-tests-shard.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' && needs.macos-workspace-shard.result == 'success' }}
+    needs: [changes, ci-fast]
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) && needs.ci-fast.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Download Linux workspace JUnit shard 1
+      - name: Download fast Linux JUnit
         uses: actions/download-artifact@v7
         with:
-          name: junit-linux-workspace-1
-          path: target/test-telemetry/input/linux-workspace-1
-
-      - name: Download Linux workspace JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-2
-          path: target/test-telemetry/input/linux-workspace-2
-
-      - name: Download dtype JUnit
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-dtype
-          path: target/test-telemetry/input/linux-dtype
-
-      - name: Download generalization JUnit shard 1
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-generalization-1
-          path: target/test-telemetry/input/linux-generalization-1
-
-      - name: Download generalization JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-generalization-2
-          path: target/test-telemetry/input/linux-generalization-2
-
-      - name: Download generalization JUnit shard 3
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-generalization-3
-          path: target/test-telemetry/input/linux-generalization-3
-
-      - name: Download generalization JUnit shard 4
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-generalization-4
-          path: target/test-telemetry/input/linux-generalization-4
-
-      - name: Download macOS workspace JUnit shard 1
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-macos-workspace-1
-          path: target/test-telemetry/input/macos-workspace-1
-
-      - name: Download macOS workspace JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-macos-workspace-2
-          path: target/test-telemetry/input/macos-workspace-2
+          name: junit-linux-fast
+          path: target/test-telemetry/input/linux-fast
 
       - name: Build cross-lane timing report
         run: >-
           uv run --managed-python --python 3.11 --no-project python
           scripts/ci_test_telemetry.py
-          --shard linux-workspace-1=target/test-telemetry/input/linux-workspace-1/junit.xml
-          --shard linux-workspace-2=target/test-telemetry/input/linux-workspace-2/junit.xml
-          --shard linux-dtype=target/test-telemetry/input/linux-dtype/junit.xml
-          --shard linux-generalization-1=target/test-telemetry/input/linux-generalization-1/junit.xml
-          --shard linux-generalization-2=target/test-telemetry/input/linux-generalization-2/junit.xml
-          --shard linux-generalization-3=target/test-telemetry/input/linux-generalization-3/junit.xml
-          --shard linux-generalization-4=target/test-telemetry/input/linux-generalization-4/junit.xml
-          --shard macos-workspace-1=target/test-telemetry/input/macos-workspace-1/junit.xml
-          --shard macos-workspace-2=target/test-telemetry/input/macos-workspace-2/junit.xml
+          --shard linux-fast=target/test-telemetry/input/linux-fast/junit.xml
           --json target/test-telemetry/full/report.json
           --summary target/test-telemetry/full/summary.md
           --github-summary "${GITHUB_STEP_SUMMARY}"
@@ -1384,11 +1525,16 @@ jobs:
 
   backend-sanitizers:
     name: Backend Sanitizers
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # Reserve 25 minutes for cold hosted Devenv realization.
+    timeout-minutes: 55
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.result != 'success' || needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_backend == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')) }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -1400,32 +1546,41 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
-      # job for the transient-mirror-reset rationale.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
-      # No uv setup here — `cargo test -p chelis-backend-c` does not
-      # transitively pull pyo3 (verified by `cargo tree -p chelis-backend-c`),
-      # so pyo3-build-config never runs in this job.
       - name: Backend tests under ASan/UBSan
-        run: cargo test -p chelis-backend-c
+        run: cargo test -p chelis-backend-c --lib
+
+      - name: Backend doctests
+        run: cargo test -p chelis-backend-c --doc
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}
 
   no-ai-authorship:
     name: No AI authorship markers
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    needs: [changes]
+    if: ${{ !cancelled() }}
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
       # repo history (chelis#421). GitHub Actions expressions have no
@@ -1436,20 +1591,32 @@ jobs:
       # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 1
 
       - name: Check commits for AI authorship markers
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ] ||
+             [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # Deepen head to the PR commit range, then backstop-fetch the
             # base commit so `base..head` resolves at the shallow boundary
-            # (both no-ops if already present).
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+            # (both no-ops if already present). The backstop is depth-less
+            # for the reason given in the `changes` job: `--depth=1` grafts
+            # the base in .git/shallow, and `$BASE..$HEAD` then stops
+            # excluding the base's ancestors, so this scan reads commits
+            # that merged into the target long before the pull request
+            # existed (chelis#2228).
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            else
+              git fetch origin "$HEAD" "$BASE" 2>/dev/null || true
+            fi
+            git fetch --no-tags origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
             git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
@@ -1493,7 +1660,12 @@ jobs:
 
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    needs: [changes]
+    if: ${{ !cancelled() }}
     # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     # This job compiles the chelis-e2e skill-suite test binary.
     env:
@@ -1511,67 +1683,118 @@ jobs:
       # green for the right reason.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
           fetch-depth: 0
+
+      # Where the reason is stated. Not the only red context on a code
+      # pull request: the two required aggregators go red too, reporting a
+      # skipped worker rather than the cause. This step states the cause
+      # and says nothing about what happened to other jobs, deliberately.
+      # That consequence list is what went stale twice, and a check whose
+      # message describes jobs it cannot see has to be kept in sync with
+      # them forever; the job log already shows what ran.
+      - name: Require candidate lifecycle and CI contract preflight
+        shell: bash
+        env:
+          CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
+          PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
+        run: |
+          if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
+            echo "this candidate could not be evaluated, which is why this" \
+              "check is red." >&2
+            echo "reason: ${PREFLIGHT_REASON:-the candidate preflight did not report}" >&2
+            echo "See the Detect docs-only changes job for the step that" \
+              "reported it." >&2
+            exit 1
+          fi
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
-      - name: Install uv for focused documentation contracts
-        uses: astral-sh/setup-uv@v8.1.0
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+
+      - name: Report Phase 3 required-test changes
+        env:
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+        run: python scripts/phase3_test_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase3-test-changes.json
+
+      - name: Publish Phase 3 required-test changes
+        if: ${{ always() && hashFiles('target/phase3-test-changes.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase3-test-changes
+          path: target/phase3-test-changes.json
+          if-no-files-found: error
+
+      - name: Report Phase 4B contract changes
+        env:
+          BASE_REF: ${{ github.event_name == 'push' && github.event.before || '' }}
+          PR_HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+        run: python scripts/phase4b_change_report.py --base "$BASE_REF" --pr-head "$PR_HEAD" --output target/phase4b-contract-changes.json
+
+      - name: Publish Phase 4B contract changes
+        if: ${{ always() && hashFiles('target/phase4b-contract-changes.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: phase4b-contract-changes
+          path: target/phase4b-contract-changes.json
+          if-no-files-found: error
 
       - name: Validate CI topology documentation
-        run: uv run --managed-python --python 3.11 --no-project python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+        run: python -m unittest scripts.test_gate.CiParityTests.test_topology_docs_name_current_shard_owners
+
+      # Agent instructions are Markdown, so their owning checks must also
+      # run when docs-only routing skips the workspace and script jobs.
+      - name: Validate shared agent skills
+        run: python scripts/check_agent_skills.py
+
+      - name: Test hosted validation coverage
+        run: python -m unittest scripts.test_check_agent_skills scripts.test_hosted_validation
+
+      - name: Verify shared skill distribution
+        run: cargo test -p chelis-conformance --test asset_drift_tripwire --test skill_set_uniformity
 
       # chelis#729 Phase 4B froze the numeric atoms and the capability schema
       # behind atom and region digests over spec/ and spec/design/, plus a
       # per-file acknowledgement gate over every frozen contract file. The
-      # oracle validates documents and runs no cargo command, and a docs-only
-      # pull request skips every heavy job, so this always-run job is the only
+      # oracle validates documents and regenerated rejection membership, including
+      # its fresh source/compiler closure. A docs-only pull request skips the
+      # other heavy jobs, so this always-run job is the
       # placement that actually defends the freeze against the edits most
       # likely to break it. This step is unconditional: on a push or a
       # workflow_dispatch it runs the atom and region digests and reports the
       # contract diff without requiring a pull request body.
       - name: Validate the chelis#729 Phase 4B freeze
-        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py
+        run: python scripts/dtype_phase4b_oracle.py
 
-      # The enforcing half. On a pull request every changed frozen contract
-      # file must be named by a `Frozen-contract-change:` line in the body.
-      # The body is untrusted text written by the PR author, so it is passed
-      # through the environment and never interpolated into a shell command.
-      #
-      # The base is the default `origin/main`, deliberately, not
-      # `github.event.pull_request.base.sha`. The checkout is `refs/pull/N/merge`,
-      # so HEAD is GitHub's test-merge commit and `git merge-base origin/main HEAD`
-      # is that commit's first parent: exactly the base the merge was built on.
-      # The payload SHA is only the base tip at event-creation time, so if `main`
-      # advances and GitHub regenerates the merge ref before the checkout, the
-      # payload SHA lags and main's changes get charged to this branch. The merge
-      # base cannot lag that way, and both steps then read one baseline.
-      - name: Require frozen contract acknowledgements
-        if: github.event_name == 'pull_request'
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: uv run --managed-python --python 3.11 --no-project python scripts/dtype_phase4b_oracle.py --require-acknowledgement --acknowledgements-env PR_BODY
+      - name: Validate package SKILL and mdBook examples
+        run: cargo test -p chelis-e2e --test skill_suite
 
       - name: Install mdBook
+        if: runner.environment == 'github-hosted'
         uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.2
 
-      # No project venv setup here — `cargo test -p chelis-e2e` does not
-      # transitively pull pyo3 (verified by `cargo tree -p chelis-e2e`), so
-      # pyo3-build-config never runs in this job. The focused documentation
-      # contract above uses uv's managed no-project interpreter directly.
-      - name: Validate package SKILL and mdBook examples
-        run: cargo test -p chelis-e2e --test skill_suite
-
       - name: Build mdBook
         run: mdbook build docs/book
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}

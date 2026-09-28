@@ -16,6 +16,7 @@
 //! - a non-finite gradient DAG / an inverted output range -> rejected at the
 //!   WI-3 producer boundary.
 
+use chelis_compiler_api::schema::numbers::NonnegativeExtent;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{
@@ -181,7 +182,7 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
         .validate_schema_version()
         .expect("the gradient artifact is a supported version");
     for goal in &goals {
-        let root = goal.extracted.goal.ir.root_index().expect("root index") as usize;
+        let root = goal.extracted.goal.ir.root_index().expect("root index");
         assert!(
             parsed.roots.contains(&root),
             "each goal's root index is a real root of the gradient DAG"
@@ -247,8 +248,6 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
     // shape, not just a changed root count.
     let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
         .expect("the gradient bytes parse back as a WireDag");
-    let x_root = x_root as usize;
-    let y_root = y_root as usize;
     assert!(
         parsed.roots.contains(&x_root),
         "x root is in the gradient DAG"
@@ -257,8 +256,8 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         parsed.roots.contains(&y_root),
         "y root is in the gradient DAG"
     );
-    let x_node = &parsed.nodes[x_root];
-    let y_node = &parsed.nodes[y_root];
+    let x_node = &parsed.nodes[usize::try_from(x_root).unwrap()];
+    let y_node = &parsed.nodes[usize::try_from(y_root).unwrap()];
     assert!(matches!(x_node.op, WireRiscOp::Add));
     assert!(matches!(y_node.op, WireRiscOp::Add));
     assert_eq!(x_node.inputs.len(), 2);
@@ -268,7 +267,7 @@ fn equal_adjoints_keep_distinct_exact_zero_roots() {
         "each target has its own exact-zero leaf"
     );
     for zero in [x_node.inputs[0], y_node.inputs[0]] {
-        let WireRiscOp::Const { value } = &parsed.nodes[zero].op else {
+        let WireRiscOp::Const { value } = &parsed.nodes[usize::try_from(zero).unwrap()].op else {
             panic!("adjoint accumulation base must be a Const");
         };
         assert_eq!(
@@ -553,16 +552,24 @@ fn unknown_wrt_name_surfaces_a_typed_grad_error() {
 /// sole gradient target `t` maps to root 0.
 fn single_op_grad_result(op: WireRiscOp) -> GradResult {
     let mut grad_nodes_by_name = BTreeMap::new();
-    grad_nodes_by_name.insert("t".to_string(), 0usize);
+    grad_nodes_by_name.insert("t".to_string(), 0_u64);
     GradResult {
         dag: WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
+            declarations: vec!["entry".to_owned()],
             nodes: vec![WireDagNode {
+                declaration: 0,
+                activation: None,
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 0,
                 op,
                 inputs: vec![],
                 output_type: WireTensorType {
-                    dims: vec![WireDimInfo::Lit { size: 1 }],
+                    dims: vec![WireDimInfo::Lit {
+                        size: NonnegativeExtent::new(1).unwrap(),
+                    }],
                     precision: "f32".to_string(),
                 },
             }],

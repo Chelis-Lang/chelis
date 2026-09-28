@@ -36,13 +36,9 @@ use chelis_deep::{Atom as DeepAtom, Expr as DeepExpr};
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::VecDeque;
 
-/// The `def`/`defsig` children of a `module` node start after the tag,
-/// metadata map, and module-name atom.
-const MODULE_DECL_OFFSET: usize = 3;
-
-/// A stamped `Expr::Node` module carries the tag and metadata map outside its
-/// child vector, so its declarations start after the module-name atom alone.
-const STAMPED_MODULE_DECL_OFFSET: usize = 1;
+/// A module node carries the tag and metadata map outside its child vector,
+/// so its declarations start after the module-name atom alone.
+const MODULE_DECL_OFFSET: usize = 1;
 
 /// Prune `exprs` to the defs reachable from `entry`, handling both the
 /// flat-top-level-`def`-siblings form and the single `(module ...)` wrapper
@@ -58,51 +54,50 @@ const STAMPED_MODULE_DECL_OFFSET: usize = 1;
 /// unknown entry surfaces downstream as the same "unbound"/unknown-output
 /// path it would without pruning, rather than silently emptying the program).
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
-    // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: the descent
-    // reads BOTH admitted carriers of a module wrapper. A `.dp` file reaches
-    // this pruner through `parse_and_stamp_file`, which produces `Expr::Node`;
-    // the `Expr::List`-only test recognized no module there, fell through to
-    // the flat-sibling branch, found no `def` there either (`deep_def_name`
-    // had the same defect), and returned the program UNPRUNED. PP7 measured
-    // the consequence through tide's `/lower`: the same program lowered
-    // cleanly from Surf and failed the check stage from Deep on an unrelated
-    // def's unbound reference. Each carrier is rebuilt as itself; nothing is
-    // routed through `Node::to_list`.
+    prune_entry(exprs, entry, ReferenceScope::Syntactic)
+}
+
+/// Resource admission concerns executed definitions, not same-spelled locals
+/// or references in type metadata. Reuse the checker's capture/binding analysis
+/// for this scope, leaving the broader authoring/build pruner unchanged.
+pub(crate) fn prune_checked_runtime_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    prune_entry(exprs, entry, ReferenceScope::LexicalRuntime)
+}
+
+#[derive(Clone, Copy)]
+enum ReferenceScope {
+    Syntactic,
+    LexicalRuntime,
+}
+
+fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<DeepExpr> {
+    // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: a module
+    // wrapper has the single spelling `Expr::Node` whether it came from Surf
+    // expansion or from a `.dp` file through `parse_and_stamp_file`. Before
+    // the legacy list spelling was deleted, a reader of only one spelling
+    // recognized no module on the other, fell through to the flat-sibling
+    // branch, found no `def` there either, and returned the program UNPRUNED.
     match exprs.as_slice() {
-        [DeepExpr::List(list, _)] if list_tag(list) == Some(DeepTag::Module) => {
-            let DeepExpr::List(module, span) = exprs.into_iter().next().expect("len-1 slice")
-            else {
-                unreachable!("matched List above");
-            };
-            let chelis_deep::List { mut elements } = module;
-            // Keep the fixed head (tag, metadata map, module-name atom)
-            // verbatim and prune the tail. `import` / `export` live in the
-            // tail (after the name atom) but are non-decl elements, so the
-            // tail pruner keeps them via its keep-non-decl filter. The split
-            // is clamped to the element count so a header-only module (no
-            // decls) is a no-op.
-            let split = MODULE_DECL_OFFSET.min(elements.len());
-            let decls = elements.split_off(split);
-            elements.extend(prune_top_level_to_reachable_defs(decls, entry));
-            vec![DeepExpr::List(chelis_deep::List { elements }, span)]
-        }
         [DeepExpr::Node(node, _)] if node.tag() == DeepTag::Module => {
             let DeepExpr::Node(mut module, span) = exprs.into_iter().next().expect("len-1 slice")
             else {
                 unreachable!("matched Node above");
             };
-            // A stamped node's children exclude the tag and the metadata map,
-            // so the module-name atom is child 0 and the declarations follow.
+            // The module-name atom is child 0 and the declarations follow.
+            // `import` / `export` live after the name atom but are non-decl
+            // elements, so the tail pruner keeps them via its keep-non-decl
+            // filter. The split is clamped to the child count so a
+            // header-only module (no decls) is a no-op.
             let mut children = module.children_slice().to_vec();
-            let split = STAMPED_MODULE_DECL_OFFSET.min(children.len());
+            let split = MODULE_DECL_OFFSET.min(children.len());
             let decls = children.split_off(split);
-            children.extend(prune_top_level_to_reachable_defs(decls, entry));
+            children.extend(prune_top_level_entry(decls, entry, scope));
             module
                 .try_replace_children(children)
                 .expect("pruning a module drops whole declarations, never its name binder");
             vec![DeepExpr::Node(module, span)]
         }
-        _ => prune_top_level_to_reachable_defs(exprs, entry),
+        _ => prune_top_level_entry(exprs, entry, scope),
     }
 }
 
@@ -116,11 +111,19 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
 /// without pruning. This is the WI-3 single-entry contract; the build path
 /// uses [`prune_to_reachable_seeds`] directly with its multi-name seed set.
 pub fn prune_top_level_to_reachable_defs(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    prune_top_level_entry(exprs, entry, ReferenceScope::Syntactic)
+}
+
+fn prune_top_level_entry(
+    exprs: Vec<DeepExpr>,
+    entry: &str,
+    scope: ReferenceScope,
+) -> Vec<DeepExpr> {
     let is_local_def = exprs.iter().any(|expr| deep_def_name(expr) == Some(entry));
     if !is_local_def {
         return exprs;
     }
-    prune_to_reachable_seeds(exprs, std::iter::once(entry.to_string()))
+    prune_reachable(exprs, std::iter::once(entry.to_string()), scope)
 }
 
 /// Prune a flat list of top-level Deep declarations to those reachable from
@@ -138,6 +141,14 @@ pub fn prune_to_reachable_seeds(
     exprs: Vec<DeepExpr>,
     seeds: impl IntoIterator<Item = String>,
 ) -> Vec<DeepExpr> {
+    prune_reachable(exprs, seeds, ReferenceScope::Syntactic)
+}
+
+fn prune_reachable(
+    exprs: Vec<DeepExpr>,
+    seeds: impl IntoIterator<Item = String>,
+    scope: ReferenceScope,
+) -> Vec<DeepExpr> {
     let def_map = exprs
         .iter()
         .filter_map(|expr| deep_def_name(expr).map(|name| (name.to_string(), expr)))
@@ -150,7 +161,15 @@ pub fn prune_to_reachable_seeds(
             continue;
         }
         if let Some(expr) = def_map.get(&name) {
-            for reference in deep_referenced_vars(expr) {
+            let lexical_references;
+            let references = match scope {
+                ReferenceScope::Syntactic => deep_referenced_vars(expr),
+                ReferenceScope::LexicalRuntime => {
+                    lexical_references = chelis_types::linearity::free_runtime_variables(expr);
+                    lexical_references.iter().map(String::as_str).collect()
+                }
+            };
+            for reference in references {
                 if def_map.contains_key(reference) && !reachable.contains(reference) {
                     queue.push_back(reference.to_string());
                 }
@@ -193,11 +212,11 @@ pub fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
     }
 }
 
-/// The decoded tag and leading name atom of a declaration on either admitted
-/// carrier, or `None` for anything else.
+/// The decoded tag and leading name atom of a declaration node, or `None` for
+/// anything else.
 ///
-/// chelis#1125 PP7 / [04-TOT-5]: the two name readers above were
-/// `Expr::List`-only, so on the stamped carrier every declaration read as
+/// chelis#1125 PP7 / [04-TOT-5]: the two name readers above once read only
+/// the deleted list spelling, so on a stamped node every declaration read as
 /// nameless. `prune_top_level_to_reachable_defs` then saw no local `def`,
 /// took its unknown-entry escape hatch, and returned the program unpruned;
 /// `prune_to_reachable_seeds`'s keep-filter would likewise have kept every
@@ -207,12 +226,6 @@ fn decl_head(expr: &DeepExpr) -> Option<(DeepTag, &str)> {
     match expr {
         DeepExpr::Node(node, _) => match node.children_slice().first() {
             Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some((node.tag(), name.as_str())),
-            _ => None,
-        },
-        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-            (Some(tag), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-                Some((tag, name.as_str()))
-            }
             _ => None,
         },
         _ => None,
@@ -227,27 +240,25 @@ pub fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
     out
 }
 
+fn collect_annotation_references<'a>(metadata: &'a chelis_deep::Metadata, out: &mut Vec<&'a str>) {
+    if let Some(targets) = metadata.wrt() {
+        out.extend(targets.variables().map(|var| var.name().value().as_str()));
+    }
+    metadata.visit_expressions(&mut |value, _| collect_deep_referenced_vars(value, out));
+}
+
 fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) {
     match expr {
         DeepExpr::Atom(_, _) => {}
-        DeepExpr::MetaExpr(meta, _) => collect_deep_referenced_vars(&meta.expr, out),
+        DeepExpr::MetaExpr(meta, _) => {
+            collect_annotation_references(&meta.metadata, out);
+            collect_deep_referenced_vars(&meta.expr, out);
+        }
         DeepExpr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_deep_referenced_vars(value, out);
-            }
+            collect_annotation_references(map, out);
         }
-        DeepExpr::List(list, _) => {
-            if let (Some(DeepTag::Var), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) =
-                (list.tag(), list.elements.get(2))
-            {
-                out.push(name.as_str());
-            }
-            for child in &list.elements {
-                collect_deep_referenced_vars(child, out);
-            }
-        }
-        // Direct Node handling (bridge not possible due to lifetime constraints) (#908)
         DeepExpr::Node(node, _) => {
+            collect_annotation_references(node.meta(), out);
             use chelis_deep::node::ChildRef;
             if node.tag() == DeepTag::Var {
                 for child_ref in node.children_iter() {
@@ -276,15 +287,12 @@ fn collect_deep_referenced_vars<'a>(expr: &'a DeepExpr, out: &mut Vec<&'a str>) 
             }
         }
         DeepExpr::UnknownForm(data) => {
+            collect_annotation_references(&data.meta, out);
             for child in &data.children {
                 collect_deep_referenced_vars(child, out);
             }
         }
     }
-}
-
-fn list_tag(list: &chelis_deep::List) -> Option<DeepTag> {
-    list.tag()
 }
 
 #[cfg(test)]

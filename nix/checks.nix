@@ -141,7 +141,6 @@ let
       }
       ''
         export HOME="$TMPDIR/home"
-        export CHELIS_RUNTIME_DIR="${packages.chelis}/lib"
         mkdir -p "$HOME"
 
         version_output="$(${packages.chelis}/bin/chelis --version 2>&1)"
@@ -211,6 +210,8 @@ let
       ''
         nixfmt --check \
           ${root}/devenv.nix \
+          ${root}/devenv/ci.nix \
+          ${root}/devenv/entry-shell.nix \
           ${root}/devenv/commands.nix \
           ${root}/devenv/generated-files.nix \
           ${root}/devenv/git-hooks.nix \

@@ -242,7 +242,7 @@ mod tests {
 
     fn neg_sidecar() -> Sidecar {
         Sidecar {
-            substring: "expected int32".to_string(),
+            substring: "expected i32".to_string(),
             citations: vec![],
         }
     }
@@ -301,7 +301,7 @@ mod tests {
     fn neg_fail_with_substring_is_ok() {
         let v = classify(
             ExpectMode::Neg,
-            &fail("error: expected int32, got f32"),
+            &fail("error: expected i32, got f32"),
             Some(&neg_sidecar()),
         );
         assert_eq!(v, Verdict::Ok);
@@ -397,7 +397,7 @@ mod tests {
         // neg cases do not require a blocker citation.
         let v = classify(
             ExpectMode::Neg,
-            &fail("error: expected int32"),
+            &fail("error: expected i32"),
             Some(&neg_sidecar()),
         );
         assert_eq!(v, Verdict::Ok);

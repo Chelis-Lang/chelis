@@ -6,7 +6,7 @@
 //!
 //! Root cause (pinned by a wrong-ascription probe ladder): `infer_tuple_get`
 //! read the projection index ONLY from a bare `deep::Atom::Int`, but the
-//! Surf `.N` desugar emits the index as a `lit` node `(lit {int32} N)`
+//! Surf `.N` desugar emits the index as a `lit` node `(lit {i32} N)`
 //! (`desugar.rs`, `Expr::TupleGet`). The index never matched, so every
 //! Surf-level `.N` projection fell through to `Type::Error`. `Type::Error`
 //! unifies with anything, so the projected element (and every value derived
@@ -39,7 +39,7 @@ use chelis_types::{InferResult, check_ir_program};
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -91,7 +91,7 @@ type G =
 type V =
   | V { v: tensor[2, f32] }
 def e_loss(p: P, s: tensor[2, f32]) -> f32 = match p with {
-  | P { v } => sum(add(v, s), cast(0, int32)) |> tensor_to_scalar
+  | P { v } => sum(add(v, s), cast(0, i32)) |> tensor_to_scalar
 }
 def g_of(x: P) -> G = match x with {
   | P { v } => G { v }
@@ -99,7 +99,7 @@ def g_of(x: P) -> G = match x with {
 def e_step(params: P, grads: G, vel: V) -> f32 = match params with {
   | P { v: pv } => match grads with {
     | G { v: gv } => match vel with {
-    | V { v: vv } => sum(add(add(pv, gv), vv), cast(0, int32)) |> tensor_to_scalar
+    | V { v: vv } => sum(add(add(pv, gv), vv), cast(0, i32)) |> tensor_to_scalar
   } } }
 ";
 
@@ -211,7 +211,7 @@ def hop1(p0: P, s: tensor[2, f32]) -> G = {
 }
 def hop2(p0: P, s: tensor[2, f32]) -> G = hop1(p0, s)
 def accum(grads: G) -> f32 =
-  match grads with { | V { v: vv } => sum(vv, cast(0, int32)) |> tensor_to_scalar }
+  match grads with { | V { v: vv } => sum(vv, cast(0, i32)) |> tensor_to_scalar }
 def driver() -> f32 = {
   p0 = P { v: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
   s = to_tensor([cast(0.5, f32), cast(0.5, f32)])
@@ -369,9 +369,9 @@ fn polymorphic_tuple_fold_accumulator_projection_checks() {
     // reject with "expected tuple type".
     assert_checks(
         "\
-def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], int64) = {
-  idxs = range(cast(0, int64), numel(copy(xs)))
-  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, int64))
+def f[n](xs: tensor[n, f32]) -> (tensor[n, f32], i64) = {
+  idxs = range(cast(0, i64), numel(copy(xs)))
+  state0 = (to_tensor(map(fn (x: f32) -> cast(0.0, f32), to_list(copy(xs)))), cast(0, i64))
   step = fn (state, i) -> {
     acc = state.0
     total = state.1

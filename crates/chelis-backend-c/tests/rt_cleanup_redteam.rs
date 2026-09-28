@@ -28,7 +28,6 @@ use chelis_types::types::Prim;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
@@ -36,88 +35,6 @@ mod common;
 const BF16_TOL: f64 = 1e-2;
 #[allow(dead_code)]
 const F16_TOL: f64 = 1e-3;
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
 
 fn gcc_available() -> bool {
     Command::new("gcc")
@@ -161,20 +78,11 @@ fn compile_and_run_kernel(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let mut args: Vec<String> = vec![
         "-O2".into(),
         "-std=c11".into(),
@@ -303,13 +211,15 @@ fn run_bf16_abs_with_bits(bits: u16) -> u16 {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Abs, vec![load], vec_ty(n, Prim::Bf16), None);
     let result = codegen(&dag, "bf16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -344,13 +254,15 @@ fn run_f16_abs_with_bits(bits: u16) -> u16 {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Abs, vec![load], vec_ty(n, Prim::F16), None);
+    dag.add_node(decl, RiscOp::Abs, vec![load], vec_ty(n, Prim::F16), None);
     let result = codegen(&dag, "f16_abs_edge").unwrap();
     let main_c = format!(
         r#"{HARNESS}
@@ -554,7 +466,9 @@ fn bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1() {
     }
     let n = 4096;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
@@ -562,6 +476,7 @@ fn bf16_reduce_sum_4096_x_0_001_uses_f32_accumulator_per_spec_5_7_1() {
     );
     let sum_op = RiscOp::sum_default(0, Prim::Bf16).expect("sum constructs");
     dag.add_node(
+        decl,
         sum_op,
         vec![load],
         TensorType {
@@ -633,13 +548,16 @@ int main(void) {{
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -657,7 +575,7 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_bf16_to_f32"),
@@ -683,13 +601,16 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
 fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::F16),
@@ -702,7 +623,7 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "f16_mm_f32_out").unwrap();
     assert!(
         result.c_source.contains("chelis_f16_to_f32"),
@@ -716,22 +637,103 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     );
 }
 
-/// The matmul wrapper allocates scratch buffers `t{id}_af`, `t{id}_bf`,
-/// and (when output is reduced-float) `t{id}_cf`, and must free EVERY
-/// scratch buffer it allocates. A mismatched count would leak per call.
-/// Lock by counting `malloc(... * sizeof(float))` vs `free(t...)` lines
-/// in the emitted source for both output-precision cases.
+/// In these generated bf16 fixtures, scratch owners and guards outlive the
+/// complete batch loop. Its enclosing nonempty branch ends with exactly one
+/// unconditional end/release pair per scratch owner.
+fn fixture_block_end(source: &str, opening: usize) -> usize {
+    let bytes = source.as_bytes();
+    assert_eq!(bytes[opening], b'{');
+    let mut depth = 0;
+    for at in opening..bytes.len() {
+        // These generated numeric fixture blocks contain no quoted tokens or
+        // comments. Reject a changed grammar instead of guessing its braces.
+        assert!(!matches!(bytes[at], b'\"' | b'\''), "quoted fixture block");
+        assert!(
+            !(bytes[at] == b'/' && matches!(bytes.get(at + 1), Some(b'/' | b'*'))),
+            "commented fixture block"
+        );
+        match bytes[at] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return at;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated fixture block")
+}
+
+fn assert_matmul_scratch_lifetime(src: &str, names: &[&str]) {
+    assert!(!src.contains("malloc("), "{src}");
+    assert_eq!(
+        src.matches("_scratch = chelis_alloc(").count(),
+        names.len(),
+        "{src}"
+    );
+    let batch = src.find("for (int64_t t2_batch").expect("batch loop");
+    let gemm = src.find("cblas_sgemm(").expect("BLAS call");
+    let branch = src
+        .find("else if (t2_batch_count != 0) {")
+        .expect("nonempty branch");
+    let branch_open = branch + src[branch..].find('{').unwrap();
+    let branch_end = fixture_block_end(src, branch_open);
+    let batch_open = batch + src[batch..].find('{').unwrap();
+    let batch_end = fixture_block_end(src, batch_open);
+    assert!(branch_open < batch_open && batch_end < branch_end);
+    let expected_cleanup = names.iter().map(|name| format!(
+        "chelis_tensor_end_write(t2_{name}_guard); chelis_tensor_release(t2_{name}_scratch);"
+    )).collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        src[batch_end + 1..branch_end]
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        expected_cleanup.split_whitespace().collect::<Vec<_>>(),
+        "cleanup must be the complete unconditional branch tail: {src}"
+    );
+
+    for name in names {
+        let steps = [
+            format!("chelis_tensor *t2_{name}_scratch = chelis_alloc("),
+            format!("chelis_tensor_begin_write(t2_{name}_scratch)"),
+            format!("chelis_tensor_write_view(t2_{name}_guard)"),
+            format!("chelis_tensor_end_write(t2_{name}_guard)"),
+            format!("chelis_tensor_release(t2_{name}_scratch)"),
+        ];
+        let positions: Vec<_> = steps
+            .iter()
+            .map(|step| {
+                assert_eq!(src.matches(step).count(), 1, "{step}: {src}");
+                src.find(step).unwrap()
+            })
+            .collect();
+        assert!(positions.windows(2).all(|p| p[0] < p[1]), "{name}: {src}");
+        assert!(
+            positions[0] > branch_open
+                && positions[2] < batch
+                && gemm < batch_end
+                && batch_end < positions[3],
+            "{name}: {src}"
+        );
+    }
+}
+
 #[test]
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -744,45 +746,26 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
     let result = codegen(&dag, "bf16_mm_alloc_free").unwrap();
     let src = &result.c_source;
-    let mallocs = src.matches("malloc((size_t)").count();
-    let frees_in_wrapper = src.matches("free(t").filter(|_| true).count();
-    // The wrapper should allocate 3 scratch buffers (af, bf, cf) and
-    // free 3. If the count diverges, the emitter has a leak.
-    assert_eq!(
-        mallocs, 3,
-        "bf16 matmul wrapper must allocate exactly 3 scratch buffers (af, bf, cf):\n{src}"
-    );
-    // free(t{id}_af), free(t{id}_bf), free(t{id}_cf) plus the contiguity
-    // descriptor releases (`if (t{id}_a != t{a})
-    // chelis_tensor_release(t{id}_a);` and similar for _b). Match the bare
-    // `free(t` calls used only for the wrapper's scratch buffers.
-    let af_free = src.contains("free(t") && src.contains("_af);");
-    let bf_free = src.contains("free(t") && src.contains("_bf);");
-    let cf_free = src.contains("free(t") && src.contains("_cf);");
-    assert!(
-        af_free && bf_free && cf_free,
-        "all three scratch buffers (af, bf, cf) must be freed:\n{src}"
-    );
-    assert!(
-        frees_in_wrapper >= 3,
-        "expected at least 3 `free(t` calls (af/bf/cf), got {frees_in_wrapper}:\n{src}"
-    );
+    assert_matmul_scratch_lifetime(src, &["af", "bf", "cf"]);
 }
 
 #[test]
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
     use chelis_ir::dag::DimExpr;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_ty(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_ty(3, 4, Prim::Bf16),
@@ -795,20 +778,12 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
         k: DimExpr::Concrete(3),
         accumulator: Prim::F32,
     };
-    dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_alloc_free_f32_out").unwrap();
     let src = &result.c_source;
-    let mallocs = src.matches("malloc((size_t)").count();
-    // When output is f32, only af and bf are scratch; cf is the result tensor itself.
-    assert_eq!(
-        mallocs, 2,
-        "bf16 matmul wrapper with f32 output must allocate exactly 2 scratch buffers \
-         (af, bf; cf=destination):\n{src}"
-    );
-    assert!(
-        !src.contains("_cf"),
-        "no cf scratch buffer should be allocated when output is f32:\n{src}"
-    );
+    // f32 results are written directly to the result tensor.
+    assert_matmul_scratch_lifetime(src, &["af", "bf"]);
+    assert!(!src.contains("t2_cf_scratch"), "{src}");
 }
 
 // =====================================================================
@@ -835,7 +810,9 @@ fn bf16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::Bf16, value),
             vec![],
             vec_ty(n, Prim::Bf16),
@@ -885,7 +862,9 @@ fn f16_const_fill_pinned_bit_patterns_for_0_1_0_01_pi() {
     for &(value, expected) in cases {
         let n = 4;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F16, value),
             vec![],
             vec_ty(n, Prim::F16),
@@ -941,13 +920,16 @@ fn cast_f32_to_bf16_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Bf16,
         },
@@ -990,13 +972,16 @@ fn cast_bf16_to_f32_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::Bf16).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -1038,13 +1023,16 @@ fn cast_f32_to_f16_preserves_value_per_ieee_754() {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, 1.5_f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F16,
         },
@@ -1089,26 +1077,30 @@ fn cross_backend_bf16_add_mul_chain_agrees_with_evaluator() {
     }
     let n = 8;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    let add = dag.add_node(RiscOp::Add, vec![a, b], vec_ty(n, Prim::Bf16), None);
+    let add = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_ty(n, Prim::Bf16), None);
     let c = dag.add_node(
+        decl,
         RiscOp::Load { name: "c".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Mul, vec![add, c], vec_ty(n, Prim::Bf16), None);
 
     // Evaluator
     let mut inputs = chelis_unord::UnordMap::new();
@@ -1363,4 +1355,98 @@ fn sibling_sweep_no_em_dash_in_string_literals_in_touched_crates() {
             }
         }
     }
+}
+
+#[test]
+fn scratch_cleanup_controls_reject_conditional_or_in_loop_release() {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        mat_ty(2, 3, Prim::Bf16),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        mat_ty(3, 4, Prim::Bf16),
+        None,
+    );
+    let mm = RiscOp::BlasMatmul {
+        batch_dims: vec![],
+        m: DimExpr::Concrete(2),
+        n: DimExpr::Concrete(4),
+        k: DimExpr::Concrete(3),
+        accumulator: Prim::F32,
+    };
+    dag.add_node(decl, mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
+    let src = codegen(&dag, "round2_probe").unwrap().c_source;
+    assert_matmul_scratch_lifetime(&src, &["af", "bf"]);
+
+    let release = "chelis_tensor_release(t2_af_scratch);";
+    let removed = src.replacen(release, "", 1);
+    assert!(
+        std::panic::catch_unwind(|| { assert_matmul_scratch_lifetime(&removed, &["af", "bf"]) })
+            .is_err()
+    );
+
+    let end = "chelis_tensor_end_write(t2_af_guard);";
+    let reordered = src
+        .replacen(end, "ROUND2_END", 1)
+        .replacen(release, end, 1)
+        .replacen("ROUND2_END", release, 1);
+    assert!(
+        std::panic::catch_unwind(|| { assert_matmul_scratch_lifetime(&reordered, &["af", "bf"]) })
+            .is_err()
+    );
+
+    let duplicated = src.replacen(release, &format!("{release} {release}"), 1);
+    assert!(
+        std::panic::catch_unwind(|| { assert_matmul_scratch_lifetime(&duplicated, &["af", "bf"]) })
+            .is_err()
+    );
+
+    // This branch is unreachable inside the emitter's enclosing
+    // `else if (t2_batch_count != 0)`, so it leaks both scratch tensors.
+    // The oracle must reject it.
+    let leaked = src
+        .replace(
+            "chelis_tensor_release(t2_af_scratch);",
+            "if (t2_batch_count == 0) chelis_tensor_release(t2_af_scratch);",
+        )
+        .replace(
+            "chelis_tensor_release(t2_bf_scratch);",
+            "if (t2_batch_count == 0) chelis_tensor_release(t2_bf_scratch);",
+        );
+    let accepted_leak =
+        std::panic::catch_unwind(|| assert_matmul_scratch_lifetime(&leaked, &["af", "bf"])).is_ok();
+
+    // Move balanced cleanup immediately after SGEMM, still inside the
+    // batch loop. A second batch would write through released guards.
+    let mut moved_inside = src.clone();
+    let mut cleanup = String::new();
+    for name in ["af", "bf"] {
+        for statement in [
+            format!("chelis_tensor_end_write(t2_{name}_guard);"),
+            format!("chelis_tensor_release(t2_{name}_scratch);"),
+        ] {
+            moved_inside = moved_inside.replacen(&statement, "", 1);
+            cleanup.push_str(&statement);
+        }
+    }
+    let gemm_start = moved_inside.find("cblas_sgemm(").unwrap();
+    let gemm_end = gemm_start + moved_inside[gemm_start..].find(';').unwrap() + 1;
+    moved_inside.insert_str(gemm_end, &cleanup);
+    let accepted_inside =
+        std::panic::catch_unwind(|| assert_matmul_scratch_lifetime(&moved_inside, &["af", "bf"]))
+            .is_ok();
+
+    assert!(
+        !accepted_leak && !accepted_inside,
+        "oracle false accepts: unreachable_release={accepted_leak}, inside_batch={accepted_inside}"
+    );
 }

@@ -22,7 +22,7 @@
 //!
 //! `spec/04-type-system.md` section 4.7 makes a runtime extent guard a typed
 //! operation-precondition guard under [04-NUM-9], so the complete line is
-//! `numeric trap: domain in <op> at int64` with no prefix and no suffix, and
+//! `numeric trap: domain in <op> at i64` with no prefix and no suffix, and
 //! section 4.7's placement rule puts it "after every value it compares is
 //! available and before the first allocation or element access whose shape
 //! depends on the guarded extent".
@@ -46,8 +46,9 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)
 }
 
-fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         ty(dims, Prim::F32),
@@ -57,7 +58,7 @@ fn load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
 
 /// The exact [04-NUM-9] line an extent guard renders.
 fn domain_trap_line(op: &str) -> String {
-    format!("numeric trap: domain in {op} at int64")
+    format!("numeric trap: domain in {op} at i64")
 }
 
 /// chelis#1374's shape, built directly so the inputs can be bound at the API
@@ -66,10 +67,12 @@ fn domain_trap_line(op: &str) -> String {
 /// extent 2 and `y` at extent 3 makes the claim false.
 fn cross_tensor_claim_dag() -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let base = load(&mut dag, "b", vec![]);
-    let x = load(&mut dag, "x", vec![named("n")]);
-    let y = load(&mut dag, "y", vec![named("m")]);
+    let decl = dag.declare("test");
+    let base = load(&mut dag, decl, "b", vec![]);
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
+    let y = load(&mut dag, decl, "y", vec![named("m")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -90,6 +93,7 @@ fn cross_tensor_claim_dag() -> (Dag, NodeId) {
     // node evaluates, so consuming `x` does not let the elementwise operand
     // check preempt it, which the disagreeing rows measure rather than assume.
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![expanded, x],
         ty(vec![named("n")], Prim::F32),
@@ -211,15 +215,13 @@ fn the_guard_precedes_the_allocation_it_protects() {
 /// are two claims sharing a spelling and not one class.
 ///
 /// Asserted on the DERIVATION rather than through `eval_tensor_roots_with_strict`,
-/// and the reason is worth recording: this program is already rejected on
-/// `main` by an older mechanism. `infer_symbolic_bindings_from_inputs`
-/// (`eval.rs:1738`) reads the legacy name-grouped `symbolic_bindings` and errs
-/// with `symbolic dimension \`seq\` mismatch: canonical x[0] = 3, but y[1] = 2`
-/// before any guard this slice places can run. That is a pre-existing
-/// same-spelling defect on the eval lane, out of this slice's scope and not
-/// introduced by it, so the eval lane cannot host a row that isolates the
-/// class derivation's behaviour. The derivation is what this slice changed and
-/// is what this row measures.
+/// and its sibling row
+/// [`two_signatures_spelling_one_binder_bind_independently_on_eval`] asserts
+/// the same fact through the evaluator. Until chelis#665 only this half was
+/// available: the binding inference read a name-keyed grouping and rejected
+/// the program before any guard could run, which was the pre-existing
+/// same-spelling defect chelis#1566 filed. The inference now reads the same
+/// scoped derivation this row measures, so both halves are assertable.
 ///
 /// EVIDENTIARY STATUS: regression test. Round 2 found `root_reach` applied in
 /// `derive_dim_witnesses` alone, so the C prologue's `Name` guards were scoped
@@ -229,15 +231,18 @@ fn the_guard_precedes_the_allocation_it_protects() {
 #[test]
 fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("seq")]);
-    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
     let from_x = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![x],
         ty(vec![named("seq")], Prim::F32),
         None,
     );
     let from_y = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![y],
         ty(vec![named("batch"), named("seq")], Prim::F32),
@@ -273,8 +278,10 @@ fn two_roots_spelling_one_binder_are_two_claims_not_one_class() {
 /// 0 is 1, and nothing in the graph proves it.
 fn unit_extent_claim_dag() -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -351,16 +358,19 @@ fn a_unit_operand_extent_satisfies_the_claim_and_broadcasts() {
 /// broadcast of element 0 of a two-element axis.
 fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", vec![named("n")]);
-    // A movement bound source is extent-domain and therefore exactly `int64`
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("n")]);
+    // A movement bound source is extent-domain and therefore exactly `i64`
     // ([05-DIM-1]); the f32 helper above is for tensor operands.
     let end = dag.add_node(
+        decl,
         RiscOp::Load { name: "end".into() },
         vec![],
         ty(vec![], Prim::Int64),
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Node(end_slot))],
         },
@@ -369,6 +379,7 @@ fn local_unit_extent_claim_dag(end_slot: usize) -> (Dag, NodeId) {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -415,4 +426,161 @@ fn a_locally_placed_unit_claim_that_holds_broadcasts() {
     let out = &values[&root];
     assert_eq!(out.shape, vec![3]);
     assert_eq!(out.to_f64_lossy_vec(), vec![7.0, 7.0, 7.0]);
+}
+
+// ===========================================================================
+// chelis#1566: the binding inference identifies extents by SPELLING.
+//
+// `infer_symbolic_bindings_from_inputs` groups occurrences with the legacy
+// name-keyed grouping it replaced, a plain `BTreeMap<String, _>`, so two
+// independent signatures that merely spell a binder `seq` land in one group
+// and the equality loop rejects a correct merged kernel. The C and HIP
+// prologues do not, because `derive_dim_witnesses` runs `split_by_scope`.
+//
+// The `.ch` shape is `rank_poly_tier3::named_axis_eval_parity_corners`, whose
+// `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])` merge
+// into one kernel. The CLI cannot host this row: `runtime_extent_claim_
+// preparation.rs`'s `scope.independent` cell passes there because both roots
+// are value bindings the host interpreter applies, so it never reaches this
+// evaluator's inputs map. The witness therefore binds the inputs at the API
+// boundary, which is the same reason this file's header gives for every other
+// row in it.
+// ===========================================================================
+
+/// Two independent roots, each from its own signature, both spelling `seq`,
+/// at DIFFERENT extents. Both must evaluate: `seq` in one signature and `seq`
+/// in the other are two claims sharing a spelling, not one extent.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `3dc3f54f6`, where
+/// the evaluator returns `symbolic dimension `seq` mismatch: canonical x[0] =
+/// 3, but y[1] = 2`.
+#[test]
+fn two_signatures_spelling_one_binder_bind_independently_on_eval() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
+    let from_x = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    let from_y = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")], Prim::F32),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let values = eval_tensor_roots_with_strict(&dag, &[from_x, from_y], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+        _ => None,
+    })
+    .expect("two scopes spelling `seq` are two claims, not one extent");
+    assert_eq!(
+        values.get(&from_x).map(|value| value.shape.clone()),
+        Some(vec![3]),
+        "`total`'s root keeps its own extent",
+    );
+    assert_eq!(
+        values.get(&from_y).map(|value| value.shape.clone()),
+        Some(vec![2, 2]),
+        "`use2`'s root keeps its own extent",
+    );
+}
+
+/// The negative twin. One scope, two `Load` axes spelling `seq` at
+/// disagreeing extents, both reachable from the SAME root: that is one claim
+/// with two witnesses and it must still refuse. Scoping a claim by the
+/// results it reaches must not be mistaken for dropping the equality check.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6` for
+/// the same reason it must stay green afterwards, through a different
+/// mechanism: today the legacy name grouping refuses it, and after the switch
+/// the scoped derivation must.
+#[test]
+fn one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("seq")]);
+    let sum = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![x, y],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+
+    let err = eval_tensor_roots_with_strict(&dag, &[sum], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        "y" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+        _ => None,
+    })
+    .expect_err("one claim with two disagreeing witnesses must refuse");
+    assert!(
+        err.contains("seq"),
+        "the refusal names the claim whose witnesses disagree: {err}"
+    );
+}
+
+/// The second negative twin, and the one that fixes the boundary of the
+/// structural limit above. Two scopes spelling `seq` at DIFFERENT extents
+/// leave the name unbound, which is fine while every axis carrying it is
+/// computed from an actual value. It stops being fine the moment a live node
+/// reads the name BY VALUE: a `Reshape` target's `RtDim::Sym` needs a number,
+/// and there is no single number to give it. That must refuse rather than
+/// pick a scope.
+///
+/// EVIDENTIARY STATUS: regression test for the boundary. On `3dc3f54f6` the
+/// whole program refused one step earlier, in the name-keyed binding
+/// inference, so this row could not distinguish "refused because the scopes
+/// were wrongly identified" from "refused because nothing can supply the
+/// value". After the switch only the second refusal is left, and it is the
+/// one this asserts.
+#[test]
+fn two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", vec![named("seq")]);
+    let y = load(&mut dag, decl, "y", vec![named("batch"), named("seq")]);
+    let from_x = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    // `use2`'s scope reshapes to a target that SPELLS the binder, so the
+    // extent has to be a value rather than whatever the operand happens to
+    // have.
+    let from_y = dag.add_node(
+        decl,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Sym("seq".into()), RtDim::Lit(2)],
+        },
+        vec![y],
+        ty(vec![named("seq"), DimInfo::Lit(2)], Prim::F32),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let err = eval_tensor_roots_with_strict(&dag, &[from_x, from_y], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+        _ => None,
+    })
+    .expect_err("a by-value read of a binder with two disagreeing scopes has no answer");
+    assert!(
+        err.contains("seq"),
+        "the refusal names the binder it cannot resolve: {err}"
+    );
 }

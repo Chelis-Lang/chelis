@@ -15,7 +15,7 @@ use chelis_types::types::Prim;
 
 fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
     let decls = surf_parse(source).map_err(|error| format!("surf parse: {error:?}"))?;
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errors| format!("typecheck failed: {:?}", errors.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -25,12 +25,83 @@ fn surf_to_library(source: &str) -> Result<LoweredLibrary, String> {
     try_lower_program_to_library(&checked).map_err(|error| format!("lowering failed: {error:?}"))
 }
 
+/// #1767: the cotangent's geometry is the actual argument's complete
+/// ordered shape, even when the forward result has no data edge to it.
+#[test]
+fn disconnected_top_level_actual_keeps_every_axis() {
+    for shape in [vec![3], vec![], vec![2, 0, 3], vec![2, 3]] {
+        let dimensions = shape.iter().map(|n| format!("{n}, ")).collect::<String>();
+        let source = format!(
+            "x: tensor[{dimensions}f32] = x\n\
+             def loss(z: tensor[{dimensions}f32]) -> f32 = 1.0f32\n\
+             derivative = grad(loss)(x)\n"
+        );
+        let library = surf_to_library(&source).expect("checked constant gradient lowers");
+        let root = library.symbol_table()["derivative"];
+        let values =
+            chelis_ir::eval::eval_tensor_roots_with_strict(library.dag(), &[root], |name| {
+                (name == "x").then(|| {
+                    chelis_ir::eval::TensorValue::from_storage(
+                        shape.clone(),
+                        chelis_types::finalize_tensor(
+                            "test",
+                            Prim::F32,
+                            chelis_types::RawTensor::Float(vec![1.0; shape.iter().product()]),
+                        )
+                        .unwrap(),
+                    )
+                })
+            })
+            .expect("strict tensor evaluation");
+        assert_eq!(
+            library.dag().get(root).unwrap().output_type.dims,
+            shape.iter().copied().map(DimInfo::Lit).collect::<Vec<_>>(),
+            "{source}"
+        );
+        assert_eq!(values[&root].shape, shape, "{source}");
+        assert_eq!(values[&root].prim(), Prim::F32);
+        assert_eq!(
+            values[&root].to_f64_lossy_vec(),
+            vec![0.0; shape.iter().product()]
+        );
+    }
+}
+
+#[test]
+fn disconnected_actual_still_checks_its_declared_input_extent() {
+    let library = surf_to_library(
+        "x: tensor[3, f32] = x\n\
+         def loss(z: tensor[3, f32]) -> f32 = 1.0f32\n\
+         derivative = grad(loss)(x)\n",
+    )
+    .unwrap();
+    let root = library.symbol_table()["derivative"];
+    let error = chelis_ir::eval::eval_tensor_roots_with_strict(library.dag(), &[root], |name| {
+        (name == "x").then(|| {
+            chelis_ir::eval::TensorValue::from_storage(
+                vec![2],
+                chelis_types::finalize_tensor(
+                    "test",
+                    Prim::F32,
+                    chelis_types::RawTensor::Float(vec![1.0; 2]),
+                )
+                .unwrap(),
+            )
+        })
+    })
+    .expect_err("a disconnected cotangent cannot discard the actual's entry claim");
+    assert!(
+        error.contains("numeric trap: domain in load at i64"),
+        "{error}"
+    );
+}
+
 #[test]
 fn proven_shaped_zero_gradient_retains_a_typed_root() {
     let library = surf_to_library(
         r#"
 def constish(x: tensor[3, f32]) -> f32 = cast(1.0, f32)
-def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=theta)(theta)
+def g(theta: tensor[3, f32]) -> tensor[3, f32] = grad(constish, wrt=x)(theta)
 "#,
     )
     .expect("a proven zero gradient must lower");

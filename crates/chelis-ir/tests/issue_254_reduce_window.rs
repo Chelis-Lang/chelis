@@ -31,13 +31,16 @@ fn build_reduce_window(
     out_shape: &[usize],
 ) -> (Dag, String) {
     let mut dag = Dag::default();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(input_shape),
         None,
     );
     let _out = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape,
@@ -290,13 +293,16 @@ fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
 
     // x[4] -> reduce_window_sum(window=[2], stride=[1]) -> out[3] -> sum -> scalar
     let mut dag = Dag::default();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_type(&[4]),
         None,
     );
     let rw = dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Sum,
             window_shape: vec![2],
@@ -307,6 +313,7 @@ fn reduce_window_grad_lowers_to_adjoint_and_evaluates() {
         None,
     );
     let scalar = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).unwrap(),
         vec![rw],
         TensorType {

@@ -37,26 +37,17 @@ fn collect_one(expr: &Expr, acc: &mut Vec<String>) {
     }
     match expr {
         Expr::Atom(..) => {}
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                collect_one(child, acc);
-            }
-        }
         Expr::Map(meta, _) => {
-            for (_, value) in &meta.entries {
-                collect_one(value, acc);
-            }
+            meta.visit_syntax(&mut |_, value| collect_one(value, acc));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                collect_one(value, acc);
-            }
+            meta.metadata
+                .visit_syntax(&mut |_, value| collect_one(value, acc));
             collect_one(&meta.expr, acc);
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                collect_one(value, acc);
-            }
+            node.meta()
+                .visit_syntax(&mut |_, value| collect_one(value, acc));
             for child in node.children_slice() {
                 collect_one(child, acc);
             }
@@ -67,9 +58,8 @@ fn collect_one(expr: &Expr, acc: &mut Vec<String>) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                collect_one(value, acc);
-            }
+            data.meta
+                .visit_syntax(&mut |_, value| collect_one(value, acc));
             for child in &data.children {
                 collect_one(child, acc);
             }

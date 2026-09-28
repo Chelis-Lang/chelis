@@ -1,0 +1,17 @@
+(module {doc: "Metadata contract example", span: "", surf_path: "Metadata.Demo"}
+  metadata.demo
+  (defsig {dtype_bounds: {p: float}}
+    identity
+    (t-fn {} (t-var {} p) (t-var {} p)))
+  (def {source: (example_generator identity),
+         tool_note: {type: "example", original: (var {} producer_only)}
+       }
+    identity
+    (fn {}
+      (params {} (x {type: (t-var {} p)}))
+      (var {} x)))
+  (def {}
+    main
+    (fn {}
+      (params {})
+      (app {} (var {} identity) (lit {type: (t-prim {} f32)} 1.0)))))

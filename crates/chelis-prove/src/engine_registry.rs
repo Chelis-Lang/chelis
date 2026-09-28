@@ -305,6 +305,7 @@ fn goal_shape_label(goal: &Goal) -> &'static str {
     match &goal.shape {
         crate::discharge::GoalShape::Smt(_) => "smt",
         crate::discharge::GoalShape::BoxRange { .. } => "box_range",
+        crate::discharge::GoalShape::ScalarUpperBound { .. } => "scalar_upper_bound",
     }
 }
 

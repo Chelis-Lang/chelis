@@ -54,14 +54,14 @@ Recorded so the next reader does not have to re-derive it:
    with siblings that do not call it. Optionality is the root cause, and
    optionality is the one thing a patch cannot remove.
 2. **There is no reference lane to patch toward.** eval-scalar rounds f16
-   correctly while eval-tensor does not ([#717]); C-tensor wraps int8 while
+   correctly while eval-tensor does not ([#717]); C-tensor wraps i8 while
    C-scalar does not ([#718]); prove's interpreter collapses what the SMT
    tier keeps exact ([#688]). "Make X match Y" is undefined when no Y holds
    the semantics.
 3. **Dtype discipline is the language's stated value proposition.** The
    spec's differentiators - no implicit precision promotion, explicit
    casts, named dimensions - are precision-centric promises. A numeric
-   layer with no grounded notion of `f16` or `int8` contradicts the
+   layer with no grounded notion of `f16` or `i8` contradicts the
    product's own core claim.
 
 ## Non-goals
@@ -122,8 +122,8 @@ in flight, and are edited in the same change set as §9.1 or not at all:
 | `f32` | IEEE binary32 | f32 | round-to-nearest-even to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (locked: `mul(65504f16, 2f16) = inf`) | as f32 |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else **trap** | **trap** (`Overflow` out of range, `Domain` non-integral, [04-NUM-9]) | none |
-| `int32/16/8` | integers at width | exact at width | same rule at width | **trap** (`Overflow` / `Domain` at width) | none |
+| `i64` | integers in [-2^63, 2^63-1] | exact i64 | must be integral and in range, else **trap** | **trap** (`Overflow` out of range, `Domain` non-integral, [04-NUM-9]) | none |
+| `i32/i16/i8` | integers at width | exact at width | same rule at width | **trap** (`Overflow` / `Domain` at width) | none |
 | `bool` | {0, 1} | n/a (not arithmetic) | must be exactly 0 or 1, else **trap** (`NumericTrap::Domain`) | trap | none |
 | deferred names (spec §1.1.1) | rejected by the checker | - | unreachable: `finalize` for them is a compile-time-visible `Rejected` row in the capability table, not a runtime arm | - | - |
 
@@ -143,10 +143,10 @@ Normative notes, each pinned by an existing test:
 2. **The f64 collision stays.** `f64 add(2^53, 1) == 2^53` is CORRECT
    IEEE behavior and must not change
    (`precision_matrix.rs::f64_add_at_mantissa_boundary_is_correctly_lossy`).
-   The identical numbers at int64 trap or stay exact - never silently
+   The identical numbers at i64 trap or stay exact - never silently
    collapse.
 3. **Integer overflow traps at every width in every lane** ([#680]'s decided
-   contract). Today int8/16/32 wrap in eval and int64 saturates, and the
+   contract). Today i8/i16/i32 wrap in eval and i64 saturates, and the
    compiled lane does neither ([#718]) - all four behaviors are replaced by
    the trap. In-range arithmetic is exact and must not trap
    (negative-parity locks exist: `int8_add_just_below_overflow_does_not_trap`).
@@ -218,13 +218,13 @@ bug; the numbered spec wins.
   by construction: the completion wait IS the lane boundary, and traps
   remain values until it. The Metal spike ([#737] report) measured the
   detection as ~free for the memory-bound elementwise shape the backend
-  emits (worst +0.7% median, int64 mul included) and verified MSL int64
+  emits (worst +0.7% median, i64 mul included) and verified MSL i64
   bit-exact. Implementation rider from the same spike: the clang
   overflow builtins are BANNED in emitted MSL (reproducible backend
   compiler crashes on `__builtin_mul_overflow(long)`; at-scale
   vectorization miscompiles false-positive the add/sub forms) - the
-  hand-written checks (widening for int32, sign-bit XOR for add/sub,
-  `mulhi` for int64 mul; never the division-based form, which also
+  hand-written checks (widening for i32, sign-bit XOR for add/sub,
+  `mulhi` for i64 mul; never the division-based form, which also
   crashes the backend) are the implementation. Ratifying trap-everywhere
   for the GPU lanes stays with the [04-NUM-3] freeze decision once
   [#736] runs.
@@ -262,7 +262,7 @@ pub fn finalize_tensor(prim: Prim, raw: RawTensor) -> Result<TensorValue, Numeri
 
 This is the **storage decision** ([#684]/[#686]/[#685]): per-dtype buffers, not
 finalize-on-write over `Vec<f64>` - f64 storage cannot represent exact
-int64 above 2^53 regardless of write discipline, so it fails [#684] by
+i64 above 2^53 regardless of write discipline, so it fails [#684] by
 construction. The census has five declaration layers. Phase 1 lands the exact
 representation atomically at four of them - `chelis-ir/src/eval.rs`
 (`TensorValue`), `chelis-compiler-api/src/schema.rs` (wire schema - tensor
@@ -302,7 +302,7 @@ in the repository.
 
 **The Pad fill is not an exemption ([#878]).** `Pad.fill` is finalized once at
 the padded tensor's dtype during lowering and remains tagged through eval,
-wire transport, proving, and every backend emitter. Exact int64 values above
+wire transport, proving, and every backend emitter. Exact i64 values above
 2^53 therefore never acquire an f64 image. The carrier replacement shrinks both guards:
 the IR payload census now requires the sealed `ScalarValue`, and §C6's typed
 wire manifest no longer carries the former FLAGGED `float-carrier` row. The
@@ -325,8 +325,8 @@ the layer list by enumerating every public channel that carries numeric values
 value ADTs, exported stdlib definitions, and published runtime-header exports
 - and the storage decision covers all of them in one change set. The final JSON
 surface has one public value identity: `io/json::Json` with tagged
-`JsonInt(int64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
-[05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-int64-range
+`JsonInt(i64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
+[05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-i64-range
 integer-form token's exact decimal spelling, so parse totality never buys a
 float image ([#1314] owns the implementation).
 [#1293] removes the duplicate prelude `Json`/`JInt`/`JNum` surface and moves CSV
@@ -376,13 +376,13 @@ ratified at spec/04 §5.2 in the same change set:
 - any source -> float target: finalize (IEEE RNE at the target width;
   overflow is the correctly signed infinity per [04-NUM-2]); total.
 - integer/bool source -> integer target: exact value; out of the
-  target range TRAPS `Overflow` (no wrap; int32 `300 -> int8` traps,
+  target range TRAPS `Overflow` (no wrap; i32 `300 -> i8` traps,
   formerly `44`).
 - float source -> integer target: finalize only if finite and integral;
   fractional values and NaN/inf TRAP `Domain`, and integral values outside
-  the target width TRAP `Overflow` (no saturation; `cast(300.0, int8)`
+  the target width TRAP `Overflow` (no saturation; `cast(300.0, i8)`
   traps, formerly `127`). The user spells a rounding choice first, e.g.
-  `cast(floor(x), int32)` or `cast(round(x), int32)`.
+  `cast(floor(x), i32)` or `cast(round(x), i32)`.
 - any source -> bool target: STRICT {0, 1} membership - exactly 0/1
   encodes false/true, anything else TRAPS `Domain` (`cast(2, bool)`
   traps, formerly `true`). Scalar->bool now WORKS under this rule
@@ -395,6 +395,34 @@ ratified at spec/04 §5.2 in the same change set:
   remaining total IEEE RNE: `cast(9007199254740993i64, f64)` yields
   `9007199254740992.0`, and `cast(16777217i32, f32)` yields `16777216.0`.
   These are explicit ByDesign controls, not a hidden f64 intermediate.
+- Bounded tensor targets (#1564) retain the declaration's precision variable
+  through checking and pass the actualized `Prim` to the host tensor cast.
+  Lowering binds original and checker-renamed formal variables independently
+  from aligned actual types, including scalar dtype witnesses, and from checked
+  result constraints when no argument carries the target. Checked cast-result
+  identities take precedence over unrelated outer binders with the same spelling.
+  A result-only constraint actualizes both the checker-renamed body result
+  identity and the preserved authored signature's result binder before lowering
+  validates the result claim (#1746); neither may remain generic at that point.
+  The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
+  numeric target dtypes, truncating-cast parity, and invalid-target rejection.
+  The same-named checker/API suites additionally cover both checker ingresses,
+  exact stored dtypes, integer values beyond 2^53, and Domain/Overflow traps.
+- Generic value-root calls (#1640) retain checked argument dtypes and extents
+  across host argument hoisting, then use the same DAG call-site bindings as
+  typed function bodies. A generic declaration has no standalone kernel;
+  its exclusion does not exclude an application whose body and arguments are
+  DAG-lowerable. This also covers bounded scalar dtype witnesses when the
+  result is a Bool tensor. Existing host capability and recursion exclusions
+  remain in force. The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1640_value_root_actualization`, registered in required CI: exact
+  eval/generated-C agreement for f32/f64 comparison value roots and typed-main
+  twins, rank-zero/rank-two scalar constructors, separate instantiations, and
+  invalid/unconstrained dtype rejection. §5.8.1's unresolved-precision tripwire
+  remains authoritative; no result dtype or shared fallback fills missing
+  argument bindings. `examples/generic_value_roots.ch` is in the executable
+  parity corpus.
 - **Fold rule (the §C2 decline clause, applied to casts):** a
   compile-time constant fold whose cast would trap DECLINES TO FOLD -
   the condition falls to runtime, where the trap fires with its full
@@ -444,7 +472,7 @@ Frozen rules (Phase 1 freezes the Rust side; Phase 3 makes C emit the
 identical bytes):
 
 1. **Integers print as integers.** `data=[750]`, never `750.0` ([#723]'s
-   `.0` lie ends). int64 prints all 19 digits exactly (never via double).
+   `.0` lie ends). i64 prints all 19 digits exactly (never via double).
 2. **Floats print shortest-round-trip for their OWN width**: an f32
    element prints the shortest string that parses back to that f32 (Rust
    `{:?}` shortest-round-trip semantics - see [#732]'s §C1.3 for why this
@@ -515,8 +543,8 @@ dispatched, the semantics are right.
 **Signature note (2026-07-28, [04-NUM-8]).** The sketch above takes
 `a: f64, b: f64` and `a: i64` because it was written under the removed
 "compute in f64" clause. Those signatures now encode a non-conforming
-contract: under [04-NUM-8] an f32 op computes at f32 and an int32 op
-computes exactly at int32, so a kernel entry point that can only accept
+contract: under [04-NUM-8] an f32 op computes at f32 and an i32 op
+computes exactly at i32, so a kernel entry point that can only accept
 f64/i64 cannot express the rule it is meant to enforce. Phase 2 owns the
 replacement and SHALL design it against [04-NUM-8]; this doc deliberately
 does not pre-specify the form (monomorphized per width, a width-parameter,
@@ -537,6 +565,25 @@ behavior and is exactly what the atom forbids.
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
+Every dropout evaluator uses the sealed `dtype_semantics::PreparedDropout`
+boundary. `new(&TensorStorage, ScalarValue)` checks the input family, same-dtype
+rate and [05-OP-37] domain without allocating or drawing. After the
+draw's key is taken, `apply(key: RandomKey)` computes [05-RNG-2]'s unit of
+`word(key, e)` for each element `e`, arithmetic-width comparison, positive dropped zero, and finalized
+sub/div into `TensorStorage`. `PreparedUniformLike` is the same split for
+[05-OP-8]: `new` validates the bounds at the arithmetic width, and
+`apply(key)` fills the template's element count. A draw over a key batch
+stacks its rows: each row is one `new` and `apply` over that row's elements,
+with the row's key and controls. `RandomKey` is an opaque, structurally
+non-numeric carrier. `from_seed` forms [05-OP-69]'s key; `derive`
+([05-RNG-2]), `split` ([05-OP-70]), `fold_in` ([05-OP-72]) and `split_n`
+([05-OP-71]) form keys from a key. The numerical owners have no ambient
+stream or replay authority. Their private fields prevent bypassing preparation;
+the lane supplying the key owns source order and failure-prefix accounting. The
+four exact compiler-kernel callables are registered to [05-OP-37] and [05-OP-8]
+in C6's off-leg semantic registry, with presence/authority controls; that
+stopgap is not a complete Rust API census.
+
 **Performance contract:** finalize is per-buffer monomorphized loops (or
 direct element-type compute once storage is per-dtype), never per-element
 dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
@@ -545,31 +592,39 @@ integration tier, not the workspace loop.
 
 ## C6. The covered-family capacity ratchet and Phase 1 entry edges (added 2026-07-30)
 
-**Current enforcement status.** The merged PR #956 change set implements the
-structurally enforced successor for the header and stdlib families:
-canonical C declaration identity, matched-row metadata freeze, stdlib
-ADT-shape identity AND capacity classification, non-function ABI
-inventory, total linemarker attribution, a derived and recursively
-walked published-header set, an INVERTED type-word rule that rejects
-unrecognized arithmetic spellings rather than classifying them
-dtype-free, post-ratchet runtime/stdlib numeric-callable authority
-registration, public-header context invariance, and issue-kind-aware liveness
-are executable tripwires. The chelis#1288 foundation adds one shared exact
-classifier across the primary, typed-wire, and registered-PyO3 legs: every
-post-foundation identity must be exactly `Nonnumeric`, `TaggedTransport`, or
-`NumericOperation(atom)`, and no generic issue citation or maintainer override
-can admit a new or changed descriptor. Eighteen exact runtime descriptors now
-classify `Nonnumeric`; `chelis_tensor_shape` and the Count wire field classify
-as exact numeric operations. The immutable foundation-era grandfather,
-permanent-disposition, successor-override, typed-wire, registered-PyO3, and
-integer-plumbing sets remain transitional implementation debt, not accepted
-end states: chelis#1288 still removes the survivors and chelis#1293 aligns the
-recursively discovered stdlib definitions before Phase 4C authority
-population may begin. The
-typed wire-schema and registered-PyO3 legs in this change complete the
-pre-Phase-1 inventory with separate generated baselines and mutation
-controls. Their named commands below remain the hard Phase 1 entry evidence;
-editing coverage metadata is not a substitute for making them green.
+**Current enforcement status.** The primary census enforces canonical C
+identities, complete published-header attribution, conservative arithmetic
+classification, configuration-invariant declarations, and exact semantic
+registrations for numeric callables and stdlib constructors. Its 313 rows have
+final authority; none uses an exception disposition. The stdlib closure resolves
+imported and generic nominal types to a finite fixed point and rejects unresolved
+names. Its execution controls preserve the 84 exact [05-OP-35] identities.
+
+The wire census verifies the compiler/Python publication graph, exact carrier
+shapes, codec and admission execution, and the default compiler-api library's
+compiled serialization obligations. The executed baseline's 97 numeric leaves
+have final authority: 80 verified transports and 17 exact numeric-operation
+registrations. WireDag v16 includes the u64 shape-dependency reference, the
+opaque u64 local-ascription identity, and the fixed-int64 extent carrier's
+literal-witness requirement role. The wire
+baseline has no frozen cohort or static-descriptor admission path. Every new or
+changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
+or `NumericOperation(atom)`; a citation or maintainer override cannot supply
+missing authority.
+
+The registered-PyO3 baseline has nine final nonnumeric registrations, seven
+final tagged transports, and one exact numeric-operation registration. The
+tagged transports are the four compiler-JSON functions, the compiled-model
+tensor call, and the two DLPack methods; `NativeTensor.shape` binds to
+[05-OP-45]. Discovery follows every registration's return values and reachable
+payloads. Native authority additionally requires the current Rustdoc graph, MIR
+ownership proof, and exact native execution receipt; no binding row remains
+legacy.
+Unflagged signatures are not evidence of nonnumeric behavior. #1288 remains
+open until all families satisfy zero-exception acceptance on one integrated
+head. #1293 retains stdlib semantic alignment. The named entry commands below
+remain required evidence; editing a baseline or coverage metadata cannot make
+an incomplete leg pass.
 
 §C1-§C5 make the EXISTING numeric surface correct and make
 supported-cell semantics unavoidable at op-result construction. The
@@ -806,12 +861,18 @@ Deliverables, with phase homes:
    command with `CHELIS_CAPACITY_CENSUS_WRITE=1`). The liveness command
    is `.venv/bin/python scripts/capacity_census_liveness.py`; success is
    exit 0 with final line `CAPACITY CENSUS LIVENESS: PASS`. Execution
-   is CI-owned through [#730]'s §C7.5 channel (converged 2026-07-31,
-   superseding the earlier manual-only contract): the change-gated
-   blocking job runs it when the census or its citations change, and
-   the nightly full sweep re-runs it for standing-citation drift;
-   release cuts and red-team passes remain additional manual
-   invocations, not the only ones.
+   is owned by [#730]'s §C7.5 scheduled full sweep, which remains pending;
+   release cuts and red-team passes run it manually in the meantime. The
+   offline census shape and authority-class guards remain on the PR path.
+
+   The liveness reader accepts the final binding baseline's native tagged
+   transports and [05-OP-45] shape operation alongside CompilerJson and
+   nonnumeric rows. It rejects all binding citation/legacy fields, including
+   the retired four-signature native disposition. Current final binding rows
+   require no tracker lookup. This is persisted-shape validation only: the
+   Rust binding verifier retains current discovery, graph, codec and execution
+   authority. No final baseline or Rust admission rule changes for this adapter
+   repair; the wider execution matrix remains [#730] §C7.5 work.
 
    The census's lexical primitives live in
    `tests/support/c_lexical.rs`, shared by `#[path]` the way
@@ -841,29 +902,35 @@ Deliverables, with phase homes:
    types carry `leg`, `artifact`, `enumerator`, `command`,
    `expected_success`, and `mutations`, and a deferred leg additionally
    carries `owner`. `Baseline { version, legs: CoverageManifest, rows }`
-   is version 2, and its serialized `legs` value must equal the
+   is version 3, and its serialized `legs` value must equal the
    executable manifest exactly. Editing
    `spec/design/capacity_census.json` therefore cannot promote a
    deferred leg. The completed typed Phase 1 entry commitments are:
 
    | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
    |---|---|---|---|---|
-   | `wire-schema-numeric-fields` | `crates/chelis-compiler-api/src/schema.rs` public serialized type graph | rustdoc JSON public schema type graph -> numeric fields | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | `adding_or_removing_a_public_serialized_f64_field_changes_the_census` |
-   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
+   | `wire-schema-numeric-fields` | Compiler/Python publication roots and their reachable typed graph | Actual graph, codec/admission, cache, publication and mutation execution through the private wire verifier | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | Actual Rust-source graph mutations and `verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected`; `final_binding_rows_cannot_regain_legacy_admission` |
 
    Each leg is a live enumerator, executable command, exact success
-   condition, and mutation test recorded in `coverage_manifest()`. The wire
-   baseline freezes public serialized numeric carrier shapes only. Its
-   `float-carrier` classification is shape metadata for this census: a
-   `TensorElements::{F64,F32,F16,Bf16}` variant inside the serde dtype-tagged
-   payload is the intended carrier, not an untagged seam and not authority for
-   execution semantics. In
-   particular, post-PR-#956 root structures are census inputs, not authority
-   for root identity, manifest order, dotted-root expansion, `requires_main`,
-   artifact routing, or `HostReason`; those remain chelis#912 work. The PyO3
-   leg freezes registered signatures and rejects raw dtype ingress; it does
-   not inspect or redesign private runtime-dtype decoding. The typed `DeepTag`
-   lane disposition and Deep stamping are outside this task entirely.
+   condition, and mutation selection recorded in `coverage_manifest()`. The wire
+   baseline compares the executed final classification of every numeric leaf.
+   Its `float-carrier` flag includes all four active float storage widths; the
+   flag itself supplies no authority. The canonical `ScalarValue` and
+   `TensorStorage` codecs and every field-specific role must be verified first.
+
+   `tests/support/capacity_census_wire_verifier.rs` exposes an opaque witness
+   obtained only by executing `scripts/capacity_census_typed.py wire`. That
+   command rejects supplied rustdoc artifacts and runs the current graph,
+   codecs, admission paths, consumers, caches and compiled publication checks.
+   Framework receipts require every selected test to execute successfully.
+   The [typed-wire membership contract](#typed-wire-transport-membership) below
+   defines the boundary; an arbitrary metadata tag does not establish it.
+
+   Root identity, artifact routing and `HostReason` remain #912 work. The PyO3
+   signature leg independently verifies return/payload discovery and native
+   runtime authority; it does not borrow authority from the wire leg. Deep
+   stamping remains outside this wire work.
 
    Binding-baseline dispositions (each entry is the C6 review a frozen
    descriptor-manifest update cites):
@@ -886,41 +953,54 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The foundation enforces that landing rule for every new or changed identity
-   while the remaining migration proceeds. The primary baseline currently has
-   119 active legacy rows: 21 grandfather seams, 97 permanent plain rows, and
-   the obsolete prelude `Json` row. Its 18 exact nonnumeric rows, its eight
-   tagged-carrier declarations, and its 34 registered numeric operations have
-   final authority and no legacy disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
-   cohorts; Count's wire field is separately final-registered. These counts are
-   progress evidence, not the zero-exception completion oracle.
+   The primary baseline has completed that landing rule: its 313 discovered
+   rows have final authority as 74 exact nonnumeric rows, 16 exact tagged
+   carriers/transports, and 223 exact numeric-operation registrations. It has
+   zero grandfather, permanent-disposition, successor-override,
+   integer-plumbing, or other transition rows. The wire baseline likewise has
+   97 final rows (80 verified transports and 17 numeric operations), with no
+   legacy cohort. Fresh actual verification includes WireDag v16's u64
+   shape-dependency and local-ascription-identity transports plus the
+   fixed-extent literal-witness role.
+   Nine binding rows have final nonnumeric authority, seven rows have final
+   tagged-transport authority, and `NativeTensor.shape` has exact
+   numeric-operation authority under [05-OP-45]. No binding row remains legacy.
+   These counts are
+   current inventory evidence; executable enumeration and exact one-class
+   matching remain the completion oracle.
+
+   The backend-header baseline has ten final rows discovered from the complete
+   HIP support root under the committed Phase-0 SDK stubs. Clang runs against a
+   fixed target with `-ffreestanding -nostdlibinc`; canonical linemarker paths
+   may resolve only inside the staged published closure, declared stub roots,
+   or clang's own resource headers. The generated `chelis_gpu_tensor` packet is
+   one exact tagged transport; the nine opaque device-owner callables are exact
+   [05-OP-33] numeric operations. The recursively discovered HIP support-header
+   set selects attributed files before declaration extraction; there is no
+   basename authority filter, so a reached nested support header cannot disappear.
+   Shared runtime declarations retain their primary-baseline authority and
+   declared SDK/stub headers remain preprocessing inputs rather than backend
+   publications.
+   The complete recursively discovered published Metal `.h` set currently
+   exports only `static inline` definitions and therefore contributes no ABI
+   row. A separate executable enrollment gate runs every such header through
+   the shared C-family lexer, aggregates and sorts its raw rows, and fails when
+   an attributable Metal declaration first appears. Comment, string, character,
+   and raw-literal payloads therefore cannot alter structural brace depth or
+   hide a later declaration. Enrollment requires a hermetic Metal census lane
+   plus exact authority in that same change.
 
    The final C/runtime authority partition is exact:
 
-   - `Nonnumeric` contains only `chelis_file_exists`,
-     `chelis_string_contains`, `chelis_string_ends_with`, `chelis_string_eq`,
-     `chelis_string_starts_with`, `chelis_string_concat`,
-     `chelis_string_from_cstr`, `chelis_string_trim`, `chelis_string_data`,
-     `chelis_adt_get_tag`, `chelis_adt_tag_equals`, `chelis_fail`,
-     `chelis_read_file`, `chelis_write_file`, `chelis_read_lines`,
-     `chelis_list_dir`, `chelis_mmap_file`, and the opaque `chelis_string`
-     layout.
-   - `TaggedTransport` contains the exact `chelis_dtype`, `chelis_scalar`,
-     `chelis_tensor`, `chelis_value_tag`, `chelis_value`,
-     `chelis_option_scalar`, `chelis_option_value`, and `chelis_dict_entry`
-     layouts; `chelis_free`; `chelis_string_retain`, `chelis_string_release`,
-     `chelis_list_retain`, `chelis_list_release`, `chelis_tuple_retain`,
-     `chelis_tuple_release`, `chelis_dict_retain`, `chelis_dict_release`,
-     `chelis_adt_retain`, `chelis_adt_release`, `chelis_value_retain`, and
-     `chelis_value_release`; `chelis_value_from_string`,
-     `chelis_value_from_tensor`, `chelis_value_from_list`,
-     `chelis_value_from_tuple`, `chelis_value_from_dict`,
-     `chelis_value_from_adt`; `chelis_value_as_string`,
-     `chelis_value_as_tensor`, `chelis_value_as_list`,
-     `chelis_value_as_tuple`, `chelis_value_as_dict`, and
-     `chelis_value_as_adt`;
-     `chelis_list_empty`, `chelis_list_append`, `chelis_list_concat`,
-     `chelis_list_flatten`, `chelis_list_zip`; and
+   - `Nonnumeric` is the exact 74-descriptor registry. In particular, the
+     `chelis_adt`, `chelis_dict`, `chelis_list`, `chelis_string`, and
+     `chelis_tuple` retain/release pairs and `chelis_value_release` carry no
+     numeric value or capacity and are registered here.
+   - `TaggedTransport` is the exact 16-descriptor registry: the value-tag enum,
+     `chelis_scalar`, `chelis_value`, `chelis_read_view`, `chelis_write_view`,
+     `chelis_value_payload`, and dtype enum declarations; the [05-OP-31]
+     `chelis_dict_entry` shape; and `chelis_list_empty`, `chelis_list_append`,
+     `chelis_list_concat`, `chelis_list_flatten`, `chelis_list_zip`,
      `chelis_dict_keys`, `chelis_dict_values`, and `chelis_dict_entries`.
      A transport row only moves an
      already validated tagged value and never sizes, compares, indexes,
@@ -1053,7 +1133,7 @@ Deliverables, with phase homes:
      an open issue. The final control instead rejects that addition because
      the new constructor identity has no exact operation registration; the
      paired integer and float mutations prove the rule uniformly. The
-     source-faithful `JsonInt(int64)` and `JsonFloat(f64)` variants are both
+     source-faithful `JsonInt(i64)` and `JsonFloat(f64)` variants are both
      wanted tagged numeric operations, not carrier seams.
      The def leg reads capacity off the DECLARED signature, so an
      exported `def` that declares none is public numeric surface the
@@ -1065,6 +1145,26 @@ Deliverables, with phase homes:
      `an_exported_stdlib_def_without_a_signature_fails_loudly`, with
      `a_declared_stdlib_signature_enumerates_and_a_type_export_does_not`
      keeping a dtype-free type export from reading as one).
+     Discovery links the complete stdlib source package through Reef's
+     declaration linker, then resolves signatures, nominal fields and alias
+     bodies through the compiler's Deep type resolver. Source paths and
+     authored signatures remain the census identities; qualified compiler
+     names govern the graph. Same-package imports obey module exports;
+     public transparent aliases may reach private local declarations without
+     making those declarations directly importable. Local declarations shadow
+     imports, and unresolved imports, type names,
+     arities or argument kinds fail discovery.
+     Finite summaries track concrete numeric domains and formal payload
+     positions to a worklist fixed point. They follow the compiler's
+     containers, function inputs/results, tuples, references and tensor
+     precisions, including recursive aliases and changing recursive generic
+     arguments. Aliases are transparent; a nominal boundary stops bare-carrier
+     flags while its payloads still contribute numeric reachability. Declared
+     dtype bounds and the existing precision-name backstop remain capacity;
+     an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
+     in `capacity_census_tripwire` exercise these boundaries and preserve the
+     existing 84 definition and five ADT identities. This is declared-surface
+     evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
      enforcement-relevant derived classification for every matched
@@ -1136,19 +1236,11 @@ Deliverables, with phase homes:
      scripts/capacity_census_liveness.py`. As originally landed this
      was a manual gate run at release cuts and red-team passes, with
      the offline constraint as its rationale (round-4 red team N8,
-     recorded); **converged 2026-07-31 onto [#730]'s §C7.5 CI channel**,
-     which resolves the same offline/online split without leaving the
-     live half manual: the change-gated blocking `ci.yml` job (with
-     `issues: read`, failing CLOSED on tracker unavailability) runs the
-     liveness command pre-merge whenever the census or a citation
-     changes, and the nightly full sweep re-runs it so a cited issue
-     closing goes red within a day rather than at the next release
-     cut. A citation naming a missing issue or a PR now fails
-     pre-merge, not only at the next manual pass; the shape/liveness
-     boundary itself is unchanged. Scheduling and gating are [#730]
-     §C7.5's; this script, its pass line, and the census contract
-     remain this plan's (the same contents-vs-scheduling split as the
-     [#732] oracle interlock).
+     recorded). [#730]'s §C7.5 scheduled full sweep is the automated
+     owner and remains pending; release cuts and red-team passes run the
+     command manually until it lands. The shape/liveness boundary is
+     unchanged: PRs prove offline shape and authority classes, while the
+     scheduled/manual command proves exists/kind/open state.
    - **Failure messages teach** the rule, the sanctioned actions, and
      the §C6 pointer. For a context-poor agent the error text is the
      only documentation that provably gets read; the cheapest passing
@@ -1240,7 +1332,7 @@ Named non-goals, each with its owner, so coverage is never inferred:
   defend, and no checker can govern a conversion whose source type is
   not in the program. The fix is still type-system-shaped: TYPE THE
   BOUNDARY - source-faithful ingestion ADTs, the in-tree `io/json`
-  precedent (`JsonInt(int64)` beside `JsonFloat(f64)`; JSON syntax
+  precedent (`JsonInt(i64)` beside `JsonFloat(f64)`; JSON syntax
   distinguishes the two, so a parse that erases it discards
   information the source format carried) - after which the checker
   governs everything downstream and the [#759] discipline covers the
@@ -1266,6 +1358,514 @@ the explicit pre-Phase-1 hard edge until their enumerators land. This is
 the enforceable surface successor to §C3, not a claim that every public
 numeric form is type-unrepresentable.
 
+### Typed-wire transport membership
+
+**Scope and implementation status.** This is the wire-specific design for
+[#1580](https://github.com/Chelis-Lang/chelis/issues/1580), within §C6's existing
+three final authority classes. The membership definition is #1580's deliverable;
+the enforcement checklist below belongs to #1288 under #729. This clarification
+records the semantic distinction in [spec/10 §3.1](../10-serialization.md#31-numeric-values-and-structural-fields);
+this section implements that rule through the census's authority classes. It
+changes no enumerator, registry, baseline, coverage manifest, or decoder. The
+follow-up implementation is accepted only by the wire oracle below. No fourth
+class for "numeric metadata" is introduced.
+
+**Membership rule.** A numeric wire leaf receives `TaggedTransport` authority
+only through an exactly recognized carrier contract that binds its semantic
+role, complete serialized shape, and construction/admission boundary together.
+A registration verifies the contract required by spec/10 §3.1; it cannot grant
+authority merely by listing a descriptor. The numbered rule governs field
+meaning; this recognizer governs census admission.
+
+Each recognized contract identifies:
+
+- The exact carrier identity and serialized variants, discriminants, fields,
+  containers, and codecs, including every reachable numeric leaf.
+- Each leaf's domain: unit, width or exact wire representation, source/reference
+  scope where applicable, and the meaning of absence or a sentinel.
+- The controlling numbered-spec rule, and the constructors and public decode
+  boundaries that preserve it. A semantic citation is reviewed for relevance;
+  neither a registry entry nor a test invents semantic authority.
+- Paired positive and negative evidence for both the representation and its
+  admission into the declared role.
+
+This separates faithful transport from permission to consume a value. Transport
+membership does not authorize arithmetic, allocation, capacity equality, or
+source-range interpretation. Each consumer still owes its governing contract;
+numeric operations still require their exact `[05-OP-N]` registration.
+
+#### Why source coordinates qualify
+
+The existing source-location domain is defined by
+[spec/03 §1.1.1](../03-deep-syntax.md#111-external-source-spans-span-span_-namespace)
+and [04-FIT-16/17] in [spec/04](../04-type-system.md). Spec/10 §3.1 explicitly
+permits structural transport for that domain. This is why the recognizer can
+admit the diagnostic's coordinate and measured extent without treating their
+integer representation as a Chelis scalar value or tensor size.
+
+`DiagnosticSpan::Point.offset`, `Range.offset`, and `Range.len` therefore have
+specific transport roles. `Point` preserves a coordinate without an extent.
+`Range` preserves a producer-supplied measured extent, including a genuinely
+measured zero-length extent. Absence, a point, and a measured empty range remain
+distinct. A serializer must not supply a default length or offset to manufacture
+a measurement. The independently optional opaque identity is preserved, never
+parsed from `octant:30..34` or `surf:30..34` to manufacture a range, and never
+reconstructed from coordinates.
+
+The tag matters because it preserves the point/range distinction; the owning
+source contract explains why that distinction is meaningful. A byte decoder
+cannot establish that an external producer actually measured a range. Local
+measurement and source association belong to producer and consumer boundaries,
+with provenance coverage owned by
+[#1172](https://github.com/Chelis-Lang/chelis/issues/1172) and
+[#1581](https://github.com/Chelis-Lang/chelis/issues/1581). A range used to slice a
+known local buffer needs checked arithmetic and bounds at that use; transporting
+an opaque external identity does not require access to the producer's buffer.
+
+This plan does not decide new public malformed-input behavior. For example,
+[04-FIT-17]'s prohibition on fabricated serialized extents does not by itself
+require a decoder to reject every extra JSON field. A proposed strict rejection
+of `Point` plus an unexpected `len`, or a new source-coordinate domain, first
+requires the corresponding decision in the owning numbered chapter.
+
+#### Why arbitrary tagged numbers do not qualify
+
+`Metadata::Value(f64)` carrying arbitrary numeric data has only a variant name
+and a machine representation. It has neither the source-coordinate role above
+nor an exact recognized Chelis numeric-carrier contract. Calling the variant
+`Offset` or adding a `kind` tag does not repair either omission. Compiler scores,
+report counts, and performance measurements cannot inherit source-coordinate
+authority because they are compiler output.
+
+A numeric value is transported through §C3's exact dtype-tagged carrier or its
+recognized wire representation under [04-NUM-11] and the owning serialization
+contract. Integers and floats retain their source distinctions. An exact i64
+does not pass through f64; dtype and payload must agree. Recognition reuses the
+closed dtype vocabulary and canonical carrier definitions, including spec/10
+§3.2's exact storage-width bit codec; it does not build another dtype table or assume that
+the Rust field width alone establishes the payload dtype. A newly authored exact
+f64 carrier can qualify under this rule. A wrapper around arbitrary f64 does
+not qualify merely because the wrapper is tagged.
+
+Source coordinates are one closed role, not a wildcard for integers. A second
+existing role is a scoped input reference:
+`WireRtDim::InputAxis.tensor` selects an absolute nonzero input slot of the
+owning node under [spec/10 §3](../10-serialization.md) and
+[spec/05 §2.4.1](../05-risc-primitives.md). Reconstruction checks the owner,
+slot bounds, earlier source node, and required source kind before building IR;
+the associated axis and source rank/dtype retain their validation. The slot's
+magnitude is neither the selected extent nor a proof that two capacities agree.
+Its sibling `WireRtAxis::Lit.value` remains separately registered to [05-OP-7]
+with int32 axis semantics; the selected extent retains exact int64 semantics.
+Identical slot bytes may be valid under distinct legitimate owners; validation
+does not require a new serialized owner token. `InputAxis` reads tensor shape
+without inheriting `Node`'s rank-zero int64 source restriction.
+
+Classification is field-specific and compositional. A recognized container or
+variant cannot confer its authority on an unclassified numeric descendant. A
+new role needs an existing governing semantic contract and an exact structural
+admission rule, or a numbered-spec amendment first. There is no name heuristic,
+generic chapter citation, or maintainer override that admits it.
+
+#### Random-key carriers
+
+A random key (spec/04 §1.1, [05-RNG-2]) is a 64-bit word with no arithmetic,
+comparison, or cast, so every key carrier is structurally non-numeric and
+never a bare integer. Each enumerator classifies its key carrier by its tag,
+not by the width of its payload:
+
+- the primary census: the published scalar carrier
+  `typedef struct { uint64_t bits; } chelis_key;` is an exact tagged carrier
+  whose nominal type is the tag; `chelis_key_from_seed(int64_t seed)` is a
+  numeric operation registered to [05-OP-69], because its seed is an `i64`;
+  `chelis_string_from_key(chelis_key key)`, the key's printed form
+  ([05-OBS-2]), is registered to [05-OP-69] with no arithmetic type in its
+  signature; and `CHELIS_DTYPE_KEY = 9` is the `key` member of the closed `chelis_dtype`
+  vocabulary, which `chelis_scalar` never carries ([05-OP-31]);
+- the wire leg: the execution value `{"type":"key","bits":h}` and the
+  `{"dtype":"key","bits":[h,...]}` storage object of a key tensor are tagged
+  transports of spec/10 §3.2, whose `"key"` tag binds the 16 hex digits to a
+  key, never to an `int64` scalar carrier or a JSON integer;
+- the PyO3 leg: keys cross only inside those execution values, and DLPack
+  and NumPy conversion refuse a key tensor with a typed rejection.
+
+A key crossing any of these surfaces as `uint64_t`, `int64_t`, an integer
+scalar carrier, or a raw dtype id is a review-blocking finding under the rule
+above.
+
+#### Representation and enforcement
+
+The wire leg replaces bare `StaticSurfaceDescriptor` transport registrations
+with verified carrier registrations. A registration binds an exact leaf path
+to a closed role of an exact carrier contract. A private verifier consumes the
+current artifact and that contract, and constructs the only transport witness
+accepted by wire final-authority classification. Callers cannot manufacture a
+witness from a descriptor or suppress a derived capacity flag. Zero matches
+and multiple matches fail; a raw integer dtype selector cannot acquire transport
+authority through this path. Other families retain their existing authority
+rules, including the conservative C callable classification.
+
+Discovery starts from the published wire roots and follows the complete
+serialized graph through aliases, newtypes, containers, imported definitions,
+and substituted generic arguments. Private serialized helpers remain reachable.
+Recursive graphs are resolved to a fixed point; an unresolved definition,
+generic substitution, or unsupported codec fails closed. Moving a helper out of
+`schema.rs` cannot remove its capacity. Root discovery must account for public
+wire exports, rather than rely solely on the current filename/module filter;
+an additional serialization surface kind extends §C6's enumerators in the same
+change that introduces it.
+
+The derived identity includes role-discriminating serde attributes and codec
+shape, not just field type spellings. Its codec identity retains the exact
+serde trait, derived/custom mode, source file and method identities. Incidental
+implementation and method line/column coordinates do not alter that structural
+identity. The execution witness still binds the complete current rustdoc
+artifacts, including those spans, and the actual source bytes and compiled
+artifacts; structural equality cannot reuse a stale witness. Relocation-only
+controls must preserve graph identity while rejecting the old artifact proof,
+and changed source ownership, codecs, methods or numeric shapes must remain
+rejected or change the structural identity. This distinction repairs
+[#1722](https://github.com/Chelis-Lang/chelis/issues/1722) without authorizing a changed
+numeric surface. A custom serializer requires an explicit
+wire-shape adapter checked against executions of the actual serializer and
+decoder. Unsupported custom serialization is an error. The artifact owns the
+discovered shape; a hand-maintained expected list cannot stand in for discovery.
+Removing a required tag, changing a codec or width, adding a numeric field, or
+relocating a field invalidates the old admission until the new artifact satisfies
+the contract. Regenerating an identity or baseline never supplies that authority.
+
+The `Diagnostic` producer has one explicit off-wire projection: its private
+`unsupported` identity is excluded by both its derived serde encoder and its
+derived JSON schema. The wire adapter binds the compiler-derived field's exact
+`Option<Box<Unsupported>>` identity, crate visibility, omission attributes,
+defining artifact, and encoder/schema method provenance. It compares every
+published field with the independent `WireDiagnostic` decoder and executes a
+production unsupported diagnostic through serialization, generated schema, and
+consumer decode. That projection remains in the graph's codec identity; it does
+not classify the internal payload as nonnumeric or import its storage graph into
+the serialized graph. Numeric fields under conditional omission remain reachable,
+generic numeric `serde(skip)` remains rejected, and a missing defining artifact
+for a serialized import remains an error. The adapter's mutation controls reject
+changed omission, payload, visibility, codec provenance, and producer/consumer
+field disagreement ([#2048](https://github.com/Chelis-Lang/chelis/issues/2048)).
+
+Role-specific constructors or domain types should make validated reconstruction
+explicit. A raw wire DTO may exist before validation; it is not yet a checked IR
+reference, a measured-source witness, or checked runtime metadata. Admission
+must occur on every public path that constructs the corresponding usable object,
+including alternate codecs and caches covered by that object's contract. The
+guard suite mutates those paths as well as registry entries: exact descriptor
+matching alone cannot prove that validation executes.
+
+#### AST annotations and runtime interlocks
+
+[PR #1604](https://github.com/Chelis-Lang/chelis/pull/1604)'s dedicated annotation
+types are relevant to the same distinction, but its `MetadataValue` is not an
+umbrella transport exemption. The defined-key table in spec/03 remains the
+authority: `loc` is source location; `surf_dim_group_size` is a positive integer
+with a particular placement and surface-fidelity role; `property_seed`,
+`property_tolerance`, `property_samples`, preconditions, and invariant bodies
+retain live-expression admission and traversal. Preserved macro source is raw
+historical syntax; executing or materializing it requires normal admission.
+Unknown extension data and arbitrary `span_*` keys cannot automatically become
+measured-source authority. The wire census does not currently establish
+coverage of this separate AST codec. Adoption requires discovery of its actual
+roots and role boundaries, not registration of every numeric descendant as
+provenance. Its predecessor JSON/binary compatibility claims also do not change
+WireDag's exact-version contract.
+
+The relevant [#1362](https://github.com/Chelis-Lang/chelis/issues/1362) ledger
+dependencies constrain the implementation without expanding this design's exit:
+
+| Owner | Obligation retained at the boundary |
+|---|---|
+| [#1288](https://github.com/Chelis-Lang/chelis/issues/1288), [#1293](https://github.com/Chelis-Lang/chelis/issues/1293) | Remove surviving legacy dispositions; exact operation authority still applies to numeric constructors and callables. Four recognized wire transport fields do not dispose of other rows. |
+| [#888](https://github.com/Chelis-Lang/chelis/issues/888) | Capacity equality uses opaque `CapacityKey::prove_equal`, with exact products, partial-expression validity, program scope, and exact `Repr` at reuse. Serialized integers and runtime equality observations are not capacity proofs. |
+| [#889](https://github.com/Chelis-Lang/chelis/issues/889) | Shapes, counts, strides, and byte capacities retain [04-NUM-11], [05-OP-31/44], and mandatory checked construction/adoption from `runtime_representation.md` C2.2. Transport recognition cannot replace `ShapeMetadata`, `ElementCount`, `ByteCount`, or `AllocationBytes`. |
+| [#1172](https://github.com/Chelis-Lang/chelis/issues/1172), [#1581](https://github.com/Chelis-Lang/chelis/issues/1581) | Preserve real producer provenance and independently optional identity/coordinate data; faithful bytes do not prove a measurement's origin. |
+| [#1351](https://github.com/Chelis-Lang/chelis/issues/1351), [#1496](https://github.com/Chelis-Lang/chelis/issues/1496) | Expected results must be independent of the implementation under test, and required evidence must fail closed when execution or CI wiring is neutralized. |
+| [#1296](https://github.com/Chelis-Lang/chelis/issues/1296) | The complete #729 prerequisite composite remains the release exit; the wire leg supplies only its own evidence. |
+
+Runtime representation Phase 1 is separate from #729's dtype Phase 1. The
+[runtime plan](runtime_representation.md) retains the complete Phase 1 oracle
+obligation. #888 remains open pending exact-head acceptance and reconciliation
+with that oracle; [PR #1629](https://github.com/Chelis-Lang/chelis/pull/1629)
+addresses legacy normalization retirement. #889 still owns mandatory checked
+runtime metadata and generated-C adoption;
+[PR #1631](https://github.com/Chelis-Lang/chelis/pull/1631) covers a host slice.
+Neither those slices nor this wire design certify the complete runtime exit.
+
+#### Implementation checklist and acceptance
+
+The bounded #1288 enforcement follow-up begins with failing, spec-derived cases.
+It owns complete discovery and recognition for the existing wire roots and the
+four currently registered transport leaves: the three `DiagnosticSpan` leaves
+and `WireRtDim::InputAxis.tensor`. Its matrix is bounded as follows. Each row
+requires an executed positive case and its negative companion; malformed-input
+expectations may use only behavior decided by the controlling spec.
+
+| Boundary | Positive control | Negative control or mutation |
+|---|---|---|
+| Point/range/absence | Actual serializer preserves offset 30, measured length 4, measured length 0, and absent location distinctly. | Fabricate a zero-length range from a point, an offset from absence, or a range from an opaque ID; the relevant output assertion fails. |
+| Source identity and use | Preserve coordinate and opaque identity independently; identical offsets in distinct source contexts stay distinguishable; valid local slicing succeeds. | Reconstruct identity from offsets, treat a foreign identity as local, or overflow/exceed the known local buffer at slicing; reject at the owning use boundary. |
+| Scoped input reference | Reconstruct the intended earlier tensor input with its valid axis and retain shape-only input liveness; accept valid tensor dtypes and identical slots under distinct legitimate owners. | Zero/out-of-range slot, forbidden owner, reconstruction against the wrong owner's inputs, invalid source/axis under the owning contract, or a dropped shape-only edge fails the owning validation. |
+| Distinct numeric roles | Input reference coexists with the registered int32 axis and exact int64 extent. | Reclassify the axis or extent as reference metadata, or turn a slot into an extent without its governing operation. |
+| Numeric payload fidelity | Canonical value/wire carrier, including exact int64 `9007199254740993` and exact reduced-float bits. | Arbitrary `Metadata::Value(f64)` transport registration, int64 through f64, dtype/payload mismatch, wrong-width bits, or a numeric float in the bit codec fails. |
+| Raw dtype selector | Canonical closed dtype carrier preserves its active/deferred disposition. | Register a raw integer dtype selector as transport, including after a rename that removes `dtype` from its field name. |
+| Shape and tags | Current Point/Range and dtype codec shapes match their recognized contracts. | Remove/change a required serde tag, add a numeric field, change width/codec, or substitute a lookalike carrier; rebaselining cannot admit it. |
+| Reachable graph | Registered transport through `Option`, `Vec`, alias, newtype, and imported helper; a nonnumeric companion stays nonnumeric. | Hide f64 behind those shapes, relocate a serialized helper, or leave a reachable generic unresolved; no numeric leaf disappears. |
+| Mixed container | Every numeric descendant has independent authority. | Use a valid source-location sibling or outer tag to admit an arbitrary numeric sibling. |
+| Admission and versions | Every registered public decode path constructs the correct validated object under its own version contract. | Bypass role validation through an alternate codec/cache or accept a wrong/missing WireDag version. |
+| Oracle effectiveness | Current producer/consumer artifacts, exact declared test selection, execution receipts, and independent expected values. | Zero selection, skipped/ignored test, stale artifact, or producer and consumer sharing the same erroneous encoding cannot produce acceptance. |
+
+When the implementation touches the corresponding consumer, include its owning
+integration controls: #1604's defined-key placement/duplicate/live-expression
+tests and raw-source admission; #889's debug/release count, byte, stride, view,
+and target-overflow tests; #888's equivalent/different large products, partial
+quotients (including zero times a partial quotient), program scope, and exact
+representation at reuse. These are non-regression evidence with their existing
+owners, not claims that the bounded wire follow-up completes those issues.
+
+Retain one authoritative aggregate for this bounded wire work:
+
+```sh
+cargo nextest run -p chelis-compiler-api --test capacity_census_wire
+```
+
+Extend that suite so its success requires the current-artifact recognition,
+codec/admission, and mutation legs in the matrix, with exact execution receipts.
+Tests within the aggregate may call supporting runners; those runners must
+return nonzero on any failed or missing expected case. Pure Python shape tests
+are supporting evidence, not replacements for real Rust-source-to-rustdoc
+mutations and actual serializer/decoder execution. Each mutation must reach and
+fail its named guard; unrelated compilation failure is not a detection receipt.
+Round trips need independent expected payloads so matching encoder/decoder bugs
+cannot certify fidelity. Changed oracle selection and hosted wiring need their
+own fail-closed controls.
+
+The implementation handoff is a checklist within #1288, not another phase plan:
+
+1. Write the matrix's positive and negative cases before implementing the guards.
+2. Implement complete wire discovery and verified carrier admission, migrating
+   the four existing transport registrations to that mechanism.
+3. Update §C6's typed `coverage_manifest()`, derived schema identity, owning
+   enumerator/classifier, and paired controls together under §B1; require the
+   aggregate's execution evidence on the implementation's exact head.
+
+The four-leaf recognizer alone can preserve wire bytes. Full legacy retirement
+also changes value codecs and role carriers; its decided contract is now
+spec/10 §§3.2–3.5. The atomic delivery below owns that versioned migration.
+
+New or changed rows independently meet the final rule. Existing legacy rows keep
+their #1288 debt until individually migrated; the final contract applies to them
+too. Retiring all legacy exceptions remains #1288's broader deliverable, not an
+additional completion requirement for the membership definition. No baseline
+edit promotes coverage. The implementation below activates the decided wire
+contract; it does not complete binding or runtime obligations.
+
+#### Final wire and binding contract handoff
+
+**Current integration state.** Execution version 4 and WireDag version 20 are
+the source contract for spec/10 §§3.2–3.5. Measured at WireDag version 16, the
+executed wire baseline contains 97 distinct numeric leaves: 80 verified
+transports and 17 numeric operations, with zero exception rows. It includes the shape-dependency and opaque
+local-ascription-identity transports plus the fixed literal-witness extent
+role, replaces the original 84-row legacy cohort and incorporates
+previously missed private codec/report leaves. The former execution scalar and
+tensor-element variants now delegate to the shared canonical carriers; counting
+those uses again would duplicate their defining leaves. Field-role checks still
+validate every use independently. The encoder/decoder helper structs remain
+endpoints of the same public slots, not additional public fields.
+
+The migration covers the following original 84 rows. This table records their
+semantic owners; current discovery and execution determine the final baseline.
+
+| rows | existing fields | controlling contract |
+|---|---|---|
+| 16 | Eight numeric `ExecutionValue` scalar variants and eight numeric `TensorElements` variants | spec/10 §3.2; [04-NUM-2/11] |
+| 6 | `WireDeepAtom` Int/Float and `WireLiteral` Int/Float/TypedInt/TypedFloat | spec/10 §3.3; spec/02 P10 and spec/03 §6.4 |
+| 2 | `Span.offset`, `Span.len` | spec/10 §3.3; owning source context |
+| 17 | `EvaluatedRoot.node_id`; the three GradResult node fields; `LowerResult.named_roots`; `WireDag.roots` and version; `WireDagNode.id` and inputs; both `WireFusedInput` indices; `WireRtDim.Node.input`; the four inference variable IDs; execution version | spec/10 §3.4; runtime-reference rules in §3 |
+| 6 | `TensorValue.shape`, concrete dimension-expression leaf, both `WireDimInfo` sizes, inferred literal dimension, runtime literal dimension | spec/10 §§3.2/3.4; [04-NUM-11], [05-DIM-1/2] |
+| 23 | Thirteen positional axis leaves; OneHot vocabulary; four window/stride leaves; three random float parameters and two seeds | spec/10 §§3.2/3.4; [05-DIM-3], [05-OP-8/37/39], [05-RNG-1] |
+| 2 | Surf tuple-get index and optional vmap axis | spec/10 §3.3; normal source admission |
+| 12 | CheckResult score and three counters; four fitness components; diagnostic severity; two edit counts; optional peak byte estimate | [04-FIT-18], spec/10 §3.5 |
+
+**Representation.** General floating values move to the canonical dtype-tagged
+IEEE bit-string codec, shared by execution values and imported scalar/storage
+carriers. Integer values remain exact at their declared widths. Report fields
+retain JSON numbers through explicitly recognized fixed-dtype adapters over
+sealed numeric carriers; the field contract supplies the dtype and admissible
+domain. Finite bounds do not create a structural metadata exemption. Source
+numeric syntax remains distinct from finalized values. Normal source admission
+is required when raw syntax becomes executable, including #1604's live
+annotations; a historical macro or extension value is not an admission bypass.
+
+**Atomic implementation boundary.** The implementation switches Execution v3
+and WireDag v9, their readers/writers, cache compatibility, consumer pins,
+random parameters and descriptor/reference carriers together with graph
+activation and wire exception retirement. No partial WireDag v9 is published.
+Old, missing and future versions reject before body interpretation, without a
+compatibility decoder. Independently shippable graph/codec infrastructure may
+precede this change; live authority requires the complete aggregate:
+
+```sh
+cargo nextest run -p chelis-compiler-api --test capacity_census_wire
+```
+
+The Rust gate executes `capacity_census_typed.py wire`, compares the version-2
+baseline with its final rows, and writes
+`target/capacity-census-wire-execution.json`. The receipt binds current source,
+compiler artifacts, selected tests and actual outcomes. It includes canonical
+codec and schema/admission cases, genuine old/current and current/current cache
+checks, consumer tests, and positive/negative discovery controls. To regenerate
+the comparison baseline, run the same verifier and retain only its `version`
+and `rows` fields; a supplied artifact or baseline cannot issue a witness.
+
+Compiled-call discovery is bounded to the default compiler-api library's
+Serialize/Serializer obligations and dynamic JSON returns. It checks every
+local MIR body and binds concrete substitutions and defining crate artifacts.
+The pinned `rustc-dev` component supplies the matching compiler API. The driver
+build uses the repository's Clippy policy and compiler-emitted dependency
+checksums; invocation collection retains a separate Cargo namespace so a cache
+hit cannot bypass the callback. Consumer builds finish before the cache proof
+binds its dependency artifacts. Foreign nongeneric encoders without serde
+obligations, handwritten encoders and new formats require their own discovery
+extension; no universal whole-workspace dataflow proof is claimed.
+
+Native cache AST/IR fields retain their separate inventory. Exact cache/key
+publication owners and shared numeric-codec compatibility do not give those
+native fields wire transport authority.
+
+**Binding contracts.** spec/11 §1 owns `CompilerJson`, `CompiledTensorCall`,
+`DLPackCapsule` and `DLPackDevice` admission. The seven transport candidates are
+the four numeric compiler JSON functions, `CompiledModel.__call__`, and the
+two NativeTensor DLPack methods. Their string/dynamic Python outer types are
+not nonnumeric evidence. The nine structural candidates are the two model
+constructors, decompile/validate source results, four model name/path/target
+getters and the NativeTensor dtype getter. Actual registered payload contracts,
+not this list, determine final classification. The remaining shape getter
+has its own [05-OP-45] identity and exact `Vec<i64>` result; the C-only
+shape atom cannot supply that binding's authority. The independent nonnumeric
+binding migration final-registers the nine structural candidates with an
+executed registered-signature and reachable-type census. `decompile_json` and
+`validate_json` preserve `SourceJson<DecompileResult>` and
+`SourceJson<ValidateResult>` until PyO3 conversion; a sealed constructor accepts
+the actual typed result and serializes it once. Their error paths raise string
+exceptions rather than serialized result payloads. The other seven structural
+signatures expose source/path/name/vocabulary strings or opaque registered
+pyclass handles. Each handle's published methods remain separate census roots.
+Python attribute names and constructor slots do not identify the implementing
+Rust function. The census parses the compiled source's direct PyO3 registrar
+and attributes, joins each registration to the live descriptor kind and exact
+Rustdoc owner/function/span, and binds the source bytes into final identities.
+Renamed getters, setters, functions and methods keep their implementing Rust
+identity; an unrelated same-named helper cannot supply it. Conditional,
+macro-generated or dynamic registration forms fail closed until their
+provenance is implemented. Native rows additionally retain their exact Rust
+implementation and callable kind. Source JSON
+authority applies only to its typed payload subtree, including through aliases
+and generic containers; sibling text results require their own contract.
+
+For the four CompilerJson functions, concrete `CheckJson`, `CompileJson`,
+`DesugarJson` and `EvalJson` adapters retain their exact compiler result until
+the actual PyO3 `IntoPyObject` implementation serializes it. `EvalBindingsJson`
+owns the `FromPyObject` extraction into `BTreeMap<String, TensorValue>` before
+either eval route. A private execution factory joins each compiled trait owner,
+its concrete serde payload and direction, the registered function's Rustdoc
+signature, and the current wire witness. It executes native Python calls,
+constructor rejection controls and compiled MIR ownership controls. Static
+descriptors and baseline graph hashes cannot construct this witness. The
+adapter source, execution evidence and census integration form one slice:
+changing a Rust signature alone cannot retire a numeric binding row. This
+proof supplies authority only to those four compiler-JSON transports.
+
+The native binding verifier separately joins checked live PyO3 registration,
+the current Rustdoc graph, compiler-derived MIR ownership, and exact native
+execution. Its stable execution identity binds the common source, selected and
+executed outcomes, test binaries, runtime and interpreter identities, the
+capture matrix, and limits while excluding temporary run paths. The
+compiled-model call and two DLPack methods have exact tagged-transport
+authority; `NativeTensor.shape` has exact numeric-operation authority under
+[05-OP-45]. A static descriptor, baseline hash, or copied receipt cannot
+construct the sealed witness. Discovery records both input and return capacity,
+alias/container/nominal closure and unsupported dynamic payloads for every
+registered method. This activation establishes complete zero-legacy binding
+closure. The
+executable checks are `cargo nextest run -p chelis-python --test capacity_census_bindings`
+and `--test binding_payloads`, including malformed input, missing/duplicate
+registration, legacy-revival, f64-return, reachable-width and
+unsupported-payload controls.
+
+The compiled-library manifest has one shared serialized definition,
+`schema::CompiledArtifactManifest` in the compiler API. Python's manifest writer
+and loader consume that definition, including its closed ABI discriminator and
+version-before-metadata decoder. Keeping the protocol in the exported schema
+makes its reachable metadata part of public wire discovery; a private binding
+copy cannot substitute for that discovery or its codec execution evidence.
+
+Binding discovery must follow registered methods and return-container capacity,
+and each numeric transport must bind the actual producer/consumer contract.
+The full-shape getter, compiled-model call, and two DLPack methods use
+#893/#1345's validated wrappers and #889's checked metadata adoption. A public
+unvalidated native wrapper cannot stand in for that tensor boundary. DLPack keyword
+validation follows the external protocol, including version/device/stream/copy
+semantics; a supported current-device zero-copy path does not authorize ignored
+keywords or promise every optional move/copy path.
+
+Guarded native owner aggregates are constructed in exact private function
+bodies. Per-output owner wrapping and device-handle interning use explicit loops
+without constructing those aggregates inside foreign callbacks. The construction
+verifier joins the aggregate census with a mandatory compiler-derived census of
+raw constructor uses across MIR operands, including casts and const/static
+initializers. It rejects guarded constructors
+exposed as function values, even inside an otherwise approved function; lexical
+ownership alone does not prove callback execution or validation. Raw aggregate
+construction inside an escaping closure likewise requires an explicit execution
+contract and is rejected by the native wrapper verifier. Missing constructor-use
+evidence cannot be interpreted as an empty census. These are implementation
+constraints for the validated wrappers, not additional authority for a tagged
+payload.
+
+**Retained owners.** The wire slice does not complete #1295's RNG arithmetic,
+ordinal-consumption or adjoint behavior. #888 retains capacity proofs with
+program scope, exact products, partial-expression validity and exact Repr at
+reuse. #889 retains checked allocation/view/copy adoption; #893/#1345 retain
+the generated tensor and Python/DLPack wrapper implementation. A wire
+registration proves none of those runtime exits. The respective non-regression
+oracles remain required whenever their boundary is touched.
+
+**Bounded dropout evaluator adoption.** Fixed-control source evaluation and
+first-order input AD now carry an opaque, non-serialized execution plan through
+lowering, normalization, AD replay, selected declarations, host helpers, and
+ordinary/prepared/contextual evaluation. [05-OP-37] uses arithmetic-width unit
+rounding and finalized sub/div at every active float dtype. The selected source
+spine retains dead draws and preceding local failures independently of value
+liveness. Scope identities distinguish equal-seed handlers; invocation-local
+forward keys authorize backward replay without another ambient draw. The host
+counter remains wrapping u64, not an unbounded proof event count.
+
+Checked tensor helpers with host-produced reshape sizes construct the complete
+checked logical graph before partitioning. The evaluator retains an opaque
+companion with the partitioner's exact local-node mappings; imported values
+become Loads and never duplicate their producers' Random sites. One invocation
+frame carries realized forward keys and scope counters through every numeric
+segment, while host sources execute at their original cuts and synchronize the
+inherited stream. This preserves a preceding accepted draw when a later local
+extent guard fails, and preserves replay keys across cuts. Host-source bindings
+retain their checked tensor types for primitive and transform routing. The public legacy
+`HostDefKernel`, `HostStagedPlan`, and wire layouts do not change. Existing
+Random-handler host boundaries still dispatch through host control.
+
+This is not completion of #1295 or #1297. Explicitly excluded runtime rates,
+rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursive control, and
+general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
+Rust entrypoints and serialized lowered libraries do not carry this plan; their
+baked-seed projection remains an adoption dependency. chelis#2413 retires this
+compatibility boundary; `archive/randomness_counter_stream.md` owns that plan. No new mask tensor owner,
+public wire field, compiled-dropout support, or native effect certificate is
+implied by the evaluator's private key table.
+
 ---
 
 # Part II - process rules that hold at every phase boundary
@@ -1289,6 +1889,52 @@ numeric form is type-unrepresentable.
 behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
+
+The fixed-control dropout owner consolidation amends C5's kernel boundary with
+the sealed `PreparedDropout::new` / `PreparedDropout::apply` split described
+above. It moves the existing pure numerical implementation into the semantics
+owner without changing numeric bits, source guards, draw timing, public wire
+formats or existing Rust signatures. The exact new kernel registrations and
+their tests accompany this amendment; [05-OP-37] and [05-RNG-1] already govern
+the behavior, so no new numbered atom or capability completion is asserted.
+
+[#1294] adds exact builtin identity incorporation to the existing governing
+operation atoms and authors [05-OP-46..64] for the remaining builtin families.
+Chapter §1.5 incorporates the normative identity registry once; each atom
+states its own signatures, domains, results, failures, adjoints, and
+accumulators. Generic field-label paragraphs confer no semantic evidence.
+Existing decided behavior remains controlling, including integer rounding
+identities, saved-mask List differentiation, and exact arithmetic widths.
+`to_csv`'s atom explicitly carries its existing text-serialization signature
+and outside-AD rule. Removing the reserved `normalize` binding implements the
+already-decided §3.4 rejection of an undeclared call. These amendments move
+the affected atom/region digests and the Phase 4 handoff digest. The #1294
+oracle supplies per-identity mutations, substantive semantic-clause mutations,
+and checked application/CLI regressions; it does not replace the behavior
+oracles or introduce Phase 4C support cells.
+
+The generalized-contract amendment replaces the two-spatial-axis convolution
+signature with [05-OP-51]'s single `conv` contract, extends [05-OP-57]'s List
+egress to positive tensor ranks, and extends [05-OP-38]'s scan state to
+fixed-shape tensors. The named scalar/rank restrictions are superseded by
+those normative amendments; numerical-kind restrictions remain controlling.
+The accompanying contract mutations guard the expanded domains and exact
+metadata signatures. The changed [05-OP-38] and region digests identify the
+amended contract, and the oracle now executes the generalized convolution
+checker and evaluation/C tests as supporting behavior evidence. The section-4
+recipe corrections replace obsolete axis insertion and arithmetic selection
+with their controlling primitives. Layer normalization's epsilon is explicit
+and typed; scalar kernel inputs preserve every active scalar dtype through
+the existing tagged carrier. The whitespace cleanup removes empty quote tails
+and duplicate separators without changing normative block membership; the
+affected atom and region digests are recomputed from that exact text.
+
+The same change extends the frozen Phase 3 example corpus with
+`explicit_normalization.ch` and its executable eval/C parity row. The
+independently reviewed `issue_1294_normalize` success/error controls and
+the parity execution justify the new row and corpus-definition digests;
+deletion, empty-body, and library-only mutations remain rejection cases.
+`faithful_observation.md` records this additive corpus amendment.
 
 [#1310] adds the root-manifest atoms [05-OBS-7..11], so it deliberately moves
 the tamper-evident complete-file digest for `spec/05-risc-primitives.md`. It
@@ -1442,7 +2088,7 @@ The second review round, and an audit of every normative sentence this change
 adds to the three chapters, found three more places where the new prose was
 broader than the decided rule. §P4c required every listed name to occur in its
 declared type, where [04-DTYPE-2] and the checker require it only of a bounded
-one - `sig f[zz]: p -> p` checks clean. §P4c also implied that listing an
+one - `sig f[zz]: i32 -> i32` checks clean. §P4c also implied that listing an
 unbounded name does nothing, when a listed multi-letter dimension name resolves
 to a dimension variable where an unlisted one is a concrete symbolic axis.
 [04-DTYPE-2] promised that both bound failures name "the required family and
@@ -1530,7 +2176,7 @@ scope.
 3. `docs/investigations/probes/` has the raw probe drivers if you need to
    re-derive any cell's current behavior from scratch; do not trust
    comments, including this document's - the oracle tests are the truth.
-4. Land against the gate (`scripts/gate.py --local`), open the PR early,
+4. Land against the gate (`scripts/gate.py --fast`), open the PR early,
    let CI's macOS Smoke run the workspace suite.
 
 ---
@@ -1670,12 +2316,18 @@ environments carry exact `ScalarValue`s, including every post-#956 public
 wire scalar variant without dtype substitution. The exact trap grammar is
 public module data and the active Phase 2 corpus asserts byte-exact
 diagnostics. Integer `abs` lowers to the typed trapping kernel, integer
-`floor`/`ceil`/`round` lower to identity, and the C, HIP, and Metal emitters
-remain loud instead of routing integer `abs` through float-only templates.
+`floor`/`ceil`/`round` lower to identity. Direct integer `abs` uses exact
+signed-width kernels in C, HIP, and Metal, with minimum-value traps. Fusion
+keeps integer `abs` materialized; externally supplied fused integer `abs`
+remains rejected. The Metal `integer_abs_guard` manual gate executes literal
+and parameter-weight gradients through these kernels. HIP executes kernel
+bodies with device-intrinsic shims in default tests; real HIP execution still
+requires its hardware gate. Metal activation-gated integer `abs` remains
+rejected under the remaining Metal integer-Abs capability in #693.
 The reduction follow-up routes ordinary, windowed, and argument reductions,
 plus the overlapping window adjoint, through the same sealed boundary:
 consumers retain only shape and ordered index-group planning. Declared-width
-float witnesses, exact int64 comparison, all four integer-width
+float witnesses, exact i64 comparison, all four integer-width
 intermediate-overflow rows, an overlap-add adjoint witness at every float
 arithmetic width, and structural no-bypass locks are part of the oracle.
 Implementing backend kernels remains Phase 3 / [#699].
@@ -1713,7 +2365,7 @@ runs the IR and host structural exclusivity locks; runs declared-width
 ordinary, windowed, and argument-reduction behavior including negative
 parity at every integer width and reverse-mode overlap accumulation at every
 float arithmetic width; runs the active eval matrices for [#680], precision,
-exact int64 values, and static-condition folding; and finishes with the exact
+exact i64 values, and static-condition folding; and finishes with the exact
 prover-carrier boundary. It never runs ignored rows or Phase 3 backend suites.
 The required Linux Integration job runs this command after the normal
 `scripts/gate.py integration` stage, so all three phase contracts are
@@ -1754,7 +2406,7 @@ this maintenance does not widen the HIP/Metal scope.
 
 1. Inherit [#730]'s completed
    `HostTypeTerm -> ConcreteHostType -> HostAbiType` boundary: exact narrow
-   scalar identity already survives host lowering, `int8`/`int16` already
+   scalar identity already survives host lowering, `i8`/`i16` already
    select their exact existing C integer ABIs, and the former
    `HostType::Unknown -> int64_t/void*` route is unrepresentable. This phase
    adds the per-dtype operation semantics and overflow traps for those integer
@@ -1861,7 +2513,7 @@ fallback. C DAG identity casts materialize logical row-major order from the
 source strides rather than copying a view's backing order.
 `issue_759_checked_cast_default.rs` generates the complete 9 x 9 x
 three-surface positive matrix for eval and compiled C, locks direct
-f64/int64-to-f16/bf16 rounding with midpoint witnesses on scalar, DAG tensor,
+f64/i64-to-f16/bf16 rounding with midpoint witnesses on scalar, DAG tensor,
 and host tensor surfaces, and runs both mixed-offender permutations at
 `OMP_NUM_THREADS=1,2,4,8`. The plan-level negative matrix covers every
 applicable fractional, non-finite, overflow, and strict-bool case. A
@@ -1933,7 +2585,13 @@ callable from bypassing review while the capability tables are built.
    owns replacing the pre-table boolean numeric aliases used by logical
    operations, comparison-derived negation, and `where`.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
-   `min_elem` arithmetic surrogates with direct typed identities in every lane.
+   `min_elem` arithmetic surrogates with direct typed identities in eval, C,
+   and HIP. [#2338] owns the remaining Metal cells.
+   [#1281] owns exact `mean`, extrema, argument-reduction, and window-extrema
+   behavior in the checker, evaluator, IR/AD, and compiled-C lanes.
+   Experimental HIP and Metal implementation gaps retain stable typed receipts
+   under [#2339] rather than weakening or silently partially implementing those
+   cells.
 
 **Authoritative direct-arithmetic oracle ([#1306]):**
 `.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
@@ -1941,21 +2599,37 @@ line `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. It runs the exact-width typed
 kernels, direct IR lowering/evaluation/AD, constant folding, WireDag v6 and
 target-disposition tests, compiled-C boundary/overflow/stored-bit cases, HIP
 source-generation tests, exhaustive downstream compilation, and its standing
-anti-surrogate mutations. [#1296] consumes this exact child command and success
-line; it does not reconstruct #1306 evidence from prose.
+anti-surrogate mutations. Eval, compiled C, and HIP finalize each floating
+subtraction NaN as the declared dtype's canonical positive quiet NaN. HIP
+f16/bf16 direct arithmetic computes in f32, narrows once with round-to-nearest,
+ties-to-even, and finalizes at stored width. [#1296] consumes this exact child
+command and success line; it does not reconstruct #1306 evidence from prose.
 
 The normal oracle compiles the ignored HIP execution cases but cannot claim
 device execution. The manual hardware gate is:
 
 ```text
-scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1 --skip direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu
 ```
 
-Expected success is four tests passed and zero failed: f32/f64 exact extrema
-and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
-by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
+Expected success is five tests passed and zero failed: exact extrema and
+adjoints at every HIP float width, subtraction agreement at every HIP float
+width, checked signed-integer overflow trapping, fused direct subtraction
+followed by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
 wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
 pass; it does not weaken or remove the ignored hardware tests.
+
+**Authoritative exact-reduction oracle ([#1281]):**
+`.venv/bin/python scripts/dtype_exact_reductions_oracle.py`; exit 0 and final
+line `DTYPE EXACT REDUCTIONS ORACLE: PASS`. It runs the typed reduction kernels,
+exact IR evaluation and adjoints, compiled-C execution, checker-domain cases,
+and exhaustive downstream compilation. Its exact-bit cases cover runtime-empty
+`Domain`, first-NaN payload selection, first stored representation on equal
+values, exact i64 argument indices, non-NaN tie splitting including infinities,
+and deterministic overlapping-window accumulation. It never claims ignored
+device execution. HIP and Metal cells that lack that complete behavior reject
+with the stable typed authority [#2339] until their device implementation and
+real-hardware evidence land.
 
 **Authoritative ReLU oracle ([#1313]):** `.venv/bin/python
 scripts/dtype_relu_oracle.py`; exit 0 and final line `DTYPE RELU ORACLE:
@@ -1986,16 +2660,20 @@ reinterpret either.
 `.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the normative atoms in this slice,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
-atom and region digests, the frozen-contract acknowledgement gate, phase
-naming, and generated rejection-registry agreement. Narrower atom and section
-fingerprints supply owning diagnostics for a changed clause. Roadmap and
-current-state documents are validated through required contract markers.
+atom identities and region boundaries, the frozen-contract acknowledgement
+report contract, phase naming, and generated rejection-registry agreement. The
+committed report names each changed atom and region, including owned registry
+text, and requires its exact acknowledgement in addition to the changed-file line.
+Required-literal anchors and their mutations remain independent checks.
+Roadmap and current-state documents retain their required contract markers.
 Its success proves this freeze, not complete builtin-atom closure or any Phase
 4C implementation.
 
 The additive-contradiction leg is an acknowledgement, not a whole-file digest.
-An atom or region digest cannot defend its own boundaries, so the oracle also
-diffs every `CONTRACT_FILES` path against the merge base with the base branch
+The report derives changes from both revisions' reviewed required identities
+and region boundaries; historical digest declarations remain readable without
+executing historical Python. Current declarations have no text hashes. The
+oracle also diffs every `CONTRACT_FILES` path against the merge base with the base branch
 and requires each changed file to be named in the pull request body:
 
 ```text
@@ -2006,9 +2684,19 @@ one line per changed file, no leading whitespace, exactly one space after the
 colon, a repo-relative path with no glob and no `.`/`..` segment, and nothing
 after the path; lines inside fenced code blocks are ignored. An unacknowledged
 change and an acknowledgement naming an unchanged file both fail
-`--require-acknowledgement`, which is the mode CI runs on a pull request. A
-local run without that flag lists the changed contract files and the lines the
-body needs, then exits 0.
+`--require-acknowledgement`, which the dedicated `PR Contract Acknowledgements`
+check applies through `phase4b_change_report.py`. The full Phase 4B oracle runs
+independently in Docs. A local oracle run without that flag lists the changed
+contract files and the lines the body needs, then exits 0.
+
+Atom and region addresses use `Frozen-contract-change: atom:05-OP-33` and
+`Frozen-contract-change: region:"exact region label"`. Missing, duplicate,
+stale, malformed or unknown addresses fail enforcing PR mode. Every changed
+file still requires its line, including changes outside reported regions.
+Acknowledgement does not excuse missing required clauses or identities and
+does not prove that added prose is semantically correct. Historical atom/region
+digest moves below and above describe the former review cue; the current cue
+is the named committed report and its mandatory acknowledgement.
 
 Acknowledging a design or status document is ordinary synchronized
 maintenance, not a semantic decision; only a change to the controlling
@@ -2042,6 +2730,126 @@ later Table-B `Unimplemented` receipt; it never satisfies semantic closure.
 final line `DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS`. The oracle and its
 adversarial mutations must be green and merged before Phase 4C begins.
 
+
+The discovery executable is `chelis-ir`'s `builtin_atom_inventory` example.
+It reads compiled declarations; a Rust AST tripwire independently checks the
+closed case and RISC enumerations. Ordinary application inference constructs
+an exact semantic selection using its existing operand stamps, dtype bounds,
+and lexical ownership. Enclosing-call substitution resolves concrete operands
+before the inference root finishes. A generic template retains an exhaustive,
+disjoint finite selection indexed by its checked operand type and constraints;
+substitution resolves each concrete instantiation to one declared case.
+`BuiltinCaseSelection::resolve` applies that same selection to the owner's
+substituted operand type. Symbolic selection is not a default case or a backend
+support disposition. This metadata carries no target support decision.
+
+`spec/registry/builtin_semantic_identities.md` is the normative identity map.
+Its atoms decide signatures, dtype/parameter domains, results, failures,
+adjoints, and accumulator/order rules. The oracle checks exact membership,
+the shared incorporation rule, real numbered definitions, callable governance,
+generated membership, and adversarial deletion/duplication/authority mutations.
+It removes actual contract clauses rather than formatting labels. When more
+than one atom mentions a callable, an explicit semantic-clause assertion must
+distinguish its governing contract; the oracle rejects every alternative
+atom that merely mentions it. A new ambiguity without a discriminating
+assertion fails closed. Semantic review remains
+necessary: membership does not prove numerical implementation conformance.
+The semantic mutations cover both deleting required clauses and inserting known
+contradictory domain restrictions while all affirmative clauses remain. The
+executable domain controls generate rectangular Lists at depths one through four
+for every active tensor-element dtype, reject recursively ragged/non-element
+inputs, and exercise shift counts at and above every signed width plus negative
+counts. These are named domain obligations, not a claim of full numerical or AD
+conformance for every builtin.
+
+Run the oracle from a clean committed checkout with the managed Python and
+Rust environments. It runs in the integration support stage; changes to the
+normative map or chapter force that stage. Its nested nextest profile is
+`builtin-atom-closure`, so it cannot overwrite workspace JUnit receipts.
+The standalone schema-1 receipt is
+`target/builtin-atom-closure/execution.json`. The #1296 handoff may supply
+`CHELIS_ORACLE_RECEIPT`, `CHELIS_ORACLE_RUN_ID`, `CHELIS_ORACLE_HEAD`, and
+`CHELIS_ORACLE_SOURCE_DIGEST` together. The adapter independently verifies
+committed source bytes before and after execution and records actual selected
+and passed case identities, including negative and mutation obligations.
+A zero-match, skipped, duplicate, stale, or failed execution cannot pass.
+The existing #1296 composite manifest registers this exact child command and
+PASS marker; its other unresolved prerequisites still fail closed.
+
+This prerequisite's release exit is semantic membership closure. It does not
+certify Table A/B target cells, all builtin behavior across lanes, or the
+composite #1296 release exit; those remain their owning oracles' work.
+
+The generalized contracts retain that boundary. [05-OP-51] now owns one
+`conv` identity with a positive number of spatial axes and explicit per-axis
+i64 strides and padding pairs. The declaration and callable spelling are
+migrated together; there is no public `conv2d` compatibility identity. The
+static lowering builds a window matrix in the contract's channel/kernel
+order and performs one contraction across its full reduction axis. Numerical
+checks cover evaluation and compiled C at spatial ranks one through three
+and all four float dtypes, the input and kernel adjoints of overlapping
+windows, and zero input-channel, batch, and output-channel extents at every
+float dtype. Accumulator-typed reductions and explicit result casts preserve
+the storage dtype even when an empty graph stays in RISC.
+They do not establish dynamic-shape, accelerator, or full higher-order AD
+conformance. Runtime metadata and symbolic extents still require the checker
+and target capability work owned by #731 and #730; literal-only lowering is
+an implementation gap, not a restriction on the normative signature.
+
+Layer normalization takes an explicit same-dtype scalar epsilon through the
+checker, graph, evaluator, and generated C. Tests compare nondefault epsilon
+values at all four float widths and exercise its adjoint. Standard section-4
+recipes use `insert` for new axes, pair batch labels with a diagonal, and use
+`gather`/`where` for selection without arithmetic on unselected NaNs or
+infinities. These controls are included in the closure oracle's selected Rust
+binaries; they do not imply full recipe conformance on every backend.
+The nontrailing softmax test executes f64 in the evaluator and asserts the
+existing C `max_reduce` Unimplemented disposition (#729); its other three
+float widths execute in both lanes.
+Attention controls execute both unbatched and batched graphs with distinct
+query/key counts and value widths in evaluation and compiled C. Host matmul
+now delegates to the typed rank-generic graph; host-only descendants in its
+operands cross explicit tensor boundaries before the C matrix helper runs.
+Broadcast and empty-dimension controls cover all four float widths, alongside
+rank, shape, dtype, mask, and permutation rejection controls. Independent
+cancellation controls execute the canonical tree in evaluation and C for
+hosted matmul at all four float widths and for f32/f64 generalized convolution.
+Four- and eight-leaf witnesses distinguish vendor contraction, a left fold,
+and the former stride-four cascade; odd-tail and signed-zero controls pin
+identity handling. Ordinary Sum now uses the existing adjacent-pair fold in
+the typed evaluator and one shared C tree for materialized and fused inputs,
+with native-width leaf loads, explicit accumulator width, and checked integer
+pairs. Paired i32/i64 controls require the canonical overflow to trap and
+the cascade-only overflow to succeed. Window/product reduction and runtime
+SIMD entry points remain outside this repair's execution claims.
+C entry preparation retains primitive contractions while applying structural rewrites; it does
+not replace them with vendor GEMM. Shape-derived BLAS helper and wrapper
+summaries are discarded before ownership lowering binds the selected graph.
+This may cost execution time and intermediate storage compared with vendor
+GEMM; preserving the decided arithmetic takes precedence. Explicit backend
+nodes and accelerator selection retain their separate #1290/#1315 obligations;
+these bounded controls do not certify every target cell or contraction case.
+
+The same authority audit generalizes [05-OP-57]'s `to_list` to recursively
+nested Lists for every positive tensor rank and [05-OP-38]'s `tensor_scan`
+to fixed-shape tensor states. These two amendments establish the contracts;
+their runtime paths still restrict `to_list` to rank one and `tensor_scan`
+to scalar state. The remaining implementation must preserve recursive
+result types, empty-state shapes, exact element bits, callback effects, and
+the saved full shape used by AD. Phase 4C's capability declarations must
+record those gaps honestly, and the composite release exit cannot treat
+this membership oracle as execution evidence for either generalization.
+The contract mutations delete these rank-general rules and insert the
+former rank/scalar restrictions to ensure that the closure guard rejects
+both kinds of regression.
+
+Other rank restrictions were checked against their controlling rules:
+matmul already admits batched operands; reductions, movement, sparse, and
+ordering operations already use explicit axes. Integer matmul remains a
+type error under spec/04 section 5.7.2, and scalar/tensor extraction remains
+restricted to rank zero under [05-OP-50]. Neither is an accidental
+specialization to remove.
+
 ### Pre-4C - composite executable gate ([#1296])
 
 After the individual behavior, storage, census, and [#1294] atom-closure
@@ -2073,18 +2881,85 @@ executing it. For Metal that is already the only available outcome ([#737]:
 that runtime has never been executed). For HIP it reaches only the cells that
 stay `Unimplemented`: the backend has real kernels and a documented hardware
 gate (`scripts/hip_test.py`), and an `Implemented { kernel_id }` cell still
-owes that gate rather than a diagnostic. And [#1291] and the device residual of
-[#1306] stay open while their cells cite them, so the rejection-authority
-liveness gate keeps reporting honestly. Neither closes on this narrowing; each
-closes when its kernels land and its own hardware gate is green.
+owes that gate rather than a diagnostic. And [#1291] and [#2338] both stay
+open, but for different executable reasons. The remaining `Unimplemented`
+Metal direct-arithmetic cells cite [#2338], so the daily/manual standing
+rejection-authority liveness check continues to cover them. No production
+rejection cites [#1306] after its eval/C/HIP oracle is green. The `count` device
+cells are already
+`Implemented { kernel_id }`; no production rejection cites [#1291], so the
+source-derived rejection manifest does not carry it. [#1291] instead closes
+only when its real-hardware numerical gates are green.
 
 The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
 `DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
 `Count` IR, evaluator/C execution, exact WireDag v6 boundary, registered wire
-capacity, loud [#1291] device receipts, semantic registration, and executable
-example parity. [#1291] later replaces those device receipts with its hardware
-execution oracle; it does not weaken or bypass the [#1287] core receipt.
+capacity, semantic registration, and executable example parity. Its device leg
+delegates to `.venv/bin/python scripts/dtype_count_device_oracle.py`; success
+ends with `DTYPE COUNT DEVICE STRUCTURAL ORACLE: PASS`. That child runs the
+HIP/Metal kernel, compiler-API, CLI, host-helper, direct-entry, and example
+source tests, then proves by controlled mutations that a Count-to-Sum dispatch
+alias or restoration of C-host helper emission makes the focused tests fail.
+Each mutation refuses a dirty owner and restores the original bytes.
+
+The structural child is not [#1291]'s numerical completion receipt. It proves
+that both device lanes route a canonical `Count` node to a dedicated kernel
+over the exact `Bool8` carrier that [#1289] landed, that a Count-bearing
+host-program helper is emitted as its own device translation unit rather than
+C, and that no Sum alias, cast-plus-Sum composition, C-host helper fallback,
+or Metal abort stub survives a controlled mutation. Numerical acceptance is
+owned by the named ignored `count_` tests in both backends' `gpu_correctness.rs`
+suites, which cover positional and named multi-axis Count, empty selected
+extents, odd and large leaf counts, and the runtime's `Bool8` write-boundary
+domain trap. The kernels' overflow and stack-limit status codes are
+unreachable for any representable tensor (fewer than 2^63 leaves cannot
+overflow `i64`, and 64 frames bound every such leaf count), so no hardware
+test claims them; the device carrier limits are locked structurally in the
+codegen suites. The two authoritative manual gates are
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness count_ --
+--ignored --test-threads=1` on real HIP hardware and
+`cargo test -p chelis-backend-metal --test gpu_correctness count_ --
+--ignored --test-threads=1` on an Apple Silicon Metal device. Both must match
+the evaluator and compiled C lane exactly and exit 0. [#1291] stays open, and
+its HIP and Metal capability cells keep citing it, until both gates have
+recorded passes; a recorded Metal pass alone closes neither. This extends, and
+never weakens or bypasses, [#1287]'s core receipt.
+
+**Pre-4C framework delivery.** `scripts/dtype_pre_phase4c_oracle.py` now owns
+the prerequisite command manifest and rejects missing owners before executing
+children. This framework is not a green entry receipt: the remaining child
+oracles are explicit `MissingOracle` entries, and the existing Count, ReLU,
+direct-arithmetic, and freeze drivers still need execution-receipt adapters.
+Normal-gate activation remains #1296 work after every prerequisite and adapter
+is available. The framework's acceptance command is
+`.venv/bin/python scripts/test_dtype_pre_phase4c_oracle.py`; it executes positive
+and negative child-process fixtures, not the missing language implementations.
+
+Each child adapter receives `CHELIS_ORACLE_RECEIPT`, `CHELIS_ORACLE_RUN_ID`,
+`CHELIS_ORACLE_HEAD`, and `CHELIS_ORACLE_SOURCE_DIGEST` from the composite. It
+writes schema-1 execution evidence with its exact command identity, selected
+test identities, individual outcomes, positive/negative/mutation obligations,
+and host-lane execution references. Selections and outcomes must come from
+the test framework; a committed expected inventory or a driver-authored
+success packet is not execution evidence. Adapters need their own bypass,
+ignored-test, and zero-match mutations before adoption. Every selected test
+must execute successfully, and every obligation must cite an executed test.
+The structural freeze, #1288 census, and #1294 atom-closure legs execute their
+guards without inventing host behavior cells. Every other prerequisite requires
+`eval`, `c-host`, and `c-dag`; a receipt cannot waive those lanes. Unbuilt HIP/Metal cells carry explicit issue-bearing
+dispositions, whose authorities are checked against the rejection manifest
+and live OPEN issue state. Children still own complete cell discovery and
+the governing per-cell acceptance requirements.
+
+Evidence is retained in a fresh directory under `target/`, separately for
+every child: stdout, stderr, and the execution packet cannot overwrite a
+sibling's receipt. Adapters must likewise preserve each nested test process's
+framework output, including separate JUnit files where used. The composite
+rejects stale source/head/run identities, duplicate or missing cases, skips,
+waivers, nonzero exits, and missing or duplicate final success markers. Only
+a complete successful run over unchanged committed source writes the aggregate
+receipt and prints `DTYPE PRE-PHASE-4C ORACLE: PASS`.
 
 ### Phase 4C - populate the machine authorities
 
@@ -2123,7 +2998,7 @@ conformant. This is the executable requirement for zero capacity exceptions.
    `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
    target-disposition registry. Exact effect dependencies populate the
    `(CanonicalEffectRequirement, BackendId)` disposition registry over
-   `Random | Accum | IO | Test | Resource(ResourceId)`. Table A and sibling
+   `Accum | IO | Test | Resource(ResourceId)`. Table A and sibling
    semantic cells use typed signature, result, atom, and diagnostic identities;
    backend and effect cells use typed implementation, issue, or
    rejected-by-design authorities.
@@ -2286,7 +3161,7 @@ operation exists and what it computes.
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; [05-OP-40..41] direct extrema/subtraction authority; canonical reduction-order authority; WireDag v6 schema freeze |
 | pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
-| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
+| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287] exact-only WireDag v6 plus first-class count delivery in eval/C, with [#1291]'s device kernels outside the Phase 4C entry set; [#1292] own-width tensor-close assertions; [#1293] the exact 84-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection in eval/C/HIP, with Metal completion owned by [#2338] |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
@@ -2370,6 +3245,8 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1297]: https://github.com/Chelis-Lang/chelis/issues/1297
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
+[#2338]: https://github.com/Chelis-Lang/chelis/issues/2338
+[#2339]: https://github.com/Chelis-Lang/chelis/issues/2339
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
 [#849]: https://github.com/Chelis-Lang/chelis/issues/849
 [#1310]: https://github.com/Chelis-Lang/chelis/pull/1310

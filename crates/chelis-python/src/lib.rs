@@ -1,3 +1,15 @@
+mod compiler_json;
+mod dlpack;
+mod native_tensor;
+mod source_json;
+
+use compiler_json::{CheckJson, CompileJson, DesugarJson, EvalBindingsJson, EvalJson};
+use dlpack::{
+    DLPackCapsule, DLPackDevice, DLPackDeviceRequest, DLPackRequest, DLPackStreamRequest,
+    DLPackVersionRequest,
+};
+use native_tensor::{CompiledInputs, CompiledTensorResults, ValidatedTensor, execute_checked};
+use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{c_char, c_int, c_void};
@@ -5,9 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -16,8 +28,10 @@ use chelis_compiler_api::compiler::{
     reef_context_hip_unsupported_error,
 };
 use chelis_compiler_api::schema::{
-    CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
-    EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    ArtifactAbiVersion, CheckRequest, CompileRequest, CompileTarget,
+    CompiledArtifactManifest as ArtifactManifest, DecompileRequest, DecompileResult,
+    DesugarRequest, EvalRequest, EvalResult, SourceKind, TensorValue, ValidateMode,
+    ValidateRequest, ValidateResult,
 };
 use chelis_compiler_api::{CancelToken, install_cancel_token};
 use chelis_compiler_api::{
@@ -25,6 +39,7 @@ use chelis_compiler_api::{
     find_package_root_for_input, load_or_compile_with_local_registry_fallback,
     surf_source_has_import,
 };
+use chelis_reef::EntryImports;
 use chelis_vocab::RuntimeDType;
 use libloading::Library;
 use pyo3::create_exception;
@@ -32,34 +47,11 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const RUNTIME_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime.h"
-));
-const RUNTIME_DTYPE_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_runtime_dtype.h"
-));
-const BLAS_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_blas.h"
-));
-const SIMD_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_simd.h"
-));
-const MATH_H: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../chelis-runtime/include/chelis_math.h"
-));
-
 const CHELIS_DTYPE_F32: i32 = RuntimeDType::F32.id();
 const CHELIS_DTYPE_F64: i32 = RuntimeDType::F64.id();
-const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
 const DLPACK_ROCM_DEVICE_TYPE: i32 = 10;
 
@@ -81,16 +73,11 @@ struct ChelisReadView {
     reserved: [u8; 7],
 }
 
+chelis_abi::define_device_descriptor!(ChelisGpuTensor);
+
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct ChelisGpuTensor {
-    data: *mut f32,
-    shape: [i32; CHELIS_MAX_DIM],
-    strides: [i32; CHELIS_MAX_DIM],
-    ndim: i32,
-    dtype: i32,
-    size: i32,
-    storage_size: i32,
+struct DeviceTensorOwner {
+    _private: [u8; 0],
 }
 
 type HostEntry = unsafe extern "C" fn(*mut *mut ChelisTensor, c_int, *mut *mut ChelisTensor, c_int);
@@ -109,9 +96,36 @@ struct HostRuntimeApi {
     rank: HostRankFn,
     shape: HostShapeFn,
 }
-type DeviceEntry =
-    unsafe extern "C" fn(*mut *mut ChelisGpuTensor, c_int, *mut *mut ChelisGpuTensor, c_int);
-type HipFreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type DeviceEntry = unsafe extern "C" fn(
+    *const *const DeviceTensorOwner,
+    c_int,
+    *mut *mut DeviceTensorOwner,
+    c_int,
+);
+type DeviceImportFn = unsafe extern "C" fn(*const ChelisGpuTensor) -> *mut DeviceTensorOwner;
+type DeviceViewFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> *const ChelisGpuTensor;
+type DeviceReleaseFn = unsafe extern "C" fn(*mut DeviceTensorOwner);
+type DeviceIdFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> i32;
+type HipGetDeviceFn = unsafe extern "C" fn(*mut c_int) -> i32;
+type HipSynchronizeFn = unsafe extern "C" fn() -> i32;
+#[derive(Clone, Copy)]
+struct DeviceRuntimeApi {
+    import: DeviceImportFn,
+    view: DeviceViewFn,
+    release: DeviceReleaseFn,
+    device: DeviceIdFn,
+    current_device: HipGetDeviceFn,
+    synchronize: HipSynchronizeFn,
+}
+impl DeviceRuntimeApi {
+    fn current(self) -> PyResult<i32> {
+        let mut device = -1;
+        if unsafe { (self.current_device)(&mut device) } != 0 || device < 0 {
+            return Err(PyRuntimeError::new_err("HIP current device query failed"));
+        }
+        Ok(device)
+    }
+}
 
 #[repr(C)]
 struct DLDevice {
@@ -144,41 +158,38 @@ struct DLManagedTensor {
     deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ArtifactManifest {
-    abi_version: u32,
-    target: CompileTarget,
-    host_entry_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    device_entry_name: Option<String>,
-    inputs: Vec<ExecutionTensorSpec>,
-    outputs: Vec<ExecutionTensorSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    symbolic_dims: Vec<String>,
-    source_path: String,
-    source_hash: String,
-}
-
 #[derive(Clone)]
 enum TensorOwner {
-    Cpu(Rc<CpuTensorHandle>),
-    Gpu(Rc<GpuTensorHandle>),
+    Cpu(Arc<CpuTensorHandle>),
+    Gpu(Arc<GpuTensorHandle>),
 }
 
 struct CpuTensorHandle {
     ptr: NonNull<ChelisTensor>,
     api: HostRuntimeApi,
-    _library: Rc<Library>,
+    _library: Arc<Library>,
 }
 
 struct GpuTensorHandle {
-    ptr: NonNull<ChelisGpuTensor>,
-    device_id: i32,
+    ptr: NonNull<DeviceTensorOwner>,
+    api: DeviceRuntimeApi,
+    _library: Arc<Library>,
 }
+
+// These handles expose no Rust references to payload storage. The host ABI's
+// immutable descriptor and atomic owner lifetime permit release from another
+// thread; the matching library remains live until after that release.
+unsafe impl Send for CpuTensorHandle {}
+unsafe impl Sync for CpuTensorHandle {}
+
+// The artifact finalizer releases the opaque owner on its recorded device and
+// restores the calling thread context. Its library stays live through release.
+unsafe impl Send for GpuTensorHandle {}
+unsafe impl Sync for GpuTensorHandle {}
 
 struct LoadedArtifact {
     manifest: ArtifactManifest,
-    library: Rc<Library>,
+    library: Arc<Library>,
     library_path: PathBuf,
     _tempdir: Option<TempDir>,
 }
@@ -229,12 +240,12 @@ struct HostExecution {
 
 struct DeviceExecution {
     entry: DeviceEntry,
-    input_ptrs: Vec<*mut ChelisGpuTensor>,
-    output_ptrs: Vec<*mut ChelisGpuTensor>,
+    input_ptrs: Vec<*const DeviceTensorOwner>,
+    output_ptrs: Vec<*mut DeviceTensorOwner>,
 }
 
 struct HostExecutionOutput(Vec<*mut ChelisTensor>);
-struct DeviceExecutionOutput(Vec<*mut ChelisGpuTensor>);
+struct DeviceExecutionOutput(Vec<*mut DeviceTensorOwner>);
 
 unsafe impl Send for HostExecution {}
 unsafe impl Send for DeviceExecution {}
@@ -269,33 +280,27 @@ impl DeviceExecution {
     }
 }
 
-#[derive(Clone)]
-struct DlpackContext {
-    owner: TensorOwner,
-    shape: Box<[i64]>,
-    strides: Box<[i64]>,
-}
-
 struct CpuInputTensor {
     _owner: Py<PyAny>,
+    _metadata: chelis_abi::metadata::ShapeMetadata,
     ptr: NonNull<ChelisTensor>,
     release: HostReleaseFn,
 }
 
 struct GpuInputTensor {
+    // Release imported metadata before its borrowed Python allocation.
+    handle: Arc<GpuTensorHandle>,
     _owner: Py<PyAny>,
-    tensor: ChelisGpuTensor,
-    device_id: i32,
 }
 
-#[pyclass(name = "CompiledModel", unsendable)]
+#[::pyo3::pyclass(name = "CompiledModel", unsendable)]
 struct NativeCompiledModel {
     loaded: LoadedArtifact,
 }
 
-#[pyclass(unsendable)]
+#[::pyo3::pyclass(unsendable)]
 struct NativeTensor {
-    owner: TensorOwner,
+    tensor: ValidatedTensor,
 }
 
 impl Drop for CpuTensorHandle {
@@ -312,49 +317,36 @@ impl Drop for CpuInputTensor {
 
 impl Drop for GpuTensorHandle {
     fn drop(&mut self) {
-        unsafe {
-            let tensor = self.ptr.as_ptr();
-            if !(*tensor).data.is_null() {
-                let _ = hip_free((*tensor).data.cast());
-            }
-            libc::free(tensor.cast());
-        }
+        unsafe { (self.api.release)(self.ptr.as_ptr()) }
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeTensor {
     #[getter]
-    fn shape(&self) -> Vec<usize> {
-        self.owner.shape()
+    fn shape(&self) -> Vec<i64> {
+        self.tensor.shape()
     }
 
-    // chelis#920: report the dtype the runtime tensor actually carries
-    // instead of asserting float32. With the f32-only gate in place the
-    // two were always equal, so the hardcode was invisible; once f64
-    // artifacts load, a stale "float32" here makes consumers
-    // reinterpret a double buffer at a 4-byte stride and read garbage
-    // with no error and an unchanged shape.
     #[getter]
     fn dtype(&self) -> PyResult<&'static str> {
-        numpy_dtype_name(self.owner.runtime_dtype())
+        numpy_dtype_name(self.tensor.dtype().id())
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) {
-        self.owner.dlpack_device()
+    fn __dlpack_device__(&self) -> DLPackDevice {
+        DLPackDevice::from_validated(&self.tensor)
     }
 
-    #[pyo3(signature = (stream = None, max_version = None, dl_device = None, copy = None))]
+    #[pyo3(signature = (*, stream = None, max_version = None, dl_device = None, copy = None))]
     fn __dlpack__(
         &self,
-        py: Python<'_>,
-        stream: Option<usize>,
-        max_version: Option<&Bound<'_, PyAny>>,
-        dl_device: Option<&Bound<'_, PyAny>>,
+        stream: Option<DLPackStreamRequest>,
+        max_version: Option<DLPackVersionRequest>,
+        dl_device: Option<DLPackDeviceRequest>,
         copy: Option<bool>,
-    ) -> PyResult<PyObject> {
-        let _ = (stream, max_version, dl_device, copy);
-        create_dlpack_capsule(py, self.owner.clone())
+    ) -> PyResult<DLPackCapsule> {
+        let request = DLPackRequest::validate(&self.tensor, stream, max_version, dl_device, copy)?;
+        self.tensor.export(request)
     }
 }
 
@@ -367,7 +359,7 @@ fn target_label(target: CompileTarget) -> &'static str {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeCompiledModel {
     #[getter]
     fn target(&self) -> String {
@@ -405,144 +397,10 @@ impl NativeCompiledModel {
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let values = resolve_call_inputs(&self.loaded.manifest.inputs, args, kwargs)?;
-        let device_kinds = values
-            .iter()
-            .map(|value| device_kind(value.bind(py)))
-            .collect::<PyResult<Vec<_>>>()?;
-        let has_gpu = device_kinds
-            .iter()
-            .any(|kind| matches!(kind, DeviceKind::Gpu));
-        let has_cpu = device_kinds
-            .iter()
-            .any(|kind| matches!(kind, DeviceKind::Cpu));
-        if has_gpu && has_cpu {
-            return Err(PyValueError::new_err(
-                "mixed CPU/GPU inputs are not supported in compiled execution",
-            ));
-        }
-
-        if has_gpu {
-            if self.loaded.manifest.target != CompileTarget::Hip {
-                return Err(PyValueError::new_err(
-                    "GPU tensors require a HIP-compiled Chelis artifact",
-                ));
-            }
-            self.call_device(py, &values)
-        } else {
-            self.call_host(py, &values)
-        }
-    }
-}
-
-impl NativeCompiledModel {
-    fn call_host(&self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<PyObject> {
-        let api = unsafe { load_host_runtime_api(&self.loaded.library)? };
-        let mut inputs = self
-            .loaded
-            .manifest
-            .inputs
-            .iter()
-            .zip(values)
-            .map(|(spec, value)| cpu_input_tensor(py, value.bind(py), spec, api))
-            .collect::<PyResult<Vec<_>>>()?;
-        let input_ptrs = inputs
-            .iter_mut()
-            .map(|input| input.ptr.as_ptr())
-            .collect::<Vec<_>>();
-        let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
-
-        let symbol_name = nul_terminated(&self.loaded.manifest.host_entry_name);
-        let entry = unsafe {
-            self.loaded
-                .library
-                .get::<HostEntry>(symbol_name.as_bytes())
-                .map_err(|err| ChelisError::new_err(format!("load symbol failed: {err}")))?
-        };
-        let execution = HostExecution {
-            entry: *entry,
-            input_ptrs,
-            output_ptrs,
-        };
-        let output_ptrs = py.allow_threads(move || execution.run()).0;
-        drop(inputs);
-
-        let mut owners = Vec::with_capacity(output_ptrs.len());
-        for output in output_ptrs {
-            let ptr = NonNull::new(output).ok_or_else(|| {
-                PyRuntimeError::new_err("compiled execution returned a NULL CPU output tensor")
-            })?;
-            owners.push(TensorOwner::Cpu(Rc::new(CpuTensorHandle {
-                ptr,
-                api,
-                _library: Rc::clone(&self.loaded.library),
-            })));
-        }
-        outputs_to_python(py, &self.loaded.manifest.outputs, owners)
-    }
-
-    fn call_device(&self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<PyObject> {
-        let device_entry_name = self
-            .loaded
-            .manifest
-            .device_entry_name
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("artifact does not expose a HIP device ABI"))?;
-
-        let mut inputs = self
-            .loaded
-            .manifest
-            .inputs
-            .iter()
-            .zip(values)
-            .map(|(spec, value)| gpu_input_tensor(py, value.bind(py), spec))
-            .collect::<PyResult<Vec<_>>>()?;
-        let first_device_id = inputs
-            .first()
-            .map(|input| input.device_id)
-            .unwrap_or_default();
-        if inputs
-            .iter()
-            .any(|input| input.device_id != first_device_id)
-        {
-            return Err(PyValueError::new_err(
-                "all GPU inputs must live on the same device",
-            ));
-        }
-
-        let input_ptrs = inputs
-            .iter_mut()
-            .map(|input| &mut input.tensor as *mut ChelisGpuTensor)
-            .collect::<Vec<_>>();
-        let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
-
-        let symbol_name = nul_terminated(device_entry_name);
-        let entry = unsafe {
-            self.loaded
-                .library
-                .get::<DeviceEntry>(symbol_name.as_bytes())
-                .map_err(|err| ChelisError::new_err(format!("load symbol failed: {err}")))?
-        };
-        let execution = DeviceExecution {
-            entry: *entry,
-            input_ptrs,
-            output_ptrs,
-        };
-        let output_ptrs = py.allow_threads(move || execution.run()).0;
-        drop(inputs);
-
-        let mut owners = Vec::with_capacity(output_ptrs.len());
-        for output in output_ptrs {
-            let ptr = NonNull::new(output).ok_or_else(|| {
-                PyRuntimeError::new_err("compiled execution returned a NULL GPU output tensor")
-            })?;
-            owners.push(TensorOwner::Gpu(Rc::new(GpuTensorHandle {
-                ptr,
-                device_id: first_device_id,
-            })));
-        }
-        outputs_to_python(py, &self.loaded.manifest.outputs, owners)
+    ) -> PyResult<CompiledTensorResults> {
+        let admitted = CompiledInputs::admit(py, &self.loaded, args, kwargs)?;
+        let outputs = execute_checked(py, &admitted);
+        CompiledTensorResults::adopt_outputs(&self.loaded.manifest, outputs)
     }
 }
 
@@ -566,57 +424,75 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
     })
 }
 
-#[pyfunction(signature = (source, *, source_kind = "surf"))]
-fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String> {
+unsafe fn load_device_runtime_api(library: &Library) -> PyResult<DeviceRuntimeApi> {
+    macro_rules! load {
+        ($ty:ty, $symbol:literal) => {
+            *unsafe { library.get::<$ty>($symbol) }.map_err(|error| {
+                ChelisError::new_err(format!("load device runtime symbol failed: {error}"))
+            })?
+        };
+    }
+    Ok(DeviceRuntimeApi {
+        import: load!(DeviceImportFn, b"chelis_device_tensor_import\0"),
+        view: load!(DeviceViewFn, b"chelis_device_tensor_view\0"),
+        release: load!(DeviceReleaseFn, b"chelis_device_tensor_release\0"),
+        device: load!(DeviceIdFn, b"chelis_device_tensor_device\0"),
+        current_device: load!(HipGetDeviceFn, b"hipGetDevice\0"),
+        synchronize: load!(HipSynchronizeFn, b"hipDeviceSynchronize\0"),
+    })
+}
+
+#[::pyo3::pyfunction(signature = (source, *, source_kind = "surf"))]
+fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<CheckJson> {
     let request = CheckRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
     };
-    run_json(py, || compiler::check(request))
+    run_job(py, || compiler::check(request)).map(CheckJson::new)
 }
 
-#[pyfunction]
-fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
+#[::pyo3::pyfunction]
+fn desugar_json(py: Python<'_>, source: &str) -> PyResult<DesugarJson> {
     let request = DesugarRequest {
         source: source.to_string(),
     };
-    run_json(py, || compiler::desugar(request))
+    run_job(py, || compiler::desugar(request)).map(DesugarJson::new)
 }
 
-#[pyfunction]
-fn decompile_json(py: Python<'_>, source: &str) -> PyResult<String> {
+#[::pyo3::pyfunction]
+fn decompile_json(py: Python<'_>, source: &str) -> PyResult<SourceJson<DecompileResult>> {
     let request = DecompileRequest {
         source: source.to_string(),
     };
-    run_json(py, || compiler::decompile(request))
+    run_job(py, || compiler::decompile(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
+#[::pyo3::pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
 fn compile_json(
     py: Python<'_>,
     source: &str,
     target: &str,
     source_kind: &str,
     entry_name: Option<String>,
-) -> PyResult<String> {
+) -> PyResult<CompileJson> {
     let request = CompileRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
         target: parse_compile_target(target)?,
         entry_name,
     };
-    run_json(py, || compiler::compile(request))
+    run_job(py, || compiler::compile(request)).map(CompileJson::new)
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
+#[::pyo3::pyfunction(signature = (source, bindings_json = EvalBindingsJson::empty(), *, source_kind = "surf", project_root = None), text_signature = "(source, bindings_json='{}', *, source_kind='surf', project_root=None)")]
 fn eval_json(
     py: Python<'_>,
     source: &str,
-    bindings_json: &str,
+    bindings_json: EvalBindingsJson,
     source_kind: &str,
     project_root: Option<&str>,
-) -> PyResult<String> {
-    let bindings = parse_bindings_json(bindings_json)?;
+) -> PyResult<EvalJson> {
+    let bindings = bindings_json.into_bindings();
     // Issue #816: with `project_root=`, resolve reef-declared dependencies
     // by evaluating the source against the package's compiled library
     // context. `eval` takes raw text (no file to walk from), so — unlike
@@ -635,27 +511,26 @@ fn eval_json(
         let result = py
             .allow_threads(move || run_eval_in_context_job(&root, &source, bindings))
             .map_err(compile_and_load_error)?;
-        return serde_json::to_string(&result)
-            .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")));
+        return Ok(EvalJson::new(result));
     }
     let request = EvalRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
         bindings,
     };
-    run_json(py, || compiler::eval(request))
+    run_job(py, || compiler::eval(request)).map(EvalJson::new)
 }
 
-#[pyfunction(signature = (source, *, mode = "surf"))]
-fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String> {
+#[::pyo3::pyfunction(signature = (source, *, mode = "surf"))]
+fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<SourceJson<ValidateResult>> {
     let request = ValidateRequest {
         mode: parse_validate_mode(mode)?,
         source: source.to_string(),
     };
-    run_json(py, || compiler::validate(request))
+    run_job(py, || compiler::validate(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
+#[::pyo3::pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
 #[allow(clippy::too_many_arguments)] // 1:1 with the Python keyword surface
 fn compile_and_load(
     py: Python<'_>,
@@ -687,7 +562,7 @@ fn compile_and_load(
     load_artifact(py, &output.lib_path, output.tempdir)
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
     load_artifact(py, Path::new(path), None)
 }
@@ -698,7 +573,7 @@ fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
 /// GIL reacquisition per interval on an otherwise idle thread.
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Run a compiler-API job and return its JSON encoding, staying responsive
+/// Run a compiler-API job and retain its typed result, staying responsive
 /// to Python signals for the whole run (chelis#914).
 ///
 /// Previously this was `py.allow_threads(f)`, which parks the Python **main**
@@ -719,9 +594,9 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// both lanes poll at every node visit; during front-end work, the compiler
 /// polls at phase and top-level-declaration boundaries. The join is bounded by
 /// the current cooperative unit rather than by all remaining work.
-fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
+fn run_job<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
-    T: serde::Serialize + Send + 'static,
+    T: Send + 'static,
     F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
 {
     let token = CancelToken::new();
@@ -742,7 +617,7 @@ where
             // keeps the token from outliving this job.
             let _cancel_guard = install_cancel_token(worker_token);
             // A send failure means the receiver is gone, which cannot happen
-            // while `run_json` is still on the stack holding `rx`.
+            // while `run_job` is still on the stack holding `rx`.
             let _ = tx.send(f());
         })
         .map_err(|err| ChelisError::new_err(format!("failed to spawn eval thread: {err}")))?;
@@ -803,9 +678,7 @@ where
         }
     };
 
-    let result = outcome.map_err(compiler_error)?;
-    serde_json::to_string(&result)
-        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
+    outcome.map_err(compiler_error)
 }
 
 /// `dlopen` a compiled artifact so that dropping it does not unmap it.
@@ -861,14 +734,26 @@ fn load_artifact(
     library_path: &Path,
     tempdir: Option<TempDir>,
 ) -> PyResult<NativeCompiledModel> {
-    let library_path = library_path.to_path_buf();
+    // One resolved path for the metadata, the digest check and the loader. For
+    // a bare file name the Linux loader searches `LD_LIBRARY_PATH` and the
+    // system directories, never the working directory the digest check reads
+    // (spec/11 §1.4). A macOS `DYLD_LIBRARY_PATH` set at launch still replaces
+    // any library by leaf name, as it does for every library the process loads.
+    let library_path = std::path::absolute(library_path).map_err(|err| {
+        ChelisError::new_err(format!(
+            "resolve artifact path {} failed: {err}",
+            library_path.display()
+        ))
+    })?;
     let manifest_path = library_path.with_extension("json");
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|err| ChelisError::new_err(format!("read manifest failed: {err}")))?;
-    let manifest: ArtifactManifest = serde_json::from_str(&manifest_text)
-        .map_err(|err| ChelisError::new_err(format!("parse manifest failed: {err}")))?;
+    let manifest: ArtifactManifest = serde_json::from_str(&manifest_text).map_err(|err| {
+        ChelisError::new_err(format!("parse manifest failed: {err}; {RECOMPILE_REMEDY}"))
+    })?;
+    admit_artifact(&manifest, &library_path)?;
     warn_if_stale_source(py, &manifest)?;
-    let library = Rc::new(
+    let library = Arc::new(
         open_compiled_library(&library_path)
             .map_err(|err| ChelisError::new_err(format!("load shared library failed: {err}")))?,
     );
@@ -882,9 +767,38 @@ fn load_artifact(
     })
 }
 
-fn parse_bindings_json(bindings_json: &str) -> PyResult<BTreeMap<String, TensorValue>> {
-    serde_json::from_str(bindings_json)
-        .map_err(|err| PyValueError::new_err(format!("invalid bindings json: {err}")))
+/// What a refused persisted artifact asks of its user (spec/11 §1.4).
+const RECOMPILE_REMEDY: &str = "recompile it with chelis.compile_and_load";
+
+/// Admit a persisted artifact only beside the runtime it was linked with and
+/// only with the library bytes its metadata recorded (spec/11 §1.4). Both
+/// checks run before the library is opened.
+fn admit_artifact(manifest: &ArtifactManifest, library_path: &Path) -> PyResult<()> {
+    let carried = chelis_runtime_bundle::carried_sha256()
+        .map_err(|err| ChelisError::new_err(err.to_string()))?;
+    if manifest.runtime_sha256 != carried {
+        return Err(ChelisError::new_err(format!(
+            "{} was linked with runtime {}, but this chelis carries runtime {carried}; \
+             {RECOMPILE_REMEDY}",
+            library_path.display(),
+            manifest.runtime_sha256
+        )));
+    }
+    let library = fs::read(library_path).map_err(|err| {
+        ChelisError::new_err(format!(
+            "read {} failed: {err}; {RECOMPILE_REMEDY}",
+            library_path.display()
+        ))
+    })?;
+    let library_sha256 = sha256_hex(&library);
+    if manifest.library_sha256 != library_sha256 {
+        return Err(ChelisError::new_err(format!(
+            "{} has SHA-256 {library_sha256}, but its metadata records {}; {RECOMPILE_REMEDY}",
+            library_path.display(),
+            manifest.library_sha256
+        )));
+    }
+    Ok(())
 }
 
 fn parse_source_kind(value: &str) -> PyResult<SourceKind> {
@@ -944,6 +858,11 @@ fn compile_and_load_error(err: CompileAndLoadError) -> PyErr {
     }
 }
 
+/// A staging failure of the carried runtime; Python sees it as `ChelisError`.
+fn runtime_error(err: chelis_runtime_bundle::RuntimeError) -> CompileAndLoadError {
+    CompileAndLoadError::Message(err.to_string())
+}
+
 /// `reef_home` sourced exactly as the CLI does at its
 /// `load_or_compile_for_package` call site (`run_eval_in_context` in
 /// crates/chelis-cli/src/main.rs): `CHELIS_REEF_HOME` if set, else an empty
@@ -974,7 +893,14 @@ fn reject_blank_project_root(root: &Path) -> Result<(), CompileAndLoadError> {
 /// Build (or load from cache) the compiled reef context for `root`, mapping a
 /// missing/invalid `reef.toml` to an actionable message that names
 /// `project_root=`. Verbose corruption logging is off (bindings run silent).
-fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError> {
+///
+/// `entries` are the imports of the source that will run against the
+/// context: it links only the chelis-std modules the package and that source
+/// reach (chelis#2558).
+fn load_reef_context(
+    root: &Path,
+    entries: &EntryImports,
+) -> Result<CompiledContext, CompileAndLoadError> {
     reject_blank_project_root(root)?;
     if !root.join("reef.toml").exists() {
         return Err(CompileAndLoadError::Message(format!(
@@ -990,7 +916,7 @@ fn load_reef_context(root: &Path) -> Result<CompiledContext, CompileAndLoadError
     // (`chelis test` worker, NOT the CLI eval site, which drops to legacy
     // `prepare_eval` instead — a divergence to watch if the CLI paths are
     // later unified).
-    load_or_compile_with_local_registry_fallback(&reef_home, root, false)
+    load_or_compile_with_local_registry_fallback(&reef_home, root, entries, false)
         .map(|(context, _path)| context)
         .map_err(CompileAndLoadError::Compiler)
 }
@@ -1054,6 +980,17 @@ fn resolve_compile_reef_root(
     }
 }
 
+/// The modules a Surf `source` imports, parsed before its context loads
+/// (chelis#2558). A source that does not parse imports nothing here: the
+/// compile against the context then reports its parse error in the shape
+/// callers already receive.
+fn surf_entry_imports(source: &str) -> EntryImports {
+    match EntryImports::from_surf_source(source) {
+        Ok(imports) => imports,
+        Err(_) => EntryImports::none(),
+    }
+}
+
 /// Evaluate `source` against the reef context at `root`, threading `bindings`
 /// through (issue #816). Backs `eval(..., project_root=...)`.
 fn run_eval_in_context_job(
@@ -1061,13 +998,17 @@ fn run_eval_in_context_job(
     source: &str,
     bindings: BTreeMap<String, TensorValue>,
 ) -> Result<EvalResult, CompileAndLoadError> {
-    let context = load_reef_context(root)?;
+    let context = load_reef_context(root, &surf_entry_imports(source))?;
     eval_in_context_with_bindings(&context, source, bindings).map_err(CompileAndLoadError::Compiler)
 }
 
 fn run_compile_and_load_job(
     job: CompileAndLoadJob,
 ) -> Result<CompileAndLoadOutput, CompileAndLoadError> {
+    // The extension links the runtime its own build carries (spec/08 §2.1): a
+    // set runtime directory, or in a development build runtime sources changed
+    // since this build, is refused before any work.
+    chelis_runtime_bundle::preflight().map_err(runtime_error)?;
     let source = fs::read_to_string(&job.source_path)
         .map_err(|err| CompileAndLoadError::Message(format!("read source failed: {err}")))?;
     let reef_root = resolve_compile_reef_root(&job, &source)?;
@@ -1098,7 +1039,12 @@ fn run_compile_and_load_job(
         && surf_source_has_import(&source);
     let artifact = match &reef_root {
         Some(root) => {
-            let context = load_reef_context(root)?;
+            // A Deep source carries no reef `import` declarations.
+            let entries = match job.source_kind {
+                SourceKind::Surf => surf_entry_imports(&source),
+                SourceKind::Deep => EntryImports::none(),
+            };
+            let context = load_reef_context(root, &entries)?;
             compile_for_execution_in_context(
                 &context,
                 &source,
@@ -1146,18 +1092,21 @@ fn run_compile_and_load_job(
     })?;
 
     write_generated_files_inner(&artifact_root, &artifact).map_err(CompileAndLoadError::Message)?;
-    write_runtime_headers_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
-    let runtime_library =
-        stage_runtime_library_inner(&artifact_root).map_err(CompileAndLoadError::Message)?;
-    let lib_path = compile_shared_library_inner(
-        &artifact_root,
-        &job.source_path,
-        &artifact,
-        &runtime_library,
-    )
-    .map_err(CompileAndLoadError::Message)?;
+    let staged = chelis_runtime_bundle::stage(&artifact_root).map_err(runtime_error)?;
+    let lib_path =
+        compile_shared_library_inner(&artifact_root, &job.source_path, &artifact, &staged.archive)
+            .map_err(CompileAndLoadError::Message)?;
+    let library = fs::read(&lib_path).map_err(|err| {
+        CompileAndLoadError::Message(format!("read {} failed: {err}", lib_path.display()))
+    })?;
     let manifest_path = lib_path.with_extension("json");
-    let manifest = artifact_manifest_inner(&job.source_path, &source, &artifact);
+    let manifest = artifact_manifest_inner(
+        &job.source_path,
+        &source,
+        &artifact,
+        staged.archive_sha256,
+        sha256_hex(&library),
+    );
     write_manifest_inner(&manifest_path, &manifest).map_err(CompileAndLoadError::Message)?;
 
     Ok(CompileAndLoadOutput { lib_path, tempdir })
@@ -1214,13 +1163,6 @@ fn ensure_supported_execution_artifact_inner(
                  `tensor[1, f32]`), or select a tensor-in/tensor-out `def` with \
                  `entry_name=`."
             ),
-            Some(EntryLaneDecline::GradLike { entry }) => format!(
-                "{prefix}: entry `{entry}` uses a `grad`/`vmap` form, which only the \
-                 host-program lane can emit (multi-root gradient tuples); its result \
-                 is not a plain compiled tensor kernel and compile_and_load cannot \
-                 expose it as one. If you meant a different, tensor-in/tensor-out \
-                 `def`, select it with `entry_name=`."
-            ),
             Some(EntryLaneDecline::HasGlobals) => format!(
                 "{prefix}: the program has top-level (non-`def`) bindings, which only \
                  the host-program lane can emit; a standalone entry kernel would \
@@ -1273,13 +1215,6 @@ fn ensure_supported_execution_artifact_inner(
                 spec.dtype
             ));
         }
-        if target == CompileTarget::Hip && spec.dims.len() > CHELIS_MAX_DIM {
-            return Err(format!(
-                "HIP compiled execution currently supports rank <= {CHELIS_MAX_DIM}; `{}` has rank {}",
-                spec.name,
-                spec.dims.len()
-            ));
-        }
         if spec.dims.iter().any(|dim| dim.size.is_none()) {
             return Err(format!(
                 "compiled execution requires fully concrete dimensions; `{}` still has unresolved symbolic axes",
@@ -1294,12 +1229,14 @@ fn artifact_manifest_inner(
     source_path: &Path,
     source: &str,
     artifact: &CompiledExecutionArtifact,
+    runtime_sha256: String,
+    library_sha256: String,
 ) -> ArtifactManifest {
     let canonical_source = source_path
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
     ArtifactManifest {
-        abi_version: 1,
+        abi_version: ArtifactAbiVersion::V2,
         target: artifact.compile_result.target,
         host_entry_name: artifact.host_entry_name.clone(),
         device_entry_name: artifact.device_entry_name.clone(),
@@ -1308,6 +1245,8 @@ fn artifact_manifest_inner(
         symbolic_dims: artifact.symbolic_dims.clone(),
         source_path: canonical_source.display().to_string(),
         source_hash: sha256_hex(source.as_bytes()),
+        runtime_sha256,
+        library_sha256,
     }
 }
 
@@ -1321,125 +1260,6 @@ fn write_generated_files_inner(
             .map_err(|err| format!("write {} failed: {err}", path.display()))?;
     }
     Ok(())
-}
-
-fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
-    for (name, content) in [
-        ("chelis_runtime.h", RUNTIME_H),
-        ("chelis_runtime_dtype.h", RUNTIME_DTYPE_H),
-        ("chelis_blas.h", BLAS_H),
-        ("chelis_simd.h", SIMD_H),
-        ("chelis_math.h", MATH_H),
-    ] {
-        let path = root.join(name);
-        fs::write(&path, content).map_err(|err| format!("write {name} failed: {err}"))?;
-    }
-    Ok(())
-}
-
-fn find_runtime_library_inner() -> Result<PathBuf, String> {
-    const LIB_NAME: &str = "libchelis_runtime.a";
-    const LIB_PREFIX: &str = "libchelis_runtime";
-
-    fn find_in_dir(dir: &Path) -> Option<PathBuf> {
-        let mut hashed_matches = Vec::new();
-        let exact = dir.join(LIB_NAME);
-        let entries = fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if name.starts_with(LIB_PREFIX) && name.ends_with(".a") {
-                if name == LIB_NAME {
-                    continue;
-                }
-                hashed_matches.push(path);
-            }
-        }
-        hashed_matches
-            .into_iter()
-            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
-            .or_else(|| exact.exists().then_some(exact))
-    }
-
-    if let Ok(dir) = std::env::var("CHELIS_RUNTIME_DIR") {
-        if let Some(candidate) = find_in_dir(&PathBuf::from(&dir)) {
-            return Ok(candidate);
-        }
-        return Err(format!(
-            "cannot find {LIB_NAME} in CHELIS_RUNTIME_DIR; set CHELIS_RUNTIME_DIR to the directory containing the chelis runtime static library"
-        ));
-    }
-
-    let exe = std::env::current_exe()
-        .map_err(|err| format!("cannot determine current executable path: {err}"))?;
-    let exe_dir = exe
-        .parent()
-        .ok_or_else(|| "cannot determine executable directory".to_string())?;
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for candidate_dir in [
-        exe_dir.join("deps"),
-        exe_dir.to_path_buf(),
-        exe_dir.join("lib"),
-        exe_dir.parent().map(|p| p.join("deps")).unwrap_or_default(),
-        exe_dir
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default(),
-        exe_dir.parent().map(|p| p.join("lib")).unwrap_or_default(),
-    ] {
-        if !candidate_dir.as_os_str().is_empty()
-            && let Some(found) = find_in_dir(&candidate_dir)
-        {
-            return Ok(found);
-        }
-    }
-
-    // Honor an external `CARGO_TARGET_DIR` (e.g. a concurrent agent building
-    // into `target/agents/<name>`) before the `CARGO_MANIFEST_DIR`-relative
-    // fallbacks below, which assume the default `target/` beside the workspace.
-    // `current_exe()` cannot resolve this for the Python extension — its exe is
-    // the interpreter, not a chelis build artifact. A relative value resolves
-    // against the workspace root. See chelis#747.
-    if let Some(raw) = std::env::var_os("CARGO_TARGET_DIR") {
-        let raw = PathBuf::from(raw);
-        let target_dir = if raw.is_absolute() {
-            raw
-        } else {
-            manifest_dir.join("../..").join(raw)
-        };
-        for candidate_dir in [
-            target_dir.join("debug/deps"),
-            target_dir.join("release/deps"),
-            target_dir.join("debug"),
-            target_dir.join("release"),
-        ] {
-            if let Some(found) = find_in_dir(&candidate_dir) {
-                return Ok(found);
-            }
-        }
-    }
-
-    for candidate_dir in [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-        manifest_dir.join("../../target/debug"),
-        manifest_dir.join("../../target/release"),
-    ] {
-        if let Some(found) = find_in_dir(&candidate_dir) {
-            return Ok(found);
-        }
-    }
-
-    Err(format!(
-        "cannot find {LIB_NAME}; set CHELIS_RUNTIME_DIR or install chelis so {LIB_NAME} is available relative to the chelis executable"
-    ))
-}
-
-fn stage_runtime_library_inner(root: &Path) -> Result<PathBuf, String> {
-    let source = find_runtime_library_inner()?;
-    let dest = root.join("libchelis_runtime.a");
-    fs::copy(&source, &dest).map_err(|err| format!("copy {} failed: {err}", dest.display()))?;
-    Ok(dest)
 }
 
 fn compile_shared_library_inner(
@@ -1692,13 +1512,15 @@ fn cpu_input_tensor(
     spec: &ExecutionTensorSpec,
     api: HostRuntimeApi,
 ) -> PyResult<CpuInputTensor> {
+    use chelis_abi::metadata::{ByteCount, ElementCount, ShapeMetadata};
+    use native_tensor::{metadata_error, validate_manifest_metadata};
+
     let owner = owner_object(value)?;
     if device_kind(&owner)? == DeviceKind::Gpu {
         return Err(PyValueError::new_err(
-            "GPU tensors require a HIP-compiled artifact and the device execution path",
+            "CPU compiled execution requires CPU inputs",
         ));
     }
-
     let numpy = PyModule::import(py, "numpy")?;
     let array = if owner.hasattr("__dlpack__")? {
         numpy.getattr("from_dlpack")?.call1((owner.clone(),))?
@@ -1709,57 +1531,80 @@ fn cpu_input_tensor(
             "expected a DLPack-capable tensor or NumPy-compatible array",
         ));
     };
-    // [05-OP-31] makes every public host tensor contiguous row-major.
-    // Materialize an internal/noncontiguous Python view before publishing
-    // its descriptor across the compiled host-entry boundary.
-    let array = numpy.getattr("ascontiguousarray")?.call1((array,))?;
-
-    // chelis#920: dispatch the expected NumPy dtype and the runtime
-    // dtype tag off the artifact's `spec.dtype` instead of hard-coding
-    // float32 / CHELIS_DTYPE_F32. A `_ =>` catch-all here would re-create the
-    // silent-default arm this issue is about, so an unmapped dtype is a
-    // loud error even though the gate above already rejected it.
-    let (expected_numpy_dtype, runtime_dtype) = spec_dtype_mapping(&spec.dtype)?;
-    let dtype = array.getattr("dtype")?.str()?.extract::<String>()?;
-    if dtype != expected_numpy_dtype {
+    // Unlike ascontiguousarray, require preserves rank zero. Ensure a base
+    // ndarray so descriptor observations do not dispatch through a subclass.
+    let requirements = PyDict::new(py);
+    requirements.set_item("requirements", ("C", "A", "E"))?;
+    let mut array = numpy
+        .getattr("require")?
+        .call((array,), Some(&requirements))?;
+    let (expected_dtype, runtime_dtype) = spec_dtype_mapping(&spec.dtype)?;
+    let actual_dtype = array.getattr("dtype")?.str()?.extract::<String>()?;
+    if actual_dtype != expected_dtype {
         return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype {expected_numpy_dtype}, got {dtype}",
+            "input `{}` expected dtype {expected_dtype}, got {actual_dtype}",
             spec.name
         )));
     }
-    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
-    validate_shape(spec, &shape)?;
-    let strides = numpy_element_strides(&array)?;
-    validate_canonical_host_strides(&shape, &strides)?;
-    let data_ptr = numpy_data_ptr(&array)?;
-    let size = element_count(&shape)?;
-    let itemsize = array.getattr("itemsize")?.extract::<usize>()?;
-    let byte_capacity = size
-        .checked_mul(itemsize)
-        .and_then(|bytes| i64::try_from(bytes).ok())
-        .ok_or_else(|| PyValueError::new_err("input byte capacity exceeds the host ABI"))?;
-    let host_shape = host_dims(&shape)?;
-    let data = if size == 0 {
+    let dtype = decode_runtime_dtype(runtime_dtype)?;
+    let shape = array.getattr("shape")?.extract::<Vec<i64>>()?;
+    let metadata = ShapeMetadata::contiguous(&shape, dtype).map_err(metadata_error)?;
+    metadata.bytes().allocation().map_err(metadata_error)?;
+    validate_manifest_metadata(spec, &metadata)?;
+    if metadata.elements().get() != 0 {
+        let expected = metadata
+            .strides()
+            .iter()
+            .map(|stride| {
+                ElementCount::from_extents(&[*stride])
+                    .and_then(|n| n.bytes(dtype))
+                    .map(|bytes| bytes.get())
+                    .map_err(metadata_error)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let actual = array.getattr("strides")?.extract::<Vec<i64>>()?;
+        if actual != expected {
+            // Singleton axes may have unobserved noncanonical strides even on
+            // a C-contiguous ndarray. Materialize before publishing OP31.
+            array = array.call_method1("copy", ("C",))?;
+            if array.getattr("strides")?.extract::<Vec<i64>>()? != expected {
+                return Err(PyValueError::new_err(
+                    "cannot publish canonical host input strides",
+                ));
+            }
+        }
+    }
+    let declared_bytes = ByteCount::from_declared(array.getattr("nbytes")?.extract::<i64>()?)
+        .map_err(metadata_error)?;
+    metadata
+        .require_capacity(declared_bytes)
+        .map_err(metadata_error)?;
+    let data = if metadata.elements().get() == 0 {
         std::ptr::null()
     } else {
-        data_ptr.cast_const()
+        let pointer = numpy_data_ptr(&array)?;
+        if pointer.is_null() || pointer.addr() % dtype.byte_width() != 0 {
+            return Err(PyValueError::new_err(
+                "nonempty host input has null or misaligned storage",
+            ));
+        }
+        pointer.cast_const()
     };
-    let tensor = unsafe {
+    let pointer = unsafe {
         (api.entry_borrow)(
-            i32::try_from(shape.len())
-                .map_err(|_| PyValueError::new_err("input rank exceeds the host ABI"))?,
-            host_dims_ptr(&host_shape),
-            u8::try_from(runtime_dtype)
-                .map_err(|_| PyValueError::new_err("runtime dtype tag exceeds the host ABI"))?,
+            metadata.rank(),
+            host_dims_ptr(metadata.shape()),
+            dtype as u8,
             data,
-            byte_capacity,
+            declared_bytes.get(),
         )
     };
-    let ptr = NonNull::new(tensor).ok_or_else(|| {
+    let ptr = NonNull::new(pointer).ok_or_else(|| {
         PyRuntimeError::new_err("chelis_tensor_entry_borrow returned a NULL descriptor")
     })?;
     Ok(CpuInputTensor {
         _owner: array.unbind(),
+        _metadata: metadata,
         ptr,
         release: api.release,
     })
@@ -1769,74 +1614,115 @@ fn gpu_input_tensor(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     spec: &ExecutionTensorSpec,
+    api: DeviceRuntimeApi,
+    library: &Arc<Library>,
 ) -> PyResult<GpuInputTensor> {
+    use chelis_abi::metadata::{ByteCount, ElementCount, StridedMetadata};
+    use native_tensor::metadata_error;
     let owner = owner_object(value)?;
     let torch = PyModule::import(py, "torch").map_err(|_| {
         PyValueError::new_err(
             "GPU compiled execution requires torch to bridge Python-managed device tensors",
         )
     })?;
-    let tensor =
-        if owner.hasattr("data_ptr")? && owner.hasattr("stride")? && owner.hasattr("device")? {
-            owner
-        } else if owner.hasattr("__dlpack__")? {
-            torch.getattr("from_dlpack")?.call1((owner.clone(),))?
-        } else {
-            return Err(PyValueError::new_err(
-                "expected a torch tensor or DLPack-capable GPU tensor",
-            ));
-        };
-
-    if device_kind(&tensor)? != DeviceKind::Gpu {
+    let tensor_class = torch.getattr("Tensor")?;
+    let tensor = if owner.is_instance(&tensor_class)? {
+        owner
+    } else if owner.hasattr("__dlpack__")? {
+        torch.getattr("from_dlpack")?.call1((owner,))?
+    } else {
         return Err(PyValueError::new_err(
-            "GPU compiled execution requires GPU tensor inputs",
+            "expected a torch tensor or DLPack-capable GPU tensor",
+        ));
+    };
+    if !tensor.is_instance(&tensor_class)? || device_kind(&tensor)? != DeviceKind::Gpu {
+        return Err(PyValueError::new_err(
+            "GPU bridge did not produce a device torch.Tensor owner",
         ));
     }
-    // chelis#920: the device lane stays f32-only. `supported_execution_dtypes`
-    // admits only f32 for the HIP target, so `spec.dtype` is already f32 here;
-    // re-check it rather than silently tagging whatever arrives as CHELIS_DTYPE_F32,
-    // so widening the HIP gate without widening this marshalling path is a
-    // loud error instead of a reinterpreted buffer.
-    if spec.dtype != "f32" {
-        return Err(PyValueError::new_err(format!(
-            "device compiled execution supports only f32 tensors; `{}` uses `{}`. \
-             The torch/GPU marshalling path is f32-hardcoded (chelis#920)",
-            spec.name, spec.dtype
-        )));
-    }
-    let dtype = tensor.getattr("dtype")?.str()?.extract::<String>()?;
-    if !dtype.ends_with("float32") {
-        return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype torch.float32, got {dtype}",
-            spec.name
-        )));
+    // The explicit native backend gate remains separate from descriptor dtype support.
+    if spec.dtype != "f32"
+        || tensor.getattr("dtype")?.str()?.extract::<String>()? != "torch.float32"
+    {
+        return Err(PyValueError::new_err(
+            "HIP compiled input requires the declared torch.float32 dtype",
+        ));
     }
     let shape = tensor.getattr("shape")?.extract::<Vec<usize>>()?;
     validate_shape(spec, &shape)?;
-    let strides = tensor.call_method0("stride")?.extract::<Vec<usize>>()?;
-    let data_ptr = tensor.call_method0("data_ptr")?.extract::<usize>()? as *mut f32;
-    let device = tensor.getattr("device")?;
-    let device_id = device
+    let shape = host_dims(&shape)?;
+    let strides = tensor.call_method0("stride")?.extract::<Vec<i64>>()?;
+    let device = tensor
+        .getattr("device")?
         .getattr("index")?
         .extract::<Option<i32>>()?
-        .unwrap_or(0);
-
+        .ok_or_else(|| PyValueError::new_err("GPU input has no concrete device index"))?;
+    if device < 0 || device != api.current()? {
+        return Err(PyValueError::new_err(
+            "GPU input device disagrees with the actual HIP current device",
+        ));
+    }
+    let storage = tensor.call_method0("untyped_storage")?;
+    let base = storage.call_method0("data_ptr")?.extract::<usize>()?;
+    let capacity = ByteCount::from_declared(storage.call_method0("nbytes")?.extract::<i64>()?)
+        .map_err(metadata_error)?;
+    capacity.allocation().map_err(metadata_error)?;
+    let offset = tensor.call_method0("storage_offset")?.extract::<i64>()?;
+    let offset = ElementCount::from_extents(&[offset])
+        .and_then(|count| count.bytes(RuntimeDType::F32))
+        .map_err(metadata_error)?;
+    let remaining = capacity
+        .get()
+        .checked_sub(offset.get())
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| PyValueError::new_err("GPU storage offset exceeds owned byte capacity"))?;
+    let expected = base
+        .checked_add(offset.allocation().map_err(metadata_error)?.get())
+        .ok_or_else(|| PyValueError::new_err("GPU storage pointer offset overflow"))?;
+    let data = tensor.call_method0("data_ptr")?.extract::<usize>()?;
+    let metadata = StridedMetadata::new(
+        &shape,
+        &strides,
+        RuntimeDType::F32,
+        ByteCount::from_declared(remaining).map_err(metadata_error)?,
+    )
+    .map_err(metadata_error)?;
+    if data != expected && !(metadata.elements().get() == 0 && data == 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor pointer disagrees with its retained storage offset",
+        ));
+    }
+    if metadata.elements().get() != 0 && (data == 0 || data % RuntimeDType::F32.byte_width() != 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor has null or misaligned nonempty storage",
+        ));
+    }
+    let packet = ChelisGpuTensor {
+        data: data as *mut c_void,
+        shape: metadata.shape().as_ptr(),
+        strides: metadata.strides().as_ptr(),
+        count: metadata.elements().get(),
+        byte_capacity: remaining,
+        rank: metadata.rank(),
+        dtype: RuntimeDType::F32.id() as u8,
+        ownership: 0,
+        reserved: [0; 2],
+    };
+    let ptr = NonNull::new(unsafe { (api.import)(&packet) })
+        .ok_or_else(|| PyRuntimeError::new_err("device import returned a NULL owner"))?;
+    let handle = Arc::new(GpuTensorHandle {
+        ptr,
+        api,
+        _library: Arc::clone(library),
+    });
+    if unsafe { (api.device)(ptr.as_ptr()) } != device {
+        return Err(PyValueError::new_err(
+            "imported owner device disagrees with admitted input",
+        ));
+    }
     Ok(GpuInputTensor {
+        handle,
         _owner: tensor.unbind(),
-        tensor: ChelisGpuTensor {
-            data: data_ptr,
-            shape: dims_array(&shape)?,
-            strides: dims_array(&strides)?,
-            ndim: shape.len() as i32,
-            dtype: CHELIS_DTYPE_F32,
-            // `as i32` truncated silently: a device tensor with more than
-            // `i32::MAX` elements published a wrong (often negative) count to
-            // the GPU carrier. Narrowing to that carrier's declared width is a
-            // decision, so it reports rather than wraps.
-            size: gpu_element_count(&shape)?,
-            storage_size: gpu_element_count(&shape)?,
-        },
-        device_id,
     })
 }
 
@@ -1850,12 +1736,21 @@ fn validate_shape(spec: &ExecutionTensorSpec, shape: &[usize]) -> PyResult<()> {
         )));
     }
     for (axis, (actual, dim)) in shape.iter().zip(&spec.dims).enumerate() {
+        let actual_extent = i64::try_from(*actual).map_err(|_| {
+            PyValueError::new_err(format!(
+                "input `{}` axis {axis} exceeds the int64 extent domain",
+                spec.name
+            ))
+        })?;
         if let Some(expected) = dim.size
-            && *actual != expected
+            && actual_extent != expected.get()
         {
             return Err(PyValueError::new_err(format!(
                 "input `{}` axis {} expected {}, got {}",
-                spec.name, axis, expected, actual
+                spec.name,
+                axis,
+                expected.get(),
+                actual
             )));
         }
     }
@@ -1882,6 +1777,7 @@ fn host_dims_ptr(dims: &[i64]) -> *const i64 {
     }
 }
 
+#[cfg(test)]
 fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResult<()> {
     let expected = contiguous_strides(shape);
     if strides == expected {
@@ -1892,29 +1788,6 @@ fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResu
              element strides {strides:?}, expected {expected:?}"
         )))
     }
-}
-
-/// Element count narrowed to the GPU carrier's declared `int32_t` width.
-///
-/// The GPU tensor still uses the fixed-rank int32 metadata carrier that the
-/// host ABI replaced with dynamic-rank int64 shape and stride carriers; until
-/// it moves, the narrowing is at least loud. Tracked by chelis#1345.
-fn gpu_element_count(shape: &[usize]) -> PyResult<i32> {
-    let count = element_count(shape)?;
-    i32::try_from(count).map_err(|_| {
-        PyValueError::new_err(format!(
-            "device tensor element count {count} exceeds the GPU carrier's int32 width"
-        ))
-    })
-}
-
-fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
-    let mut out = [0; CHELIS_MAX_DIM];
-    for (index, dim) in dims.iter().enumerate() {
-        out[index] = i32::try_from(*dim)
-            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
-    }
-    Ok(out)
 }
 
 /// Element count for a host input shape, folded in the canonical int64 extent
@@ -1931,40 +1804,15 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
 /// order. Without it a checked fold rejects `[i64::MAX, i64::MAX, 0]` while
 /// accepting `[i64::MAX, 0, i64::MAX]`, though both describe the same empty
 /// array.
+#[cfg(test)]
 fn element_count(shape: &[usize]) -> PyResult<usize> {
-    if shape.contains(&0) {
-        return Ok(0);
-    }
-    let count = shape.iter().copied().try_fold(1_i64, |acc, dim| {
-        let dim = i64::try_from(dim)
-            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
-        acc.checked_mul(dim).ok_or_else(|| {
-            PyValueError::new_err("input element count exceeds the int64 extent domain")
-        })
-    })?;
-    usize::try_from(count)
-        .map_err(|_| PyValueError::new_err("input element count exceeds the host index domain"))
+    let shape = host_dims(shape)?;
+    chelis_abi::metadata::ElementCount::from_extents(&shape)
+        .and_then(|count| count.as_usize())
+        .map_err(native_tensor::metadata_error)
 }
 
-fn numpy_element_strides(array: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-    let itemsize = array.getattr("itemsize")?.extract::<usize>()?;
-    if let Ok(strides_any) = array.getattr("strides") {
-        if strides_any.is_none() {
-            return Ok(contiguous_strides(
-                &array.getattr("shape")?.extract::<Vec<usize>>()?,
-            ));
-        }
-        let byte_strides = strides_any.extract::<Vec<usize>>()?;
-        return Ok(byte_strides
-            .into_iter()
-            .map(|stride| stride / itemsize)
-            .collect());
-    }
-    Ok(contiguous_strides(
-        &array.getattr("shape")?.extract::<Vec<usize>>()?,
-    ))
-}
-
+#[cfg(test)]
 fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![0; shape.len()];
     let mut running = 1usize;
@@ -1986,25 +1834,7 @@ fn numpy_data_ptr(array: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
     Ok(pointer as *mut c_void)
 }
 
-fn outputs_to_python(
-    py: Python<'_>,
-    specs: &[ExecutionTensorSpec],
-    owners: Vec<TensorOwner>,
-) -> PyResult<PyObject> {
-    if owners.len() == 1 {
-        return tensor_owner_object(py, owners.into_iter().next().expect("single output"));
-    }
-    let dict = PyDict::new(py);
-    for (spec, owner) in specs.iter().zip(owners) {
-        dict.set_item(&spec.name, tensor_owner_object(py, owner)?)?;
-    }
-    Ok(dict.into_any().unbind())
-}
-
-fn tensor_owner_object(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObject> {
-    Ok(Py::new(py, NativeTensor { owner })?.into_any())
-}
-
+#[cfg(test)]
 impl TensorOwner {
     fn shape(&self) -> Vec<usize> {
         match self {
@@ -2015,9 +1845,9 @@ impl TensorOwner {
                     .collect()
             },
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.shape[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.shape.add(axis).read() as usize)
                     .collect()
             },
         }
@@ -2027,38 +1857,11 @@ impl TensorOwner {
         match self {
             Self::Cpu(_) => contiguous_strides(&self.shape()),
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.strides[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.strides.add(axis).read() as usize)
                     .collect()
             },
-        }
-    }
-
-    fn data_ptr(&self) -> *mut c_void {
-        match self {
-            Self::Cpu(handle) => unsafe {
-                (handle.api.read_view)(handle.ptr.as_ptr()).data.cast_mut()
-            },
-            Self::Gpu(handle) => unsafe { handle.ptr.as_ref().data.cast() },
-        }
-    }
-
-    fn dlpack_device(&self) -> (i32, i32) {
-        match self {
-            Self::Cpu(_) => (DLPACK_CPU_DEVICE_TYPE, 0),
-            Self::Gpu(handle) => (DLPACK_ROCM_DEVICE_TYPE, handle.device_id),
-        }
-    }
-
-    /// chelis#920: the `CHELIS_*` dtype tag the compiled kernel wrote.
-    /// CPU descriptors expose it only through the read view.
-    fn runtime_dtype(&self) -> i32 {
-        match self {
-            Self::Cpu(handle) => unsafe {
-                i32::from((handle.api.read_view)(handle.ptr.as_ptr()).dtype)
-            },
-            Self::Gpu(handle) => unsafe { handle.ptr.as_ref().dtype },
         }
     }
 }
@@ -2099,6 +1902,17 @@ fn decode_runtime_dtype(dtype: i32) -> PyResult<RuntimeDType> {
     })
 }
 
+/// chelis#2413: a random-key tensor crosses no numeric interchange. A key
+/// has no arithmetic, comparison, or cast (spec/04 §1.1), so NumPy and DLPack,
+/// whose dtypes all carry numeric meaning, cannot describe one.
+fn key_tensor_has_no_numeric_interchange(dtype: i32) -> PyErr {
+    PyValueError::new_err(format!(
+        "compiled output tensor carries runtime dtype {} (tag {dtype}): a random-key \
+         tensor has no NumPy or DLPack representation, because a key is not a number",
+        RuntimeDType::Key.c_macro()
+    ))
+}
+
 /// chelis#920: NumPy dtype name for a `CHELIS_*` runtime dtype tag.
 ///
 /// No default arm, for the same reason as `spec_dtype_mapping`: an
@@ -2108,6 +1922,7 @@ fn numpy_dtype_name(dtype: i32) -> PyResult<&'static str> {
     match decode_runtime_dtype(dtype)? {
         RuntimeDType::F32 => Ok("float32"),
         RuntimeDType::F64 => Ok("float64"),
+        RuntimeDType::Key => Err(key_tensor_has_no_numeric_interchange(dtype)),
         other => Err(PyValueError::new_err(format!(
             "compiled output tensor carries runtime dtype {} (tag {dtype}), which \
              chelis-python cannot describe to NumPy (known tags: \
@@ -2124,100 +1939,13 @@ fn dlpack_bits(dtype: i32) -> PyResult<u8> {
     match decode_runtime_dtype(dtype)? {
         RuntimeDType::F32 => Ok(32),
         RuntimeDType::F64 => Ok(64),
+        RuntimeDType::Key => Err(key_tensor_has_no_numeric_interchange(dtype)),
         other => Err(PyValueError::new_err(format!(
             "compiled output tensor carries runtime dtype {} (tag {dtype}), which has \
              no DLPack width in chelis-python (known tags: {CHELIS_DTYPE_F32} = 32-bit \
              float, {CHELIS_DTYPE_F64} = 64-bit float)",
             other.c_macro()
         ))),
-    }
-}
-
-fn create_dlpack_capsule(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObject> {
-    // chelis#920: resolve the width before building the capsule so an
-    // unknown dtype tag surfaces as a Python exception rather than a
-    // capsule that misdescribes its own buffer.
-    let bits = dlpack_bits(owner.runtime_dtype())?;
-    let mut context = Box::new(DlpackContext {
-        shape: owner.shape().into_iter().map(|dim| dim as i64).collect(),
-        strides: owner
-            .strides()
-            .into_iter()
-            .map(|stride| stride as i64)
-            .collect(),
-        owner,
-    });
-    let managed = Box::new(DLManagedTensor {
-        dl_tensor: DLTensor {
-            data: context.owner.data_ptr(),
-            device: {
-                let (device_type, device_id) = context.owner.dlpack_device();
-                DLDevice {
-                    device_type,
-                    device_id,
-                }
-            },
-            ndim: context.shape.len() as i32,
-            // chelis#920: the width follows the runtime tensor's dtype
-            // tag rather than a hardcoded 32. `code: 2` (kDLFloat) is
-            // correct for both f32 and f64, so only `bits` varies.
-            dtype: DLDataType {
-                code: 2,
-                bits,
-                lanes: 1,
-            },
-            shape: context.shape.as_mut_ptr(),
-            strides: context.strides.as_mut_ptr(),
-            byte_offset: 0,
-        },
-        manager_ctx: Box::into_raw(context).cast(),
-        deleter: Some(dlmanaged_tensor_deleter),
-    });
-
-    let capsule = unsafe {
-        Bound::from_owned_ptr_or_err(
-            py,
-            ffi::PyCapsule_New(
-                Box::into_raw(managed).cast(),
-                DLTENSOR_CAPSULE.as_ptr().cast::<c_char>(),
-                Some(dlpack_capsule_destructor),
-            ),
-        )?
-    };
-    Ok(capsule.into_any().unbind())
-}
-
-unsafe extern "C" fn dlmanaged_tensor_deleter(managed: *mut DLManagedTensor) {
-    if managed.is_null() {
-        return;
-    }
-    let managed = unsafe { Box::from_raw(managed) };
-    if !managed.manager_ctx.is_null() {
-        let _ = unsafe { Box::from_raw(managed.manager_ctx.cast::<DlpackContext>()) };
-    }
-}
-
-unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut ffi::PyObject) {
-    if capsule.is_null() {
-        return;
-    }
-    let is_valid =
-        unsafe { ffi::PyCapsule_IsValid(capsule, DLTENSOR_CAPSULE.as_ptr().cast::<c_char>()) };
-    if is_valid == 0 {
-        return;
-    }
-    let managed =
-        unsafe { ffi::PyCapsule_GetPointer(capsule, DLTENSOR_CAPSULE.as_ptr().cast::<c_char>()) }
-            as *mut DLManagedTensor;
-    if managed.is_null() {
-        return;
-    }
-    unsafe {
-        ffi::PyCapsule_SetName(capsule, std::ptr::null());
-    }
-    let deleter = unsafe { (*managed).deleter };
-    if let Some(deleter) = deleter {
-        unsafe { deleter(managed) };
     }
 }
 
@@ -2231,51 +1959,59 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn hip_free(ptr: *mut c_void) -> Result<(), String> {
-    static HIP_FREE: OnceLock<Result<HipFreeFn, String>> = OnceLock::new();
-    if ptr.is_null() {
-        return Ok(());
-    }
-    let hip_free = HIP_FREE.get_or_init(|| {
-        let candidates = ["libamdhip64.so", "libamdhip64.so.6"];
-        for candidate in candidates {
-            let library = unsafe { Library::new(candidate) };
-            let Ok(library) = library else {
-                continue;
-            };
-            let symbol = unsafe { library.get::<HipFreeFn>(b"hipFree\0") };
-            let Ok(symbol) = symbol else {
-                continue;
-            };
-            let func = *symbol;
-            std::mem::forget(library);
-            return Ok(func);
-        }
-        Err("failed to load hipFree from libamdhip64".to_string())
-    });
-    match hip_free {
-        Ok(func) => {
-            unsafe {
-                let _ = func(ptr);
-            }
-            Ok(())
-        }
-        Err(err) => Err(err.clone()),
-    }
+/// Exact PyO3 class identities for the registered-surface census.
+/// The census compares this list bijectively with the live module's classes.
+pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
+    [
+        capacity_census_class::<NativeCompiledModel>(),
+        capacity_census_class::<NativeTensor>(),
+    ]
+}
+
+/// Compiled class objects for census identity checks on actual module exports.
+/// A matching Python class name or descriptor spelling does not identify a Rust owner.
+pub fn capacity_census_class_types(
+    py: Python<'_>,
+) -> [(&'static str, &'static str, Bound<'_, pyo3::types::PyType>); 2] {
+    [
+        (
+            <NativeCompiledModel as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeCompiledModel>(),
+            py.get_type::<NativeCompiledModel>(),
+        ),
+        (
+            <NativeTensor as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeTensor>(),
+            py.get_type::<NativeTensor>(),
+        ),
+    ]
+}
+
+fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
+    // Read the slots emitted by #[::pyo3::pymethods], rather than assuming an absent
+    // rustdoc method means PyO3's non-instantiable default constructor. Presence
+    // does not identify the Rust function; discovery rejects unproved slots.
+    let has_constructor = <T as pyo3::impl_::pyclass::PyClassImpl>::items_iter()
+        .any(|items| items.slots.iter().any(|slot| slot.slot == ffi::Py_tp_new));
+    (
+        <T as pyo3::PyTypeInfo>::NAME,
+        std::any::type_name::<T>(),
+        has_constructor,
+    )
 }
 
 pub fn register_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ChelisError", module.py().get_type::<ChelisError>())?;
     module.add_class::<NativeCompiledModel>()?;
     module.add_class::<NativeTensor>()?;
-    module.add_function(wrap_pyfunction!(check_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_and_load, module)?)?;
-    module.add_function(wrap_pyfunction!(decompile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(desugar_json, module)?)?;
-    module.add_function(wrap_pyfunction!(eval_json, module)?)?;
-    module.add_function(wrap_pyfunction!(load, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(check_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_and_load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(decompile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(desugar_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(eval_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(validate_json, module)?)?;
     Ok(())
 }
 
@@ -2285,6 +2021,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/native_dlpack_owner.rs"]
+mod native_dlpack_owner_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};
@@ -2292,10 +2032,141 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
+    #[test]
+    fn binding_constructor_metadata_tracks_actual_pyo3_slots() {
+        #[::pyo3::pyclass]
+        struct NoConstructor;
+        #[::pyo3::pyclass]
+        struct HasConstructor {
+            dtype: i32,
+        }
+        impl HasConstructor {
+            fn new() -> Self {
+                Self { dtype: 0 }
+            }
+        }
+        #[::pyo3::pymethods]
+        impl HasConstructor {
+            #[new]
+            fn create(dtype: i32) -> Self {
+                Self { dtype }
+            }
+        }
+        assert!(!capacity_census_class::<NoConstructor>().2);
+        assert!(capacity_census_class::<HasConstructor>().2);
+        assert_eq!(HasConstructor::new().dtype, 0);
+        Python::with_gil(|py| {
+            assert!(py.get_type::<NoConstructor>().call0().is_err());
+            let constructor = py.get_type::<HasConstructor>();
+            let value = constructor.call1((7,)).unwrap();
+            assert_eq!(value.extract::<PyRef<HasConstructor>>().unwrap().dtype, 7);
+            assert!(constructor.call0().is_err());
+        });
+    }
+
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
     const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
 "#;
+
+    #[test]
+    fn native_shape_admission_checks_exact_int64_extents() {
+        use chelis_compiler_api::{compiler::ExecutionDim, schema::numbers::NonnegativeExtent};
+        let mut spec = ExecutionTensorSpec {
+            name: "x".into(),
+            dtype: "f32".into(),
+            dims: vec![ExecutionDim {
+                name: None,
+                size: Some(NonnegativeExtent::new(2).unwrap()),
+            }],
+        };
+        assert!(validate_shape(&spec, &[2]).is_ok());
+        assert!(validate_shape(&spec, &[3]).is_err());
+        assert!(validate_shape(&spec, &[]).is_err());
+        spec.dims[0].size = None;
+        assert!(validate_shape(&spec, &[0]).is_ok());
+        if let Some(outside_int64) = usize::try_from(i64::MAX)
+            .ok()
+            .and_then(|v| v.checked_add(1))
+        {
+            assert!(validate_shape(&spec, &[outside_int64]).is_err());
+        }
+    }
+
+    /// Bytes that are not a shared library: any attempt to open them fails as
+    /// "load shared library failed", so a different error proves that the check
+    /// producing it ran before the library was opened.
+    const NOT_A_LIBRARY: &[u8] = b"not a shared library";
+
+    /// Version-2 metadata that `load` admits beside a library holding
+    /// `library_bytes`: this build's carried runtime and those bytes' digest.
+    fn admitted_manifest(library_bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
+            "inputs": [], "outputs": [], "source_path": "", "source_hash": "",
+            "runtime_sha256": chelis_runtime_bundle::carried_sha256().expect("carried runtime"),
+            "library_sha256": sha256_hex(library_bytes),
+        })
+    }
+
+    /// Write `manifest` beside a library file holding `library_bytes`, load it,
+    /// and return the refusal.
+    fn load_error(manifest: &serde_json::Value, library_bytes: &[u8]) -> String {
+        let dir = tempdir().expect("tempdir");
+        let library = dir.path().join("model.so");
+        fs::write(&library, library_bytes).expect("write library");
+        fs::write(
+            library.with_extension("json"),
+            serde_json::to_vec(manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        Python::with_gil(|py| match load_artifact(py, &library, None) {
+            Ok(_) => panic!("load must refuse {manifest}"),
+            Err(error) => error.to_string(),
+        })
+    }
+
+    #[test]
+    fn compiled_manifest_version_admission_precedes_metadata_and_library_use() {
+        let valid = admitted_manifest(NOT_A_LIBRARY);
+        let manifest: ArtifactManifest = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(serde_json::to_value(manifest).unwrap(), valid);
+        // Admitted metadata reaches the library open, which these bytes fail.
+        let error = load_error(&valid, NOT_A_LIBRARY);
+        assert!(error.contains("load shared library failed"), "{error}");
+        let dir = tempdir().unwrap();
+        let library = dir.path().join("not-a-library.so");
+        let path = library.with_extension("json");
+        Python::with_gil(|py| {
+            for header in [
+                "",
+                ",\"abi_version\":0",
+                ",\"abi_version\":1",
+                ",\"abi_version\":3",
+                ",\"abi_version\":4294967295",
+                ",\"abi_version\":-1",
+                ",\"abi_version\":2.0",
+                ",\"abi_version\":true",
+                ",\"abi_version\":\"2\"",
+                ",\"abi_version\":2,\"abi_version\":2",
+            ] {
+                // Bad metadata appears first; unsupported/missing versions must
+                // fail at the envelope before visiting it or loading a library.
+                fs::write(&path, format!("{{\"inputs\":\"invalid\"{header}}}")).unwrap();
+                let error = load_artifact(py, &library, None)
+                    .err()
+                    .expect("reject version");
+                assert!(
+                    error.to_string().contains("artifact ABI version"),
+                    "{header}: {error}"
+                );
+                assert!(
+                    !error.to_string().contains("load shared library"),
+                    "{error}"
+                );
+            }
+        });
+    }
 
     /// The host ABI's element count is an `int64_t`, so its check belongs in
     /// the int64 extent domain ([05-DIM-2]). These extents assume a 64-bit
@@ -2319,18 +2190,6 @@ loss = (mean(x, 0) : tensor[f32])
         // it as a successful count.
         let band = 1_usize << 32;
         assert!(element_count(&[band, band]).is_err());
-    }
-
-    #[test]
-    fn gpu_element_count_reports_instead_of_truncating_to_the_carrier_width() {
-        assert_eq!(gpu_element_count(&[2, 3]).expect("legal count"), 6);
-        assert_eq!(
-            gpu_element_count(&[i32::MAX as usize]).expect("boundary count"),
-            i32::MAX
-        );
-        // One element past the carrier's declared width. `as i32` published
-        // `i32::MIN` here.
-        assert!(gpu_element_count(&[(i32::MAX as usize) + 1]).is_err());
     }
 
     struct HostTensorFixture {
@@ -2446,7 +2305,7 @@ loss = (mean(x, 0) : tensor[f32])
             )
             .expect("parse rank-copy manifest");
             let library =
-                Rc::new(open_compiled_library(&output.lib_path).expect("load rank-copy library"));
+                Arc::new(open_compiled_library(&output.lib_path).expect("load rank-copy library"));
             let symbol = nul_terminated(&manifest.host_entry_name);
             let entry = unsafe {
                 library
@@ -2470,10 +2329,10 @@ loss = (mean(x, 0) : tensor[f32])
                 );
             }
             let output = NonNull::new(output_ptrs[0]).expect("rank-copy output");
-            let owner = TensorOwner::Cpu(Rc::new(CpuTensorHandle {
+            let owner = TensorOwner::Cpu(Arc::new(CpuTensorHandle {
                 ptr: output,
                 api,
-                _library: Rc::clone(&library),
+                _library: Arc::clone(&library),
             }));
             let expected_shape = shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
             assert_eq!(unsafe { (api.rank)(output.as_ptr()) }, shape.len() as i32);
@@ -2486,7 +2345,7 @@ loss = (mean(x, 0) : tensor[f32])
             assert_eq!(unsafe { host_values::<f32>(api, output.as_ptr()) }, [7.25]);
 
             // The runtime output is shared by every exported Python/DLPack
-            // view. Dropping a non-final Rc must retain it; the final drop
+            // view. Dropping a non-final Arc must retain it; the final drop
             // owns exactly one call to the runtime destructor.
             let retained_owner = owner.clone();
             drop(owner);
@@ -2555,8 +2414,7 @@ loss = (mean(x, 0) : tensor[f32])
         Python::with_gil(|py| {
             let module = PyModule::new(py, "_native").expect("module");
             register_module(&module).expect("register");
-            let bindings =
-                r#"{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}"#;
+            let bindings = r#"{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}"#;
             let result = module
                 .getattr("eval_json")
                 .expect("eval_json")
@@ -2572,15 +2430,14 @@ loss = (mean(x, 0) : tensor[f32])
                 .find(|root| root["name"] == "loss")
                 .expect("loss root");
             assert_eq!(loss["value"]["type"].as_str(), Some("tensor"));
-            // Execution wire v2 (chelis#729): the tensor payload is the
-            // tagged per-dtype form.
+            // Execution wire v3: floats carry exact stored bits under the dtype.
             assert_eq!(
                 loss["value"]["value"]["data"]["dtype"].as_str(),
                 Some("f32")
             );
             assert_eq!(
-                loss["value"]["value"]["data"]["values"][0].as_f64(),
-                Some(2.5)
+                loss["value"]["value"]["data"]["bits"][0].as_str(),
+                Some("40200000")
             );
         });
     }
@@ -2662,6 +2519,179 @@ loss = (mean(x, 0) : tensor[f32])
         let library = open_compiled_library(&output.lib_path)
             .expect("shared library should load without unresolved runtime symbols");
         drop(library);
+    }
+
+    const RELU4_SOURCE: &str = "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n";
+
+    /// Compile `source` as `model.ch` into a retained artifact directory, so
+    /// its library is that directory's `model.so`.
+    fn compile_model_artifact(source: &str) -> (TempDir, CompileAndLoadOutput) {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(&source_path, source).expect("write source");
+        let output = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(PathBuf::from(dir.path())),
+            project_root: None,
+            force_bare: false,
+        })
+        .expect("compile and load job");
+        (dir, output)
+    }
+
+    /// spec/08 §2.1 and spec/11 §1.4: compiling stages the runtime this build
+    /// carries, links it, and records both the carried runtime's digest and the
+    /// linked library's digest in the artifact metadata.
+    #[test]
+    fn compile_and_load_job_stages_the_carried_runtime_and_records_both_digests() {
+        let (dir, output) = compile_model_artifact(RELU4_SOURCE);
+        let carried = chelis_runtime_bundle::carried_sha256().expect("carried runtime");
+        let staged = fs::read(dir.path().join("libchelis_runtime.a")).expect("staged archive");
+        assert_eq!(
+            sha256_hex(&staged),
+            carried,
+            "staging writes the carried bytes"
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(dir.path().join("chelis_runtime.receipt.json")).expect("staging receipt"),
+        )
+        .expect("receipt JSON");
+        assert_eq!(receipt["archive_sha256"], carried.as_str());
+        let manifest: ArtifactManifest = serde_json::from_slice(
+            &fs::read(output.lib_path.with_extension("json")).expect("read manifest"),
+        )
+        .expect("parse manifest");
+        assert_eq!(manifest.runtime_sha256, carried);
+        assert_eq!(
+            manifest.library_sha256,
+            sha256_hex(&fs::read(&output.lib_path).expect("read library"))
+        );
+    }
+
+    /// spec/11 §1.4: the extension that built an artifact reloads it from disk,
+    /// and its entry computes exact values.
+    #[test]
+    fn a_persisted_artifact_reloads_and_computes_exact_values() {
+        let (_dir, output) = compile_model_artifact(RELU4_SOURCE);
+        Python::with_gil(|py| {
+            let model =
+                load_artifact(py, &output.lib_path, None).expect("admit the artifact it built");
+            let outputs = call_host_entry(
+                &model.loaded.library,
+                &model.loaded.manifest,
+                &[(vec![-1.0, 0.0, 2.5, -3.0], vec![4])],
+            );
+            assert_eq!(outputs, vec![vec![0.0, 0.0, 2.5, 0.0]]);
+        });
+    }
+
+    /// spec/11 §1.4: `load` opens the library whose bytes it admitted. A bare
+    /// file name is checked in the working directory, so the loader must not
+    /// resolve it on its search path, which here names another library of the
+    /// same name first. The Linux loader searches `LD_LIBRARY_PATH` for a bare
+    /// name and never the working directory; macOS searches the working
+    /// directory, so the two can diverge only on Linux. The loader reads its
+    /// path at process start, so the load runs in a child test process.
+    #[cfg(unix)]
+    #[test]
+    fn load_of_a_bare_name_executes_the_library_it_admitted() {
+        const WORKER: &str = "CHELIS_BARE_NAME_LOAD_TEST_WORKER";
+        if env::var_os(WORKER).is_some() {
+            Python::with_gil(|py| {
+                let model =
+                    load_artifact(py, Path::new("model.so"), None).expect("admit ./model.so");
+                let outputs = call_host_entry(
+                    &model.loaded.library,
+                    &model.loaded.manifest,
+                    &[(vec![-1.0, 0.0, 2.5, -3.0], vec![4])],
+                );
+                assert_eq!(
+                    outputs,
+                    vec![vec![0.0, 0.0, 2.5, 0.0]],
+                    "executed a library other than the admitted ./model.so"
+                );
+            });
+            return;
+        }
+        let (admitted, _) = compile_model_artifact(RELU4_SOURCE);
+        let (other, _) =
+            compile_model_artifact("def neg4(x: tensor[4, f32]) -> tensor[4, f32] = neg(x)\n");
+        // Prepend, keeping the inherited entries: CI finds libpython through them.
+        let search_path = env::join_paths(
+            std::iter::once(other.path().to_path_buf()).chain(
+                env::var_os("LD_LIBRARY_PATH")
+                    .iter()
+                    .flat_map(env::split_paths),
+            ),
+        )
+        .expect("join LD_LIBRARY_PATH");
+        let child = Command::new(env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                "tests::load_of_a_bare_name_executes_the_library_it_admitted",
+                "--nocapture",
+            ])
+            .current_dir(admitted.path())
+            .env(WORKER, "1")
+            .env("LD_LIBRARY_PATH", search_path)
+            .output()
+            .expect("run the bare-name load child");
+        assert!(
+            child.status.success(),
+            "bare-name load child failed ({}): {}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// spec/11 §1.4: metadata naming another runtime is refused before the
+    /// library is opened, with recompilation as the remedy.
+    #[test]
+    fn load_refuses_an_artifact_linked_with_another_runtime_before_opening_it() {
+        let mut manifest = admitted_manifest(NOT_A_LIBRARY);
+        manifest["runtime_sha256"] = "0".repeat(64).into();
+        let error = load_error(&manifest, NOT_A_LIBRARY);
+        assert!(
+            error.contains("but this chelis carries runtime") && error.contains(RECOMPILE_REMEDY),
+            "{error}"
+        );
+        assert!(!error.contains("load shared library"), "{error}");
+    }
+
+    /// spec/11 §1.4: library bytes that differ from the recorded digest are
+    /// refused before they are opened.
+    #[test]
+    fn load_refuses_changed_library_bytes_before_opening_them() {
+        let manifest = admitted_manifest(b"the bytes that were compiled");
+        let error = load_error(&manifest, NOT_A_LIBRARY);
+        assert!(
+            error.contains("but its metadata records") && error.contains(RECOMPILE_REMEDY),
+            "{error}"
+        );
+        assert!(!error.contains("load shared library"), "{error}");
+    }
+
+    /// spec/11 §1.4: neither digest has a missing-field default.
+    #[test]
+    fn load_refuses_metadata_without_either_digest_before_opening_the_library() {
+        for field in ["runtime_sha256", "library_sha256"] {
+            let mut manifest = admitted_manifest(NOT_A_LIBRARY);
+            manifest
+                .as_object_mut()
+                .expect("manifest object")
+                .remove(field);
+            let error = load_error(&manifest, NOT_A_LIBRARY);
+            assert!(
+                error.contains(&format!("missing field `{field}`"))
+                    && error.contains(RECOMPILE_REMEDY),
+                "{field}: {error}"
+            );
+            assert!(!error.contains("load shared library"), "{field}: {error}");
+        }
     }
 
     /// chelis#963: unloading an artifact whose kernel has *run* must not
@@ -3158,6 +3188,25 @@ loss = (mean(x, 0) : tensor[f32])
         });
     }
 
+    // chelis#2413: a key tensor is refused by name, not as an unknown width.
+    #[test]
+    fn a_key_tensor_has_no_numpy_or_dlpack_representation() {
+        Python::with_gil(|_py| {
+            let key = RuntimeDType::Key.id();
+            for err in [
+                numpy_dtype_name(key).expect_err("a key tensor must not map to NumPy"),
+                dlpack_bits(key).expect_err("a key tensor must have no DLPack width"),
+            ] {
+                let message = err.to_string();
+                assert!(
+                    message.contains("CHELIS_DTYPE_KEY")
+                        && message.contains("a key is not a number"),
+                    "expected the typed key refusal, got: {message}"
+                );
+            }
+        });
+    }
+
     // chelis#920: the artifact gate is target-aware. Widening the C
     // lane to f64 must not widen the device lane, whose torch
     // marshalling and HIP kernels are still f32-hardcoded.
@@ -3170,42 +3219,56 @@ loss = (mean(x, 0) : tensor[f32])
         assert_eq!(supported_execution_dtypes(CompileTarget::Hip), &["f32"]);
     }
 
-    // chelis#747 red-team: `CHELIS_RUNTIME_DIR` is the first-priority override in
-    // `find_runtime_library_inner`. When the staticlib is absent there it MUST
-    // fail loud (naming the env var), never silently fall through to the
-    // `CARGO_TARGET_DIR` branch or the manifest-relative fallbacks. A valid
-    // `CARGO_TARGET_DIR` set simultaneously must NOT rescue it: the documented
-    // precedence is CHELIS_RUNTIME_DIR-wins-or-errors, then exe-relative, then
-    // CARGO_TARGET_DIR, then manifest. Env is process-global; save/restore and
-    // rely on nextest's process-per-test isolation (matches the repo pattern in
-    // reef_install_from_github.rs).
+    // spec/08 §2.1: the extension links the runtime its build carries. A set
+    // `CHELIS_RUNTIME_DIR` is refused before anything is written, even when it
+    // names a directory holding a real runtime archive. Env is process-global;
+    // save/restore and rely on nextest's process-per-test isolation (matches
+    // the repo pattern in reef_install_from_github.rs).
     #[test]
-    fn find_runtime_library_bogus_chelis_runtime_dir_is_loud_error_even_with_valid_target_dir() {
-        let empty_runtime_dir = tempdir().expect("tempdir");
-        let valid_target_dir = tempdir().expect("tempdir");
+    fn compile_and_load_rejects_a_set_runtime_dir_before_staging() {
+        let offered = tempdir().expect("tempdir");
+        chelis_runtime_bundle::stage(offered.path()).expect("stage a real runtime to offer");
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("model.ch");
+        fs::write(
+            &source_path,
+            "def relu4(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n",
+        )
+        .expect("write source");
+        let artifact_dir = dir.path().join("artifact");
         let prior_runtime = std::env::var_os("CHELIS_RUNTIME_DIR");
-        let prior_target = std::env::var_os("CARGO_TARGET_DIR");
         unsafe {
-            std::env::set_var("CHELIS_RUNTIME_DIR", empty_runtime_dir.path());
-            std::env::set_var("CARGO_TARGET_DIR", valid_target_dir.path());
+            std::env::set_var("CHELIS_RUNTIME_DIR", offered.path());
         }
-        let result = find_runtime_library_inner();
+        let result = run_compile_and_load_job(CompileAndLoadJob {
+            source_path,
+            source_kind: SourceKind::Surf,
+            target: CompileTarget::C,
+            entry_name: None,
+            artifact_dir: Some(artifact_dir.clone()),
+            project_root: None,
+            force_bare: false,
+        });
         unsafe {
             match prior_runtime {
                 Some(v) => std::env::set_var("CHELIS_RUNTIME_DIR", v),
                 None => std::env::remove_var("CHELIS_RUNTIME_DIR"),
             }
-            match prior_target {
-                Some(v) => std::env::set_var("CARGO_TARGET_DIR", v),
-                None => std::env::remove_var("CARGO_TARGET_DIR"),
-            }
         }
-        let err =
-            result.expect_err("bogus CHELIS_RUNTIME_DIR must be a loud error, not a fall-through");
+        let message = match result {
+            Err(CompileAndLoadError::Message(message)) => message,
+            Err(other) => panic!("expected the runtime-directory refusal, got {other:?}"),
+            Ok(output) => panic!(
+                "a set CHELIS_RUNTIME_DIR was honored: {}",
+                output.lib_path.display()
+            ),
+        };
         assert!(
-            err.contains("CHELIS_RUNTIME_DIR"),
-            "error must name CHELIS_RUNTIME_DIR, got: {err}"
+            message.contains("CHELIS_RUNTIME_DIR is set")
+                && message.contains("Unset CHELIS_RUNTIME_DIR"),
+            "{message}"
         );
+        assert!(!artifact_dir.exists(), "nothing may be staged or written");
     }
 
     fn run_job_manifest(source: &str, entry: Option<&str>) -> ArtifactManifest {
@@ -3252,7 +3315,7 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
         let manifest = run_job_manifest(source, None);
@@ -3306,13 +3369,25 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
         );
 
         let library = unsafe { Library::new(&output.lib_path) }.expect("load shared library");
+        let results = call_host_entry(&library, &manifest, inputs);
+        drop(library);
+        results
+    }
+
+    /// Call `manifest`'s host entry in the opened `library` with f32 `inputs`
+    /// (each a `(data, shape)` pair), returning the numeric outputs.
+    fn call_host_entry(
+        library: &Library,
+        manifest: &ArtifactManifest,
+        inputs: &[(Vec<f32>, Vec<usize>)],
+    ) -> Vec<Vec<f32>> {
         let symbol = nul_terminated(&manifest.host_entry_name);
         let entry_fn = unsafe {
             library
                 .get::<HostEntry>(symbol.as_bytes())
                 .expect("host entry symbol resolves via dlsym")
         };
-        let api = unsafe { load_host_runtime_api(&library).expect("resolve host runtime API") };
+        let api = unsafe { load_host_runtime_api(library).expect("resolve host runtime API") };
 
         // Keep input buffers alive across the call.
         let mut buffers: Vec<Vec<f32>> = inputs.iter().map(|(data, _)| data.clone()).collect();
@@ -3352,7 +3427,6 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             .collect::<Vec<_>>();
         drop(input_tensors);
         drop(buffers);
-        drop(library);
         results
     }
 
@@ -3383,7 +3457,7 @@ def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
         let outputs = run_job_and_call(source, None, &[(vec![3.0], vec![1]), (vec![4.0], vec![1])]);
@@ -3502,41 +3576,20 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         );
     }
 
-    // Negative-parity sibling of the scalar case: a `grad` entry selected by
-    // name compiles WITHOUT error (host lane owns it, #309), and the job-path
-    // rejection reports the grad-specific reason, not the scalar one.
+    // A tensor projection from grad has a callable ABI with only the
+    // selected def's parameters and its single projected result.
     #[test]
-    fn compile_and_load_job_grad_entry_reports_grad_reason() {
-        let dir = tempdir().expect("tempdir");
-        let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "module Repro.GradEntry\n\
+    fn compile_and_load_job_grad_entry_executes_selected_tensor() {
+        let source = "module Repro.GradEntry\n\
              def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =\n  \
-             tensor_to_scalar(sum(mul(x, w), cast(0, int32)))\n\
-             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n",
-        )
-        .expect("write source");
-        let result = run_compile_and_load_job(CompileAndLoadJob {
-            source_path,
-            source_kind: SourceKind::Surf,
-            target: CompileTarget::C,
-            entry_name: Some("dloss".to_string()),
-            artifact_dir: Some(PathBuf::from(dir.path())),
-            project_root: None,
-            force_bare: false,
-        });
-        let message = match result {
-            Ok(_) => panic!("grad entry has no callable tensor ABI and must be rejected"),
-            Err(CompileAndLoadError::Message(m)) => m,
-            Err(CompileAndLoadError::Compiler(e)) => {
-                panic!("grad entry must compile host-lane without a compiler error, got: {e:?}")
-            }
-        };
-        assert!(
-            message.contains("`dloss`") && message.contains("grad"),
-            "error must name the entry and the grad reason, got: {message}"
+              tensor_to_scalar(sum(mul(x, w), cast(0, i32)))\n\
+             def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0\n";
+        let values = run_job_and_call(
+            source,
+            Some("dloss"),
+            &[(vec![2.0, 3.0], vec![2]), (vec![5.0, 7.0], vec![2])],
         );
+        assert_eq!(values, vec![vec![5.0, 7.0]]);
     }
 
     // A genuinely host-only program (top-level bindings/globals, no
@@ -3547,11 +3600,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
     fn compile_and_load_job_rejects_host_only_program_loudly() {
         let dir = tempdir().expect("tempdir");
         let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "total = add(cast(1, int64), cast(2, int64))\n",
-        )
-        .expect("write source");
+        fs::write(&source_path, "total = add(cast(1, i64), cast(2, i64))\n").expect("write source");
         let result = run_compile_and_load_job(CompileAndLoadJob {
             source_path,
             source_kind: SourceKind::Surf,
@@ -3661,6 +3710,56 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         assert!(
             message.contains("project_root= is empty"),
             "expected the explicit empty-project_root rejection, got: {message}"
+        );
+    }
+
+    // chelis#2558: a context links only the standard-library modules its
+    // package and the evaluated source import, so `load_reef_context` must
+    // parse the source before it loads. The package imports nothing; the
+    // source imports `Std.Io.Json`.
+    #[test]
+    fn eval_in_context_source_reaches_past_the_package_imports() {
+        let ver = chelis_compiler_api::COMPILER_VERSION;
+        let runtime_manifest = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/chelis-std/reef.toml"),
+        )
+        .expect("read the chelis-std manifest");
+        let runtime_version = runtime_manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("version = "))
+            .expect("the chelis-std manifest names its version")
+            .trim_matches('"');
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::write(
+            root.join("reef.toml"),
+            format!(
+                "[package]\nname = \"proj\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Proj\"\n\n[dependencies]\nchelis-std = {{ version = \"{runtime_version}\" }}\n"
+            ),
+        )
+        .expect("write reef.toml");
+        fs::write(
+            root.join("src/main.ch"),
+            "module Proj.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
+        )
+        .expect("write main");
+        let result = run_eval_in_context_job(
+            &root,
+            "import Std.Io.Json (try_parse_json)\n\
+             bench = match try_parse_json(\"{}\") with {\n  \
+             | Some(_) => cast(1, i64)\n  | None => cast(0, i64)\n}\n",
+            BTreeMap::new(),
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(CompileAndLoadError::Message(m)) => panic!("eval failed: {m}"),
+            Err(CompileAndLoadError::Compiler(e)) => panic!("eval failed: {e:?}"),
+        };
+        let rendered = serde_json::to_string(&result.roots).expect("render roots");
+        assert_eq!(
+            rendered,
+            r#"[{"node_id":0,"name":"bench","value":{"type":"scalar","value":{"dtype":"int64","value":1}}}]"#
         );
     }
 
@@ -3934,7 +4033,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -4068,43 +4167,25 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         );
     }
 
-    // Reviewer B1: a vmap entry declines the entry lane as GradLike but does
-    // NOT require the host backend, so it used to reach a debug_assert (a
-    // panic across the FFI boundary in debug builds; a silently merged
-    // manifest in release). The callable surface now rejects it loudly as an
-    // unsupported feature.
+    // A vmap entry is admitted by its checked, standalone tensor result.
     #[test]
-    fn compile_and_load_job_vmap_entry_is_loud_unsupported() {
-        let dir = tempdir().expect("tempdir");
-        let source_path = dir.path().join("model.ch");
-        fs::write(
-            &source_path,
-            "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
+    fn compile_and_load_job_vmap_entry_executes_selected_tensor() {
+        let source = "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
              def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
-             xs |> vmap(process)\n",
-        )
-        .expect("write source");
-        let result = run_compile_and_load_job(CompileAndLoadJob {
-            source_path,
-            source_kind: SourceKind::Surf,
-            target: CompileTarget::C,
-            entry_name: Some("batch_process".to_string()),
-            artifact_dir: Some(PathBuf::from(dir.path())),
-            project_root: None,
-            force_bare: false,
-        });
-        let message = match result {
-            Ok(_) => panic!("a vmap entry must not yield a whole-program callable model"),
-            Err(CompileAndLoadError::Message(m)) => m,
-            Err(CompileAndLoadError::Compiler(e)) => e
-                .errors
-                .first()
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| format!("{e:?}")),
-        };
-        assert!(
-            message.contains("batch_process") && message.contains("eval"),
-            "expected the strict transform-entry error naming the def and eval, got: {message}"
+             xs |> vmap(process)\n";
+        let input = vec![
+            -1.0, 2.0, -3.0, 4.0, 0.0, -5.0, 6.0, 7.0, 8.0, -9.0, 10.0, -11.0, 12.0, 13.0, -14.0,
+            15.0, 16.0, 17.0, -18.0, 19.0, 20.0, -21.0, 22.0, 23.0, 24.0, 25.0, -26.0, 27.0, 28.0,
+            -29.0, 30.0, 31.0,
+        ];
+        let values = run_job_and_call(
+            source,
+            Some("batch_process"),
+            &[(input.clone(), vec![8, 4])],
+        );
+        assert_eq!(
+            values,
+            vec![input.into_iter().map(|x| x.max(0.0)).collect::<Vec<_>>()]
         );
     }
 
@@ -4218,7 +4299,7 @@ mod worker_stack_tests {
     /// which is exactly the loudness we want (chelis#914 review).
     #[test]
     fn eval_worker_survives_depth_that_overflowed_the_default_stack() {
-        let program = "def down(n: int64) -> int64 = \
+        let program = "def down(n: i64) -> i64 = \
                        if lte(n, 0i64) then 0i64 else add(1i64, down(sub(n, 1i64)))\n\
                        depth = down(200i64)\n";
         Python::with_gil(|py| {
@@ -4238,11 +4319,11 @@ mod worker_stack_tests {
                 .iter()
                 .find(|root| root["name"] == "depth")
                 .expect("depth root");
-            // Int roots surface as {"type": "int", "value": N}; the exact
-            // number proves the recursion ran to completion rather than
-            // being clipped by a partial-result path.
-            assert_eq!(depth["value"]["type"].as_str(), Some("int64"));
-            assert_eq!(depth["value"]["value"].as_i64(), Some(200));
+            // The tagged int64 and exact value prove the recursion completed.
+            assert_eq!(payload["schema_version"], 4);
+            assert_eq!(depth["value"]["type"], "scalar");
+            assert_eq!(depth["value"]["value"]["dtype"], "int64");
+            assert_eq!(depth["value"]["value"]["value"].as_i64(), Some(200));
         });
     }
 }

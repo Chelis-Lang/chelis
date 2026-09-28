@@ -21,13 +21,86 @@ def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
 def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
 ";
 
+const FIXED_CONTROL_ENTRIES: &str = "\
+def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(key_from_seed(42i64), x, 0.5f32)
+def other(y: tensor[8, f32]) -> tensor[8, f32] = dropout(key_from_seed(7i64), y, 0.5f32)
+";
+
+#[test]
+fn fixed_control_hostless_entry_keeps_exact_callable_selection() {
+    let artifact = compile_c(FIXED_CONTROL_ENTRIES, Some("sample"));
+    assert_eq!(input_names(&artifact), ["x"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert!(
+        artifact
+            .compile_result
+            .files
+            .iter()
+            .any(|file| file.path == "chelis_main.c")
+    );
+    for (entry, reason) in [
+        (None, "ambiguous entry"),
+        (Some("ample"), "unknown entry_name `ample`"),
+    ] {
+        let error = compile_for_execution(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: FIXED_CONTROL_ENTRIES.into(),
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_owned),
+        })
+        .unwrap_err();
+        assert!(format!("{error:?}").contains(reason), "{error:?}");
+    }
+}
+
+#[test]
+fn fixed_control_source_sibling_does_not_replace_an_ordinary_selected_entry() {
+    let source =
+        format!("{FIXED_CONTROL_ENTRIES}\ndef identity(z: tensor[2, f32]) -> tensor[2, f32] = z\n");
+    let main_c = |entry: &str| {
+        compile_c(&source, Some(entry))
+            .compile_result
+            .files
+            .iter()
+            .find(|file| file.path == "chelis_main.c")
+            .unwrap()
+            .contents
+            .clone()
+    };
+    let artifact = compile_c(&source, Some("identity"));
+    assert_eq!(input_names(&artifact), ["z"]);
+    // The selected drawing sibling emits its dropout kernel; the ordinary
+    // entry must not carry it. (The shared random-unit helpers are part of
+    // every translation unit's preamble, so they are no witness.)
+    assert!(main_c("sample").contains("dropout"));
+    assert!(!main_c("identity").contains("dropout"));
+}
+
+/// The key-form analogue of the retired unhandled-`Random` rejection: a draw
+/// without its key is an arity error, never an admitted entry.
+#[test]
+fn hostless_entry_rejects_a_keyless_draw_as_an_arity_error() {
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: "def main(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n".into(),
+        target: CompileTarget::C,
+        entry_name: Some("main".into()),
+    })
+    .unwrap_err();
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("`dropout(x, rate)` is the retired counter-stream spelling"),
+        "{error:?}"
+    );
+}
+
 // #818 repro verbatim: single def, multi-statement block, a parameter reused
 // across statements, `concat` in the body.
 const CONCAT_ENTRY: &str = "\
 def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
   x = mul(copy(a), b)
   y = add(a, b)
-  concat([x, y], cast(0, int32))
+  concat([x, y], cast(0, i32))
 }
 ";
 
@@ -226,7 +299,7 @@ fn entry_named_main_does_not_emit_reserved_main_symbol() {
 #[test]
 fn sibling_host_def_does_not_disable_entry_lane() {
     let artifact = compile_c(
-        "def other(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+        "def other(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, i32))\n\
          def solve(a: tensor[1, f32]) -> tensor[1, f32] = mul(copy(a), a)\n",
         Some("solve"),
     );
@@ -239,7 +312,7 @@ fn sibling_host_def_does_not_disable_entry_lane() {
 #[test]
 fn entry_calling_concat_helper_reports_real_metadata() {
     let artifact = compile_c(
-        "def helper(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, int32))\n\
+        "def helper(x: tensor[1, f32]) -> tensor[2, f32] = concat([copy(x), x], cast(0, i32))\n\
          def solve(a: tensor[1, f32]) -> tensor[2, f32] = helper(a)\n",
         Some("solve"),
     );
@@ -252,7 +325,7 @@ fn entry_calling_concat_helper_reports_real_metadata() {
 fn entry_with_concat_calling_pure_helper_reports_real_metadata() {
     let artifact = compile_c(
         "def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)\n\
-         def solve(a: tensor[1, f32]) -> tensor[2, f32] = concat([helper(copy(a)), a], cast(0, int32))\n",
+         def solve(a: tensor[1, f32]) -> tensor[2, f32] = concat([helper(copy(a)), a], cast(0, i32))\n",
         Some("solve"),
     );
     assert_eq!(input_names(&artifact), vec!["a".to_string()]);
@@ -291,34 +364,34 @@ fn zero_input_entry_reports_one_output_no_inputs() {
     );
 }
 
-/// Fix 1 guard: a `grad`-using entry, even selected by its def name, stays on
-/// the host lane (empty compiled-execution metadata) — the pure entry-kernel
-/// lane does not own multi-root grad-tuple emission (#309). This is the line
-/// that keeps "it lowers" from being sufficient to claim the entry lane.
+/// A tensor result selected from a gradient has one callable output. The
+/// gradient's internal tuple does not make the selected entry a host-only
+/// function or leak the sibling loss definition into its ABI.
 #[test]
-fn grad_entry_stays_on_host_lane_even_when_selected() {
-    const GRAD_SRC: &str = "module Repro.GradEntry
-def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
-def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
-";
-    let artifact = compile_c(GRAD_SRC, Some("dloss"));
-    assert!(
-        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
-        "grad entry must stay host-lane (empty callable metadata), got inputs={:?} outputs={:?}",
-        artifact.inputs,
-        artifact.outputs
-    );
-    // #819 Fix 2: the decline is recorded, not silent — and it is the
-    // grad-specific reason, so downstream error text can say WHY instead of
-    // guessing from the empty manifest.
-    assert_eq!(
-        artifact.entry_lane_decline,
-        Some(EntryLaneDecline::GradLike {
-            entry: "dloss".to_string()
-        }),
-        "grad decline must be recorded with the GradLike reason"
-    );
+fn selected_tensor_gradient_has_exact_entry_manifest() {
+    let source = "def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 = \
+        tensor_to_scalar(sum(mul(x, w), 0i32))\n\
+        def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = \
+        (grad(loss)(x, w)).0\n";
+    let artifact = compile_c(source, Some("dloss"));
+    assert_eq!(input_names(&artifact), ["x", "w"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert_eq!(artifact.entry_lane_decline, None);
+    let c = artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path == "chelis_main.c")
+        .expect("selected entry source");
+    assert!(c.contents.contains("chelis_main"));
+}
+
+#[test]
+fn selected_vmap_has_exact_entry_manifest() {
+    let artifact = compile_c(VMAP_ENTRY, Some("batch_process"));
+    assert_eq!(input_names(&artifact), ["xs"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert_eq!(artifact.entry_lane_decline, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,41 +627,12 @@ fn compile_emits_entry_scoped_kernel_not_sibling_def() {
     );
 }
 
-/// Reviewer B1: a `vmap` entry declines the lane as `GradLike` but, unlike
-/// `grad`, does NOT force the host backend, so it reaches the legacy
-/// whole-DAG fallthrough. An earlier revision `debug_assert!`ed that this
-/// combination was impossible: a vmap entry panicked every debug-built
-/// caller of the shared pipeline (tide serve included) and, in release,
-/// silently returned the merged whole-program manifest (#817 unfixed). On
-/// the STRICT surface it is now a loud unsupported-feature error.
+/// The legacy surface still emits the whole program; the callable surface
+/// above scopes this same transformed entry to one checked DAG.
 const VMAP_ENTRY: &str = "\
 def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
 def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process)
 ";
-
-#[test]
-fn vmap_entry_is_a_loud_unsupported_error_on_the_callable_surface() {
-    let err = compile_for_execution(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: VMAP_ENTRY.to_string(),
-        target: CompileTarget::C,
-        entry_name: Some("batch_process".to_string()),
-    })
-    .expect_err("a vmap entry must be a loud error on compile_for_execution, not a panic");
-    let diagnostic = &err.errors[0];
-    assert_eq!(
-        diagnostic.kind(),
-        chelis_vocab::DiagnosticKind::UnsupportedFeature,
-        "a transform entry is a not-yet-implemented capability, got kind {}: {}",
-        diagnostic.kind().as_str(),
-        diagnostic.message
-    );
-    assert!(
-        diagnostic.message.contains("batch_process") && diagnostic.message.contains("eval"),
-        "message must name the entry and point at `eval`, got: {}",
-        diagnostic.message
-    );
-}
 
 /// LEGACY surface pin for the same program: `compile()` must keep emitting
 /// the whole program (pre-entry-lane behavior) with no panic and no error.

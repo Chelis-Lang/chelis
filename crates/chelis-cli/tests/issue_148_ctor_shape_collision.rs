@@ -79,15 +79,15 @@ fn positional_ctor_call_resolves_to_positional_variant_when_record_collides() {
     write_file(
         &fixture,
         "module CtorCollision\n\
-         type RecordIntCol[n] = | IntCol { values: tensor[n, int64] }\n\
-         type PositionalIntCol[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
-         def make_positional[n](xs: tensor[n, int64], mask: tensor[n, bool]) -> PositionalIntCol[n] = IntCol(xs, mask)\n",
+         type RecordIntCol[n] = | IntCol { values: tensor[n, i64] }\n\
+         type PositionalIntCol[n] = | IntCol(tensor[n, i64], tensor[n, bool])\n\
+         def make_positional[n](xs: tensor[n, i64], mask: tensor[n, bool]) -> PositionalIntCol[n] = IntCol(xs, mask)\n",
     );
     fmt_inplace(&fixture);
 
     let json = run_check(&fixture);
     let msgs = error_messages(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         msgs.is_empty(),
         "positional dispatch on mixed-shape collision must produce no errors; got {msgs:?}"
@@ -108,15 +108,15 @@ fn record_ctor_call_resolves_to_record_variant_when_positional_collides() {
     write_file(
         &fixture,
         "module CtorCollisionRecord\n\
-         type RecordIntCol[n] = | IntCol { values: tensor[n, int64] }\n\
-         type PositionalIntCol[n] = | IntCol(tensor[n, int64], tensor[n, bool])\n\
-         def make_record[n](xs: tensor[n, int64]) -> RecordIntCol[n] = IntCol { values: xs }\n",
+         type RecordIntCol[n] = | IntCol { values: tensor[n, i64] }\n\
+         type PositionalIntCol[n] = | IntCol(tensor[n, i64], tensor[n, bool])\n\
+         def make_record[n](xs: tensor[n, i64]) -> RecordIntCol[n] = IntCol { values: xs }\n",
     );
     fmt_inplace(&fixture);
 
     let json = run_check(&fixture);
     let msgs = error_messages(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         msgs.is_empty(),
         "record dispatch on mixed-shape collision must produce no errors; got {msgs:?}"
@@ -134,8 +134,8 @@ fn record_only_ctor_still_errors_when_called_positionally() {
     write_file(
         &fixture,
         "module RecordOnly\n\
-         type WrapperRecord = | Wrapper { value: int64 }\n\
-         def make() -> WrapperRecord = Wrapper(cast(7, int64))\n",
+         type WrapperRecord = | Wrapper { value: i64 }\n\
+         def make() -> WrapperRecord = Wrapper(cast(7, i64))\n",
     );
     fmt_inplace(&fixture);
 
@@ -170,9 +170,9 @@ fn two_positional_same_name_emits_no_shape_error() {
     write_file(
         &fixture,
         "module TwoPositional\n\
-         type AaaCol[n] = | IntCol(tensor[n, int64])\n\
-         type BbbCol[n] = | IntCol(tensor[n, int64])\n\
-         def make_aaa[n](xs: tensor[n, int64]) -> AaaCol[n] = IntCol(xs)\n",
+         type AaaCol[n] = | IntCol(tensor[n, i64])\n\
+         type BbbCol[n] = | IntCol(tensor[n, i64])\n\
+         def make_aaa[n](xs: tensor[n, i64]) -> AaaCol[n] = IntCol(xs)\n",
     );
     fmt_inplace(&fixture);
 

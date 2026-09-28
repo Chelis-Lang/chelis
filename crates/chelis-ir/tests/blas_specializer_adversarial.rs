@@ -12,7 +12,7 @@
 //! 1. **Non-identity cast pair** (`f32 → f64 → f32`) between Expand and Mul
 //!    must NOT specialize to BLAS. There's no cancel-pair recognizer; the
 //!    pair is structurally non-identity at the IR level.
-//! 2. **Non-identity cast pair** (`int32 → f32 → int32`) — same.
+//! 2. **Non-identity cast pair** (`i32 → f32 → i32`) — same.
 //! 3. **Reshape pair that round-trips** (`[m,k] → [k,m] → [m,k]` via two
 //!    Reshape nodes) must NOT specialize: there's no cancel-pair recognizer.
 //! 4. **Permute pair that cancels** (`[1,0]` then `[1,0]` again) must NOT
@@ -61,8 +61,15 @@ fn dead_intermediates_pruned(dag: &Dag) -> bool {
 /// Build a canonical Tier 2 matmul subgraph
 /// (Expand → Cast → Mul → Sum or Cast → Expand → Mul → Sum) so adversarial
 /// perturbations can be injected at known positions.
-fn add_const_mat(dag: &mut Dag, prim: Prim, r: usize, c: usize) -> chelis_ir::dag::NodeId {
+fn add_const_mat(
+    dag: &mut Dag,
+    decl: chelis_ir::dag::DeclId,
+    prim: Prim,
+    r: usize,
+    c: usize,
+) -> chelis_ir::dag::NodeId {
     dag.add_node(
+        decl,
         RiscOp::synth_const(mat(prim, r, c).precision, 1.0),
         vec![],
         mat(prim, r, c),
@@ -77,9 +84,11 @@ fn add_const_mat(dag: &mut Dag, prim: Prim, r: usize, c: usize) -> chelis_ir::da
 #[test]
 fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     let mut dag = Dag::new();
-    let a = add_const_mat(&mut dag, Prim::F32, 2, 3);
-    let b = add_const_mat(&mut dag, Prim::F32, 3, 4);
+    let decl = dag.declare("test");
+    let a = add_const_mat(&mut dag, decl, Prim::F32, 2, 3);
+    let b = add_const_mat(&mut dag, decl, Prim::F32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -89,6 +98,7 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -99,6 +109,7 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     );
     // f32 → f64 → f32 (round-trip; non-identity at the IR level).
     let cast_a_up = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F64,
         },
@@ -107,6 +118,7 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let cast_a_down = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -115,12 +127,14 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![cast_a_down, eb],
         t3(Prim::F32, 2, 3, 4),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -145,20 +159,22 @@ fn non_identity_cast_pair_between_expand_and_mul_misses_blas() {
     );
 }
 
-/// ADV-2: An int32 → f32 → int32 cast pair is NOT a closed-list no-op.
+/// ADV-2: An i32 → f32 → i32 cast pair is NOT a closed-list no-op.
 /// Even though the round-trip data semantics is "lossy identity", the
 /// pair is structurally distinct from a single identity Cast and must
 /// not be collapsed by the closed-list cleanup.
 ///
-/// (Note: matmul with int32 operands doesn't match the BLAS-F32 signature
+/// (Note: matmul with i32 operands doesn't match the BLAS-F32 signature
 /// at the recognizer anyway, but we want to be sure NO recognizer fires
 /// — neither BLAS nor any other.)
 #[test]
 fn int_float_int_cast_round_trip_misses_specialization() {
     let mut dag = Dag::new();
-    let a = add_const_mat(&mut dag, Prim::Int32, 2, 3);
-    let b = add_const_mat(&mut dag, Prim::Int32, 3, 4);
+    let decl = dag.declare("test");
+    let a = add_const_mat(&mut dag, decl, Prim::Int32, 2, 3);
+    let b = add_const_mat(&mut dag, decl, Prim::Int32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -168,6 +184,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -177,6 +194,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
         None,
     );
     let cast_up = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -185,6 +203,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
         None,
     );
     let cast_down = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Int32,
         },
@@ -193,12 +212,14 @@ fn int_float_int_cast_round_trip_misses_specialization() {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![cast_down, eb],
         t3(Prim::Int32, 2, 3, 4),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -212,7 +233,7 @@ fn int_float_int_cast_round_trip_misses_specialization() {
     let out = specialize_for_blas(&dag);
     assert!(
         !has_blas(&out),
-        "int32→f32→int32 cast round-trip must NOT collapse to BLAS; got BLAS specialization"
+        "i32→f32→i32 cast round-trip must NOT collapse to BLAS; got BLAS specialization"
     );
 }
 
@@ -228,9 +249,11 @@ fn int_float_int_cast_round_trip_misses_specialization() {
 #[test]
 fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     let mut dag = Dag::new();
-    let a = add_const_mat(&mut dag, Prim::F32, 2, 3); // [m=2, k=3]
-    let b = add_const_mat(&mut dag, Prim::F32, 3, 4);
+    let decl = dag.declare("test");
+    let a = add_const_mat(&mut dag, decl, Prim::F32, 2, 3); // [m=2, k=3]
+    let b = add_const_mat(&mut dag, decl, Prim::F32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -240,6 +263,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -250,6 +274,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
     );
     // Reshape pair: [2,3,4] → [3,2,4] → [2,3,4]. Neither step is identity.
     let rs_a_up = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![
                 chelis_ir::dag::RtDim::Lit(3),
@@ -262,6 +287,7 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let rs_a_down = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![
                 chelis_ir::dag::RtDim::Lit(2),
@@ -274,12 +300,14 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let mul = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![rs_a_down, eb],
         t3(Prim::F32, 2, 3, 4),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -308,9 +336,11 @@ fn reshape_round_trip_pair_between_expand_and_mul_misses_blas() {
 #[test]
 fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
     let mut dag = Dag::new();
-    let a = add_const_mat(&mut dag, Prim::F32, 2, 3);
-    let b = add_const_mat(&mut dag, Prim::F32, 3, 4);
+    let decl = dag.declare("test");
+    let a = add_const_mat(&mut dag, decl, Prim::F32, 2, 3);
+    let b = add_const_mat(&mut dag, decl, Prim::F32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -320,6 +350,7 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -330,6 +361,7 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
     );
     // Permute pair on the lhs (axes [1,0,2] then [1,0,2]).
     let p1 = dag.add_node(
+        decl,
         RiscOp::Permute {
             axes: vec![1, 0, 2],
         },
@@ -338,6 +370,7 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
         None,
     );
     let p2 = dag.add_node(
+        decl,
         RiscOp::Permute {
             axes: vec![1, 0, 2],
         },
@@ -345,8 +378,15 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
         t3(Prim::F32, 2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![p2, eb], t3(Prim::F32, 2, 3, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![p2, eb],
+        t3(Prim::F32, 2, 3, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -372,9 +412,11 @@ fn permute_round_trip_pair_between_expand_and_mul_misses_blas() {
 #[test]
 fn single_identity_permute_does_collapse_to_blas() {
     let mut dag = Dag::new();
-    let a = add_const_mat(&mut dag, Prim::F32, 2, 3);
-    let b = add_const_mat(&mut dag, Prim::F32, 3, 4);
+    let decl = dag.declare("test");
+    let a = add_const_mat(&mut dag, decl, Prim::F32, 2, 3);
+    let b = add_const_mat(&mut dag, decl, Prim::F32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -384,6 +426,7 @@ fn single_identity_permute_does_collapse_to_blas() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -393,6 +436,7 @@ fn single_identity_permute_does_collapse_to_blas() {
         None,
     );
     let p_id = dag.add_node(
+        decl,
         RiscOp::Permute {
             axes: vec![0, 1, 2],
         },
@@ -400,8 +444,15 @@ fn single_identity_permute_does_collapse_to_blas() {
         t3(Prim::F32, 2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![p_id, eb], t3(Prim::F32, 2, 3, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![p_id, eb],
+        t3(Prim::F32, 2, 3, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -433,6 +484,7 @@ fn single_identity_permute_does_collapse_to_blas() {
 #[test]
 fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     // a: [Named("m", Some(2)), Named("k", Some(3))], i.e. carry symbolic names.
     let a_ty = TensorType {
         dims: vec![
@@ -442,6 +494,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(a_ty.precision, 1.0),
         vec![],
         a_ty.clone(),
@@ -452,6 +505,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
     // dims vector is structurally distinct -> not an identity Reshape.
     let lit_ty = mat(Prim::F32, 2, 3);
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Lit(2), chelis_ir::dag::RtDim::Lit(3)],
         },
@@ -460,8 +514,9 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         None,
     );
 
-    let b = add_const_mat(&mut dag, Prim::F32, 3, 4);
+    let b = add_const_mat(&mut dag, decl, Prim::F32, 3, 4);
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -471,6 +526,7 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -479,8 +535,15 @@ fn named_vs_lit_dim_reshape_is_not_identity_and_misses_blas() {
         t3(Prim::F32, 2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(Prim::F32, 2, 3, 4), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        t3(Prim::F32, 2, 3, 4),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,

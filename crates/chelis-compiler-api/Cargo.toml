@@ -6,7 +6,18 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Native immutable views at the actual code-generation boundary; default off.
+emission-observer = []
+# Same-compilation helper captures and a final-success-bound projection; default off.
+compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pipeline-core/lowering-trace"]
+# Test-only: instruments the runtime these tests link with the ownership ledger.
+# The targets that use tests/ownership_support require it, stage the runtime
+# this build carries, and read the ledger it records.
+ownership-ledger = ["chelis-runtime/ownership-ledger"]
+
 [dependencies]
+chelis-abi.workspace = true
 chelis-unord.workspace = true
 chelis-backend-c.workspace = true
 chelis-backend-hip.workspace = true
@@ -26,16 +37,157 @@ bincode = "1"
 half.workspace = true
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Fixed binary64 source/report adapters must read back their emitted decimals exactly.
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Tests that link generated C stage the runtime the bundle carries
+# (spec/08-backends.md §2.1) and link that exact archive; `ownership-ledger`
+# enables the ledger in that runtime.
+chelis-runtime.workspace = true
+chelis-runtime-bundle.workspace = true
 chelis-reef.workspace = true
 bincode = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[[test]]
+name = "key_tensor_forms"
+path = "tests/key_tensor_forms.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "emission_observer"
+path = "tests/emission_observer.rs"
+required-features = ["emission-observer"]
+
+[[test]]
+name = "compilation_trace"
+path = "tests/compilation_trace.rs"
+required-features = ["compilation-trace"]
+
+[[test]]
+name = "builtin_named_kernel_inputs"
+path = "tests/builtin_named_kernel_inputs.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "dropout_fixed_stream_api"
+path = "tests/dropout_fixed_stream_api.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "fixed_control_host_c"
+path = "tests/fixed_control_host_c.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "generated_header_native_probe"
+path = "tests/generated_header_native_probe.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "invocation_local_random"
+path = "tests/invocation_local_random.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_1684_entry_cleanup"
+path = "tests/issue_1684_entry_cleanup.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_1685_multi_root_cleanup"
+path = "tests/issue_1685_multi_root_cleanup.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2445_match_arm_ownership"
+path = "tests/issue_2445_match_arm_ownership.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2485_region_entry_terminals"
+path = "tests/issue_2485_region_entry_terminals.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2508_list_step_ownership"
+path = "tests/issue_2508_list_step_ownership.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2522_data_type_c_lane"
+path = "tests/issue_2522_data_type_c_lane.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2576_option_items_render"
+path = "tests/issue_2576_option_items_render.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "issue_2577_filter_named_predicate"
+path = "tests/issue_2577_filter_named_predicate.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_admission_lanes"
+path = "tests/key_admission_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_affinity_lanes"
+path = "tests/key_affinity_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_extent_lanes"
+path = "tests/key_extent_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_operand_random_c"
+path = "tests/key_operand_random_c.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_operations_c"
+path = "tests/key_operations_c.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_root_lanes"
+path = "tests/key_root_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_split_count_lanes"
+path = "tests/key_split_count_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "key_surface_lanes"
+path = "tests/key_surface_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "local_ascription_activation"
+path = "tests/local_ascription_activation.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "rule_d_entered_lanes"
+path = "tests/rule_d_entered_lanes.rs"
+required-features = ["ownership-ledger"]
+
+[[test]]
+name = "untaken_arm_gradients"
+path = "tests/untaken_arm_gradients.rs"
+required-features = ["ownership-ledger"]
 
 [lints]
 workspace = true

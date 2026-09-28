@@ -44,20 +44,24 @@ fn cube_prec(a: usize, b: usize, c: usize, p: Prim) -> TensorType {
 
 fn build_add_dag(p: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_prec(4, p),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_prec(4, p),
         None,
     );
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_prec(4, p), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_prec(4, p), None);
     let stored = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![s],
         vec_prec(4, p),
@@ -72,19 +76,23 @@ fn build_matmul_dag(p: Prim) -> Dag {
     let k = 4usize;
     let n = 4usize;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_prec(m, k, p),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_prec(k, n, p),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(n),
@@ -94,6 +102,7 @@ fn build_matmul_dag(p: Prim) -> Dag {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(m),
@@ -102,9 +111,10 @@ fn build_matmul_dag(p: Prim) -> Dag {
         cube_prec(m, k, n, p),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], cube_prec(m, k, n, p), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], cube_prec(m, k, n, p), None);
     let acc = metal_dtype::sum_accumulator(p);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: acc,
@@ -117,6 +127,7 @@ fn build_matmul_dag(p: Prim) -> Dag {
         sum
     } else {
         dag.add_node(
+            decl,
             RiscOp::Cast { new_precision: p },
             vec![sum],
             mat_prec(m, n, p),
@@ -575,9 +586,9 @@ fn int64_emit_uses_msl_long_with_apple_silicon_assumption() {
     let src = &result.mm_source;
     assert!(
         src.contains("device const long* a") && src.contains("device long* out"),
-        "int64 add kernel must use MSL `long` for buffers:\n{src}"
+        "i64 add kernel must use MSL `long` for buffers:\n{src}"
     );
-    // sizeof(long) on macOS LP64 = 8, matches int64 width. Document
+    // sizeof(long) on macOS LP64 = 8, matches i64 width. Document
     // the platform assumption.
     assert_eq!(
         std::mem::size_of::<i64>(),

@@ -32,7 +32,7 @@
 //!   refuses to choose a rounding rule for fractional values and traps
 //!   `Domain`; callers spell `floor` or `round` before `cast`.
 //! * `eval_cast_tensor_int32_to_f32` -- integer source widens to f32;
-//!   `cast(cast(to_tensor([..]), int32), f32)` exercises the int-source arm.
+//!   `cast(cast(to_tensor([..]), i32), f32)` exercises the int-source arm.
 
 use assert_cmd::Command;
 use std::fs;
@@ -122,31 +122,31 @@ fn eval_cast_tensor_fractional_f32_to_int32_traps() {
     let path = write_program(
         dir.path(),
         "cast_f32_to_int32.ch",
-        "result = cast(to_tensor([1.5, 2.5, 3.5]), int32)\n",
+        "result = cast(to_tensor([1.5, 2.5, 3.5]), i32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
-    assert!(!ok, "fractional f32->int32 must trap; stdout={stdout}");
+    assert!(!ok, "fractional f32->i32 must trap; stdout={stdout}");
     assert!(
-        stderr.contains("numeric trap: domain in cast at int32"),
+        stderr.contains("numeric trap: domain in cast at i32"),
         "expected checked-cast Domain trap; stderr={stderr}"
     );
 }
 
 #[test]
 fn eval_cast_tensor_int32_to_f32() {
-    // Integer source widens to f32. `to_tensor([1, 2, 3])` produces int64
-    // by default; the inner `cast(.., int32)` forces int32 source, the
+    // Integer source widens to f32. `to_tensor([1, 2, 3])` produces i64
+    // by default; the inner `cast(.., i32)` forces i32 source, the
     // outer cast exercises int-to-float widening.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
         "cast_int32_to_f32.ch",
-        "result = cast(cast(to_tensor([1, 2, 3]), int32), f32)\n",
+        "result = cast(cast(to_tensor([1, 2, 3]), i32), f32)\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
         ok,
-        "tensor cast int32->f32 should eval (spec section 2.7); stderr={stderr} stdout={stdout}"
+        "tensor cast i32->f32 should eval (spec section 2.7); stderr={stderr} stdout={stdout}"
     );
     let elements = parse_anonymous_tensor_data(&stdout)
         .unwrap_or_else(|| panic!("expected tensor in stdout: {stdout}"));

@@ -22,14 +22,15 @@ Treat all other evidence as supporting material, not the completion decision its
 The gate is `scripts/gate.py`; do not hand-type `cargo test --workspace` in its place:
 
 ```sh
-python3 scripts/gate.py --fast   # before every push
-python3 scripts/gate.py --local  # once per pull request, on the committed candidate, before ready-for-review
-python3 scripts/gate.py --list   # the canonical command list with local/CI ownership
+python3 scripts/gate.py --fast        # before every push
+python3 scripts/gate.py --validation  # optional troubleshooting and extra validation
+python3 scripts/gate.py --list        # the canonical command list with local/CI ownership
 ```
 
 The workspace nextest stage is CI-owned and macOS Smoke is the authoritative workspace
 oracle. Completion evidence is CI green on the candidate head plus the phase's named
-oracle, never a local workspace run alone.
+oracle, never a local workspace run alone. A `--validation` run is not required per PR;
+the phase's acceptance oracle and manual gates remain required.
 
 ## Additional Required Checks
 

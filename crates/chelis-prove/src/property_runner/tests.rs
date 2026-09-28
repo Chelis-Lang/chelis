@@ -2,6 +2,40 @@
 
 use super::*;
 
+#[test]
+fn deep_param_rejects_unknown_form_but_reads_a_structural_param() {
+    let span = deep_span();
+    let structural = DeepExpr::BareList(
+        vec![
+            DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+            DeepExpr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    let unknown = DeepExpr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "x".into(),
+        meta: Metadata::default(),
+        children: Vec::new(),
+        span,
+    }));
+    let malformed = DeepExpr::BareList(
+        vec![
+            DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+            DeepExpr::Atom(DeepAtom::Int(0), span),
+        ],
+        span,
+    );
+
+    let param = deep_param(&structural).expect("structural inline param is readable");
+    assert_eq!(param.name, "x");
+    assert!(param.ty.is_none());
+    assert!(deep_param(&unknown).is_none());
+    let malformed =
+        deep_param(&malformed).expect("malformed structural inline param retains its binder");
+    assert_eq!(malformed.name, "x");
+    assert!(malformed.ty.is_none());
+}
+
 fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
     let opts = PropertyRunOptions {
         tier: tier.to_string(),
@@ -14,10 +48,10 @@ fn run_surf(source: &str, tier: &str) -> Vec<PropertyOutcome> {
 
 #[cfg(feature = "smt")]
 const GENERAL_BOND_INDUCTION: &str = "module M
-def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+def bond_value(n: i32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * bond_value(n - 1, coupon, discount)
-@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+@property bond_value_nonnegative forall(n: i32, coupon: f64, discount: f64)
 where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";
@@ -139,12 +173,12 @@ fn induction_never_dispatches_an_unchecked_parser_ast() {
 #[test]
 fn induction_accepts_compiler_inlined_alias_recursion_soundly() {
     let source = "module M
-def recur_alias(n: int32, coupon: f64, discount: f64) -> f64 =
+def recur_alias(n: i32, coupon: f64, discount: f64) -> f64 =
   bond_value(n, coupon, discount)
-def bond_value(n: int32, coupon: f64, discount: f64) -> f64 =
+def bond_value(n: i32, coupon: f64, discount: f64) -> f64 =
   if (n <= 0) then cast(1.0, f64)
   else coupon + discount * recur_alias(n - 1, coupon, discount)
-@property bond_value_nonnegative forall(n: int32, coupon: f64, discount: f64)
+@property bond_value_nonnegative forall(n: i32, coupon: f64, discount: f64)
 where n >= 0, coupon >= cast(0.0, f64), discount >= cast(0.0, f64):
   (bond_value(n, coupon, discount) >= cast(0.0, f64))
 ";
@@ -434,6 +468,253 @@ fn scalar_grad_nested_transform_fails_closed_with_specific_reason() {
     assert_eq!(
         outcomes[0].reason.as_deref(),
         Some("scalar grad SMT lowering does not support nested gradients")
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn valid_nested_grad_properties_reach_their_own_smt_boundary() {
+    let outcomes = run_surf(
+        "module M
+@property nested_grad_left forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+@property nested_grad_right forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx + xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+        "smt-only",
+    );
+
+    assert_eq!(outcomes.len(), 2, "{outcomes:#?}");
+    for outcome in outcomes {
+        assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+        assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("scalar grad SMT lowering does not support nested gradients"),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn only_selected_nested_grad_ignores_valid_unsupported_sibling() {
+    let source = "module M
+@property nested_grad_left forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+@property nested_grad_right forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx + xx, wrt=xx), wrt=xx)(x) >= 0.0)
+";
+    let options = PropertyRunOptions {
+        tier: "smt-only".to_string(),
+        only: Some("nested_grad_left".to_string()),
+        ..Default::default()
+    };
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_source_properties(source, &options).expect("run filtered nested gradients");
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+    let outcome = &outcomes[0];
+    assert_eq!(
+        outcome.name, "nested_grad_left",
+        "filter chose the wrong property"
+    );
+    assert_eq!(outcome.status, PropertyStatus::Unsupported, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
+    assert_eq!(
+        outcome.reason.as_deref(),
+        Some("scalar grad SMT lowering does not support nested gradients"),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn aliased_nested_grad_reason_matches_generated_deep_without_mislabeling_ordinary_calls() {
+    const ALIAS_REASON: &str = "scalar grad SMT lowering cannot resolve function `inner`";
+    const GENERIC_REASON: &str = "property does not lower to Tier B (smt-only)";
+
+    let surf = "module M
+def square(xx: f32) -> f32 = xx * xx
+inner = grad(square, wrt=xx)
+@property alias_nested forall(x: f32):
+  (grad(inner, wrt=xx)(x) >= 0.0)
+@property ordinary_alias_call forall(x: f32):
+  (inner(x) >= 0.0)
+";
+    let declarations = chelis_surf::parser::parse_str(surf).expect("alias fixture parses");
+    let deep = chelis_deep::printer::print_canonical(
+        &chelis_surf::desugar::desugar_program(&declarations).expect("alias fixture desugars"),
+    );
+    let all = [
+        ("alias_nested", ALIAS_REASON),
+        ("ordinary_alias_call", GENERIC_REASON),
+    ];
+    let alias_only = [("alias_nested", ALIAS_REASON)];
+    let ordinary_only = [("ordinary_alias_call", GENERIC_REASON)];
+    let cases = [
+        ("surf-all", surf, false, None, all.as_slice()),
+        (
+            "surf-alias-only",
+            surf,
+            false,
+            Some("alias_nested"),
+            alias_only.as_slice(),
+        ),
+        (
+            "surf-ordinary-only",
+            surf,
+            false,
+            Some("ordinary_alias_call"),
+            ordinary_only.as_slice(),
+        ),
+        ("deep-all", deep.as_str(), true, None, all.as_slice()),
+        (
+            "deep-alias-only",
+            deep.as_str(),
+            true,
+            Some("alias_nested"),
+            alias_only.as_slice(),
+        ),
+        (
+            "deep-ordinary-only",
+            deep.as_str(),
+            true,
+            Some("ordinary_alias_call"),
+            ordinary_only.as_slice(),
+        ),
+    ];
+
+    for (case, source, is_deep, only, expected) in cases {
+        let options = PropertyRunOptions {
+            tier: "smt-only".to_string(),
+            only: only.map(str::to_string),
+            ..Default::default()
+        };
+        let result = if is_deep {
+            run_deep_source_properties(source, &options)
+        } else {
+            run_surf_source_properties(source, &options)
+        };
+        let PropertyRunResult::Ran(outcomes) = result.expect("run alias fixture");
+
+        assert_eq!(outcomes.len(), expected.len(), "{case}: {outcomes:#?}");
+        for (outcome, (expected_name, expected_reason)) in outcomes.iter().zip(expected) {
+            assert_eq!(outcome.name, *expected_name, "{case}: {outcome:#?}");
+            assert_eq!(
+                outcome.status,
+                PropertyStatus::Unsupported,
+                "{case}: {outcome:#?}"
+            );
+            assert_eq!(
+                outcome.proof_tier,
+                PropertyTier::Smt,
+                "{case}: {outcome:#?}"
+            );
+            assert_eq!(
+                outcome.reason.as_deref(),
+                Some(*expected_reason),
+                "{case}: {outcome:#?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn selected_nested_grad_with_unknown_outer_wrt_is_an_error() {
+    let outcomes = run_surf(
+        "module M
+@property invalid_nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=missing)(x) >= 0.0)
+",
+        "smt-only",
+    );
+
+    assert_eq!(outcomes.len(), 1, "{outcomes:#?}");
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(
+        outcome.reason.as_deref().is_some_and(|reason| {
+            reason.contains("unknown `grad` parameter") && reason.contains("missing")
+        }),
+        "{outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn unrelated_invalid_grad_declaration_fails_closed_before_scalar_smt_property() {
+    let outcomes = run_surf(
+        "module M
+def pair(x: f32) -> (f32, f32) = (x, x)
+bad = grad(pair, wrt=missing)
+@property reflexive forall(x: f32):
+  (x == x)
+",
+        "smt-only",
+    );
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(!outcome.is_pass(), "{outcome:?}");
+    let reason = outcome.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("grad") && reason.contains("missing"),
+        "the unrelated desugar failure must remain visible: {outcome:?}"
+    );
+}
+
+#[cfg(feature = "smt")]
+#[test]
+fn colliding_property_spans_preserve_invalid_nested_sibling_during_smt_routing() {
+    fn collide_property_spans(decls: &mut [Decl]) {
+        for decl in decls {
+            match decl {
+                Decl::Module { decls, .. } => collide_property_spans(decls),
+                Decl::Property { span, .. } => *span = chelis_deep::Span::new(0, 0),
+                _ => {}
+            }
+        }
+    }
+
+    let parsed = chelis_surf::parser::parse_str(
+        "module Inner
+def pair(x: f32) -> (f32, f32) = (x, x)
+@property invalid_sibling forall(x: f32):
+  (grad(pair, wrt=missing)(x) == x)
+@property reflexive forall(x: f32):
+  (x == x)
+",
+    )
+    .expect("parse collision fixture");
+    let mut module_decls = vec![Decl::Module {
+        name: "Outer".to_string(),
+        decls: parsed,
+        span: chelis_deep::Span::new(0, 0),
+    }];
+    collide_property_spans(&mut module_decls);
+    let flat = flatten_module_decls(&module_decls);
+    let options = PropertyRunOptions {
+        tier: "smt-only".to_string(),
+        only: Some("reflexive".to_string()),
+        ..Default::default()
+    };
+
+    let PropertyRunResult::Ran(outcomes) =
+        run_surf_decls_properties(&flat, &flat, &module_decls, &options)
+            .expect("run collision fixture");
+    assert_eq!(outcomes.len(), 1);
+    let outcome = &outcomes[0];
+    assert_eq!(outcome.status, PropertyStatus::Error, "{outcome:?}");
+    assert_eq!(outcome.proof_tier, PropertyTier::None, "{outcome:?}");
+    assert!(!outcome.is_pass(), "{outcome:?}");
+    let reason = outcome.reason.as_deref().unwrap_or_default();
+    assert!(
+        reason.contains("grad") && reason.contains("missing"),
+        "the colliding invalid sibling must remain visible: {outcome:?}"
     );
 }
 
@@ -949,7 +1230,8 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
   m
   (def {chelis_role: "property",
          property_source_kind: "bridge:c-earchin",
-         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_preconditions: (tuple {})}
     bridged
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
@@ -1080,4 +1362,12 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
         none.is_empty(),
         "no preconditions => no assumption record to tier"
     );
+}
+
+#[test]
+fn producer_property_marker_has_no_discovery_authority() {
+    let source = r#"(def {c_earchin_role: "property_witness", property_source_kind: "user"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#;
+    let PropertyRunResult::Ran(outcomes) =
+        run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
+    assert!(outcomes.is_empty(), "{outcomes:?}");
 }

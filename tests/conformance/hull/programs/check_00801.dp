@@ -1,1 +1,10 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 6.0) (lit {type: (t-prim {} int64)} 4) (app {} (var {} neg) (lit {type: (t-prim {} f32)} 0.0))) 1)))
+(def {}
+  answer
+  (fn {}
+    (params {} (__chk {type: (t-prim {} f32)}))
+    (tuple-get {}
+      (tuple {}
+        (lit {type: (t-prim {} f32)} 6.0)
+        (lit {type: (t-prim {} i64)} 4)
+        (app {} (var {} neg) (lit {type: (t-prim {} f32)} 0.0)))
+      1)))

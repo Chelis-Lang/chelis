@@ -83,7 +83,7 @@ fn issue_255_rank_uniform_list_of_tensor_type_checks() {
     write_file(
         &path,
         "module Repro.RankUniformList\n\
-         def make_uniform() -> List[tensor[k, f32]] = {\n  \
+         def make_uniform[k]() -> List[tensor[k, f32]] = {\n  \
            a = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n  \
            b = to_tensor([cast(3.0, f32), cast(4.0, f32)])\n  \
            [a, b]\n\
@@ -110,7 +110,7 @@ fn issue_255_mixed_rank_list_of_tensor_rejects_with_actionable_hint() {
     write_file(
         &path,
         "module Repro.MixedRankList\n\
-         def make_mixed() -> List[tensor[k, f32]] = {\n  \
+         def make_mixed[k]() -> List[tensor[k, f32]] = {\n  \
            a = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n  \
            b = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n  \
            [a, b]\n\
@@ -177,7 +177,7 @@ fn issue_255_mixed_rank_list_four_element_real_consumer_shape_rejects() {
     write_file(
         &path,
         "module Repro.MlpShapeMixed\n\
-         def make_params() -> List[tensor[k, f32]] = {\n  \
+         def make_params[k]() -> List[tensor[k, f32]] = {\n  \
            fc1_w = to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]])\n  \
            fc1_b = to_tensor([cast(5.0, f32), cast(6.0, f32)])\n  \
            fc2_w = to_tensor([[cast(7.0, f32), cast(8.0, f32)], [cast(9.0, f32), cast(10.0, f32)]])\n  \

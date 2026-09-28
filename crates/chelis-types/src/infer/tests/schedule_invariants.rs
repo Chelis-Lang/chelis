@@ -43,10 +43,10 @@ enum Header {
     /// No `defsig` anywhere: `def helper(x) = x`. Nothing is available to a
     /// reader until the body is inferred, so the mirror edge applies.
     Absent,
-    /// Every slot annotated: `def anchor() -> int32 = 1`. Honest from the
+    /// Every slot annotated: `def anchor() -> i32 = 1`. Honest from the
     /// first pass under [04-INF-6], so no edge is owed.
     Complete,
-    /// At least one wildcard slot: `def f(n: int32) = add(v, n)`. Not honest
+    /// At least one wildcard slot: `def f(n: i32) = add(v, n)`. Not honest
     /// until the body fills it ([04-INF-5]), so the hole edge applies.
     Holed,
 }
@@ -122,7 +122,7 @@ fn value(name: &'static str, source: &str, references: &[&'static str]) -> Decla
     }
 }
 
-/// A value with a declaration type (`carried: int32 = 7`), which desugars to a
+/// A value with a declaration type (`carried: i32 = 7`), which desugars to a
 /// complete `defsig` beside the `def`.
 fn signed_value(name: &'static str, source: &str, references: &[&'static str]) -> Declaration {
     value(name, source, references).with_header(Header::Complete)
@@ -188,7 +188,6 @@ fn deep_type_has_hole(root: &chelis_deep::Expr) -> bool {
             continue;
         }
         match expr {
-            chelis_deep::Expr::List(list, _) => worklist.extend(list.elements.iter()),
             chelis_deep::Expr::BareList(elements, _) => worklist.extend(elements.iter()),
             chelis_deep::Expr::MetaExpr(meta, _) => worklist.push(&meta.expr),
             _ => {}
@@ -201,7 +200,8 @@ fn measure(program: &Program) -> Measured {
     let source = program.source();
     let declarations = chelis_surf::parser::parse_str(&source)
         .unwrap_or_else(|error| panic!("generated Surf must parse: {error:?}\n{source}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let flat = items
         .iter()
@@ -247,11 +247,12 @@ fn measure(program: &Program) -> Measured {
         else {
             panic!("a `defsig` for `{name}` has no generator declaration\n{source}");
         };
-        let header = if kids.get(1).is_some_and(deep_type_has_hole) {
-            Header::Holed
-        } else {
-            Header::Complete
-        };
+        let header =
+            if defsig_parts(kids).is_some_and(|(_, _, type_expr)| deep_type_has_hole(type_expr)) {
+                Header::Holed
+            } else {
+                Header::Complete
+            };
         headers.insert(declared.name, header);
     }
     Measured {
@@ -706,7 +707,7 @@ fn round_eight_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            signed_value("carried", "carried: int32 = tailfn(1)", &["tailfn"])
+            signed_value("carried", "carried: i32 = tailfn(1)", &["tailfn"])
         } else {
             value("carried", "carried = tailfn(1)", &["tailfn"])
         };
@@ -738,16 +739,16 @@ fn matrix_layouts() -> Vec<Vec<Declaration>> {
     let mut layouts = Vec::new();
     for annotated in [false, true] {
         let carried = if annotated {
-            signed_value("carried", "carried: int32 = 7", &[])
+            signed_value("carried", "carried: i32 = 7", &[])
         } else {
             value("carried", "carried = 7", &[])
         };
         for reader in [
-            signed_function("reader", "def reader() -> int32 = carried", &["carried"]),
+            signed_function("reader", "def reader() -> i32 = carried", &["carried"]),
             value("echoed", "echoed = carried", &["carried"]),
         ] {
             let alphabet = vec![
-                signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+                signed_function("anchor", "def anchor() -> i32 = 1", &[]),
                 carried.clone(),
                 reader.clone(),
             ];
@@ -780,20 +781,20 @@ fn recursive_layouts() -> Vec<Vec<Declaration>> {
         let alphabet = vec![
             signed_member(
                 "ping",
-                "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
+                "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
                 &["pong"],
                 "pair",
             ),
             signed_member(
                 "pong",
-                "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
+                "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
                 &["ping", "carried"],
                 "pair",
             ),
             carried,
         ];
         for mut layout in permutations(&alphabet) {
-            layout.insert(0, signed_function("seed", "def seed() -> int32 = 3", &[]));
+            layout.insert(0, signed_function("seed", "def seed() -> i32 = 3", &[]));
             layouts.push(layout);
         }
     }
@@ -864,12 +865,12 @@ fn round_five_hoisted_reader_follows_the_value_it_reads() {
     let program = named(
         true,
         vec![
-            signed_function("seed", "def seed() -> int32 = 3", &[]),
-            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+            signed_function("seed", "def seed() -> i32 = 3", &[]),
+            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
             value("carried", "carried = seed()", &["seed"]),
             signed_function(
                 "later_reader",
-                "def later_reader() -> int32 = carried",
+                "def later_reader() -> i32 = carried",
                 &["carried"],
             ),
         ],
@@ -892,17 +893,17 @@ fn round_six_recursive_component_follows_the_value_a_member_reads() {
             let program = named(
                 wrapped,
                 vec![
-                    signed_function("seed", "def seed() -> int32 = 3", &[]),
+                    signed_function("seed", "def seed() -> i32 = 3", &[]),
                     signed_member(
                         "ping",
-                        "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
+                        "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
                         &["pong"],
                         "pair",
                     ),
                     carried,
                     signed_member(
                         "pong",
-                        "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
+                        "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
                         &["ping", "carried"],
                         "pair",
                     ),
@@ -943,7 +944,7 @@ fn round_eight_stall_free_program_keeps_planner_order() {
         true,
         vec![
             function("caller", "def caller(n) = helper(n)", &["helper"]),
-            signed_value("carried", "carried: int32 = tailfn(1)", &["tailfn"]),
+            signed_value("carried", "carried: i32 = tailfn(1)", &["tailfn"]),
             function("helper", "def helper(x) = carried", &["carried"]),
             function("tailfn", "def tailfn(n) = n", &[]),
         ],
@@ -993,7 +994,7 @@ fn a_textual_chain_would_close_a_cycle_this_graph_does_not_have() {
     let program = named(
         true,
         vec![
-            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
             value("first", "first = reads()", &["reads"]),
             value("second", "second = 7", &[]),
             function("reads", "def reads() = second", &["second"]),
@@ -1027,8 +1028,8 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
         true,
         vec![
             value("r", "r = f(2)", &["f"]),
-            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
-            holed_function("f", "def f(n: int32) = n", &[]),
+            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
+            holed_function("f", "def f(n: i32) = n", &[]),
         ],
     );
     assert!(
@@ -1045,7 +1046,7 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
         false,
         vec![
             value("r", "r = f(2)", &["f"]),
-            holed_function("f", "def f(n: int32) = n", &[]),
+            holed_function("f", "def f(n: i32) = n", &[]),
         ],
     );
     assert!(
@@ -1063,8 +1064,8 @@ fn a_below_floor_reader_of_a_hole_signature_function_follows_it() {
         true,
         vec![
             value("r", "r = g(2)", &["g"]),
-            signed_function("anchor", "def anchor() -> int32 = 1", &[]),
-            signed_function("g", "def g(n: int32) -> int32 = n", &[]),
+            signed_function("anchor", "def anchor() -> i32 = 1", &[]),
+            signed_function("g", "def g(n: i32) -> i32 = n", &[]),
         ],
     );
     assert!(violations(&complete).is_empty(), "{}", complete.source());
@@ -1084,7 +1085,7 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
             function("wrap", "def wrap(g) = g", &[]),
             signed_function(
                 "f",
-                "def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))",
+                "def f(n: i32) -> i32 = if (n <= 0) then 0 else carried((n - 1))",
                 &["carried"],
             ),
         ),
@@ -1092,15 +1093,11 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
             "lambda naming a signed reader",
             value(
                 "carried",
-                "carried = pick(fn (x: int32) -> f(x))",
+                "carried = pick(fn (x: i32) -> f(x))",
                 &["pick", "f"],
             ),
             function("pick", "def pick(g) = 5", &[]),
-            signed_function(
-                "f",
-                "def f(n: int32) -> int32 = add(n, carried)",
-                &["carried"],
-            ),
+            signed_function("f", "def f(n: i32) -> i32 = add(n, carried)", &["carried"]),
         ),
         (
             "defsig-less reader",
@@ -1116,7 +1113,7 @@ fn a_value_naming_a_function_that_reads_it_back_is_a_recorded_stall() {
         let program = named(
             true,
             vec![
-                signed_function("anchor", "def anchor() -> int32 = 1", &[]),
+                signed_function("anchor", "def anchor() -> i32 = 1", &[]),
                 carried,
                 helper,
                 reader,
@@ -1168,7 +1165,7 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
         true,
         vec![
             function("caller", "def caller(n) = helper(n)", &["helper"]),
-            signed_value("carried", "carried: int32 = caller(1)", &["caller"]),
+            signed_value("carried", "carried: i32 = caller(1)", &["caller"]),
             function("helper", "def helper(x) = carried", &["carried"]),
         ],
     );
@@ -1206,14 +1203,14 @@ fn a_genuine_binding_cycle_stays_total_as_one_component() {
         vec![
             signed_member(
                 "ping",
-                "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))",
+                "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))",
                 &["pong"],
                 "pair",
             ),
             value("carried", "carried = ping(1)", &["ping"]),
             signed_member(
                 "pong",
-                "def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))",
+                "def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))",
                 &["ping", "carried"],
                 "pair",
             ),
@@ -1253,7 +1250,7 @@ fn a_mixed_bare_and_module_component_follows_the_value_a_member_reads() {
     let exprs = chelis_deep::parse_and_stamp_file(
         "(def {} ping (fn {} (params {} n) (app {} (var {} pong) (var {} n))))\n\
          (module {} Mixed\n  \
-           (def {} carried (lit {type: (t-prim {} int32)} 7))\n  \
+           (def {} carried (lit {type: (t-prim {} i32)} 7))\n  \
            (def {} pong (fn {} (params {} n) (app {} (var {} add) (var {} carried) (app {} (var {} ping) (var {} n))))))\n",
     )
     .expect("mixed Deep fixture parses");
@@ -1284,9 +1281,10 @@ fn cycle_precedence_value_is_available_before_the_cyclic_component() {
     let source = "module CyclePrecedence\n\n\
                   root = add(read_root(), later)\n\n\
                   later = 5i32\n\n\
-                  def read_root() -> int32 = root\n";
+                  def read_root() -> i32 = root\n";
     let declarations = chelis_surf::parser::parse_str(source).expect("fixture parses");
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let items = top_level_decl_items_with_modules(&exprs);
     let plan = FunctionInferencePlan::build(&items);
     let schedule = primary_inference_schedule(&plan, &items);

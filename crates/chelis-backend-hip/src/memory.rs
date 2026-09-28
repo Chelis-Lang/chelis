@@ -167,16 +167,19 @@ impl MemoryPlan {
             {
                 continue;
             }
-            lines.push(format!("    chelis_gpu_free_view(d_t{idx});"));
+            lines.push(format!("    chelis_device_tensor_release(o_t{idx});"));
         }
         for slot in &self.slots {
-            lines.push(format!("    chelis_gpu_free(chelis_slot{});", slot.id));
+            lines.push(format!(
+                "    if (chelis_slot{0}) chelis_device_tensor_release(chelis_slot{0});",
+                slot.id
+            ));
         }
         lines
     }
 }
 
-fn bytes_expr(expr: &DimExpr, dtype: Prim) -> DimExpr {
+pub(crate) fn bytes_expr(expr: &DimExpr, dtype: Prim) -> DimExpr {
     let bytes = dtype
         .runtime_dtype()
         .unwrap_or_else(|error| {
@@ -221,8 +224,15 @@ mod tests {
     #[test]
     fn adapter_preserves_input_mirror_and_owned_slot_placements() {
         let mut dag = Dag::new();
-        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let output = dag.add_node(RiscOp::Neg, vec![input], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let output = dag.add_node(decl, RiscOp::Neg, vec![input], vec_f32(4), None);
         dag.add_root(output);
         let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
         let shared = plan_hip_storage(verified).unwrap();

@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-two are Rust and seven are C or Objective-C headers. A completeness
+Seventy-nine are Rust and eleven are C, C++, or Objective-C sources. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -51,6 +51,7 @@ import hashlib
 import inspect
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -61,8 +62,10 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
-# design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "9e78c58fbad46dbd16a3c922cccce32b8291fe2d3f48a19b4869a6f687e972db"
+# design amendment when the finished foundation or a mutation binding changes.
+# Release reproducers, hardware probes, counts, and ordinary configuration are
+# deliberately outside this digest.
+FREEZE_SHA256 = "a90d2e9c1e42b01cdcd2338444f5c982e6f0163bb57c9ec38d326e6cef3aefa2"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -83,6 +86,7 @@ INVENTORY_ROOTS = (
     "crates/chelis-python/build.rs",
     "crates/chelis-backend-*/src/**/*.rs",
     "crates/chelis-backend-*/runtime/**/*.h",
+    "crates/chelis-backend-*/runtime/**/*.cpp",
     # A build script is compiled by cargo like any other source and can carry
     # a seam; a root that cannot see it is a closure hole.
     "crates/chelis-backend-*/build.rs",
@@ -93,12 +97,19 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-c/src/blas.rs",
     "crates/chelis-backend-c/src/emit.rs",
     "crates/chelis-backend-c/src/emitted_expr.rs",
+    "crates/chelis-backend-c/src/generated_header.rs",
     "crates/chelis-backend-c/src/host_abi.rs",
     "crates/chelis-backend-c/src/host_abi_tests.rs",
     "crates/chelis-backend-c/src/host_emit.rs",
+    "crates/chelis-backend-c/src/host_emit/entry.rs",
+    "crates/chelis-backend-c/src/host_emit/entry_walk.rs",
+    "crates/chelis-backend-c/src/integer_float.rs",
     "crates/chelis-backend-c/src/lib.rs",
     "crates/chelis-backend-c/src/memory.rs",
     "crates/chelis-backend-c/src/toolchain.rs",
+    "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
+    "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
+    "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
     "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
     "crates/chelis-backend-hip/src/blas.rs",
     "crates/chelis-backend-hip/src/emit.rs",
@@ -114,6 +125,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-metal/src/kernels.rs",
     "crates/chelis-backend-metal/src/lib.rs",
     "crates/chelis-ir/src/analysis.rs",
+    "crates/chelis-ir/src/anonymous_dims.rs",
     "crates/chelis-ir/src/axis_sources.rs",
     "crates/chelis-ir/src/capacity_key.rs",
     "crates/chelis-ir/src/dag.rs",
@@ -121,10 +133,13 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/fuse.rs",
     "crates/chelis-ir/src/grad.rs",
     "crates/chelis-ir/src/host.rs",
+    "crates/chelis-ir/src/host/signature_entry.rs",
+    "crates/chelis-ir/src/host/staged.rs",
     "crates/chelis-ir/src/host_type_state.rs",
     "crates/chelis-ir/src/lib.rs",
     "crates/chelis-ir/src/load_store_name.rs",
     "crates/chelis-ir/src/lower.rs",
+    "crates/chelis-ir/src/lowering_trace.rs",
     "crates/chelis-ir/src/optimize.rs",
     "crates/chelis-ir/src/ownership/classify.rs",
     "crates/chelis-ir/src/ownership/error.rs",
@@ -143,19 +158,29 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/tier2.rs",
     "crates/chelis-ir/src/verify.rs",
     "crates/chelis-ir/src/vmap.rs",
+    "crates/chelis-python/src/compiler_json.rs",
+    "crates/chelis-python/src/dlpack.rs",
     "crates/chelis-python/src/lib.rs",
+    "crates/chelis-python/src/native_tensor.rs",
+    "crates/chelis-python/src/source_json.rs",
+    "crates/chelis-runtime/build.rs",
     "crates/chelis-runtime/include/chelis_blas.h",
     "crates/chelis-runtime/include/chelis_math.h",
     "crates/chelis-runtime/include/chelis_runtime.h",
     "crates/chelis-runtime/include/chelis_runtime_dtype.h",
+    "crates/chelis-runtime/include/chelis_runtime_views.h",
     "crates/chelis-runtime/include/chelis_simd.h",
+    "crates/chelis-runtime/src/build_record.rs",
     "crates/chelis-runtime/src/decimal_parse.rs",
     "crates/chelis-runtime/src/dtype_header.rs",
     "crates/chelis-runtime/src/element.rs",
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
+    "crates/chelis-runtime/src/list.rs",
+    "crates/chelis-runtime/src/metadata.rs",
     "crates/chelis-runtime/src/ownership_ledger.rs",
+    "crates/chelis-runtime/src/public_headers.rs",
     "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
     "crates/chelis-vocab/src/lib.rs",)
 
@@ -179,6 +204,221 @@ CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
 CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
 ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
+METADATA_OWNER = "crates/chelis-runtime/src/metadata.rs"
+METADATA_FINAL_WIDTH_OWNERS = ("ElementCount::bytes", "ElementCount::scratch_len")
+C_INDEX_PROJECTION_OWNERS = (
+    ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
+    ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
+)
+TYPED_NONNUMERIC_BACKEND_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_compare",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_logical",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_where",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_where",
+    ),
+    # chelis#1464 / [05-OP-68]: the guarded abort reads its condition as the
+    # Bool stored bits it is -- `const uint8_t*` compared against zero -- and
+    # carries the fallback through `emit_realize`. Both spellings are the same
+    # typed-nonnumeric final forms `emit_where` already registers, for the same
+    # reason: no numeric interpretation is placed on either operand.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_guarded_fail",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_guarded_fail",
+    ),
+    # chelis#2413 / spec/10 section 3.2: a node's activation is a Bool node,
+    # and a checking node reads it as the Bool stored bits it is, compared
+    # against zero: once for a rank-0 activation, once per row for a per-row
+    # one (`emit_activation_gate`, `open_element_loop`), and any row for a
+    # local extent claim's carrier (`emit_local_dim_guards_matching`). The
+    # same typed-nonnumeric final forms `emit_where` and `emit_guarded_fail`
+    # register, for the same reason: no numeric interpretation is placed on
+    # the activation.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_activation_gate",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_activation_gate",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::open_element_loop",
+    ),
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "load-store-template",
+        "CEmitter::emit_local_dim_guards_matching",
+    ),
+    (
+        "crates/chelis-backend-hip/src/emit.rs",
+        "backend-element-spelling",
+        "HipEmitter::comparison_c_type",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "REDUCED_FLOAT_COMPARISON_HELPERS",
+    ),
+)
+EXACT_REDUCTION_BACKEND_FINAL_FORMS = (
+    # chelis#1281: the lowered mean guard observes the exact divisor storage
+    # selected by [05-OP-11], including explicit f16/bf16 decoding, before
+    # division can turn an empty runtime domain into NaN.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_mean_nonempty_guard",
+    ),
+    # chelis#1281: max/min reduction selection is governed by [05-OP-12..13].
+    # The owner decodes at the declared arithmetic width but copies the exact
+    # selected source storage bits, preserving first-NaN and tie behavior.
+    (
+        "crates/chelis-backend-c/src/emit.rs",
+        "backend-element-spelling",
+        "CEmitter::emit_reduce_extreme",
+    ),
+)
+# [04-NUM-14], [05-OP-46,49]: closed dtype-directed integer finalization
+# and stored-element expansion. The non-hardware legs and explicit device
+# harnesses below bind these exact identities to positive/negative execution.
+INTEGER_UNARY_BACKEND_FINAL_FORMS = (
+    ("crates/chelis-backend-c/src/integer_float.rs", "backend-element-spelling", "integer_to_float_bits"),
+    ("crates/chelis-backend-hip/src/kernels.rs", "backend-element-spelling", "cast_integer_to_float"),
+    ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_expand"),
+    ("crates/chelis-backend-metal/src/emit.rs", "backend-element-spelling", "Emitter < 'plan >::emit_integer_float_cast"),
+)
+UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "NUMERIC_DEVICE_HELPERS",
+    ),
+    # chelis#2120: the C host lane's uniform draw. Its f32/f64 element
+    # spellings and its store loop are exact final forms under the same
+    # [05-OP-8] authority as the device sampler above: the per-dtype
+    # arithmetic width is the one the atom fixes, the bounds carry the
+    # atom's exact f32 narrowing, and the loop stores one sampled element
+    # per flat index. Registered here rather than carried as inventory
+    # debt, because a new row must reach a final authority class.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "HostEmitter < 'a >::assign_uniform_like",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "HostEmitter < 'a >::assign_uniform_like",
+    ),
+)
+DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "binary_elementwise_typed",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "backend-element-spelling",
+        "fused_reduced_step_lines",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "load-store-template",
+        "binary_extrema_reduced",
+    ),
+    (
+        "crates/chelis-backend-hip/src/kernels.rs",
+        "load-store-template",
+        "extrema_adjoint_reduced",
+    ),
+)
+UTF8_STRING_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "backend-element-spelling",
+        "runtime_string_literal",
+    ),
+    (
+        "crates/chelis-runtime/include/chelis_runtime.h",
+        "raw-element-pointer",
+        "chelis_string_from_utf8",
+    ),
+)
+RESULT_CLAIM_METADATA_FINAL_FORMS = (
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_claim_checks",
+    ),
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_host_result_interface_origin_support",
+    ),
+)
+PHASE2_FINAL_FORMS = (
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::data"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::dtype"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::ownership"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::rank"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::reserved"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::shape"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "fixed-rank-metadata", "chelis_gpu_tensor::reserved"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "narrow-metadata", "chelis_gpu_tensor::rank"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "raw-element-pointer", "chelis_gpu_tensor::shape"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "raw-element-pointer", "chelis_gpu_tensor::strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "canonical_plan"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_clone"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_copy_from_host"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_copy_to_host"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_import"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "array_preflight"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "canonical_strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "tagged_array"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "width-arithmetic", "array_preflight"),
+    ("crates/chelis-backend-hip/src/emit.rs", "backend-element-spelling", "HipEmitter::tagged_i64"),
+    ("crates/chelis-backend-hip/src/emit.rs", "width-arithmetic", "HipEmitter::collect_kernels"),
+    ("crates/chelis-backend-hip/src/emit.rs", "width-arithmetic", "HipEmitter::kernel_source_for_op"),
+    ("crates/chelis-python/src/lib.rs", "raw-element-pointer", "HipGetDeviceFn"),
+    ("crates/chelis-python/src/lib.rs", "width-arithmetic", "cpu_input_tensor"),
+    ("crates/chelis-python/src/lib.rs", "width-arithmetic", "gpu_input_tensor"),
+    ("crates/chelis-python/src/native_tensor.rs", "direct-data-access", "ValidatedTensor::adopt"),
+    ("crates/chelis-python/src/native_tensor.rs", "direct-data-access", "ValidatedTensor::data"),
+    ("crates/chelis-python/src/native_tensor.rs", "width-arithmetic", "ValidatedTensor::adopt"),
+    ("crates/chelis-runtime/include/chelis_runtime.h", "raw-element-pointer", "chelis_metadata_plan_shape"),
+    ("crates/chelis-runtime/include/chelis_runtime.h", "raw-element-pointer", "chelis_metadata_plan_strides"),
+    ("crates/chelis-runtime/src/lib.rs", "raw-element-pointer", "chelis_metadata_plan_shape"),
+    ("crates/chelis-runtime/src/lib.rs", "raw-element-pointer", "chelis_metadata_plan_strides"),
+)
 ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for f64", "ElementStorage for f32",
     "ElementStorage for F16Bits", "ElementStorage for Bf16Bits",
@@ -206,7 +446,7 @@ VOCAB_FINAL_CONTRACT_OWNERS = (
 
 
 def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
-    """Exact owners backed by the capacity, vocabulary, and element contracts."""
+    """Exact owners backed by the capacity, vocabulary, element, and metadata contracts."""
 
     return (
         kind == "exact-capacity-arithmetic"
@@ -224,6 +464,29 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
             (kind == "dtype-contract" and owner in ELEMENT_FINAL_CONTRACT_OWNERS)
             or (kind == "width-arithmetic" and owner == "assert_registration")
         )
+    ) or (
+        path == METADATA_OWNER
+        and kind == "width-arithmetic"
+        and owner in METADATA_FINAL_WIDTH_OWNERS
+    ) or (
+        kind == "backend-element-spelling"
+        and (path, owner) in C_INDEX_PROJECTION_OWNERS
+    ) or (
+        (path, kind, owner) in TYPED_NONNUMERIC_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in EXACT_REDUCTION_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in INTEGER_UNARY_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in UTF8_STRING_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in RESULT_CLAIM_METADATA_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in PHASE2_FINAL_FORMS
     )
 
 
@@ -509,9 +772,15 @@ def _deletion_phase(kind: str, path: str) -> int:
     return 3
 
 
-def _freeze_digest(rows: Sequence[dict[str, object]], manifest: dict[str, object]) -> str:
+def _freeze_digest(
+    rows: Sequence[dict[str, object]],
+    source_inventory: dict[str, object],
+) -> str:
     payload = json.dumps(
-        {"coverage_manifest": manifest, "foundation_rows": rows},
+        {
+            "foundation_rows": rows,
+            "source_inventory": source_inventory,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -570,8 +839,63 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
     ]
 
 
-def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str, object]:
-    probes = phase0_mutation_probes() if probes is None else probes
+def frozen_mutation_rows(
+    probes: Sequence[MutationProbe],
+) -> list[dict[str, object]]:
+    """Freeze the complete mutation contract, including rejection obligations."""
+
+    return mutation_manifest(probes)
+
+
+def _validate_frozen_mutation_contract(
+    source_inventory: dict[str, object],
+    probes: Sequence[MutationProbe],
+) -> None:
+    expected = {"mutations": frozen_mutation_rows(probes)}
+    if source_inventory != expected:
+        raise OracleFailure(
+            "current Phase 0 probes do not match the frozen mutation contract"
+        )
+
+
+def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
+    rows = [
+        *PHASE2_FINAL_FORMS,
+        *((path, "backend-element-spelling", owner) for path, owner in C_INDEX_PROJECTION_OWNERS),
+        *TYPED_NONNUMERIC_BACKEND_FINAL_FORMS,
+        *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
+        *INTEGER_UNARY_BACKEND_FINAL_FORMS,
+        *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
+        *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
+        *UTF8_STRING_FINAL_FORMS,
+        *RESULT_CLAIM_METADATA_FINAL_FORMS,
+        *((METADATA_OWNER, "width-arithmetic", owner) for owner in METADATA_FINAL_WIDTH_OWNERS),
+        *((ELEMENT_OWNER, "dtype-contract", owner) for owner in ELEMENT_FINAL_CONTRACT_OWNERS),
+        (ELEMENT_OWNER, "width-arithmetic", "assert_registration"),
+        *((VOCAB_OWNER, "dtype-contract", owner) for owner in VOCAB_FINAL_CONTRACT_OWNERS),
+        (VOCAB_OWNER, "width-arithmetic", "DTypeContract::byte_width"),
+        (
+            CAPACITY_KEY_OWNER,
+            "exact-capacity-arithmetic",
+            CAPACITY_KEY_EXACT_PRODUCT_OWNER,
+        ),
+    ]
+    by_path: dict[str, list[dict[str, str]]] = {}
+    for path, kind, owner in rows:
+        by_path.setdefault(path, []).append({"kind": kind, "owner": owner})
+    return {
+        path: sorted(path_rows, key=lambda row: (row["kind"], row["owner"]))
+        for path, path_rows in sorted(by_path.items())
+    }
+
+
+def _coverage_manifest_from_configuration(
+    probes: Sequence[MutationProbe],
+    legs: Sequence[OracleLeg],
+    hardware_probes: Sequence[dict[str, str]],
+) -> dict[str, object]:
+    """Project the exact executable Phase 0 configuration for review."""
+
     return {
         "source_inventory": {
             "artifact": "the frozen INVENTORY_SOURCES file list",
@@ -591,30 +915,14 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             },
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
-            "owner_module_final_forms": {
-                ELEMENT_OWNER: [
-                    {"kind": "dtype-contract", "owner": owner}
-                    for owner in ELEMENT_FINAL_CONTRACT_OWNERS
-                ] + [{"kind": "width-arithmetic", "owner": "assert_registration"}],
-                VOCAB_OWNER: [
-                    {"kind": "dtype-contract", "owner": owner}
-                    for owner in VOCAB_FINAL_CONTRACT_OWNERS
-                ]
-                + [{"kind": "width-arithmetic", "owner": "DTypeContract::byte_width"}],
-                CAPACITY_KEY_OWNER: [
-                    {
-                        "kind": "exact-capacity-arithmetic",
-                        "owner": CAPACITY_KEY_EXACT_PRODUCT_OWNER,
-                    }
-                ],
-            },
+            "owner_module_final_forms": _owner_module_final_forms_manifest(),
             "command": PHASE0_COMMAND,
             "mutations": mutation_manifest(probes),
         },
         "release_reproducers": [
-            {"name": leg.name, "command": " ".join(leg.argv)} for leg in phase0_legs()
+            {"name": leg.name, "command": " ".join(leg.argv)} for leg in legs
         ],
-        "hardware_probes": list(hardware_probe_manifest()),
+        "hardware_probes": list(hardware_probes),
         "hardware_disposition": (
             "manual-required rows are harness registrations, not executed receipts"
         ),
@@ -622,21 +930,125 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
     }
 
 
-def build_foundation_baseline(rows: Sequence[InventoryRow]) -> dict[str, object]:
-    foundation = [row.to_baseline_dict() for row in rows]
-    manifest = coverage_manifest()
-    return {
-        "schema_version": 4,
-        "freeze_sha256": _freeze_digest(foundation, manifest),
-        "foundation_rows": foundation,
-        "active_debt": [row.to_active_dict() for row in rows],
-        "coverage_manifest": manifest,
+def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str, object]:
+    """Return the current code-derived coverage configuration.
+
+    This object is review content, not a frozen artifact. Runtime validation
+    compares it with the exact mutations, reproducers, and hardware
+    registrations captured for the current run.
+    """
+
+    return _coverage_manifest_from_configuration(
+        phase0_mutation_probes() if probes is None else probes,
+        phase0_legs(),
+        hardware_probe_manifest(),
+    )
+
+
+def _validate_coverage_manifest(
+    manifest: dict[str, object],
+    *,
+    probes: Sequence[MutationProbe],
+    legs: Sequence[OracleLeg],
+    hardware_probes: Sequence[dict[str, str]],
+) -> None:
+    expected = _coverage_manifest_from_configuration(probes, legs, hardware_probes)
+    if manifest != expected:
+        raise OracleFailure(
+            "Phase 0 coverage manifest drifted from the code-derived configuration"
+        )
+
+
+def build_foundation_baseline(
+    rows: Sequence[InventoryRow],
+    *,
+    foundation_rows: Sequence[dict[str, object]] | None = None,
+    source_inventory: dict[str, object],
+    active_debt_rows: Sequence[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Build the shrink-only ledger without forgetting reviewed contracts.
+
+    Existing foundation rows remain review-bearing even after their live debt
+    disappears. A new identity or changed deletion phase enters the foundation
+    and therefore changes the manual digest. The supplied source inventory is
+    copied exactly; regeneration must never derive reviewed mutation rows from
+    whatever implementation happens to be current.
+    """
+
+    foundation = [
+        dict(row) for row in (() if foundation_rows is None else foundation_rows)
+    ]
+    stored_active = [
+        dict(row) for row in (() if active_debt_rows is None else active_debt_rows)
+    ]
+    preexisting_foundation_ids = {
+        str(row["identity"]) for row in foundation
     }
+    preexisting_active_ids = {
+        str(row["identity"]) for row in stored_active
+    }
+    observed_ids = {row.identity for row in rows}
+    reactivated = sorted(
+        observed_ids & (preexisting_foundation_ids - preexisting_active_ids)
+    )
+    if reactivated:
+        raise OracleFailure(
+            "retired Phase 0 identity reappeared and cannot be restored by regeneration: "
+            + ", ".join(reactivated[:5])
+        )
+
+    foundation_index = {
+        str(row["identity"]): index for index, row in enumerate(foundation)
+    }
+    for row in rows:
+        current = row.to_baseline_dict()
+        index = foundation_index.get(row.identity)
+        if index is None:
+            foundation_index[row.identity] = len(foundation)
+            foundation.append(current)
+        else:
+            foundation[index] = current
+
+    current_by_id = {row.identity: row for row in rows}
+    active: list[dict[str, object]] = []
+    active_ids: set[str] = set()
+    for stored in stored_active:
+        identity = str(stored["identity"])
+        current = current_by_id.get(identity)
+        if current is not None:
+            active.append(current.to_active_dict())
+            active_ids.add(identity)
+    for row in rows:
+        if row.identity not in active_ids:
+            active.append(row.to_active_dict())
+            active_ids.add(row.identity)
+
+    return {
+        "schema_version": 7,
+        "freeze_sha256": _freeze_digest(foundation, source_inventory),
+        "source_inventory": json.loads(json.dumps(source_inventory)),
+        "foundation_rows": foundation,
+        "active_debt": active,
+    }
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate JSON keys instead of silently keeping the last value."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OracleFailure(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
 
 
 def load_baseline() -> dict[str, object]:
     try:
-        loaded = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+        loaded = json.loads(
+            BASELINE_PATH.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_json_object,
+        )
     except (OSError, json.JSONDecodeError) as error:
         raise OracleFailure(f"cannot read Phase 0 inventory baseline: {error}") from error
     if not isinstance(loaded, dict):
@@ -644,43 +1056,211 @@ def load_baseline() -> dict[str, object]:
     return loaded
 
 
-def validate_baseline(baseline: dict[str, object], rows: Sequence[InventoryRow]) -> None:
+def _validate_exact_fields(
+    row: object,
+    *,
+    expected: set[str],
+    location: str,
+) -> dict[str, object]:
+    if not isinstance(row, dict):
+        raise OracleFailure(f"{location} must be an object")
+    actual = set(row)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        raise OracleFailure(
+            f"{location} must have exact fields {', '.join(sorted(expected))}; "
+            + "; ".join(details)
+        )
+    return row
+
+
+def _validate_baseline_schema(baseline: object) -> None:
+    """Validate every persisted field before digest or inventory semantics."""
+
+    expected_fields = {
+        "schema_version",
+        "freeze_sha256",
+        "foundation_rows",
+        "source_inventory",
+        "active_debt",
+    }
+    if not isinstance(baseline, dict):
+        raise OracleFailure("Phase 0 inventory baseline must be a JSON object")
+    if set(baseline) != expected_fields:
+        raise OracleFailure(
+            "Phase 0 inventory has unsupported top-level fields: "
+            + ", ".join(sorted(set(baseline) ^ expected_fields))
+        )
+
+    schema_version = baseline["schema_version"]
+    if type(schema_version) is not int or schema_version != 7:
+        raise OracleFailure("schema_version must be the integer 7")
+    freeze_sha256 = baseline["freeze_sha256"]
+    if (
+        not isinstance(freeze_sha256, str)
+        or len(freeze_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in freeze_sha256)
+    ):
+        raise OracleFailure("freeze_sha256 must be a lowercase 64-digit SHA-256")
+
+    foundation = baseline["foundation_rows"]
+    source_inventory = baseline["source_inventory"]
+    active = baseline["active_debt"]
+    if not isinstance(foundation, list):
+        raise OracleFailure("foundation_rows must be a list")
+    source_inventory = _validate_exact_fields(
+        source_inventory,
+        expected={"mutations"},
+        location="source_inventory",
+    )
+    mutations = source_inventory["mutations"]
+    if not isinstance(mutations, list):
+        raise OracleFailure("source_inventory.mutations must be a list")
+    if not isinstance(active, list):
+        raise OracleFailure("active_debt must be a list")
+
+    foundation_ids: list[str] = []
+    for index, untyped_row in enumerate(foundation):
+        location = f"foundation_rows[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "deletion_phase"},
+            location=location,
+        )
+        identity = row["identity"]
+        deletion_phase = row["deletion_phase"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if type(deletion_phase) is not int or deletion_phase not in (1, 2, 3, 4):
+            raise OracleFailure(f"{location}.deletion_phase must be one of 1, 2, 3, 4")
+        foundation_ids.append(identity)
+
+    witness_ids: list[str] = []
+    for index, untyped_row in enumerate(mutations):
+        location = f"source_inventory.mutations[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={
+                "witness_id",
+                "path",
+                "expected_kind",
+                "expected_owners",
+                "implementation_sha256",
+                "expected_failure",
+                "command",
+            },
+            location=location,
+        )
+        witness_id = row["witness_id"]
+        implementation_sha256 = row["implementation_sha256"]
+        expected_failure = _validate_exact_fields(
+            row["expected_failure"],
+            expected={"code", "reason_prefix"},
+            location=f"{location}.expected_failure",
+        )
+        command = row["command"]
+        if not isinstance(witness_id, str) or not witness_id:
+            raise OracleFailure(f"{location}.witness_id must be a nonempty string")
+        for field in ("path", "expected_kind"):
+            if not isinstance(row[field], str) or not row[field]:
+                raise OracleFailure(f"{location}.{field} must be a nonempty string")
+        owners = row["expected_owners"]
+        if not isinstance(owners, list) or any(
+            not isinstance(owner, str) or not owner for owner in owners
+        ):
+            raise OracleFailure(
+                f"{location}.expected_owners must be a list of nonempty strings"
+            )
+        if (
+            not isinstance(implementation_sha256, str)
+            or len(implementation_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in implementation_sha256
+            )
+        ):
+            raise OracleFailure(
+                f"{location}.implementation_sha256 must be a lowercase 64-digit SHA-256"
+            )
+        if (
+            not isinstance(expected_failure["code"], str)
+            or not expected_failure["code"]
+        ):
+            raise OracleFailure(
+                f"{location}.expected_failure.code must be a nonempty string"
+            )
+        if (
+            not isinstance(expected_failure["reason_prefix"], str)
+            or not expected_failure["reason_prefix"]
+        ):
+            raise OracleFailure(
+                f"{location}.expected_failure.reason_prefix must be a nonempty string"
+            )
+        if not isinstance(command, str) or not command:
+            raise OracleFailure(f"{location}.command must be a nonempty string")
+        witness_ids.append(witness_id)
+
+    active_ids: list[str] = []
+    for index, untyped_row in enumerate(active):
+        location = f"active_debt[{index}]"
+        row = _validate_exact_fields(
+            untyped_row,
+            expected={"identity", "sample"},
+            location=location,
+        )
+        identity = row["identity"]
+        sample = row["sample"]
+        if not isinstance(identity, str):
+            raise OracleFailure(f"{location}.identity must be a string")
+        if not isinstance(sample, str):
+            raise OracleFailure(f"{location}.sample must be a string")
+        active_ids.append(identity)
+
+    if len(foundation_ids) != len(set(foundation_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 foundation_rows")
+    if len(witness_ids) != len(set(witness_ids)):
+        raise OracleFailure(
+            "duplicate witness_id in Phase 0 source_inventory.mutations"
+        )
+    if len(active_ids) != len(set(active_ids)):
+        raise OracleFailure("duplicate identity in Phase 0 active_debt")
+
+
+def validate_baseline(
+    baseline: dict[str, object],
+    rows: Sequence[InventoryRow],
+    *,
+    probes: Sequence[MutationProbe] | None = None,
+) -> None:
     """Check the derived inventory against the shrink-only frozen ledger.
 
-    The digest binds the immutable foundation and the executable coverage
-    manifest together. The active-debt list is deliberately outside it so it can
-    shrink; what stops it growing is that every active identity must already be
-    in the reviewed foundation.
+    The digest binds the immutable foundation and exact mutation contracts.
+    The active-debt list is deliberately outside it so it can shrink; what
+    stops it growing is that every active identity must already be in the
+    reviewed foundation.
     """
 
-    if baseline.get("schema_version") != 4:
-        raise OracleFailure("unsupported Phase 0 inventory schema")
-    manifest = baseline.get("coverage_manifest")
-    if not isinstance(manifest, dict):
-        raise OracleFailure("coverage_manifest must be an object")
-    if manifest != coverage_manifest():
-        raise OracleFailure("Phase 0 coverage manifest drifted")
-    foundation = baseline.get("foundation_rows")
-    active = baseline.get("active_debt")
-    if not isinstance(foundation, list) or not all(isinstance(row, dict) for row in foundation):
-        raise OracleFailure("foundation_rows must be a list of objects")
-    if not isinstance(active, list) or not all(isinstance(row, dict) for row in active):
-        raise OracleFailure("active_debt must be a list of objects")
+    _validate_baseline_schema(baseline)
+    foundation = baseline["foundation_rows"]
+    source_inventory = baseline["source_inventory"]
+    active = baseline["active_debt"]
 
-    computed_digest = _freeze_digest(foundation, manifest)
+    computed_digest = _freeze_digest(foundation, source_inventory)
     if baseline.get("freeze_sha256") != computed_digest or computed_digest != FREEZE_SHA256:
         raise OracleFailure("Phase 0 freeze digest does not match the reviewed contract")
+    _validate_frozen_mutation_contract(
+        source_inventory,
+        phase0_mutation_probes() if probes is None else probes,
+    )
 
     foundation_ids = [row.get("identity") for row in foundation]
     active_ids = [row.get("identity") for row in active]
-    if not all(isinstance(value, str) for value in foundation_ids):
-        raise OracleFailure("every foundation row must have an identity")
-    if not all(isinstance(value, str) for value in active_ids):
-        raise OracleFailure("every active-debt row must have an identity")
-    if len(foundation_ids) != len(set(foundation_ids)):
-        raise OracleFailure("duplicate identity in Phase 0 foundation")
-    if len(active_ids) != len(set(active_ids)):
-        raise OracleFailure("duplicate identity in active transition debt")
 
     foundation_set = set(foundation_ids)
     active_set = set(active_ids)
@@ -810,10 +1390,16 @@ unsafe fn {marker}(tensor: *mut crate::chelis_tensor) -> *mut u8 {{
 
 
 def mutate_incomplete_dtype(source: str) -> str:
-    anchor = "    I16 = 8,\n}"
+    # Anchor on the declaration, not on its last variant: appending a dtype is
+    # the change this witness exists for, so a last-variant anchor drifts on
+    # exactly that change.
+    anchor = "pub enum RuntimeDType {\n"
     if source.count(anchor) != 1:
         raise OracleFailure("incomplete-dtype mutation anchor drifted")
-    return source.replace(anchor, "    I16 = 8,\n    Phase0Probe = 127,\n}", 1)
+    tail = source.find("\n}", source.index(anchor))
+    if tail < 0:
+        raise OracleFailure("incomplete-dtype mutation anchor drifted")
+    return source[:tail] + "\n    Phase0Probe = 127," + source[tail:]
 
 
 def mutate_incomplete_arithmetic_repr(source: str) -> str:
@@ -861,6 +1447,17 @@ fn runtime_representation_phase0_byte_width() -> usize {
     )
 
 
+def mutate_metadata_owner_width(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_unchecked_metadata_width",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_unchecked_metadata_width() -> usize {
+    size_of::<f32>()
+}""",
+    )
+
+
 def mutate_normalized_key_arithmetic(source: str) -> str:
     return _append_probe(
         source,
@@ -868,6 +1465,25 @@ def mutate_normalized_key_arithmetic(source: str) -> str:
         """#[allow(dead_code)]
 fn runtime_representation_phase0_saturating_fold(concrete: usize, value: usize) -> usize {
     concrete.saturating_mul(value)
+}""",
+    )
+
+
+def mutate_retired_capacity_normalizer(source: str) -> str:
+    """An old normalizer identity cannot re-enter the shrink-only debt set."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_retired_normalizer",
+        """// runtime_representation_retired_normalizer
+impl DimExpr {
+    pub fn normalized_key(&self) -> usize {
+        match self {
+            Self::Mul(lhs, rhs) => lhs.as_concrete().unwrap_or(usize::MAX)
+                .saturating_mul(rhs.as_concrete().unwrap_or(usize::MAX)),
+            _ => self.as_concrete().unwrap_or(usize::MAX),
+        }
+    }
 }""",
     )
 
@@ -950,7 +1566,7 @@ def mutate_fixed_rank_metadata(source: str) -> str:
 
 
 def mutate_descriptor_field(source: str) -> str:
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_descriptor",
         """typedef struct {
@@ -973,7 +1589,7 @@ def mutate_unknown_c_arithmetic_spelling(source: str) -> str:
     than enter as an unflagged row.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_unknown_arithmetic",
         "extern _Float16 *runtime_representation_phase0_unknown_arithmetic(void);",
@@ -1000,7 +1616,7 @@ def mutate_c_public_element_pointer_export(source: str) -> str:
 def mutate_c_body_direct_data_access(source: str) -> str:
     """A new `->data` access inside a function body in a tracked header."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_touch",
         """static inline void runtime_representation_phase0_probe_touch(chelis_gpu_tensor *t) {
@@ -1017,7 +1633,7 @@ def mutate_c_extern_element_data(source: str) -> str:
     form that the paren-keyed naming rule could already see.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_table",
         "extern double *runtime_representation_phase0_probe_table;",
@@ -1031,7 +1647,7 @@ def mutate_c_non_descriptor_struct_field(source: str) -> str:
     do not apply to it.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pair",
         """typedef struct {
@@ -1048,7 +1664,7 @@ def mutate_c_tagged_struct_field(source: str) -> str:
     let this form carry a `float *` past it without a row or an error.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pool",
         """struct runtime_representation_phase0_probe_pool {
@@ -1060,7 +1676,7 @@ typedef struct runtime_representation_phase0_probe_pool runtime_representation_p
 
 
 def mutate_c_union_field(source: str) -> str:
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_slot",
         """union runtime_representation_phase0_probe_slot {
@@ -1073,7 +1689,7 @@ def mutate_c_union_field(source: str) -> str:
 def mutate_c_macro_typed_carrier(source: str) -> str:
     """A carrier whose element type only a preprocessor can see."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_slab",
         """#define RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM float
@@ -1084,7 +1700,7 @@ RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM *runtime_representation_phase0_probe_sl
 def mutate_c_multi_declarator_data(source: str) -> str:
     """Two declarators in one declaration are two owners, not one."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pair_a",
         "extern float *runtime_representation_phase0_probe_pair_a, "
@@ -1105,7 +1721,7 @@ def mutate_c_enum_width(source: str) -> str:
 def mutate_objc_element_pointer_parameter(source: str) -> str:
     """An Objective-C header's C function carrying an element pointer."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_fill",
         """static inline void runtime_representation_phase0_probe_fill(
@@ -1154,7 +1770,7 @@ extern float *runtime_representation_phase0_probe_cfg;
 def mutate_objc_method_carrier(source: str) -> str:
     """An Objective-C method whose result is an element pointer."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "RuntimeRepresentationPhase0Probe",
         """@interface RuntimeRepresentationPhase0Probe : NSObject
@@ -1167,7 +1783,7 @@ def mutate_c_unclassified_cast_spelling(source: str) -> str:
     """An arithmetic spelling no vocabulary lists, in a cast rather than a
     declaration. The inverted type-word rule holds in expression position."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_cast",
         """static inline void runtime_representation_phase0_probe_cast(void *p) {
@@ -1179,7 +1795,7 @@ def mutate_c_unclassified_cast_spelling(source: str) -> str:
 def mutate_c_pointer_to_element_array(source: str) -> str:
     """A pointer to an array of elements, through a declarator group."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_rows",
         "void runtime_representation_phase0_probe_rows(float (*rows)[4]);",
@@ -1218,7 +1834,7 @@ def mutate_objc_block_parameter(source: str) -> str:
     """A block literal whose parameter is an element pointer, handed to an
     `id`, so no enclosing declaration's type reveals it."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_block",
         """static inline id runtime_representation_phase0_probe_block(void) {
@@ -1230,7 +1846,7 @@ def mutate_objc_block_parameter(source: str) -> str:
 def mutate_c_sizeof_in_array_bound(source: str) -> str:
     """A width computed in a declared type rather than in a statement."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_scratch",
         "static unsigned char runtime_representation_phase0_probe_scratch[sizeof(double) * 4];",
@@ -1254,7 +1870,7 @@ def mutate_c_int8_element_pointer(source: str) -> str:
     """An 8-bit element pointer, whose typedef resolves to a `char` spelling
     that names no element; the written spelling has to be read first."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_i8",
         "extern int8_t *runtime_representation_phase0_probe_i8;",
@@ -1332,6 +1948,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
         _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_retired_capacity_normalizer,
+               expected_owners=("DimExpr::normalized_key",)),
         _probe(
             "saturating-capacity-fold",
             CAPACITY_KEY_OWNER,
@@ -1349,6 +1967,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         _probe("raw-element-pointer", "crates/chelis-runtime/src/ieee_narrow.rs", mutate_raw_element_pointer),
         _probe("width-arithmetic", "crates/chelis-runtime/src/format_shortest.rs", mutate_width_arithmetic),
+        _probe("width-arithmetic", METADATA_OWNER, mutate_metadata_owner_width),
         _probe(
             "unknown-arithmetic-spelling",
             "crates/chelis-runtime/include/chelis_simd.h",
@@ -1592,8 +2211,10 @@ def _expect_mutation_rejected(probe: MutationProbe) -> None:
             raise OracleFailure(f"{probe.witness_id} mutation was silently accepted")
 
 
-def run_phase0_mutations() -> None:
-    probes = phase0_mutation_probes()
+def run_phase0_mutations(
+    probes: Sequence[MutationProbe] | None = None,
+) -> None:
+    probes = phase0_mutation_probes() if probes is None else probes
     print(f"+ controlled mutations: {len(probes)}", flush=True)
     for probe in probes:
         _expect_mutation_rejected(probe)
@@ -1605,6 +2226,244 @@ def run_phase0_mutations() -> None:
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
+        *(OracleLeg(
+            f"checked host metadata {profile} contract",
+            (
+                "cargo", "nextest", "run", *flags, "-p", "chelis-runtime",
+                "--features", "ownership-ledger",
+                "--test", "checked_metadata", "--test", "metadata_compile",
+                "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
+                "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_movement_plans", "--test", "checked_c_affine",
+                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal", "--test", "checked_c_alloc_like",
+                "--test", "exact_tagged_c_abi",
+                "--test", "op33_empty_tensor_axis_decomposition",
+                "--test", "op33_tensor_validation",
+                "--test", "op33_legal_domain_matrix", "--test", "dim_carrier_int64",
+                "--test", "tensor_repurpose", "--test", "tensor_write_guard",
+            ),
+        ) for profile, flags in (("debug", ()), ("release", ("--release",)))),
+        OracleLeg(
+            "checked C snapshot delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata", "--test", "checked_c_snapshot_metadata"),
+        ),
+        OracleLeg(
+            "checked shape observation before storage submission execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile", "-E", "test(checked_snapshot_)"),
+        ),
+        OracleLeg(
+            "checked vmap shape observation on its shifted axis",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "-E", "test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"),
+        ),
+        OracleLeg(
+            "selected-result C claim and aggregate-interface provenance metadata execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-cli",
+                "--test", "issue_1771_callable_selected_result_claims", "-E",
+                "test(c_aggregate_interface_ingress_stamps_each_tensor_field_as_load) | "
+                "test(c_direct_list_skip_retains_selected_tail_producer) | "
+                "test(c_list_and_adt_projection_retains_selected_producer) | "
+                "test(c_nested_list_pattern_retains_selected_tail_producer) | "
+                "test(c_option_projection_distinguishes_local_and_formal_origins) | "
+                "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
+        ),
+        OracleLeg(
+            "checked C reduction delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
+        ),
+        OracleLeg(
+            "integer-to-float exact finalization execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib", "-E", "test(integer_float::tests::)"),
+        ),
+        OracleLeg(
+            "integer unary device lowering and trap controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-hip", "-p", "chelis-backend-metal",
+             "--test", "integer_abs", "--test", "integer_abs_guard"),
+        ),
+        OracleLeg(
+            "exact C reduction stored-width and runtime-empty execution",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-backend-c",
+                "--test",
+                "issue_1281_exact_reductions",
+            ),
+        ),
+        OracleLeg(
+            "checked C reductions and Count optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "--test", "fused_compile", "-E", "binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)"),
+        ),
+        OracleLeg(
+            "checked C reduction example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "--test", "issue_1294_standard_lowerings", "-E",
+             "test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch delegation and lifetime controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_json_scratch"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch recursive and empty execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"),
+        ),
+        OracleLeg(
+            "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--features", "ownership-ledger",
+             "--test", "issue_1314_json_bigint_ledger",
+             "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
+        ),
+        OracleLeg(
+            "checked C literal ingress delegation controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_host_metadata"),
+        ),
+        OracleLeg(
+            "checked C literal storage optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_literals_)"),
+        ),
+        OracleLeg(
+            "checked C window delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_window"),
+        ),
+        OracleLeg(
+            "checked C window geometry and gradient optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "--test", "issue_254_reduce_window_emit", "-E", "test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)"),
+        ),
+        OracleLeg(
+            "checked C window executable example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "-E", "test(parity_checked_window_geometry) | test(parity_corpus_is_complete)"),
+        ),
+        OracleLeg(
+            "checked C BLAS submission delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_blas"),
+        ),
+        OracleLeg(
+            "checked C BLAS optimized submission and vendor prototype execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_blas_) | test(blas_vendor_dimension_contract)"),
+        ),
+        OracleLeg(
+            "checked C sparse delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_sparse"),
+        ),
+        OracleLeg(
+            "checked C sparse optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_sparse_)"),
+        ),
+        OracleLeg(
+            "checked C sparse host summary execution and rejection",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "cross_library_sparse_summaries",
+             "--test", "parity", "-E", "binary(cross_library_sparse_summaries) | test(parity_checked_sparse_axes)"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cohort and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_indexing"),
+        ),
+        OracleLeg(
+            "typed nonnumeric IR semantics, verifier, optimizer, vmap, and AD",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-ir",
+                "--test", "logical_bool_semantics",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric IR release semantics and AD",
+            (
+                "cargo", "nextest", "run", "--release", "-p", "chelis-ir",
+                "--test", "logical_bool_semantics",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric C exact dtype and stored-bit execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-c",
+                "--test", "exec_compile", "-E",
+                "test(typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype) | "
+                "test(typed_logical_c_truth_tables_are_bool8) | "
+                "test(typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype) | "
+                "test(typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits)",
+            ),
+        ),
+        OracleLeg(
+            "typed nonnumeric HIP source and dtype admission controls",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-hip",
+                "--test", "logical_comparison_where",
+            ),
+        ),
+        OracleLeg(
+            "exact direct arithmetic HIP source and dtype admission controls",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-backend-hip",
+                "--test", "codegen_structure", "-E",
+                "test(direct_extrema_and_adjoint_emit_bit_preserving_kernels) | "
+                "test(direct_checked_signed_sub_emits_exact_always_on_trap_channel) | "
+                "test(direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection) | "
+                "test(direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels) | "
+                "test(direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization)",
+            ),
+        ),
+        OracleLeg(
+            "checked C shared indexing optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_indexing_)"),
+        ),
+        OracleLeg(
+            "checked C movement delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_movement", "--test", "checked_c_movement_plans"),
+        ),
+        OracleLeg(
+            "movement local extent CLI parity and primitive diagnostics",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_616_runtime_movement_c_parity"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards",
+            ("cargo", "nextest", "run", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards in release",
+            ("cargo", "nextest", "run", "--release", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
+        ),
+        OracleLeg(
+            "checked C movement optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"),
+        ),
+        OracleLeg(
+            "checked C shared indexing dtype dispatch and storage reuse",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "--test", "host_emit_dtype_dispatch", "--test", "dtype_matrix_bf16_f16",
+             "--test", "fused_in_place_exec", "--test", "fused_in_place_forall_alias"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cast behavior and first failure",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_759_checked_cast_default",
+             "--test", "cast_trunc", "--test", "cbackend_cast_memcpy",
+             "--test", "cbackend_cast_arithmetic_composition"),
+        ),
+        OracleLeg(
+            "checked C reshape and shared indexing example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "-E", "test(parity_checked_reshape)"),
+        ),
+        OracleLeg(
+            "checked C DAG reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "-E", "test(checked_c_metadata_dag_reshape_executes_under_ubsan)"),
+        ),
+        OracleLeg(
+            "checked C host reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "cbackend_reshape_memcpy"),
+        ),
         OracleLeg(
             "sealed runtime element contract",
             ("cargo", "nextest", "run", "--release", "-p", "chelis-runtime", "--test", "element_contract"),
@@ -1628,13 +2487,12 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "opaque capacity key public surface",
             ("cargo", "test", "--release", "-p", "chelis-ir", "--doc", "capacity_key"),
         ),
-        # [#888] has three witnesses at two levels: the key-level collision in
-        # the IR, and the planner-level consequence in each backend that
-        # consumes the key. The two planners carry the same defect in verbatim
-        # copies, so one witness would understate the class. All three must
-        # INVERT when Phase 1's exact CapacityKey lands, never be deleted.
+        # The private CapacityKey leg above inverts #888's original key-level
+        # witness. These shared-plan and backend-adapter legs preserve its
+        # allocation consequences without retaining a lossy production API.
+        # Finite DimExpr projections must reject overflow in release too.
         OracleLeg(
-            "capacity collision key-level release reproducer",
+            "exact shared capacity and finite projection release controls",
             (
                 "cargo",
                 "nextest",
@@ -1644,6 +2502,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "chelis-ir",
                 "--test",
                 "issue_888_capacity_collision",
+                "--test",
+                "dim_expr_evaluation",
             ),
         ),
         OracleLeg(
@@ -1731,6 +2591,39 @@ def hardware_probe_manifest() -> tuple[dict[str, str], ...]:
             ),
         },
         {
+            "lane": "hip-typed-nonnumeric",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip "
+                "--test logical_comparison_where_gpu "
+                "-- --ignored --test-threads=1"
+            ),
+        },
+        {
+            "lane": "hip-direct-arithmetic",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness "
+                "direct_ -- --ignored --test-threads=1 "
+                "--skip direct_relu_and_adjoint_preserve_exact_bits_at_every_float_width_on_gpu"
+            ),
+        },
+        {
+            "lane": "hip-integer-unary",
+            "status": "manual-required",
+            "command": (
+                "scripts/hip_test.py -p chelis-backend-hip --test integer_abs "
+                "-- --ignored --test-threads=1"
+            ),
+        },
+        {
+            "lane": "metal-integer-unary",
+            "status": "manual-required",
+            "command": (
+                "cargo test -p chelis-backend-metal --test integer_abs_guard -- --ignored --test-threads=1"
+            ),
+        },
+        {
             "lane": "metal",
             "status": "manual-required",
             "command": (
@@ -1749,10 +2642,19 @@ def _run_leg(leg: OracleLeg) -> None:
 
 
 def run_phase0(*, run_mutations: bool = True) -> None:
+    probes = phase0_mutation_probes()
+    legs = phase0_legs()
+    hardware_probes = hardware_probe_manifest()
+    _validate_coverage_manifest(
+        coverage_manifest(),
+        probes=probes,
+        legs=legs,
+        hardware_probes=hardware_probes,
+    )
     validate_phase0_inventory()
     if run_mutations:
-        run_phase0_mutations()
-    for leg in phase0_legs():
+        run_phase0_mutations(probes)
+    for leg in legs:
         _run_leg(leg)
     print("RUNTIME REPRESENTATION PHASE 0: PASS")
 
@@ -1762,12 +2664,33 @@ def regenerate() -> None:
 
     Regeneration cannot bless growth: it rewrites the artifact, and the reviewed
     `FREEZE_SHA256` in this file still has to be moved by hand, which is the
-    design's B1 freeze move rather than a regeneration step.
+    design's B1 freeze move rather than a regeneration step. It also preserves
+    the reviewed mutation rows and refuses to run when current probe code has
+    drifted from them.
     """
 
-    baseline = build_foundation_baseline(inventory_rows(REPO_ROOT))
+    existing = load_baseline()
+    _validate_baseline_schema(existing)
+    foundation = existing["foundation_rows"]
+    source_inventory = existing["source_inventory"]
+    active_debt = existing["active_debt"]
+    _validate_frozen_mutation_contract(
+        source_inventory,
+        phase0_mutation_probes(),
+    )
+    baseline = build_foundation_baseline(
+        inventory_rows(REPO_ROOT),
+        foundation_rows=foundation,
+        source_inventory=source_inventory,
+        active_debt_rows=active_debt,
+    )
     BASELINE_PATH.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {len(baseline['foundation_rows'])} rows to {BASELINE_PATH}")
+    print(
+        f"wrote {len(baseline['active_debt'])} active rows with "
+        f"{len(baseline['foundation_rows'])} foundation rows and "
+        f"{len(baseline['source_inventory']['mutations'])} frozen mutations "
+        f"to {BASELINE_PATH}"
+    )
     print(f"freeze_sha256 = {baseline['freeze_sha256']}")
 
 
@@ -1789,8 +2712,24 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if args.phase == 2:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.runtime_representation_phase2 import run
+        try:
+            run()
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            raise OracleFailure(str(error)) from error
+        return 0
+    if args.phase == 1:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.runtime_representation_phase1 import run
+        try:
+            run()
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            raise OracleFailure(str(error)) from error
+        return 0
     if args.phase != 0:
-        raise OracleFailure("only runtime-representation Phase 0 is implemented")
+        raise OracleFailure("only runtime-representation Phases 0, 1, and 2 are implemented")
     if args.regenerate:
         regenerate()
         return 0
@@ -1802,4 +2741,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except OracleFailure as error:
-        raise SystemExit(f"RUNTIME REPRESENTATION PHASE 0: FAIL: {error}") from error
+        phase = sys.argv[sys.argv.index("--phase") + 1] if "--phase" in sys.argv else "?"
+        raise SystemExit(f"RUNTIME REPRESENTATION PHASE {phase}: FAIL: {error}") from error

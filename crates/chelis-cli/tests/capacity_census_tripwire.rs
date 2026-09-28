@@ -15,29 +15,42 @@
 //!    an exact structurally nonnumeric registration, an exact structurally
 //!    recognized tagged transport, or an exact numeric-operation registration
 //!    against its governing normative `[05-OP-N]` atom.
-//! 2. Foundation-era legacy dispositions are an immutable exact universe
-//!    which may only shrink. Grandfathers, permanent dispositions, the one-off
-//!    successor override, generic issue citations, and maintainer overrides
-//!    cannot authorize a new or changed identity.
+//! 2. The primary census has no transition authority. Citations,
+//!    grandfathers, permanent dispositions, successor overrides, and
+//!    maintainer overrides cannot authorize any identity.
 //! 3. A removed row is an ABI removal and is 0.19 payload by default
 //!    (`spec/design/remediation_roadmap.md` anti-churn invariant 7).
 //!
 //! This file and the baseline are guard artifacts: editing either to make a
-//! change pass is never the fix. Deferred legs (wire-schema numeric fields,
-//! binding-side raw-dtype parameters) remain typed, fixed manifest entries;
+//! change pass is never the fix. Wire-schema numeric fields and binding-side
+//! raw-dtype parameters have typed, fixed executable manifest entries.
+//! The wire aggregate requires final authority and execution receipts;
 //! relabeling JSON cannot claim an enumerator or mutation oracle exists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Atom, DtypeFamily, Expr, List};
+use chelis_deep::{Atom, Expr};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
+#[path = "../../../tests/support/capacity_census_stdlib_tests.rs"]
+mod stdlib_closure_tests;
+
 #[path = "../../../tests/support/c_lexical.rs"]
 mod c_lexical;
+
+#[path = "../../../tests/support/c_preprocessor.rs"]
+mod c_preprocessor;
+
+#[path = "../../../tests/support/c_include.rs"]
+mod c_include;
+
+#[path = "../../../tests/support/capacity_census_backend_headers.rs"]
+mod backend_headers;
 
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
@@ -55,8 +68,9 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
+static PLANTED_INCLUDE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const NUMERIC_PRIMS: &[&str] = &[
-    "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
+    "f64", "f32", "f16", "bf16", "f8e4m3", "i8", "i16", "i32", "i64",
 ];
 /// The subset of `NUMERIC_PRIMS` whose appearance in an untagged public
 /// position is a capacity SEAM, mirroring `double`/`float` on the C side.
@@ -93,7 +107,9 @@ fn prim_census_class(prim: Prim) -> PrimCensusClass {
         // reserved dtype becomes a silent seam on the day it activates.
         Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 | Prim::F8e4m3 => PrimCensusClass::Float,
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => PrimCensusClass::Integer,
-        Prim::Bool | Prim::String => PrimCensusClass::NonNumeric,
+        // A random key (chelis#2413) is an opaque word with no arithmetic,
+        // cast, or literal carrier: structurally non-numeric.
+        Prim::Bool | Prim::String | Prim::Key => PrimCensusClass::NonNumeric,
     }
 }
 
@@ -112,1049 +128,7 @@ const ALL_PRIMS: &[Prim] = &[
     Prim::Int64,
     Prim::Bool,
     Prim::String,
-];
-
-/// The exact citation carried by the grandfathered 2026-07-30 capacity
-/// seams. A FLAGGED row (float-carrier / raw-dtype-int) has NO
-/// issue-citation path (PR #950 red team P1-1: an open-issue path would
-/// make the known-red set monotonically growable). Only exact unchanged
-/// members of the sealed foundation-era set may retain this string; no
-/// generic override path remains.
-const GRANDFATHER_SEAM_CITATION: &str = "baseline-2026-07-30 pre-ratchet seam; \
-unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break";
-
-/// Permanent disposition for the exact non-seam descriptors ratified at the
-/// #729 capacity review. It is frozen to `PERMANENT_PLAIN_ROWS`, so a new
-/// numeric callable cannot copy it to evade semantic registration. This is
-/// capacity review, not semantic authority; only the exact initial descriptors
-/// receive it.
-const PERMANENT_PLAIN_DISPOSITION: &str =
-    "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FrozenDispositionRow {
-    kind: &'static str,
-    id: &'static str,
-    flags: &'static [&'static str],
-}
-
-/// The exact enforcement descriptors of the frozen 2026-07-30 seam set. Living in
-/// THIS file rather than the regeneratable baseline is the point (PR #950
-/// re-red-team P1: a count-only freeze permits removing one seam and
-/// relocating its citation onto a brand-new one).
-// GRANDFATHER_SEAM_ROWS_BEGIN
-const GRANDFATHER_SEAM_ROWS: &[FrozenDispositionRow] = &[
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
-        flags: &["raw-dtype-int"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_f64 ( double value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: double chelis_tensor_to_f64 ( const chelis_tensor * t ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: double chelis_value_as_f64 ( chelis_value value ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
-        flags: &["raw-dtype-int"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
-        flags: &["float-carrier", "raw-dtype-int", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_f32_buffer_to_f16 ( const float * src , uint16_t * dst , int64_t n ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_f32 ( chelis_tensor * t , float val ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_f64 ( chelis_tensor * t , double val ) ;",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-adt-numeric",
-        id: "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "contracts::normal_cdf: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "scalar::abs: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "scalar::max: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "scalar::min: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/construct::linspace: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-        flags: &["float-carrier", "numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-lit {} 1) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-var {} d) (t-prim {} f32))) (t-var {} _))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_close: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-        flags: &["float-carrier"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_eq: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-        flags: &["float-carrier"],
-    },
-];
-// GRANDFATHER_SEAM_ROWS_END
-
-/// The three exact successor descriptors introduced by PR #1149's reviewed
-/// int64 dimension-carrier widening. They are NOT members of the shrink-only
-/// 2026-07-30 grandfather set: each carries the named maintainer override that
-/// authorized the remove-plus-add identity change. This one-off closed set is
-/// not the general relocation mechanism owned by chelis#1160.
-const INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE: &str =
-    "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)";
-const INT64_DIM_CARRIER_SUCCESSOR_ROWS: &[FrozenDispositionRow] = &[FrozenDispositionRow {
-    kind: "header-export",
-    id: "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-    flags: &["raw-dtype-int"],
-}];
-
-/// The exact enforcement descriptors carrying the permanent non-seam disposition, frozen
-/// on the same principle as the seam set and for the same reason: a string
-/// any new row may copy is not an adjudication. Like
-/// `GRANDFATHER_SEAM_ROWS` this list is hand-maintained and SHRINK-ONLY -
-/// deliberately not regenerated, because a generator that re-derived it
-/// from the baseline would re-bless whatever a contributor had just pasted
-/// the citation onto.
-// PERMANENT_PLAIN_ROWS_BEGIN
-const PERMANENT_PLAIN_ROWS: &[FrozenDispositionRow] = &[
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int64_t axis , const chelis_list * sizes ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_from_int64 ( int64_t value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_i64 ( int64_t value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int64_t axis ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int64_t axis ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int64_t axis ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int64_t axis , chelis_string mode ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int64_t axis ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_int64 ( int64_t value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * t ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_tensor_rank ( const chelis_tensor * t ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: int64_t chelis_value_as_int64 ( chelis_value value ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_bf16 ( chelis_tensor * t , uint16_t bits ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_bool_bits ( chelis_tensor * t , uint32_t bits ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_f16 ( chelis_tensor * t , uint16_t bits ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_f32_bits ( chelis_tensor * t , uint32_t bits ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_f64_bits ( chelis_tensor * t , uint64_t bits ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_fill_i64 ( chelis_tensor * t , int64_t val ) ;",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-export",
-        id: "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { _Bool is_some ; int64_t value ; } chelis_option_i64",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "header-struct",
-        id: "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
-        flags: &[],
-    },
-    FrozenDispositionRow {
-        kind: "std-adt-numeric",
-        id: "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-adt-numeric",
-        id: "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-adt-numeric",
-        id: "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-adt-numeric",
-        id: "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "io::mmap_size: (t-fn {} (t-prim {} string) (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "io::read_head_bytes: (t-fn {} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "process::run: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "process::run_chelis: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "sort::sort_1d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} n) (t-prim {} int64))))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "sort::sort_2d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} int64))))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/construct::arange: (t-fn {} (t-prim {} int32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} int32)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_eq_int: (t-fn {eff: (effects {} test)} (t-prim {} int64) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_eq_tensor_int64: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-prim {} string) (t-unit {}))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
-        flags: &["numeric-op"],
-    },
-    FrozenDispositionRow {
-        kind: "std-def-numeric",
-        id: "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
-        flags: &["numeric-op"],
-    },
-];
-// PERMANENT_PLAIN_ROWS_END
-
-/// Exact reviewed C callables whose bare `int` values are control/layout
-/// plumbing rather than language numeric operations. The default is
-/// deliberately conservative: every non-boolean, non-character built-in
-/// arithmetic value type makes a callable `numeric-op`; only these complete
-/// canonical identities remove that flag. Names, parameter names, and
-/// substring heuristics never exempt a future callable.
-const NON_NUMERIC_INTEGER_PLUMBING_EXPORTS: &[&str] = &[
-    // chelis_alloc's respelling stays in lockstep with the exact #1149
-    // successor override; the other two remain in the grandfather set.
-    // The reviewed plumbing set remains exactly three callables.
-    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-    "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
-    "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
+    Prim::Key,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1173,6 +147,126 @@ const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
 /// derived flags are necessary but never sufficient: the complete family,
 /// kind, canonical identity, and flag vector must match one of these rows.
 const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    // A closed diagnostic identity; no extent, width, dtype, or payload is encoded.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_REDUCE_SUM = 0 , CHELIS_REDUCE_COUNT = 1 , CHELIS_REDUCE_MAX = 2 , CHELIS_REDUCE_MIN = 3 , CHELIS_REDUCE_PROD = 4 , CHELIS_REDUCE_ARGMAX = 5 , CHELIS_REDUCE_ARGMIN = 6 } chelis_reduction_op",
+        &[],
+    ),
+    // Closed sparse-operation identities select shape policy and diagnostics only.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_SPARSE_GATHER = 0 , CHELIS_SPARSE_ADD = 1 , CHELIS_SPARSE_REPLACE = 2 , CHELIS_SPARSE_ELEMENTS = 3 } chelis_sparse_op",
+        &[],
+    ),
+    // Closed movement operation/side identities contain no numeric payload.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_EXPAND = 0 , CHELIS_MOVEMENT_INSERT = 1 , CHELIS_MOVEMENT_PAD = 2 , CHELIS_MOVEMENT_SHRINK = 3 , CHELIS_MOVEMENT_STRIDE = 4 } chelis_movement_op",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_SOURCE = 0 , CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side",
+        &[],
+    ),
+    // Closed window operation/side identities select a contract, not a number.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_WINDOW_SUM = 0 , CHELIS_WINDOW_MEAN = 1 , CHELIS_WINDOW_MAX = 2 , CHELIS_WINDOW_MIN = 3 , CHELIS_WINDOW_GRAD = 4 } chelis_window_op",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_WINDOW_SOURCE = 0 , CHELIS_WINDOW_RESULT = 1 } chelis_window_side",
+        &[],
+    ),
+    // Closed matrix-part and dimension identities contain no numeric values.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MATMUL_LEFT = 0 , CHELIS_MATMUL_RIGHT = 1 , CHELIS_MATMUL_RESULT = 2 } chelis_matmul_part",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MATMUL_ROWS = 0 , CHELIS_MATMUL_COLUMNS = 1 , CHELIS_MATMUL_REDUCTION = 2 } chelis_matmul_dimension_kind",
+        &[],
+    ),
+    // Final nonnumeric lifetime operations from the retired primary cohort.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
+        &[],
+    ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-export",
@@ -1212,7 +306,7 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-export",
-        "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+        "chelis_runtime.h: void chelis_fail ( chelis_string message ) ;",
         &[],
     ),
     StaticSurfaceDescriptor::new(
@@ -1513,6 +607,61 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
 /// numeric data across the ABI. These rows ARE the tagged transport; the
 /// callables operating on them register as numeric operations below.
 const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
+    // Exact C6 container transports and [05-OP-31] dictionary-entry shape.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
+        &[],
+    ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
@@ -1531,16 +680,25 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
         "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
         &["numeric-op"],
     ),
+    // spec/08 section 2's scalar key carrier (dtype_semantics.md section C6,
+    // "Random-key carriers"): the nominal struct is the key's tag, so its
+    // 64-bit `bits` field is a key and never a bare integer.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+        "chelis_runtime.h: typedef struct { uint64_t bits ; } chelis_key",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+        "chelis_runtime_views.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime_views.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
@@ -1552,7 +710,7 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
+        "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 , CHELIS_DTYPE_KEY = 9 }",
         &[],
     ),
 ];
@@ -1573,36 +731,338 @@ macro_rules! final_numeric_row {
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_char_from_code ( int64_t value ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Character-code conversion follows [05-OP-58] exactly"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_from_utf8 ( const uint8_t * value , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Length-aware UTF-8 construction copies exactly the declared bytes"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_char_code ( chelis_string value ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "Character-code conversion follows [05-OP-58] exactly"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_string ( chelis_string value ) ;",
+        &[],
+        "[05-OP-32]",
+        "Length-aware string observation writes every stored UTF-8 byte"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_byte_offset` takes a canonical tagged i64 logical"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_new ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_view` instead retains rank-many exact tagged i64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int32_t chelis_metadata_plan_rank ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_shape ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_strides ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dtype chelis_metadata_plan_dtype ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_check_capacity` validates a canonical nonnegative i64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_release ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_release` consumes the live plan exactly once; all"
+    ),
+    // Final [05-OP-32] registrations from the retired primary cohort.
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+        &["numeric-op"],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
+        &[],
+        "[05-OP-32]",
+        "shape_index(container, parameters...) -> result"
+    ),
+    final_numeric_row!(
         "std-adt-numeric",
-        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} i64)) (field {} scale (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} i64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
         &["float-carrier", "numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+        "time::Date: () (variant {} Date (field {} year (t-prim {} i64)) (field {} month (t-prim {} i64)) (field {} day (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+        "time::Duration: () (variant {} Duration (field {} days (t-prim {} i64)) (field {} hours (t-prim {} i64)) (field {} minutes (t-prim {} i64)) (field {} seconds (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
     ),
     final_numeric_row!(
         "std-adt-numeric",
-        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} string) (t-prim {} i64)) (t-adt {} Dict (t-prim {} i64) (t-prim {} string)) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-34]",
         "numeric_adt"
@@ -1616,14 +1076,14 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1651,7 +1111,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} i64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1665,7 +1125,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+        "decimal::decimal_from_int: (t-fn {} (t-prim {} i64) (t-adt {} Decimal))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1735,63 +1195,63 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-var {} item))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+        "index::skip_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} i64) (t-adt {} List (t-var {} item)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/kaiming::kaiming_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/kaiming::kaiming_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/random::normal_like: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/random::normal_like: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::trunc_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::trunc_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_normal: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::xavier_normal: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "init/xavierext::xavier_uniform: [p: Float] (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
+        "init/xavierext::xavier_uniform: [p: Float] (t-fn {} (t-prim {} key) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-var {} p) (t-var {} p) (t-tensor {} (d-rank {} r) (t-var {} p)))",
         &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1820,7 +1280,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "std-def-numeric",
         "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
-        &["float-carrier"],
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1833,8 +1293,8 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
-        &["numeric-op"],
+        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} i64)))",
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -1917,28 +1377,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} i64) (t-adt {} List (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} i64) (t-prim {} string) (t-prim {} string)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1966,7 +1426,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+        "sort::sort: [p: Numeric] (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} i32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p)) (t-tensor {} (d-rank {} r) (t-prim {} i64))))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -1980,35 +1440,35 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p)))",
+        "tensor/construct::linspace: [p: Float] (t-fn {} (t-var {} p) (t-var {} p) (t-prim {} i64) (t-tensor {} (d-var {} n) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} i32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -2043,21 +1503,21 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} i64)) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
-        &["numeric-op"],
-        "[05-OP-35]",
-        "stdlib_numeric_def"
-    ),
-    final_numeric_row!(
-        "std-def-numeric",
-        "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+        "time::date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -2113,28 +1573,28 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} i64))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+        "time::duration: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Duration))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+        "time::is_leap_year: (t-fn {} (t-prim {} i64) (t-prim {} bool))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
@@ -2148,36 +1608,36 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} i64) (t-adt {} Date))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+        "time::try_date: (t-fn {} (t-prim {} i64) (t-prim {} i64) (t-prim {} i64) (t-adt {} Option (t-adt {} Date)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} i64) (t-prim {} i64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} i64)))",
         &["numeric-op"],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
-        &["numeric-op"],
+        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} i64)) (t-prim {} string))",
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
     final_numeric_row!(
         "std-def-numeric",
-        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
-        &["numeric-op"],
+        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} i64)))",
+        &[],
         "[05-OP-35]",
         "stdlib_numeric_def"
     ),
@@ -2233,7 +1693,7 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
             &["numeric-op"],
         ),
         atom: "[05-OP-33]",
-        authority_anchor: "nonnegative int64 sizes whose checked sum equals the selected extent",
+        authority_anchor: "nonnegative i64 sizes whose checked sum equals the selected extent",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2264,6 +1724,29 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-31]",
         authority_anchor: "the exact stored image and all unused high bits are zero",
+    },
+    // The key of an i64 seed; the seed is the numeric operand.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_key chelis_key_from_seed ( int64_t seed ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-69]",
+        authority_anchor: "Its published C form is\n> `chelis_key chelis_key_from_seed(int64_t seed)`",
+    },
+    // A key's printed form: a key carrier in, a string out, no arithmetic
+    // type in the signature.
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_string chelis_string_from_key ( chelis_key key ) ;",
+            &[],
+        ),
+        atom: "[05-OP-69]",
+        authority_anchor: "A key's printed form ([05-OBS-2]) is\n> published as `chelis_string chelis_string_from_key(chelis_key key)`",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
@@ -2575,6 +2058,649 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         atom: "[05-OP-44]",
         authority_anchor: "`chelis_tensor_repurpose` is the one descriptor-metadata mutation",
     },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_stride ( const chelis_tensor * tensor , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_stride` projects the checked contiguous suffix stride",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_byte_count ( const chelis_tensor * tensor ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_byte_count` projects the checked logical byte",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step ( const chelis_tensor * input , const chelis_tensor * domain ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_elementwise_index_step` validates input and domain tensor metadata",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step_for_shape ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_elementwise_index_step_for_shape` applies the same rule",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_unravel_index ( const chelis_tensor * tensor , chelis_scalar index , chelis_scalar * coordinates ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_unravel_index` converts an exact tagged i64 linear index into",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_flat_index ( const chelis_tensor * tensor , const chelis_scalar * coordinates ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_flat_index` converts rank-many exact tagged i64 coordinates",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_permute ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * axes ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_expand ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_permute` and `chelis_tensor_check_expand` validate a target",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_pad_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * before , const chelis_scalar * after , chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_pad_shape`, `chelis_tensor_shrink_shape`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_shrink_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * start , const chelis_scalar * end , chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_pad_shape`, `chelis_tensor_shrink_shape`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_stride_shape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * steps , chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_pad_shape`, `chelis_tensor_shrink_shape`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_affine_index ( const chelis_tensor * tensor , const chelis_scalar * coordinates , const chelis_scalar * offsets , const chelis_scalar * steps ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_affine_index` takes rank-many exact tagged i64 coordinates,",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_alloc_like ( const chelis_tensor * input , chelis_scalar exemplar ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_alloc_like` takes a validated input tensor and a canonical",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_literal ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar , chelis_scalar count ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_literal` validates a complete result shape and literal",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_write_literal ( chelis_tensor_write * guard , chelis_scalar count , const chelis_scalar * values ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_write_literal` takes a live tensor write guard, an exact tagged",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_permute_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_expand_plan ( const chelis_tensor * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_affine_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * first , const chelis_scalar * second , chelis_movement_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_extent ( const chelis_movement_plan * plan , chelis_movement_side side , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_count ( const chelis_movement_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_index ( const chelis_movement_plan * plan , chelis_scalar linear ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_movement_check_target ( const chelis_movement_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_movement_plan_release ( chelis_movement_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_window_plan * chelis_tensor_window_plan ( const chelis_tensor * input , chelis_scalar count , const chelis_scalar * window , const chelis_scalar * steps , chelis_window_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_window_extent ( const chelis_window_plan * plan , chelis_window_side side , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_window_count ( const chelis_window_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_window_index ( const chelis_window_plan * plan , chelis_scalar group , chelis_scalar leaf ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_window_check_tensor ( const chelis_window_plan * plan , const chelis_tensor * tensor , chelis_window_side side ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_window_check_target ( const chelis_window_plan * plan , chelis_window_side side , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_window_plan_release ( chelis_window_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_window_plan` snapshots the complete input and valid-padding",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_matmul_plan * chelis_tensor_matmul_plan ( const chelis_tensor * left , const chelis_tensor * right , chelis_scalar exemplar ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_matmul_extent ( const chelis_matmul_plan * plan , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_matmul_dimension ( const chelis_matmul_plan * plan , chelis_matmul_dimension_kind dimension ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_matmul_batch_count ( const chelis_matmul_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_matmul_matrix_count ( const chelis_matmul_plan * plan , chelis_matmul_part part ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_matmul_index ( const chelis_matmul_plan * plan , chelis_matmul_part part , chelis_scalar batch , chelis_scalar element ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_matmul_check_target ( const chelis_matmul_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_matmul_check_scratch ( const chelis_matmul_plan * plan , chelis_matmul_part part , chelis_scalar exemplar ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_matmul_check_vendor ( const chelis_matmul_plan * plan , chelis_scalar maximum ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_matmul_plan_release ( chelis_matmul_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_sparse_plan * chelis_tensor_sparse_plan ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , chelis_scalar axis , chelis_sparse_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_sparse_extent ( const chelis_sparse_plan * plan , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_sparse_count ( const chelis_sparse_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_sparse_index_slot ( const chelis_sparse_plan * plan , chelis_scalar linear ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_sparse_data_index ( const chelis_sparse_plan * plan , chelis_scalar linear , chelis_scalar selected ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_sparse_check_target ( const chelis_sparse_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_sparse_plan_release ( chelis_sparse_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_reduction_plan * chelis_tensor_reduction_plan ( const chelis_tensor * tensor , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_reduction_plan * chelis_shape_reduction_plan ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_count ( const chelis_reduction_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_extent ( const chelis_reduction_plan * plan , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_index ( const chelis_reduction_plan * plan , chelis_scalar outer , chelis_scalar leaf ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_check_target ( const chelis_reduction_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_check_scratch ( const chelis_reduction_plan * plan , chelis_scalar exemplar ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_plan_release ( chelis_reduction_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_reshape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_reshape` takes rank and every target extent as exact tagged",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_reshape ( const chelis_tensor * tensor , const chelis_list * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reshape` accepts a live, flat `List<i64>`",
+    },
+];
+
+const BACKEND_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[StaticSurfaceDescriptor::new(
+    PRIMARY_CENSUS_FAMILY,
+    "header-struct",
+    "chelis_device_descriptor.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t count ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t ownership ; uint8_t reserved [ 2 ] ; } chelis_gpu_tensor",
+    &["numeric-op"],
+)];
+
+const BACKEND_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_borrow` consumes one live metadata plan, validates its"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_import` validates every field of a generated raw packet"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_view` returns a const generated packet observation tied"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_device_tensor_device` returns the owner's exact nonnegative i32"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_clone` returns a distinct owner with a new contiguous"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_release` consumes one live opaque owner exactly once,"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
 ];
 
 fn final_authority_registries() -> AuthorityRegistries<'static> {
@@ -2582,6 +2708,14 @@ fn final_authority_registries() -> AuthorityRegistries<'static> {
         nonnumeric: FINAL_NONNUMERIC_ROWS,
         tagged_transports: FINAL_TAGGED_TRANSPORT_ROWS,
         numeric_operations: FINAL_NUMERIC_OPERATION_ROWS,
+    }
+}
+
+fn backend_authority_registries() -> AuthorityRegistries<'static> {
+    AuthorityRegistries {
+        nonnumeric: &[],
+        tagged_transports: BACKEND_TAGGED_TRANSPORT_ROWS,
+        numeric_operations: BACKEND_NUMERIC_OPERATION_ROWS,
     }
 }
 
@@ -2649,22 +2783,27 @@ fn coverage_manifest() -> CoverageManifest {
             CoveredLeg {
                 leg: "std-adt-numeric".to_string(),
                 artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
-                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                enumerator: "stdlib_rows -> Reef declaration linker -> resolved type fixed point".to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
                     .to_string(),
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
                 mutations: vec![
                     "std_adt_identity_changes_when_same_dtype_variant_changes".to_string(),
+                    "stdlib_closure_tests::mutual_nominal_recursion_propagates_numeric_fields".to_string(),
                 ],
             },
             CoveredLeg {
                 leg: "std-def-numeric".to_string(),
                 artifact: "packages/chelis-std/src/**/*.ch desugared Deep AST".to_string(),
-                enumerator: "stdlib_rows -> scan_deftypes + scan_exported_numeric_defs".to_string(),
+                enumerator: "stdlib_rows -> Reef declaration linker -> resolved type fixed point".to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
                     .to_string(),
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
-                mutations: vec!["exported_public_numeric_stdlib_def_is_enumerated".to_string()],
+                mutations: vec![
+                    "exported_public_numeric_stdlib_def_is_enumerated".to_string(),
+                    "stdlib_closure_tests::private_helpers_and_transparent_aliases_survive_relocation".to_string(),
+                    "stdlib_closure_tests::unresolved_nominals_and_wrong_nominal_arguments_fail_closed".to_string(),
+                ],
             },
             CoveredLeg {
                 leg: "prelude-adt-numeric".to_string(),
@@ -2681,10 +2820,37 @@ fn coverage_manifest() -> CoverageManifest {
                 ],
             },
             CoveredLeg {
-                leg: "wire-schema-numeric-fields".to_string(),
-                artifact: "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
+                leg: "backend-runtime-headers".to_string(),
+                artifact: "complete chelis_hip_runtime.h published closure under the committed \
+                           Phase 0 SDK stubs; recursively discovered published Metal `.h` \
+                           zero-ABI enrollment set"
+                .to_string(),
+                enumerator: "backend_headers::scan_published_backend_rows -> closed attributed \
+                             preprocess_root -> complete recursively discovered HIP owner set -> \
+                             header_rows; published_headers_on_disk(Metal runtime) -> shared \
+                             lexical header_rows -> sorted raw header rows -> enrollment assertion"
                     .to_string(),
-                enumerator: "rustdoc JSON public schema type graph -> wire-schema numeric fields"
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'".to_string(),
+                expected_success: "backend_runtime_headers_match_the_reviewed_final_authority passes".to_string(),
+                mutations: vec![
+                    "a_metal_abi_declaration_requires_backend_census_enrollment".to_string(),
+                    "backend_include_resolving_outside_declared_universe_fails_closed".to_string(),
+                    "backend_roots_cannot_omit_an_unreached_generated_header".to_string(),
+                    "backend_environments_cannot_change_a_public_numeric_signature".to_string(),
+                    "reached_nested_hip_header_survives_backend_authority_selection".to_string(),
+                    "hip_sdk_stub_rows_remain_nonpublished_inputs".to_string(),
+                    "metal_literal_payloads_cannot_change_declaration_depth".to_string(),
+                    "generated_device_descriptor_requires_exact_tagged_transport_authority".to_string(),
+                    "device_owner_callables_require_exact_op33_authority".to_string(),
+                ],
+            },
+            CoveredLeg {
+                leg: "wire-schema-numeric-fields".to_string(),
+                artifact: "compiler/Python serialization publication roots and their reachable \
+                           rustdoc JSON type graph"
+                    .to_string(),
+                enumerator: "capacity_census_typed.py wire -> private wire verifier: \
+                             publication graph inventory, final authority, and execution receipts"
                     .to_string(),
                 command: "cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
                     .to_string(),
@@ -2693,13 +2859,17 @@ fn coverage_manifest() -> CoverageManifest {
                 mutations: vec![
                     "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
                         .to_string(),
+                    "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline"
+                        .to_string(),
+                    "wire_baseline_rejects_exception_fields_and_nonfinal_classes".to_string(),
+                    "wire_rows_cannot_erase_capacity_or_duplicate_an_identity".to_string(),
                 ],
             },
             CoveredLeg {
                 leg: "binding-raw-dtype-params".to_string(),
                 artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
                 enumerator:
-                    "live registered PyCFunctions/pyclasses joined to rustdoc JSON signatures"
+                    "live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation"
                         .to_string(),
                 command: "cargo nextest run -p chelis-python --test capacity_census_bindings"
                     .to_string(),
@@ -2708,6 +2878,8 @@ fn coverage_manifest() -> CoverageManifest {
                         .to_string(),
                 mutations: vec![
                     "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected".to_string(),
+                    "final_binding_rows_cannot_regain_legacy_admission".to_string(),
+                    "copied_missing_and_duplicate_binding_registrations_fail".to_string(),
                 ],
             },
         ],
@@ -2733,6 +2905,26 @@ struct SemanticRegistration {
 /// them their own complete enumerator. Discovered rows use the exact shared
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+        atom: "[05-OP-8]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-8]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]",
+        atom: "[05-OP-37]",
+    },
     // chelis#759's float-to-integer ladder rung. `cast_trunc` is a
     // compiler-owned numeric callable, so it lands on no enumerated leg
     // (it is neither a C export, an exported stdlib `def`, nor a prelude
@@ -2748,7 +2940,7 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     // off-leg blind spot, not something this entry closes.
     SemanticRegistration {
         callable: "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
-                   target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
+                   target: i8 | i16 | i32 | i64) -> i8 | i16 | i32 | i64",
         atom: "[05-OP-6]",
     },
     SemanticRegistration {
@@ -2763,12 +2955,12 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     },
     SemanticRegistration {
         callable: "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], \
-                   width: int64, pad: T) -> tensor[len(sequences), width, T]",
+                   width: i64, pad: T) -> tensor[len(sequences), width, T]",
         atom: "[05-OP-10]",
     },
     SemanticRegistration {
-        callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
-                   -> tensor[D\\axes, int64]",
+        callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: i32...) \
+                   -> tensor[D\\axes, i64]",
         atom: "[05-OP-29]",
     },
     SemanticRegistration {
@@ -2797,12 +2989,28 @@ fn repo_root() -> PathBuf {
 /// closure is followed by the real preprocessor, so an export added to a
 /// transitively-included header - or hidden behind a macro - is visible.
 fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    preprocessed_headers_with_environment(
+        include_dir,
+        roots,
+        &c_preprocessor::Environment::native_c(),
+    )
+}
+
+/// Backend headers use explicit C++/Objective-C++ SDK lanes while retaining
+/// the primary census's attribution, type-word and context-invariance rules.
+fn preprocessed_headers_with_environment(
+    include_dir: &Path,
+    roots: &[&str],
+    environment: &c_preprocessor::Environment<'_>,
+) -> BTreeMap<String, String> {
     let sources = header_source_closure(include_dir, roots);
     assert_no_line_directives(&sources);
     assert_context_invariant_headers(include_dir, roots);
     let mut per_file: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
-        for (name, text) in preprocess_root(include_dir, root) {
+        let preprocessed = c_preprocessor::preprocess_root(include_dir, root, environment)
+            .unwrap_or_else(|error| panic!("{}{}{}", teaching_header(), error, teaching_footer()));
+        for (name, text) in preprocessed {
             if let Some(previous) = per_file.get(&name) {
                 let previous_rows = header_rows_local(&name, previous);
                 let current_rows = header_rows_local(&name, &text);
@@ -2984,20 +3192,12 @@ fn published_headers_on_disk(include_dir: &Path) -> BTreeSet<String> {
     out
 }
 
-/// A `#include` of a local header by EITHER spelling. `cc -E -I <dir>`
-/// resolves `<x>` against the include path exactly as it resolves `"x"`, so
-/// a raw-source guard that follows only quoted includes leaves a local
-/// header reachable solely through `#include <x>` outside every raw-source
-/// scan (round-3 red team P2). Callers filter by resolution inside the
-/// include directory, which keeps system includes out.
+/// Recognize both literal include spellings. Resolution separately preserves
+/// the compiler's search order: a quoted include first tries the including
+/// header's directory, while an angle include uses the published include root.
+/// Both spellings participate in attribution and conditional-macro guards.
 fn local_include(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("#include")?.trim_start();
-    let close = match rest.chars().next()? {
-        '"' => '"',
-        '<' => '>',
-        _ => return None,
-    };
-    rest[1..].split(close).next()
+    c_include::include_name(line)
 }
 
 fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
@@ -3010,11 +3210,11 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
         let path = include_dir.join(&name);
         let source =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for line in source.lines() {
-            if let Some(included) = local_include(line)
-                && include_dir.join(included).is_file()
-            {
-                pending.push(included.to_string());
+        for (_, line) in logical_lines(&strip_c_comments(&source)) {
+            if let Some(included) = c_include::resolve(&name, &line, |candidate| {
+                include_dir.join(candidate).is_file()
+            }) {
+                pending.push(included);
             }
         }
         sources.insert(name, source);
@@ -3215,11 +3415,13 @@ fn closure_conditional_macro_taint(
     let edges: Vec<(String, String)> = sources
         .iter()
         .flat_map(|(name, source)| {
-            source
-                .lines()
-                .filter_map(local_include)
-                .filter(|included| sources.contains_key(*included))
-                .map(|included| (name.clone(), included.to_string()))
+            logical_lines(&strip_c_comments(source))
+                .into_iter()
+                .filter_map(|(_, line)| {
+                    c_include::resolve(name, &line, |candidate| sources.contains_key(candidate))
+                })
+                .map(|included| (name.clone(), included))
+                .collect::<Vec<_>>()
         })
         .collect();
     loop {
@@ -3277,8 +3479,11 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             }
 
             let varying = conditional_stack.iter().any(|frame| *frame);
-            if varying && let Some(included) = local_include(trimmed) {
-                conditional_includes.insert(included.to_string());
+            if varying
+                && let Some(included) =
+                    c_include::resolve(name, trimmed, |candidate| sources.contains_key(candidate))
+            {
+                conditional_includes.insert(included);
             }
             let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
             if varying && brace_depth == 0 && !trimmed.starts_with('#') {
@@ -3321,6 +3526,20 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
                 dependent
             })
             .collect();
+        // A conditional include can expose ABI through an otherwise empty
+        // intermediate header. Follow its complete local closure before
+        // deciding that the conditional branch declares no public surface.
+        let mut pending: Vec<_> = conditional_includes.iter().cloned().collect();
+        while let Some(included) = pending.pop() {
+            for (_, line) in logical_lines(&strip_c_comments(&sources[&included])) {
+                if let Some(child) = c_include::resolve(&included, &line, |candidate| {
+                    sources.contains_key(candidate)
+                }) && conditional_includes.insert(child.clone())
+                {
+                    pending.push(child);
+                }
+            }
+        }
         let conditional_include_rows: Vec<Row> = conditional_includes
             .iter()
             .filter_map(|included| sources.get(included).map(|source| (included, source)))
@@ -3372,160 +3591,11 @@ fn canonical_c_tokens(s: &str) -> String {
     c_lexical::canonical_c_tokens(s)
 }
 
-fn canonical_inventory_id(id: &str) -> String {
-    if let Some((header, declaration)) = id.split_once(": ")
-        && header.ends_with(".h")
-    {
-        return format!("{header}: {}", canonical_c_tokens(declaration));
-    }
-    id.to_string()
-}
-
-fn is_frozen_grandfather_seam_id(id: &str) -> bool {
-    GRANDFATHER_SEAM_ROWS
-        .iter()
-        .any(|frozen| canonical_inventory_id(frozen.id) == id)
-}
-
-fn is_reviewed_seam_disposition_id(id: &str) -> bool {
-    is_frozen_grandfather_seam_id(id)
-        || INT64_DIM_CARRIER_SUCCESSOR_ROWS
-            .iter()
-            .any(|row| canonical_inventory_id(row.id) == id)
-}
-
-fn matches_frozen_descriptor(row: &Row, frozen: &FrozenDispositionRow) -> bool {
-    row.kind == frozen.kind
-        && row.id == canonical_inventory_id(frozen.id)
-        && row
-            .flags
-            .iter()
-            .map(String::as_str)
-            .eq(frozen.flags.iter().copied())
-}
-
-fn has_recognized_grandfather_disposition(row: &Row) -> bool {
-    row.citation == GRANDFATHER_SEAM_CITATION
-        && GRANDFATHER_SEAM_ROWS
-            .iter()
-            .any(|frozen| matches_frozen_descriptor(row, frozen))
-}
-
-fn has_recognized_int64_dim_carrier_successor_override(row: &Row) -> bool {
-    row.citation == INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE
-        && INT64_DIM_CARRIER_SUCCESSOR_ROWS
-            .iter()
-            .any(|successor| matches_frozen_descriptor(row, successor))
-}
-
-fn has_recognized_permanent_plain_disposition(row: &Row) -> bool {
-    row.citation == PERMANENT_PLAIN_DISPOSITION
-        && PERMANENT_PLAIN_ROWS
-            .iter()
-            .any(|frozen| matches_frozen_descriptor(row, frozen))
-}
-
-fn has_recognized_permanent_disposition(row: &Row) -> bool {
-    has_recognized_permanent_plain_disposition(row)
-}
-
-fn has_recognized_legacy_disposition(row: &Row) -> bool {
-    has_recognized_grandfather_disposition(row)
-        || has_recognized_int64_dim_carrier_successor_override(row)
-        || has_recognized_permanent_disposition(row)
-}
-
-fn frozen_disposition_for_canonical_key(
-    row: &Row,
-) -> Option<(&'static FrozenDispositionRow, &'static str)> {
-    GRANDFATHER_SEAM_ROWS
-        .iter()
-        .find(|frozen| row.kind == frozen.kind && row.id == canonical_inventory_id(frozen.id))
-        .map(|frozen| (frozen, GRANDFATHER_SEAM_CITATION))
-        .or_else(|| {
-            INT64_DIM_CARRIER_SUCCESSOR_ROWS
-                .iter()
-                .find(|successor| {
-                    row.kind == successor.kind && row.id == canonical_inventory_id(successor.id)
-                })
-                .map(|successor| (successor, INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE))
-        })
-        .or_else(|| {
-            PERMANENT_PLAIN_ROWS
-                .iter()
-                .find(|frozen| {
-                    row.kind == frozen.kind && row.id == canonical_inventory_id(frozen.id)
-                })
-                .map(|frozen| (frozen, PERMANENT_PLAIN_DISPOSITION))
-        })
-}
-
-fn frozen_disposition_rows() -> Vec<Row> {
-    GRANDFATHER_SEAM_ROWS
-        .iter()
-        .map(|frozen| row_from_frozen(frozen, GRANDFATHER_SEAM_CITATION))
-        .chain(
-            INT64_DIM_CARRIER_SUCCESSOR_ROWS
-                .iter()
-                .map(|successor| row_from_frozen(successor, INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE)),
-        )
-        .chain(
-            PERMANENT_PLAIN_ROWS
-                .iter()
-                .map(|frozen| row_from_frozen(frozen, PERMANENT_PLAIN_DISPOSITION)),
-        )
-        .collect()
-}
-
-fn check_active_legacy_subset(baseline: &Baseline) -> Result<(), String> {
-    let invalid: Vec<String> = baseline
-        .rows
-        .iter()
-        .filter(|row| !row.citation.is_empty() && !has_recognized_legacy_disposition(row))
-        .map(|row| format!("[{}] {}", row.kind, row.id))
-        .collect();
-    if invalid.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE: {}. Transition dispositions may disappear, but no new, renamed, reclassified, or relocated descriptor may acquire one.",
-            invalid.join(", ")
-        ))
-    }
-}
-
-fn row_from_frozen(frozen: &FrozenDispositionRow, citation: &str) -> Row {
-    Row {
-        kind: frozen.kind.to_string(),
-        id: canonical_inventory_id(frozen.id),
-        flags: frozen
-            .flags
-            .iter()
-            .map(|flag| (*flag).to_string())
-            .collect(),
-        citation: citation.to_string(),
-    }
-}
-
-fn active_legacy_permanent_plain_sample() -> &'static FrozenDispositionRow {
-    PERMANENT_PLAIN_ROWS
-        .iter()
-        .find(|row| {
-            !FINAL_NONNUMERIC_ROWS
-                .iter()
-                .any(|final_row| final_row.kind == row.kind && final_row.id == row.id)
-        })
-        .expect("at least one permanent plain row remains active legacy debt")
-}
-
 /// Fixed-width numeric C value types: a signature mentioning one (after
 /// typedef resolution) is a numeric runtime callable and carries the
-/// `numeric-op` flag, which binds NEW rows to semantic registration (the
-/// PR #950 re-red-team's P1 finding: surface existence is not a semantic
-/// decision). Non-boolean/non-character built-in arithmetic spellings are
-/// conservative numeric candidates too; the three existing bare-int
-/// control/layout exports are removed only by the exact reviewed seam-disposition
-/// intersection in `apply_exact_integer_plumbing_exemption`.
+/// `numeric-op` flag, which binds rows to semantic registration. Every
+/// non-boolean, non-character built-in arithmetic spelling is conservative
+/// numeric capacity; there is no integer-plumbing exemption.
 const NUMERIC_C_TYPES: &[&str] = c_lexical::NUMERIC_C_TYPES;
 
 /// The FROZEN set of type words a published declaration may use that carry
@@ -3546,8 +3616,8 @@ const NUMERIC_C_TYPES: &[&str] = c_lexical::NUMERIC_C_TYPES;
 /// same footing an unresolvable typedef already has.
 const NON_NUMERIC_C_TYPE_WORDS: &[&str] = c_lexical::NON_NUMERIC_C_TYPE_WORDS;
 
-/// The flags that make a row a capacity SEAM (subject to the grandfather
-/// freeze). `numeric-op` is classification, not a seam.
+/// The flags that make a row an untagged capacity seam. `numeric-op` is
+/// classification, not a seam.
 fn is_seam(flags: &[String]) -> bool {
     flags
         .iter()
@@ -3733,67 +3803,6 @@ fn comment_stripping_respects_string_and_character_literals() {
     );
 }
 
-fn apply_exact_integer_plumbing_exemption(id: &str, flags: &mut Vec<String>) {
-    if NON_NUMERIC_INTEGER_PLUMBING_EXPORTS.contains(&id) && is_reviewed_seam_disposition_id(id) {
-        flags.retain(|flag| flag != "numeric-op");
-    }
-}
-
-/// Run the REAL C preprocessor over a root header and return its output
-/// attributed per header file via linemarkers, restricted to files under
-/// `include_dir` (system-header content is dropped). This is the
-/// compiled-artifact requirement made literal: `#define`-hidden spellings
-/// arrive expanded, so the re-red-team's macro evasion is visible. A
-/// missing C compiler fails LOUDLY - a skip here would be an evasion
-/// channel.
-fn preprocess_root(include_dir: &Path, root: &str) -> BTreeMap<String, String> {
-    let out = std::process::Command::new("cc")
-        .arg("-E")
-        .arg("-x")
-        .arg("c")
-        .arg("-I")
-        .arg(include_dir)
-        .arg(include_dir.join(root))
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}the capacity census requires a C compiler (`cc`) on PATH to \
-                 preprocess the published headers; none ran: {e}{}",
-                teaching_header(),
-                teaching_footer()
-            )
-        });
-    assert!(
-        out.status.success(),
-        "cc -E failed for {root}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let dir_str = include_dir.to_string_lossy().to_string();
-    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
-    let mut current: Option<String> = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# ") {
-            // Linemarker: `# <num> "<file>" <flags...>`.
-            if let Some(file) = rest.split('"').nth(1) {
-                current = if file.contains(&dir_str) || file.ends_with(root) {
-                    Path::new(file)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-            }
-            continue;
-        }
-        if let Some(name) = &current {
-            per_file.entry(name.clone()).or_default().push_str(line);
-            per_file.entry(name.clone()).or_default().push('\n');
-        }
-    }
-    per_file
-}
-
 /// Extract exported declarations and struct layouts from one preprocessed
 /// header body. `static` definitions carry no ABI and are skipped; the
 /// `extern "C" {` wrapper is neutralized; preprocessor lines are dropped.
@@ -3816,12 +3825,11 @@ fn push_callable_row(
     declaration: &str,
     typedefs: &BTreeMap<String, Vec<String>>,
 ) {
-    let mut flags = classify(declaration, typedefs);
+    let flags = classify(declaration, typedefs);
     let id = format!(
         "{header_name}: {}",
         canonical_c_tokens(&format!("{declaration};"))
     );
-    apply_exact_integer_plumbing_exemption(&id, &mut flags);
     rows.push(Row {
         kind: "header-export".to_string(),
         id,
@@ -3832,36 +3840,44 @@ fn push_callable_row(
 
 fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<Row> {
     let text = strip_c_comments(raw);
-    let text: String = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
+    let text: String = logical_lines(&text)
+        .into_iter()
+        .filter(|(_, line)| !line.trim_start().starts_with('#'))
+        .map(|(_, line)| line)
         .collect::<Vec<_>>()
         .join("\n")
         .replace("extern \"C\" {", "");
+    let tokens = c_lexical::lex_c_tokens(&text);
 
     let mut rows = Vec::new();
-    let mut seg = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '{' => {
-                let head = normalize_ws(&seg);
+    let mut seg = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "{" => {
+                let head = seg.join(" ");
                 // Consume the brace-matched body in every case; what differs
                 // is whether the construct publishes ABI.
                 let mut depth = 1usize;
-                let mut body = String::new();
-                for c2 in chars.by_ref() {
-                    match c2 {
-                        '{' => depth += 1,
-                        '}' => {
+                let mut body = Vec::new();
+                index += 1;
+                while index < tokens.len() {
+                    match tokens[index].as_str() {
+                        "{" => {
+                            depth += 1;
+                            body.push(tokens[index].clone());
+                        }
+                        "}" => {
                             depth -= 1;
                             if depth == 0 {
+                                index += 1;
                                 break;
                             }
+                            body.push(tokens[index].clone());
                         }
-                        _ => {}
+                        _ => body.push(tokens[index].clone()),
                     }
-                    body.push(c2);
+                    index += 1;
                 }
                 if head.starts_with("static") {
                     // A `static inline` definition carries no ABI export.
@@ -3870,19 +3886,17 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     // { ... } name;` and its untypedef'd forms. Capture the
                     // trailing declarator too - without it the `enum` tail
                     // would fall through to the statement arm as a bare name.
-                    let mut tail = String::new();
-                    for c2 in chars.by_ref() {
-                        if c2 == ';' {
+                    let mut tail = Vec::new();
+                    while index < tokens.len() {
+                        if tokens[index] == ";" {
+                            index += 1;
                             break;
                         }
-                        tail.push(c2);
+                        tail.push(tokens[index].clone());
+                        index += 1;
                     }
-                    let declaration = format!(
-                        "{} {{ {} }} {}",
-                        head,
-                        normalize_ws(&body),
-                        normalize_ws(&tail)
-                    );
+                    let declaration =
+                        format!("{} {{ {} }} {}", head, body.join(" "), tail.join(" "));
                     let flags = classify(&declaration, typedefs);
                     rows.push(Row {
                         kind: "header-struct".to_string(),
@@ -3898,13 +3912,15 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                 }
                 seg.clear();
             }
-            '}' => {
+            "}" => {
                 // Orphaned closer from the neutralized extern "C" block.
                 seg.clear();
+                index += 1;
             }
-            ';' => {
-                let stmt = normalize_ws(&seg);
+            ";" => {
+                let stmt = seg.join(" ");
                 seg.clear();
+                index += 1;
                 if stmt.is_empty() || stmt.starts_with("typedef") || stmt.starts_with("static") {
                     continue;
                 }
@@ -3925,10 +3941,28 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
                     });
                 }
             }
-            _ => seg.push(c),
+            _ => {
+                seg.push(tokens[index].clone());
+                index += 1;
+            }
         }
     }
     rows
+}
+
+#[test]
+fn multiline_preprocessor_macros_do_not_create_phantom_exports() {
+    let rows = header_rows_local(
+        "fixture.h",
+        concat!(
+            "#define CHECK(call) do { \\\n",
+            "    if ((call) != 0) abort(); \\\n",
+            "} while (0)\n",
+            "int real_export(void);\n",
+        ),
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].id.contains("real_export"));
 }
 
 // ---------------------------------------------------------------------------
@@ -3947,17 +3981,9 @@ fn walk_ch_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Classify a stdlib carrier by the numeric primitives it mentions, on the
-/// same rule the C families already use: a float primitive in an untagged
-/// public position is a `float-carrier` SEAM, an integer primitive makes
-/// the row a `numeric-op`. On a new post-ratchet row that class is bound to
-/// semantic registration. `scan_deftypes`
-/// previously hard-coded empty flags, so no `std-adt-numeric` row could be
-/// a seam and adding `| JsonBigNum(f64)` to `io/json.ch` landed by
-/// regenerating and citing an open issue - the round-1 P1-1 shape closed
-/// for the header family only, and a direct contradiction of `AGENTS.md`'s
-/// "a public ADT variant carrying bare `f64` has NO citation path"
-/// (round-3 red team P1).
+/// Retained capacity flags for concrete numeric payloads. Final authority
+/// classifies a declared Chelis primitive as a typed numeric operation; these
+/// flags do not turn a language ADT into an untagged external C carrier.
 fn numeric_carrier_flags(prims: &BTreeSet<String>) -> Vec<String> {
     let mut flags = Vec::new();
     if prims.iter().any(|p| FLOAT_PRIMS.contains(&p.as_str())) {
@@ -3969,461 +3995,9 @@ fn numeric_carrier_flags(prims: &BTreeSet<String>) -> Vec<String> {
     flags
 }
 
-fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TPrim)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && NUMERIC_PRIMS.contains(&name.as_str())
-            {
-                prims.insert(name.clone());
-            }
-            // [05-OP-35]'s closed precision domains and recursive equality
-            // domain are numeric capacity even when no concrete primitive is
-            // written in the signature. A tensor precision variable is also
-            // capacity over the active tensor element set. These markers are
-            // deliberately not in `FLOAT_PRIMS`: they use the tagged carrier,
-            // so they are numeric operations without introducing a bare-float
-            // seam.
-            if list.tag() == Some(DeepTag::TVar)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
-            {
-                prims.insert(name.clone());
-            }
-            if list.tag() == Some(DeepTag::TTensor)
-                && let Some(Expr::List(precision, _)) = list.elements.last()
-                && precision.tag() == Some(DeepTag::TVar)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = precision.elements.get(2)
-            {
-                prims.insert(format!("tensor-precision:{name}"));
-            }
-            for e in &list.elements {
-                collect_numeric_tprims(e, prims);
-            }
-        }
-        Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
-                collect_numeric_tprims(v, prims);
-            }
-        }
-        Expr::MetaExpr(me, _) => collect_numeric_tprims(&me.expr, prims),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_numeric_tprims(&bridged, prims);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn collect_referenced_adts(expr: &Expr, names: &mut BTreeSet<String>) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TAdt)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-            {
-                names.insert(name.clone());
-            }
-            for element in &list.elements {
-                collect_referenced_adts(element, names);
-            }
-        }
-        Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_referenced_adts(value, names);
-            }
-        }
-        Expr::MetaExpr(meta, _) => collect_referenced_adts(&meta.expr, names),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_referenced_adts(&bridged, names);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-#[derive(Default)]
-struct AdtNumericDependencies {
-    direct_prims: BTreeSet<String>,
-    referenced_adts: BTreeSet<String>,
-}
-
-fn collect_adt_numeric_dependencies(
-    expr: &Expr,
-    definitions: &mut BTreeMap<String, AdtNumericDependencies>,
-) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::Deftype) {
-                let mut dependency = AdtNumericDependencies::default();
-                for element in list.elements.iter().skip(3) {
-                    collect_numeric_tprims(element, &mut dependency.direct_prims);
-                    collect_referenced_adts(element, &mut dependency.referenced_adts);
-                }
-                definitions.insert(deftype_name(list), dependency);
-            }
-            for element in &list.elements {
-                collect_adt_numeric_dependencies(element, definitions);
-            }
-        }
-        Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_adt_numeric_dependencies(value, definitions);
-            }
-        }
-        Expr::MetaExpr(meta, _) => collect_adt_numeric_dependencies(&meta.expr, definitions),
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_adt_numeric_dependencies(&bridged, definitions);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn nominal_adt_numeric_prims(exprs: &[Vec<Expr>]) -> BTreeMap<String, BTreeSet<String>> {
-    let mut definitions = BTreeMap::new();
-    for program in exprs {
-        for expr in program {
-            collect_adt_numeric_dependencies(expr, &mut definitions);
-        }
-    }
-
-    let mut closure: BTreeMap<String, BTreeSet<String>> = definitions
-        .iter()
-        .map(|(name, dependency)| (name.clone(), dependency.direct_prims.clone()))
-        .collect();
-    loop {
-        let mut changed = false;
-        for (name, dependency) in &definitions {
-            let inherited = dependency
-                .referenced_adts
-                .iter()
-                .filter_map(|referenced| closure.get(referenced))
-                .flat_map(|prims| prims.iter().cloned())
-                .collect::<Vec<_>>();
-            let target = closure.entry(name.clone()).or_default();
-            let previous_len = target.len();
-            target.extend(inherited);
-            changed |= target.len() != previous_len;
-        }
-        if !changed {
-            return closure;
-        }
-    }
-}
-
-fn collect_numeric_tprims_with_adts(
-    expr: &Expr,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    prims: &mut BTreeSet<String>,
-) {
-    collect_numeric_tprims(expr, prims);
-    let mut referenced = BTreeSet::new();
-    collect_referenced_adts(expr, &mut referenced);
-    for name in referenced {
-        if let Some(reachable) = adt_prims.get(&name) {
-            prims.extend(reachable.iter().cloned());
-        }
-    }
-}
-
-/// Collect numeric primitives that cross the exported definition boundary
-/// without first entering a source-defined nominal ADT. The recursive ADT
-/// closure above decides whether a callable is numeric; this narrower pass
-/// decides whether it exposes an untagged primitive carrier. A tagged value
-/// such as `Json` remains numeric surface, but merely accepting or returning
-/// that ADT does not create another bare-float seam for every JSON operation.
-fn collect_untagged_numeric_tprims(
-    expr: &Expr,
-    nominal_adts: &BTreeMap<String, BTreeSet<String>>,
-    prims: &mut BTreeSet<String>,
-) {
-    match expr {
-        Expr::List(list, _) => {
-            if list.tag() == Some(DeepTag::TAdt)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && nominal_adts.contains_key(name)
-            {
-                return;
-            }
-            if list.tag() == Some(DeepTag::TPrim)
-                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && NUMERIC_PRIMS.contains(&name.as_str())
-            {
-                prims.insert(name.clone());
-            }
-            for element in &list.elements {
-                collect_untagged_numeric_tprims(element, nominal_adts, prims);
-            }
-        }
-        Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_untagged_numeric_tprims(value, nominal_adts, prims);
-            }
-        }
-        Expr::MetaExpr(meta, _) => {
-            collect_untagged_numeric_tprims(&meta.expr, nominal_adts, prims);
-        }
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            collect_untagged_numeric_tprims(&bridged, nominal_adts, prims);
-        }
-        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-    }
-}
-
-fn deftype_name(list: &List) -> String {
-    for e in list.elements.iter().skip(2) {
-        if let Expr::Atom(Atom::Name(name), _) = e {
-            return name.clone();
-        }
-    }
-    "<unnamed>".to_string()
-}
-
-fn symbol(expr: &Expr) -> Option<&str> {
-    if let Expr::Atom(Atom::Name(name), _) = expr {
-        Some(name)
-    } else {
-        None
-    }
-}
-
-/// The identity prefix for a declaration's dtype-family bounds.
-///
-/// Two signatures that differ only in their bounds are different numeric
-/// surface, so the bound belongs in the row identity. Empty for a
-/// declaration with no bound, which keeps every pre-existing row byte-stable.
-fn render_declared_bounds(bounds: &[(String, DtypeFamily)]) -> String {
-    if bounds.is_empty() {
-        return String::new();
-    }
-    format!(
-        "[{}] ",
-        bounds
-            .iter()
-            .map(|(binder, family)| format!("{binder}: {}", family.surf_name()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-fn scan_exported_numeric_defs(
-    list: &List,
-    file_label: &str,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    rows: &mut Vec<Row>,
-) {
-    if list.tag() != Some(DeepTag::Module) {
-        return;
-    }
-    let declarations = list.elements.iter().skip(3);
-    let mut exports = BTreeSet::new();
-    let mut value_definitions = BTreeSet::new();
-    let mut signatures: BTreeMap<String, &Expr> = BTreeMap::new();
-    // `spec/04-type-system.md` §5.9: a declared dtype-family bound is a
-    // binder's dtype domain, so it is both numeric capacity and part of the
-    // row identity. Before bounds existed the domain lived in the binder's
-    // NAME (`p_float`); reading it from the declaration instead is structural
-    // rather than a spelling heuristic, and the name list below stays as a
-    // conservative backstop for an unbounded metavariable spelling.
-    let mut declared_bounds: BTreeMap<String, Vec<(String, DtypeFamily)>> = BTreeMap::new();
-    for declaration in declarations.clone() {
-        let Expr::List(declaration, _) = declaration else {
-            continue;
-        };
-        match declaration.tag() {
-            Some(DeepTag::Export) => {
-                exports.extend(
-                    declaration
-                        .elements
-                        .iter()
-                        .skip(2)
-                        .filter_map(symbol)
-                        .map(str::to_string),
-                );
-            }
-            Some(DeepTag::Def) => {
-                if let Some(name) = declaration.elements.get(2).and_then(symbol) {
-                    value_definitions.insert(name.to_string());
-                }
-            }
-            Some(DeepTag::Defsig) => {
-                if let (Some(name), Some(signature)) = (
-                    declaration.elements.get(2).and_then(symbol),
-                    declaration.elements.get(3),
-                ) {
-                    signatures.insert(name.to_string(), signature);
-                    if let Some(Expr::Map(meta, _)) = declaration.elements.get(1) {
-                        let bounds = chelis_deep::decode_dtype_bounds(meta).unwrap_or_else(|e| {
-                            panic!(
-                                "{}MALFORMED DTYPE-FAMILY BOUND on `{file_label}::{name}`: {e}. \
-                                 A bound the census cannot decode is public numeric surface it \
-                                 cannot see.{}",
-                                teaching_header(),
-                                teaching_footer()
-                            )
-                        });
-                        if !bounds.is_empty() {
-                            declared_bounds.insert(name.to_string(), bounds);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    for name in exports {
-        let Some(signature) = signatures.get(&name) else {
-            // An export naming no value definition is a type, ADT, or
-            // constructor export, which this leg does not enumerate. An
-            // export naming a `def` with no `defsig` is different: the
-            // enumerator reads capacity off the DECLARED signature, so
-            // that def's dtypes are public and invisible at once. It used
-            // to `continue` (round-4 red team N3), and the Surf style
-            // guide recommends exactly that shape for load-style bindings,
-            // so the silent path was one stdlib commit from being taken.
-            assert!(
-                !value_definitions.contains(&name),
-                "{}EXPORTED DEFINITION WITHOUT A DECLARED SIGNATURE \
-                 `{file_label}::{name}`: this leg enumerates a public \
-                 stdlib def's numeric capacity from its `defsig`, so an \
-                 exported def that declares none is public numeric surface \
-                 the census cannot see. Declare the signature (`def ... -> \
-                 T = ...` per the Surf style guide) or stop exporting the \
-                 binding.{}",
-                teaching_header(),
-                teaching_footer()
-            );
-            continue;
-        };
-        let bounds = declared_bounds.get(&name).map(Vec::as_slice).unwrap_or(&[]);
-        let mut reachable_prims = BTreeSet::new();
-        // A bounded binder ranges over that family's active dtypes, so it is
-        // capacity exactly as the metavariable spellings below are. Like
-        // them it stays out of `untagged_prims`: the domain is declared, not
-        // a bare-float seam.
-        for (binder, family) in bounds {
-            reachable_prims.insert(format!("dtype-bound:{binder}:{}", family.surf_name()));
-        }
-        collect_numeric_tprims_with_adts(signature, adt_prims, &mut reachable_prims);
-        if reachable_prims.is_empty() {
-            continue;
-        }
-        let mut untagged_prims = BTreeSet::new();
-        collect_untagged_numeric_tprims(signature, adt_prims, &mut untagged_prims);
-        rows.push(Row {
-            kind: "std-def-numeric".to_string(),
-            id: format!(
-                "{file_label}::{name}: {}{}",
-                render_declared_bounds(bounds),
-                chelis_deep::printer::print_expr_flat(signature)
-            ),
-            flags: numeric_carrier_flags(&untagged_prims),
-            citation: String::new(),
-        });
-    }
-}
-
-fn scan_deftypes_with_adts(
-    exprs: &[Expr],
-    file_label: &str,
-    adt_prims: &BTreeMap<String, BTreeSet<String>>,
-    rows: &mut Vec<Row>,
-) {
-    fn walk(
-        expr: &Expr,
-        file_label: &str,
-        adt_prims: &BTreeMap<String, BTreeSet<String>>,
-        rows: &mut Vec<Row>,
-    ) {
-        match expr {
-            Expr::List(list, _) => {
-                if list.tag() == Some(DeepTag::Module) {
-                    scan_exported_numeric_defs(list, file_label, adt_prims, rows);
-                }
-                if list.tag() == Some(DeepTag::Deftype) {
-                    let name = deftype_name(list);
-                    let prims = adt_prims.get(&name).cloned().unwrap_or_default();
-                    if !prims.is_empty() {
-                        let shape = list
-                            .elements
-                            .iter()
-                            .skip(3)
-                            .map(chelis_deep::printer::print_expr_flat)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        rows.push(Row {
-                            kind: "std-adt-numeric".to_string(),
-                            id: format!("{file_label}::{name}: {shape}"),
-                            flags: numeric_carrier_flags(&prims),
-                            citation: String::new(),
-                        });
-                    }
-                }
-                for e in &list.elements {
-                    walk(e, file_label, adt_prims, rows);
-                }
-            }
-            Expr::Map(map, _) => {
-                for (_, v) in &map.entries {
-                    walk(v, file_label, adt_prims, rows);
-                }
-            }
-            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, adt_prims, rows),
-            Expr::Node(node, span) => {
-                let bridged = Expr::List(node.to_list(*span), *span);
-                walk(&bridged, file_label, adt_prims, rows);
-            }
-            Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-        }
-    }
-    for e in exprs {
-        walk(e, file_label, adt_prims, rows);
-    }
-}
-
-fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
-    let programs = vec![exprs.to_vec()];
-    let adt_prims = nominal_adt_numeric_prims(&programs);
-    scan_deftypes_with_adts(exprs, file_label, &adt_prims, rows);
-}
-
-fn stdlib_rows(root: &Path) -> Vec<Row> {
-    let src_dir = root.join(STD_SRC_REL);
-    let mut files = Vec::new();
-    walk_ch_files(&src_dir, &mut files);
-    files.sort();
-    let mut programs = Vec::new();
-    for path in files {
-        let src =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let decls = chelis_surf::parser::parse_str(&src).unwrap_or_else(|e| {
-            panic!(
-                "stdlib source must parse for the capacity census: {}: {e:?}",
-                path.display()
-            )
-        });
-        let exprs = chelis_surf::desugar::desugar_program(&decls);
-        let label = path
-            .strip_prefix(&src_dir)
-            .expect("under src dir")
-            .with_extension("")
-            .to_string_lossy()
-            .replace('\\', "/");
-        programs.push((label, exprs));
-    }
-    let exprs = programs
-        .iter()
-        .map(|(_, exprs)| exprs.clone())
-        .collect::<Vec<_>>();
-    let adt_prims = nominal_adt_numeric_prims(&exprs);
-    let mut rows = Vec::new();
-    for (label, exprs) in programs {
-        scan_deftypes_with_adts(&exprs, &label, &adt_prims, &mut rows);
-    }
-    rows
-}
+#[path = "../../../tests/support/capacity_census_stdlib.rs"]
+mod stdlib_discovery;
+use stdlib_discovery::{scan_deftypes, stdlib_rows};
 
 // ---------------------------------------------------------------------------
 // Rust-registered prelude value ADTs (the chelis#890 `Json` shape)
@@ -4477,7 +4051,7 @@ fn render_prelude_census_type(ty: &chelis_types::types::Type) -> String {
 }
 
 /// Collect the numeric primitive spellings reachable in one prelude ADT
-/// field type, the `collect_numeric_tprims` counterpart for
+/// field type, the resolved stdlib traversal counterpart for
 /// Rust-registered types.
 fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTreeSet<String>) {
     use chelis_types::types::{TensorPrec, Type};
@@ -4598,8 +4172,8 @@ fn teaching_footer() -> String {
      and commit crates/chelis-types/src/rejection_registry_generated.rs. The \
      generated registry is required but is not semantic authority; an unrelated or \
      nonexistent atom still fails.\n\
-     4. An identity change is removal plus addition: remove the old descriptor and \
-     legacy disposition, then register the successor under exactly one of rules \
+     4. An identity change is removal plus addition: remove the old descriptor, \
+     then register the successor under exactly one of rules \
      1-3. No transition exception can be copied or newly authored. A removed ABI \
      row is 0.19 payload by \
      default per remediation_roadmap.md anti-churn invariant 7.\n\
@@ -4760,87 +4334,22 @@ fn check_against_baseline_with_authorities(
                 row.kind, row.id
             ));
         }
-        let final_authority = capacity_census_authority::classify_final_authority(
+        match capacity_census_authority::classify_final_authority(
             &authority_surface(row),
             final_registries,
             spec,
-        );
-        if final_authority.is_ok() {
-            if !row.citation.trim().is_empty() {
-                problems.push(format!(
-                    "FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION: [{}] {} has `{}`; final rows omit legacy citations/exceptions",
-                    row.kind, row.id, row.citation
-                ));
-            }
-            continue;
-        }
-        if row.citation.trim().is_empty() || row.citation.trim() == "TODO" {
-            problems.push(format!(
-                "UNCLASSIFIED census row (no final authority and no sealed legacy disposition): [{}] {} ({})",
-                row.kind,
-                row.id,
-                final_authority.expect_err("checked above")
-            ));
-            continue;
-        }
-        if let Some((frozen, expected_citation)) = frozen_disposition_for_canonical_key(row)
-            && (!matches_frozen_descriptor(row, frozen) || row.citation != expected_citation)
-        {
-            problems.push(format!(
-                "FROZEN DISPOSITION CHANGED for [{}] {}: expected citation `{}` and flags {:?}, got citation `{}` and flags {:?}",
-                row.kind,
-                row.id,
-                expected_citation,
-                frozen.flags,
-                row.citation,
-                row.flags
-            ));
-        }
-        if row.citation == GRANDFATHER_SEAM_CITATION && !has_recognized_grandfather_disposition(row)
-        {
-            problems.push(format!(
-                "GRANDFATHER citation on a descriptor outside the frozen \
-                 2026-07-30 seam set (kind/id/flags changed or descriptor \
-                 relocated; the set may only shrink): [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if row.citation == INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE
-            && !has_recognized_int64_dim_carrier_successor_override(row)
-        {
-            problems.push(format!(
-                "#1149 SUCCESSOR OVERRIDE on the wrong descriptor: the one-off \
-                 maintainer decision binds exactly the three reviewed int64 \
-                 dimension-carrier successor kind/id/flags triples and is not a \
-                 reusable relocation mechanism: [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if row.citation == PERMANENT_PLAIN_DISPOSITION
-            && !has_recognized_permanent_plain_disposition(row)
-        {
-            problems.push(format!(
-                "PERMANENT PLAIN disposition on a descriptor outside the frozen \
-                 kind/id/flags set: this is an exact foundation-era adjudication, not a \
-                 string a new row may copy. A new or changed row must enter exactly one final \
-                 authority class; a numeric callable authors its governing `[05-OP-N]` atom \
-                 and complete family-qualified registration: [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if !has_recognized_legacy_disposition(row) {
-            problems.push(format!(
-                "LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE: [{}] {} carries `{}`. New or changed identities must satisfy exactly one final authority class; no grandfather, permanent-disposition, successor-override, generic issue citation, or maintainer override can be added.",
+        ) {
+            Ok(_) if !row.citation.trim().is_empty() => problems.push(format!(
+                "FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION: [{}] {} has `{}`; final rows omit legacy citations/exceptions",
                 row.kind, row.id, row.citation
-            ));
+            )),
+            Ok(_) => {}
+            Err(problem) => problems.push(format!(
+                "UNCLASSIFIED census row (no final authority; citations and transition exceptions are not authority): [{}] {} ({problem})",
+                row.kind, row.id
+            )),
         }
     }
-    // There is deliberately no separate seam COUNT lock. The descriptor
-    // freeze above subsumes it: `GRANDFATHER_SEAM_ROWS` is the whole frozen
-    // set, so a row carrying the seam citation either matches one of those
-    // complete descriptors or is already a rejection. A count branch that
-    // no reachable input can trip is not a second guard, it is an untested claim
-    // (round-4 red team N7).
     if problems.is_empty() {
         Ok(())
     } else {
@@ -4853,20 +4362,7 @@ fn check_against_baseline_with_authorities(
     }
 }
 
-fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
-    let old_citations: BTreeMap<(String, String), String> = old
-        .map(|b| {
-            b.rows
-                .iter()
-                .map(|r| {
-                    (
-                        (r.kind.clone(), canonical_inventory_id(&r.id)),
-                        r.citation.clone(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+fn regenerate(baseline_path: &Path, current: &[Row], _old: Option<&Baseline>) {
     let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
         .expect("controlling spec/05 must be readable");
     let rows: Vec<Row> = current
@@ -4884,10 +4380,7 @@ fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
             {
                 String::new()
             } else {
-                old_citations
-                    .get(&(r.kind.clone(), r.id.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| "TODO".to_string())
+                "TODO".to_string()
             },
         })
         .collect();
@@ -4937,9 +4430,6 @@ fn capacity_census_matches_public_surface() {
         }))
         .expect("parse capacity_census.json");
 
-    if let Err(msg) = check_active_legacy_subset(&baseline) {
-        panic!("{msg}");
-    }
     if let Err(msg) = check_against_baseline(&current, &baseline) {
         panic!("{msg}");
     }
@@ -5135,6 +4625,144 @@ fn migrated_primary_rows_have_exact_final_authority_and_no_transition_dispositio
 }
 
 #[test]
+fn primary_baseline_has_zero_legacy_rows() {
+    let baseline: Baseline = serde_json::from_str(
+        &fs::read_to_string(repo_root().join(BASELINE_REL)).expect("read primary baseline"),
+    )
+    .expect("parse primary baseline");
+    let legacy: Vec<&Row> = baseline
+        .rows
+        .iter()
+        .filter(|row| !row.citation.trim().is_empty())
+        .collect();
+    assert!(legacy.is_empty(), "primary legacy rows remain: {legacy:#?}");
+}
+
+fn row_from_final(descriptor: StaticSurfaceDescriptor) -> Row {
+    Row {
+        kind: descriptor.kind.to_string(),
+        id: descriptor.id.to_string(),
+        flags: descriptor
+            .flags
+            .iter()
+            .map(|flag| (*flag).to_string())
+            .collect(),
+        citation: String::new(),
+    }
+}
+
+#[test]
+fn duplicate_primary_descriptors_fail_before_map_collapse() {
+    let row = row_from_final(FINAL_NONNUMERIC_ROWS[0]);
+    let duplicate_baseline = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![row.clone(), row.clone()],
+    };
+    let error = check_against_baseline(std::slice::from_ref(&row), &duplicate_baseline)
+        .expect_err("duplicate baseline identities must fail");
+    assert!(error.contains("DUPLICATE BASELINE DESCRIPTOR"), "{error}");
+
+    let baseline = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let error = check_against_baseline(&[row.clone(), row], &baseline)
+        .expect_err("duplicate current identities must fail");
+    assert!(error.contains("DUPLICATE CURRENT DESCRIPTOR"), "{error}");
+}
+
+#[test]
+fn primary_metadata_and_manifest_mutations_fail() {
+    let row = row_from_final(FINAL_NONNUMERIC_ROWS[0]);
+    let baseline = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let mut changed = row.clone();
+    changed.flags.push("numeric-op".to_string());
+    let error = check_against_baseline(&[changed], &baseline)
+        .expect_err("derived metadata changes must fail");
+    assert!(error.contains("ENFORCEMENT METADATA CHANGED"), "{error}");
+
+    let mut wrong_manifest = baseline;
+    wrong_manifest.legs.covered[0]
+        .command
+        .push_str(" --weakened");
+    let error = check_against_baseline(std::slice::from_ref(&row), &wrong_manifest)
+        .expect_err("editable coverage claims must fail");
+    assert!(error.contains("INVALID COVERAGE MANIFEST"), "{error}");
+}
+
+#[test]
+fn every_primary_final_registration_binds_kind_identity_and_flags() {
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    let registered: Vec<StaticSurfaceDescriptor> = FINAL_NONNUMERIC_ROWS
+        .iter()
+        .chain(FINAL_TAGGED_TRANSPORT_ROWS)
+        .copied()
+        .chain(
+            FINAL_NUMERIC_OPERATION_ROWS
+                .iter()
+                .map(|registration| registration.surface),
+        )
+        .collect();
+
+    for descriptor in registered {
+        let exact = SurfaceDescriptor::new(
+            descriptor.family,
+            descriptor.kind,
+            descriptor.id,
+            descriptor.flags,
+        );
+        capacity_census_authority::classify_final_authority(
+            &exact,
+            final_authority_registries(),
+            &spec,
+        )
+        .unwrap_or_else(|problem| panic!("registered descriptor must classify: {problem}"));
+
+        let mut wrong_kind = exact.clone();
+        wrong_kind.kind.push_str("-mutated");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &wrong_kind,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "kind mutation inherited authority: {descriptor:?}"
+        );
+
+        let mut wrong_identity = exact.clone();
+        wrong_identity.id.push_str(" mutated");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &wrong_identity,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "identity mutation inherited authority: {descriptor:?}"
+        );
+
+        let mut wrong_flags = exact;
+        wrong_flags.flags.push("float-carrier".to_string());
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &wrong_flags,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "flag mutation inherited authority: {descriptor:?}"
+        );
+    }
+}
+
+#[test]
 fn regeneration_preserves_final_authority_but_cannot_bless_an_unclassified_row() {
     let final_row = Row {
         kind: FINAL_NONNUMERIC_ROWS[0].kind.to_string(),
@@ -5167,61 +4795,6 @@ fn regeneration_preserves_final_authority_but_cannot_bless_an_unclassified_row()
 }
 
 #[test]
-fn changed_identity_can_register_as_final_but_cannot_inherit_transition_debt() {
-    const SUCCESSOR: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-export",
-        "reviewer.h: int64_t changed_signature ( int32_t axis ) ;",
-        &["numeric-op"],
-    );
-    const REGISTRATION: FinalNumericOperationRegistration = FinalNumericOperationRegistration {
-        surface: SUCCESSOR,
-        atom: "[05-OP-7]",
-        authority_anchor: "runtime extent read",
-    };
-    let mut row = Row {
-        kind: SUCCESSOR.kind.to_string(),
-        id: SUCCESSOR.id.to_string(),
-        flags: SUCCESSOR
-            .flags
-            .iter()
-            .map(|flag| (*flag).to_string())
-            .collect(),
-        citation: String::new(),
-    };
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
-    let registries = AuthorityRegistries {
-        nonnumeric: &[],
-        tagged_transports: &[],
-        numeric_operations: &[REGISTRATION],
-    };
-    assert!(
-        check_against_baseline_with_authorities(&[row.clone()], &baseline, &[], &spec, registries)
-            .is_ok(),
-        "a changed identity may land only after exact final registration"
-    );
-
-    row.citation = INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE.to_string();
-    let copied_baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let error =
-        check_against_baseline_with_authorities(&[row], &copied_baseline, &[], &spec, registries)
-            .expect_err("a final successor cannot copy even the one-off successor override");
-    assert!(
-        error.contains("FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION"),
-        "{error}"
-    );
-}
-
-#[test]
 fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
     let guidance = teaching_footer();
     for required in [
@@ -5237,102 +4810,6 @@ fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
         assert!(
             guidance.contains(required),
             "the sanctioned-action guidance must name `{required}`:\n{guidance}"
-        );
-    }
-}
-
-#[test]
-fn int64_dim_carrier_successors_use_named_one_off_overrides() {
-    const SUCCESSORS: &[(&str, &str, &[&str])] = &[(
-        "header-export",
-        "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-        &["raw-dtype-int"],
-    )];
-    const OVERRIDE: &str =
-        "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)";
-
-    assert_eq!(INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE, OVERRIDE);
-    assert_eq!(INT64_DIM_CARRIER_SUCCESSOR_ROWS.len(), SUCCESSORS.len());
-
-    let root = repo_root();
-    let baseline: Baseline = serde_json::from_str(
-        &fs::read_to_string(root.join(BASELINE_REL)).expect("read capacity census baseline"),
-    )
-    .expect("parse capacity census baseline");
-
-    for (kind, id, flags) in SUCCESSORS {
-        assert!(
-            !GRANDFATHER_SEAM_ROWS
-                .iter()
-                .any(|frozen| frozen.kind == *kind && frozen.id == *id),
-            "the #1149 successor `{id}` must not be rewritten into the shrink-only pre-ratchet set"
-        );
-        let reviewed = INT64_DIM_CARRIER_SUCCESSOR_ROWS
-            .iter()
-            .find(|successor| successor.kind == *kind && successor.id == *id)
-            .unwrap_or_else(|| panic!("missing closed #1149 override descriptor `{id}`"));
-        assert_eq!(reviewed.flags, *flags);
-        // The chelis#1289 tagged-carrier ABI removed all three #1149
-        // successor identities from the live surface; their replacements
-        // register through the final authority classes. The frozen override
-        // universe below still binds the retired descriptors exactly, so a
-        // reintroduced identity cannot borrow the one-off citation from a
-        // different kind/id/flags triple.
-        assert!(
-            !baseline
-                .rows
-                .iter()
-                .any(|row| row.kind == *kind && row.id == *id),
-            "the retired #1149 successor `{id}` must not re-enter the census; \
-             a successor identity registers through exactly one final \
-             authority class"
-        );
-
-        let exact = row_from_frozen(reviewed, OVERRIDE);
-        let exact_baseline = Baseline {
-            version: 3,
-            legs: coverage_manifest(),
-            rows: vec![exact.clone()],
-        };
-        assert!(
-            check_against_baseline(std::slice::from_ref(&exact), &exact_baseline).is_ok(),
-            "the exact reviewed successor must pass"
-        );
-
-        let mut regrandfathered = exact.clone();
-        regrandfathered.citation = GRANDFATHER_SEAM_CITATION.to_string();
-        let regrandfathered_baseline = Baseline {
-            version: 3,
-            legs: coverage_manifest(),
-            rows: vec![regrandfathered.clone()],
-        };
-        let err = check_against_baseline(
-            std::slice::from_ref(&regrandfathered),
-            &regrandfathered_baseline,
-        )
-        .expect_err("a #1149 successor cannot regain the pre-ratchet citation");
-        assert!(
-            err.contains("FROZEN DISPOSITION CHANGED") && err.contains("GRANDFATHER citation"),
-            "unexpected re-grandfather diagnostic: {err}"
-        );
-
-        let mut complete_rows = frozen_disposition_rows();
-        let mutated = complete_rows
-            .iter_mut()
-            .find(|candidate| candidate.kind == *kind && candidate.id == *id)
-            .expect("the closed disposition manifest includes every #1149 successor");
-        mutated.kind.push_str("-moved");
-        let incomplete = Baseline {
-            version: 3,
-            legs: coverage_manifest(),
-            rows: complete_rows,
-        };
-        let err = check_active_legacy_subset(&incomplete)
-            .expect_err("a #1149 successor cannot change family inside the closed set");
-        assert!(
-            err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
-                && err.contains(id),
-            "unexpected successor mutation diagnostic: {err}"
         );
     }
 }
@@ -5399,25 +4876,15 @@ fn planted_struct_layout_is_inventoried() {
 
 #[test]
 fn planted_deftype_with_f64_variant_is_detected() {
-    // The chelis#891 JNum shape, built through the typed Deep constructors
-    // (artifact-level, not text): (deftype {} Json (variant JNum (t-prim {} f64))).
-    let span = chelis_deep::Span::new(0, 0);
-    let tprim = Expr::node(
-        DeepTag::TPrim,
-        Default::default(),
-        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
-        span,
-    );
-    let deftype = Expr::node(
-        DeepTag::Deftype,
-        Default::default(),
-        vec![Expr::Atom(Atom::Name("Json".to_string()), span), tprim],
-        span,
-    );
+    // A complete, canonical declaration reaches the resolver before the
+    // census follows the field's numeric payload.
     let mut rows = Vec::new();
-    scan_deftypes(&[deftype], "planted", &mut rows);
+    scan_deftypes(&[planted_numeric_adt("JNum")], "planted", &mut rows);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].id, "planted::Json: (t-prim {} f64)");
+    assert_eq!(
+        rows[0].id,
+        "planted::Json: () (variant {} JNum (t-prim {} f64))"
+    );
 }
 
 #[test]
@@ -5490,40 +4957,12 @@ fn new_flagged_seam_cannot_be_cited_with_an_issue() {
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "an issue citation must not bless a flagged row: {err}"
     );
 }
 
-/// Copying the grandfather citation string onto an extra flagged row trips
-/// the complete-descriptor lock: the whole frozen set PLUS one more is a
-/// rejection even though nothing was removed, which is the growth direction a
-/// shrink-only set has to refuse. (There is no separate count lock - see
-/// the note in `check_against_baseline_with` for why it was redundant.)
-#[test]
-fn grandfather_citation_cannot_be_copied_onto_new_rows() {
-    let mut rows: Vec<Row> = GRANDFATHER_SEAM_ROWS
-        .iter()
-        .map(|frozen| row_from_frozen(frozen, GRANDFATHER_SEAM_CITATION))
-        .collect();
-    rows.push(flagged_row(
-        "planted.h: void f_extra(int x_dtype);",
-        GRANDFATHER_SEAM_CITATION,
-    ));
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: rows.clone(),
-    };
-    let err = check_against_baseline(&rows, &baseline).unwrap_err();
-    assert!(
-        err.contains("may only shrink") && err.contains("f_extra"),
-        "the grandfather descriptor lock must trip on the added row: {err}"
-    );
-}
-
-/// #1288 removes the generic human-override path: even a well-formed marker
-/// cannot authorize a new identity.
+/// A human override is not one of the three final authority classes.
 #[test]
 fn maintainer_override_is_not_a_final_authority_class() {
     let row = flagged_row(
@@ -5537,10 +4976,7 @@ fn maintainer_override_is_not_a_final_authority_class() {
     };
     let error = check_against_baseline(&[row], &baseline)
         .expect_err("generic maintainer overrides are transition debt, not final authority");
-    assert!(
-        error.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
-        "{error}"
-    );
+    assert!(error.contains("UNCLASSIFIED census row"), "{error}");
 }
 
 #[test]
@@ -5555,14 +4991,12 @@ fn maintainer_override_does_not_waive_new_numeric_semantic_registration() {
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "a generic override is not one of the three final classes: {err}"
     );
 }
 
-/// Prose is not a citation: an ordinary disposition names a chelis issue so
-/// the liveness gate can require it to remain OPEN. Only the exact permanent
-/// dispositions have no issue reference.
+/// Arbitrary prose cannot classify a row.
 #[test]
 fn prose_citation_without_issue_ref_fails() {
     let row = Row {
@@ -5577,14 +5011,10 @@ fn prose_citation_without_issue_ref_fails() {
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
-        "{err}"
-    );
+    assert!(err.contains("UNCLASSIFIED census row"), "{err}");
 }
 
-/// A maintainer override must name its issue too (§C6: "naming its
-/// reason and issue"), or the liveness gate has nothing to hold it to.
+/// An override spelling cannot classify a row, with or without an issue.
 #[test]
 fn maintainer_override_without_issue_ref_fails() {
     let row = flagged_row(
@@ -5597,10 +5027,7 @@ fn maintainer_override_without_issue_ref_fails() {
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
-        "{err}"
-    );
+    assert!(err.contains("UNCLASSIFIED census row"), "{err}");
 }
 
 /// Empty numeric flags are not proof of structural nonnumericity, and an
@@ -5620,10 +5047,7 @@ fn unflagged_row_with_issue_citation_still_requires_final_authority() {
     };
     let error = check_against_baseline(&[row], &baseline)
         .expect_err("an issue citation cannot classify an unflagged descriptor");
-    assert!(
-        error.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
-        "{error}"
-    );
+    assert!(error.contains("UNCLASSIFIED census row"), "{error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -5673,33 +5097,6 @@ fn reviewer_typedef_capacity_seam_is_visible() {
     assert!(
         row.flags.iter().any(|f| f == "raw-dtype-int"),
         "the typedef resolves to raw int: {row:?}"
-    );
-}
-
-/// Removing one grandfathered seam and relocating its citation onto a
-/// brand-new seam must fail even though the count stays constant: the
-/// complete-descriptor set is frozen in this file, not the regeneratable
-/// baseline.
-#[test]
-fn reviewer_grandfathered_descriptor_relocation_must_fail() {
-    let mut rows: Vec<Row> = GRANDFATHER_SEAM_ROWS
-        .iter()
-        .skip(1)
-        .map(|frozen| row_from_frozen(frozen, GRANDFATHER_SEAM_CITATION))
-        .collect();
-    rows.push(flagged_row(
-        "planted.h: void brand_new_seam(int output_dtype);",
-        GRANDFATHER_SEAM_CITATION,
-    ));
-    let regenerated = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: rows.clone(),
-    };
-    let err = check_against_baseline(&rows, &regenerated).unwrap_err();
-    assert!(
-        err.contains("outside the frozen"),
-        "the complete descriptor freeze must not accept descriptor relocation: {err}"
     );
 }
 
@@ -5797,83 +5194,6 @@ fn c_identity_is_stable_across_bool_preprocessor_spellings() {
 }
 
 #[test]
-fn matched_row_float_carrier_metadata_change_fails() {
-    let baseline_row = Row {
-        kind: "header-export".to_string(),
-        id: "planted.h: int64_t f(int64_t value);".to_string(),
-        flags: vec!["numeric-op".to_string()],
-        citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-    };
-    let mut current_row = baseline_row.clone();
-    current_row.flags = vec!["float-carrier".to_string(), "numeric-op".to_string()];
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![baseline_row],
-    };
-    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
-    assert!(
-        err.contains("ENFORCEMENT METADATA CHANGED")
-            && err.contains("float-carrier")
-            && err.contains("numeric-op"),
-        "matched canonical rows must freeze their derived flags exactly: {err}"
-    );
-}
-
-#[test]
-fn matched_row_typedef_int64_to_double_metadata_change_fails() {
-    let before = header_rows_local(
-        "planted.h",
-        "typedef int64_t planted_num;\nplanted_num f(planted_num value);\n",
-    );
-    let after = header_rows_local(
-        "planted.h",
-        "typedef double planted_num;\nplanted_num f(planted_num value);\n",
-    );
-    assert_eq!(before.len(), 1);
-    assert_eq!(after.len(), 1);
-    assert_eq!(before[0].id, after[0].id, "typedef spelling stays stable");
-    let mut baseline_row = before[0].clone();
-    baseline_row.citation = PERMANENT_PLAIN_DISPOSITION.to_string();
-    let mut current_row = after[0].clone();
-    current_row.citation = PERMANENT_PLAIN_DISPOSITION.to_string();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![baseline_row],
-    };
-    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
-    assert!(
-        err.contains("ENFORCEMENT METADATA CHANGED")
-            && err.contains("float-carrier")
-            && err.contains("numeric-op"),
-        "typedef target changes must not evade the flag freeze: {err}"
-    );
-}
-
-#[test]
-fn matched_row_raw_dtype_metadata_change_fails() {
-    let baseline_row = Row {
-        kind: "header-export".to_string(),
-        id: "planted.h: void f ( int dtype ) ;".to_string(),
-        flags: vec![],
-        citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-    };
-    let mut current_row = baseline_row.clone();
-    current_row.flags = vec!["raw-dtype-int".to_string()];
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![baseline_row],
-    };
-    let err = check_against_baseline(&[current_row], &baseline).unwrap_err();
-    assert!(
-        err.contains("ENFORCEMENT METADATA CHANGED") && err.contains("raw-dtype-int"),
-        "raw-dtype classification is enforcement metadata: {err}"
-    );
-}
-
-#[test]
 fn unrelated_observation_atom_is_not_a_numeric_registration() {
     let mut rows = header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);");
     let mut row = rows.remove(0);
@@ -5966,7 +5286,7 @@ fn old_style_semantic_registration_and_issue_prose_are_not_final_authority() {
     )
     .unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "only a family-qualified complete final registration authorizes a discovered row: {err}"
     );
 }
@@ -5993,7 +5313,7 @@ fn planted_numeric_adt(variant_name: &str) -> Expr {
         Default::default(),
         vec![
             Expr::Atom(Atom::Name("Json".to_string()), span),
-            Expr::List(List { elements: vec![] }, span),
+            Expr::BareList(vec![], span),
             variant,
         ],
         span,
@@ -6019,10 +5339,10 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
     let decls = chelis_surf::parser::parse_str(
         "module Planted\n\
          export (public_numeric)\n\
-         def public_numeric(x: int64) -> int64 = x\n",
+         def public_numeric(x: i64) -> i64 = x\n",
     )
     .expect("planted stdlib source parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, "planted", &mut rows);
     assert!(
@@ -6037,8 +5357,9 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
 /// walk. A name may carry a subdirectory (`sub/x.h`), which is how the
 /// recursive-walk controls plant a header one level down.
 fn planted_include_dir(label: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("census-{label}-{}", std::process::id()));
-    fs::remove_dir_all(&dir).ok();
+    let sequence = PLANTED_INCLUDE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("census-{label}-{}-{sequence}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp include dir");
     for (name, body) in files {
         let path = dir.join(name);
@@ -6111,37 +5432,81 @@ fn shared_header_cannot_have_multiple_public_macro_contexts() {
 }
 
 #[test]
-fn coverage_legs_cannot_claim_covered_without_live_oracles() {
-    let row = Row {
-        kind: "header-export".to_string(),
-        id: "planted.h: void plain(chelis_string s);".to_string(),
-        flags: vec![],
-        citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-    };
-    let mut legs = coverage_manifest();
-    legs.deferred
-        .retain(|leg| leg.leg != "wire-schema-numeric-fields");
-    legs.covered.push(CoveredLeg {
-        leg: "wire-schema-numeric-fields".to_string(),
-        artifact: "invented".to_string(),
-        enumerator: "invented".to_string(),
-        command: "invented".to_string(),
-        expected_success: "invented".to_string(),
-        mutations: vec!["invented".to_string()],
-    });
+fn wire_coverage_manifest_names_graph_and_execution_authority() {
+    let manifest = coverage_manifest();
+    let wire = manifest
+        .covered
+        .iter()
+        .find(|leg| leg.leg == "wire-schema-numeric-fields")
+        .expect("the wire leg has an executable aggregate");
+    assert!(wire.artifact.contains("publication roots"));
+    assert!(wire.enumerator.contains("final authority"));
+    assert!(wire.enumerator.contains("execution receipts"));
+    assert_eq!(
+        wire.command,
+        "cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
+    );
+    assert!(wire.mutations.iter().any(|test| {
+        test == "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline"
+    }));
+    assert!(
+        wire.mutations
+            .iter()
+            .any(|test| { test == "wire_baseline_rejects_exception_fields_and_nonfinal_classes" })
+    );
+    assert!(
+        wire.mutations
+            .iter()
+            .any(|test| { test == "wire_rows_cannot_erase_capacity_or_duplicate_an_identity" })
+    );
     let baseline = Baseline {
         version: 3,
-        legs,
-        rows: vec![row.clone()],
+        legs: manifest,
+        rows: vec![],
     };
-    let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(
-        err.contains("INVALID COVERAGE MANIFEST")
-            && err.contains("wire-schema-numeric-fields")
-            && err.contains("enumerator")
-            && err.contains("mutation_oracle"),
-        "a prose relabel must not turn a deferred leg into covered: {err}"
-    );
+    check_against_baseline(&[], &baseline).expect("the executable manifest is accepted");
+}
+
+#[test]
+fn wire_coverage_cannot_drop_execution_or_restore_schema_only_inventory() {
+    for change in ["artifact", "enumerator", "mutations"] {
+        let mut manifest = coverage_manifest();
+        let wire = manifest
+            .covered
+            .iter_mut()
+            .find(|leg| leg.leg == "wire-schema-numeric-fields")
+            .unwrap();
+        match change {
+            "artifact" => {
+                wire.artifact =
+                    "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
+                        .to_string();
+            }
+            "enumerator" => {
+                wire.enumerator =
+                    "rustdoc JSON public schema type graph -> wire-schema numeric fields"
+                        .to_string();
+            }
+            "mutations" => {
+                wire.mutations = vec![
+                    "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
+                        .to_string(),
+                ];
+            }
+            _ => unreachable!(),
+        }
+        let baseline = Baseline {
+            version: 3,
+            legs: manifest,
+            rows: vec![],
+        };
+        let error = check_against_baseline(&[], &baseline)
+            .expect_err("an obsolete wire manifest must fail");
+        assert!(
+            error.contains("INVALID COVERAGE MANIFEST"),
+            "{change}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -6189,45 +5554,8 @@ fn new_post_ratchet_bare_int_export_is_numeric_op_and_requires_registration() {
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "a new post-ratchet bare-int numeric callable owes exact registration: {err}"
-    );
-}
-
-#[test]
-fn integer_plumbing_exemptions_are_exact_and_closed() {
-    assert_eq!(
-        NON_NUMERIC_INTEGER_PLUMBING_EXPORTS.len(),
-        3,
-        "the reviewed plumbing set is closed"
-    );
-    for id in NON_NUMERIC_INTEGER_PLUMBING_EXPORTS {
-        assert!(
-            is_reviewed_seam_disposition_id(id),
-            "an exemption must belong to an exact reviewed seam disposition set: {id}"
-        );
-        let (header, declaration) = id.split_once(": ").expect("canonical header identity");
-        let row = header_rows_local(header, declaration).remove(0);
-        assert_eq!(&row.id, id);
-        assert!(
-            !row.flags.iter().any(|flag| flag == "numeric-op"),
-            "the exact reviewed plumbing identity stays non-op: {row:?}"
-        );
-    }
-    assert!(
-        !is_frozen_grandfather_seam_id(NON_NUMERIC_INTEGER_PLUMBING_EXPORTS[0])
-            && INT64_DIM_CARRIER_SUCCESSOR_ROWS.iter().any(|successor| {
-                canonical_inventory_id(successor.id) == NON_NUMERIC_INTEGER_PLUMBING_EXPORTS[0]
-            }),
-        "chelis_alloc is the one plumbing exemption carried by the #1149 successor override"
-    );
-
-    let renamed =
-        header_rows_local("chelis_runtime.h", "int chelis_dtype_extent(int dtype);").remove(0);
-    assert!(
-        renamed.flags.iter().any(|flag| flag == "numeric-op"),
-        "a new same-shaped callable is numeric until explicitly registered; \
-         no name/parameter heuristic may inherit the exemption: {renamed:?}"
     );
 }
 
@@ -6333,7 +5661,7 @@ fn std_adt_bare_f64_variant_has_no_issue_citation_path() {
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "regenerate-and-cite must not land a new f64 ADT channel: {err}"
     );
 }
@@ -6347,7 +5675,7 @@ fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
     let tprim = Expr::node(
         DeepTag::TPrim,
         Default::default(),
-        vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+        vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
         span,
     );
     let variant = Expr::node(
@@ -6361,7 +5689,7 @@ fn std_adt_integer_carrier_is_numeric_op_not_a_seam() {
         Default::default(),
         vec![
             Expr::Atom(Atom::Name("Json".to_string()), span),
-            Expr::List(List { elements: vec![] }, span),
+            Expr::BareList(vec![], span),
             variant,
         ],
         span,
@@ -6415,7 +5743,7 @@ fn extern_data_declarations_are_inventoried_and_classified() {
     };
     let err = check_against_baseline(&[cited], &baseline).unwrap_err();
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "data seams take the same no-citation-path rule as callables: {err}"
     );
 }
@@ -6568,286 +5896,9 @@ fn no_generic_maintainer_override_spelling_is_authority() {
         };
         let err = check_against_baseline(&[row], &baseline).unwrap_err();
         assert!(
-            err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+            err.contains("UNCLASSIFIED census row"),
             "generic override must be rejected: {err}"
         );
-    }
-}
-
-/// The residual the prior round recorded and this one executed: the original
-/// non-seam label exempted any row from the `numeric-op` semantic hook, so it
-/// was copyable onto a brand-new numeric export. The permanent disposition is
-/// now frozen to a complete-descriptor set exactly as the seam citation is.
-#[test]
-fn permanent_plain_disposition_cannot_be_copied_onto_a_new_row() {
-    let mut row =
-        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
-    row.citation = PERMANENT_PLAIN_DISPOSITION.to_string();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(
-        err.contains("PERMANENT PLAIN disposition on a descriptor outside the frozen"),
-        "the permanent disposition must not exempt a brand-new numeric callable: {err}"
-    );
-
-    let frozen = row_from_frozen(
-        active_legacy_permanent_plain_sample(),
-        PERMANENT_PLAIN_DISPOSITION,
-    );
-    let frozen_baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![frozen.clone()],
-    };
-    assert!(
-        check_against_baseline(&[frozen], &frozen_baseline).is_ok(),
-        "a ratified initial descriptor keeps the permanent disposition"
-    );
-}
-
-#[test]
-fn duplicate_primary_descriptors_are_rejected_before_map_collapse() {
-    let row = row_from_frozen(
-        active_legacy_permanent_plain_sample(),
-        PERMANENT_PLAIN_DISPOSITION,
-    );
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone(), row.clone()],
-    };
-    let err = check_against_baseline(std::slice::from_ref(&row), &baseline)
-        .expect_err("duplicate baseline descriptors must not collapse in a map");
-    assert!(err.contains("DUPLICATE BASELINE DESCRIPTOR"), "{err}");
-
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let err = check_against_baseline(&[row.clone(), row], &baseline)
-        .expect_err("duplicate live descriptors must not collapse in a set");
-    assert!(err.contains("DUPLICATE CURRENT DESCRIPTOR"), "{err}");
-}
-
-#[test]
-fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
-    let mut row = row_from_frozen(active_legacy_permanent_plain_sample(), "chelis#893");
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let err = check_against_baseline(std::slice::from_ref(&row), &baseline)
-        .expect_err("a frozen permanent descriptor must retain its exact disposition");
-    assert!(err.contains("FROZEN DISPOSITION CHANGED"), "{err}");
-
-    row = row_from_frozen(
-        &GRANDFATHER_SEAM_ROWS[0],
-        "maintainer-override(red-team mutation, chelis#893)",
-    );
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    let err = check_against_baseline(std::slice::from_ref(&row), &baseline)
-        .expect_err("a frozen seam descriptor must retain its exact disposition");
-    assert!(err.contains("FROZEN DISPOSITION CHANGED"), "{err}");
-}
-
-#[test]
-fn active_legacy_rows_may_shrink_but_cannot_leave_the_foundation_universe() {
-    let mut rows = frozen_disposition_rows();
-    let complete = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: rows.clone(),
-    };
-    assert!(
-        check_active_legacy_subset(&complete).is_ok(),
-        "the complete hand-maintained manifest must describe itself"
-    );
-
-    rows.remove(0);
-    let shrunk = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows,
-    };
-    assert!(
-        check_active_legacy_subset(&shrunk).is_ok(),
-        "migration to final authority removes active debt without rewriting the immutable universe"
-    );
-
-    let copied = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "header-export".to_string(),
-            id: "reviewer.h: void successor(void);".to_string(),
-            flags: Vec::new(),
-            citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-        }],
-    };
-    let err = check_active_legacy_subset(&copied)
-        .expect_err("a successor cannot copy a foundation-era disposition");
-    assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
-            && err.contains("successor"),
-        "{err}"
-    );
-}
-
-#[test]
-fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
-    let permanent = *active_legacy_permanent_plain_sample();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "wrong-family".to_string(),
-            id: permanent.id.to_string(),
-            flags: Vec::new(),
-            citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-        }],
-    };
-    let err = check_against_baseline(&baseline.rows, &baseline)
-        .expect_err("a permanent descriptor under the wrong kind must fail");
-    assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
-
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "header-export".to_string(),
-            id: permanent.id.to_string(),
-            flags: vec!["float-carrier".to_string()],
-            citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
-        }],
-    };
-    let err = check_against_baseline(&baseline.rows, &baseline)
-        .expect_err("a permanent descriptor with changed derived flags must fail");
-    assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
-}
-
-#[test]
-fn grandfathered_seams_bind_the_complete_enforcement_descriptor() {
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "wrong-family".to_string(),
-            id: GRANDFATHER_SEAM_ROWS[0].id.to_string(),
-            flags: Vec::new(),
-            citation: GRANDFATHER_SEAM_CITATION.to_string(),
-        }],
-    };
-    let err = check_against_baseline(&baseline.rows, &baseline)
-        .expect_err("a grandfathered seam cannot erase its kind and flags");
-    assert!(err.contains("GRANDFATHER citation"), "{err}");
-}
-
-#[test]
-fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
-    for (rows, citation, diagnostic) in [
-        (
-            GRANDFATHER_SEAM_ROWS,
-            GRANDFATHER_SEAM_CITATION,
-            "GRANDFATHER citation",
-        ),
-        (
-            INT64_DIM_CARRIER_SUCCESSOR_ROWS,
-            INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE,
-            "#1149 SUCCESSOR OVERRIDE",
-        ),
-        (
-            PERMANENT_PLAIN_ROWS,
-            PERMANENT_PLAIN_DISPOSITION,
-            "PERMANENT PLAIN disposition",
-        ),
-    ] {
-        for frozen in rows {
-            let exact = row_from_frozen(frozen, citation);
-            let exact_baseline = Baseline {
-                version: 3,
-                legs: coverage_manifest(),
-                rows: vec![exact.clone()],
-            };
-            if capacity_census_authority::classify_final_authority(
-                &authority_surface(&exact),
-                final_authority_registries(),
-                &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
-            )
-            .is_ok()
-            {
-                let error = check_against_baseline(std::slice::from_ref(&exact), &exact_baseline)
-                    .expect_err("a migrated final row must drop its transition disposition");
-                assert!(
-                    error.contains("FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION"),
-                    "{frozen:?}: {error}"
-                );
-                let mut final_row = exact;
-                final_row.citation.clear();
-                let final_baseline = Baseline {
-                    version: 3,
-                    legs: coverage_manifest(),
-                    rows: vec![final_row.clone()],
-                };
-                assert!(
-                    check_against_baseline(&[final_row], &final_baseline).is_ok(),
-                    "the migrated descriptor must pass through final authority: {frozen:?}"
-                );
-                continue;
-            }
-            assert!(
-                check_against_baseline(std::slice::from_ref(&exact), &exact_baseline).is_ok(),
-                "frozen descriptor must remain accepted: {frozen:?}"
-            );
-
-            let mut wrong_kind = exact.clone();
-            wrong_kind.kind.push_str("-moved");
-            let baseline = Baseline {
-                version: 3,
-                legs: coverage_manifest(),
-                rows: vec![wrong_kind.clone()],
-            };
-            let err = check_against_baseline(&[wrong_kind], &baseline)
-                .expect_err("kind relocation must invalidate a frozen disposition");
-            assert!(err.contains(diagnostic), "{frozen:?}: {err}");
-
-            let mut wrong_flags = exact.clone();
-            if wrong_flags.flags.is_empty() {
-                wrong_flags.flags.push("float-carrier".to_string());
-            } else {
-                wrong_flags.flags.remove(0);
-            }
-            let baseline = Baseline {
-                version: 3,
-                legs: coverage_manifest(),
-                rows: vec![wrong_flags.clone()],
-            };
-            let err = check_against_baseline(&[wrong_flags], &baseline)
-                .expect_err("classification changes must invalidate a frozen disposition");
-            assert!(err.contains(diagnostic), "{frozen:?}: {err}");
-
-            if exact.flags.len() > 1 {
-                let mut reordered_flags = exact;
-                reordered_flags.flags.reverse();
-                let baseline = Baseline {
-                    version: 3,
-                    legs: coverage_manifest(),
-                    rows: vec![reordered_flags.clone()],
-                };
-                let err = check_against_baseline(&[reordered_flags], &baseline)
-                    .expect_err("classification order is part of the frozen descriptor");
-                assert!(err.contains(diagnostic), "{frozen:?}: {err}");
-            }
-        }
     }
 }
 
@@ -6867,39 +5918,8 @@ fn invented_permanent_disposition_is_not_a_citation() {
     let err = check_against_baseline_with(&[row], &baseline, &[], "")
         .expect_err("an invented permanent disposition must fail");
     assert!(
-        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        err.contains("UNCLASSIFIED census row"),
         "unexpected invented-disposition diagnostic: {err}"
-    );
-}
-
-#[test]
-fn frozen_disposition_sets_are_consistent_and_disjoint() {
-    let seams: BTreeSet<&str> = GRANDFATHER_SEAM_ROWS.iter().map(|row| row.id).collect();
-    let successors: BTreeSet<&str> = INT64_DIM_CARRIER_SUCCESSOR_ROWS
-        .iter()
-        .map(|row| row.id)
-        .collect();
-    let plain: BTreeSet<&str> = PERMANENT_PLAIN_ROWS.iter().map(|row| row.id).collect();
-    assert_eq!(
-        seams.len(),
-        GRANDFATHER_SEAM_ROWS.len(),
-        "no duplicate seam"
-    );
-    assert_eq!(
-        successors.len(),
-        INT64_DIM_CARRIER_SUCCESSOR_ROWS.len(),
-        "no duplicate #1149 successor override"
-    );
-    assert_eq!(
-        plain.len(),
-        PERMANENT_PLAIN_ROWS.len(),
-        "no duplicate permanent non-seam canonical id"
-    );
-    assert!(
-        seams.is_disjoint(&successors)
-            && seams.is_disjoint(&plain)
-            && successors.is_disjoint(&plain),
-        "one canonical id carries one exact reviewed disposition"
     );
 }
 
@@ -7136,7 +6156,7 @@ fn an_unresolvable_array_typedef_is_rejected() {
 /// stdlib enumerator over it.
 fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
     let decls = chelis_surf::parser::parse_str(source).expect("planted module parses");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let mut rows = Vec::new();
     scan_deftypes(&exprs, label, &mut rows);
     rows
@@ -7247,7 +6267,7 @@ fn the_same_signature_without_a_bound_is_not_numeric_capacity() {
         "planted",
         "module Std.Planted\n\
          export (planted_pick)\n\
-         sig planted_pick: p -> p -> p\n\
+         sig planted_pick[p]: p -> p -> p\n\
          def planted_pick(a, b) = a\n",
     );
     assert!(
@@ -7385,7 +6405,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         "planted",
         "module Std.Planted\n\
          export (planted_scale)\n\
-         sig planted_scale: int32 -> int32\n\
+         sig planted_scale: i32 -> i32\n\
          def planted_scale(n) = n\n",
     );
     let row = rows
@@ -7412,7 +6432,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "std-def-numeric",
-            "planted::planted_scale: (t-fn {} (t-prim {} int32) (t-prim {} int32))",
+            "planted::planted_scale: (t-fn {} (t-prim {} i32) (t-prim {} i32))",
             &["numeric-op"],
         ),
         atom: "[05-OP-1]",
@@ -7463,7 +6483,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
     let float_err =
         check_against_baseline(std::slice::from_ref(&float_row), &float_baseline).unwrap_err();
     assert!(
-        float_err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
+        float_err.contains("UNCLASSIFIED census row")
             && float_err.contains("planted::planted_ratio"),
         "a capacity override is not final authority for the new stdlib \
          callable: {float_err}"
@@ -7480,7 +6500,7 @@ fn a_stdlib_registration_against_a_nonexistent_atom_fails() {
         "planted",
         "module Std.Planted\n\
          export (planted_scale)\n\
-         sig planted_scale: int32 -> int32\n\
+         sig planted_scale: i32 -> i32\n\
          def planted_scale(n) = n\n",
     );
     let mut row = rows
@@ -7588,7 +6608,7 @@ fn planted_prelude_adt_with_f64_variant_is_detected() {
 #[test]
 fn cast_trunc_is_registered_against_its_authority_atom() {
     const CAST_TRUNC: &str = "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
-         target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64";
+         target: i8 | i16 | i32 | i64) -> i8 | i16 | i32 | i64";
     let registration = SEMANTIC_REGISTRATIONS
         .iter()
         .find(|r| r.callable == CAST_TRUNC)
@@ -7618,6 +6638,53 @@ fn cast_trunc_is_registered_against_its_authority_atom() {
 }
 
 #[test]
+fn fixed_control_dropout_is_registered_against_its_exact_authority_atom() {
+    let callable = "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]";
+    let registration = SEMANTIC_REGISTRATIONS
+        .iter()
+        .find(|row| row.callable == callable)
+        .expect("the active-float dropout signature requires an exact semantic registration");
+    assert_eq!(registration.atom, "[05-OP-37]");
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    assert!(registration_problem(*registration, &spec).is_none());
+}
+
+#[test]
+fn prepared_random_kernel_boundaries_have_exact_semantic_authority() {
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    for (callable, atom) in [
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+            "[05-OP-37]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[05-OP-37]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::new(prim: Prim, len: usize, low: ScalarValue, high: ScalarValue) -> Result<PreparedUniformLike, NumericKernelError>",
+            "[05-OP-8]",
+        ),
+        (
+            "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedUniformLike::apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError>",
+            "[05-OP-8]",
+        ),
+    ] {
+        let rows = SEMANTIC_REGISTRATIONS
+            .iter()
+            .filter(|row| row.callable == callable)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "missing or duplicate kernel boundary: {callable}"
+        );
+        assert_eq!(rows[0].atom, atom, "wrong kernel authority: {callable}");
+        assert!(registration_problem(*rows[0], &spec).is_none());
+    }
+}
+
+#[test]
 fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
     let expected = [
         (
@@ -7629,7 +6696,7 @@ fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
             "[05-OP-9]",
         ),
         (
-            "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], width: int64, pad: T) -> tensor[len(sequences), width, T]",
+            "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], width: i64, pad: T) -> tensor[len(sequences), width, T]",
             "[05-OP-10]",
         ),
     ];
@@ -7650,8 +6717,8 @@ fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
 
 #[test]
 fn count_is_registered_against_its_exact_authority_atom() {
-    const COUNT: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
-         -> tensor[D\\axes, int64]";
+    const COUNT: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: i32...) \
+         -> tensor[D\\axes, i64]";
     let registration = SEMANTIC_REGISTRATIONS
         .iter()
         .find(|registration| registration.callable == COUNT)
@@ -7692,6 +6759,69 @@ fn relu_identities_are_registered_against_their_exact_authority_atom() {
         assert!(
             registration_problem(*registration, &spec).is_none(),
             "`{callable}` must name the existing [05-OP-43] normative atom"
+        );
+    }
+}
+
+#[test]
+fn metadata_plan_callables_require_exact_op33_authority() {
+    let root = repo_root();
+    let files = preprocessed_headers(&root.join(INCLUDE_DIR_REL), HEADER_ROOTS);
+    let mut typedefs = BTreeMap::new();
+    for text in files.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    let rows: Vec<_> = files
+        .iter()
+        .flat_map(|(name, text)| header_rows(name, text, &typedefs))
+        .filter(|row| row.kind == "header-export" && row.id.contains("chelis_metadata_plan_"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        11,
+        "complete checked metadata plan API: {rows:?}"
+    );
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    let registry = fs::read_to_string(root.join("spec/registry/c_tensor_runtime.md")).unwrap();
+    let normative: BTreeSet<_> = registry
+        .lines()
+        .filter(|line| line.contains("chelis_metadata_plan_"))
+        .map(|line| {
+            let signature = line.split('`').nth(1).expect("exact normative C signature");
+            format!(
+                "chelis_runtime.h: {}",
+                canonical_c_tokens(&format!("{signature};"))
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.id.clone())
+            .collect::<BTreeSet<_>>(),
+        normative
+    );
+    for row in rows {
+        let surface = authority_surface(&row);
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &surface,
+                final_authority_registries(),
+                &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
+        );
+        let mut successor = surface;
+        successor.id = successor
+            .id
+            .replace("chelis_metadata_plan_", "chelis_unchecked_metadata_");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &successor,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "a renamed successor must acquire independent exact authority"
         );
     }
 }

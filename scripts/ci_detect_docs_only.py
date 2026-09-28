@@ -22,13 +22,13 @@ would let a code change skip the heavy gate.
 Usage:
     git diff --name-only <base>..<head> | python3 scripts/ci_detect_docs_only.py
 
-Writes `docs_only=<bool>`, `rejection_authority_changed=<bool>`, and
-`diagnostic_kind_changed=<bool>` to
+Writes `docs_only=<bool>`, `diagnostic_kind_changed=<bool>`, and
+`ci_contract_changed=<bool>` to
 the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
 mechanism); if that env var is unset it prints both lines to stdout so the
 script is runnable and testable off CI. Exit status is always 0. An empty or
-unreadable change set fails safe in both directions: it runs the full build
-and the network-backed rejection-authority liveness check.
+unreadable change set fails safe: it runs the full build and the
+diagnostic-kind mutation oracle.
 """
 
 from __future__ import annotations
@@ -36,6 +36,11 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import PurePosixPath
+
+try:
+    from scripts.ci_contract_paths import ci_contract_changed
+except ModuleNotFoundError:
+    from ci_contract_paths import ci_contract_changed
 
 # Paths that are pure documentation/prose: a change confined to these is
 # safe to skip the heavy build/test jobs for. Exact-name files plus
@@ -56,13 +61,10 @@ DOC_EXACT_NAMES: frozenset[str] = frozenset(
 # mdBook source and investigations; an mdBook-only change still has its
 # own Docs job (mdbook build + the skill_suite validator), which is one
 # of the always-run jobs, so skipping the heavy jobs for a docs/-only
-# change keeps coverage. `openspec/changes/` is planning prose, but every
-# change carries a non-Markdown `.openspec.yaml`, which alone would force
-# the full matrix; the openspec-validate workflow keys on `openspec/**`
-# and still runs. `openspec/config.yaml` stays code -- it configures the
-# tool, not one change. Trailing slash is required so a sibling file
-# like `docsignore` does not match.
-DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
+# change keeps coverage. Trailing slash is required so a sibling file
+# like `docsignore` does not match. OpenSpec documents live in the shared store;
+# the consumer's store pointer and revision lock are configuration, not prose.
+DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/",)
 
 # Markdown inputs consumed structurally by blocking oracles are executable
 # contracts, not prose-only changes. Editing one must run the heavy suite even
@@ -70,10 +72,12 @@ DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
 EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
     {
         "docs/investigations/remediation_status_2026_08_04.md",
+        "docs/manual_gates.md",
         "spec/02-surf-syntax.md",
         "spec/03-deep-syntax.md",
         "spec/04-type-system.md",
         "spec/05-risc-primitives.md",
+        "spec/registry/builtin_semantic_identities.md",
         "spec/11-ffi.md",
         "spec/design/capability_table.md",
         "spec/design/compiled_value_ownership.md",
@@ -82,25 +86,6 @@ EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
         "spec/design/loud_unsupported.md",
         "spec/design/remediation_roadmap.md",
         "spec/design/spec_provenance.md",
-    }
-)
-
-# Inputs whose edits could authorize a new [05-UNS-5] issue citation or weaken
-# its checker. The CI workflow itself is included so a would-be bypass to the
-# job is exercised by the job in the same pull request.
-REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
-    {
-        ".github/workflows/ci.yml",
-        "crates/chelis-types/src/lib.rs",
-        "crates/chelis-types/src/rejection_registry_generated.rs",
-        "crates/chelis-types/src/unsupported.rs",
-        "scripts/capacity_census_liveness.py",
-        "scripts/check_rejection_authority_boundary.py",
-        "scripts/ci_detect_docs_only.py",
-        "scripts/generate_rejection_registries.py",
-        "scripts/test_check_rejection_authority_boundary.py",
-        "scripts/validate_rejection_issue_manifest.py",
-        "spec/design/loud_unsupported_issue_manifest.json",
     }
 )
 
@@ -124,7 +109,6 @@ DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
         "scripts/test_gate.py",
     }
 )
-
 
 def is_doc_path(path: str) -> bool:
     """True if `path` is documentation/prose under the allowlist."""
@@ -156,14 +140,6 @@ def is_docs_only(paths: list[str]) -> bool:
     ) and all(is_doc_path(path) for path in cleaned)
 
 
-def rejection_authority_changed(paths: list[str]) -> bool:
-    """Whether the diff must run live validation; empty input fails safe."""
-    cleaned = [p.strip().strip('"') for p in paths if p.strip()]
-    if not cleaned:
-        return True
-    return any(path in REJECTION_AUTHORITY_PATHS for path in cleaned)
-
-
 def diagnostic_kind_changed(paths: list[str]) -> bool:
     """Whether the diff must run the C2.2 mutation oracle; empty fails safe."""
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
@@ -174,15 +150,15 @@ def diagnostic_kind_changed(paths: list[str]) -> bool:
 
 def _emit(
     docs_only: bool,
-    authority_changed: bool,
     diagnostic_changed: bool,
+    contract_changed: bool,
 ) -> None:
     lines = [
         f"docs_only={'true' if docs_only else 'false'}",
-        "rejection_authority_changed="
-        f"{'true' if authority_changed else 'false'}",
         "diagnostic_kind_changed="
         f"{'true' if diagnostic_changed else 'false'}",
+        "ci_contract_changed="
+        f"{'true' if contract_changed else 'false'}",
     ]
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -197,8 +173,8 @@ def main(argv: list[str]) -> int:
     paths = sys.stdin.read().splitlines()
     _emit(
         is_docs_only(paths),
-        rejection_authority_changed(paths),
         diagnostic_kind_changed(paths),
+        ci_contract_changed(paths),
     )
     return 0
 

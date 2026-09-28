@@ -135,9 +135,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
-         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
-         (spec/04-type-system.md §5.7.1)\n",
+         chelis#729: this operation has no typed HIP narrow-float kernel; see \
+         spec/04-type-system.md §1.1.3\n",
     ),
     (
         "hip_bf16_compute",
@@ -145,9 +144,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip",
         "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
-         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
-         (spec/04-type-system.md §5.7.1)\n",
+         chelis#729: this operation has no typed HIP narrow-float kernel; see \
+         spec/04-type-system.md §1.1.3\n",
     ),
     (
         "hip_f16_matmul_operand_compute",
@@ -158,9 +156,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:95..115\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `f16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
-         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
-         (spec/04-type-system.md §5.7.1)\n",
+         chelis#729: this operation has no typed HIP narrow-float kernel; see \
+         spec/04-type-system.md §1.1.3\n",
     ),
     (
         "hip_bf16_matmul_operand_compute",
@@ -171,9 +168,8 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          not a direct load of a helper input; callsite=<no-span>, helper-body=surf:99..119\n\
          error: unsupported: narrow-float compute at lowered node 3 (`Add` with `bf16`) on \
          `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
-         chelis#729: `bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the \
-         dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel \
-         (spec/04-type-system.md §5.7.1)\n",
+         chelis#729: this operation has no typed HIP narrow-float kernel; see \
+         spec/04-type-system.md §1.1.3\n",
     ),
     (
         "metal_f64",
@@ -184,12 +180,13 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          ALUs; use `--target c` or `--target hip` for f64 workloads\n",
     ),
     (
-        "c_seeded_dropout",
-        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
-         with seed(42i64) { dropout(x, 0.5) }\n",
-        "c",
-        "error: unsupported: compiled `dropout` op at lowered node 1 on `chelis build --target c` \
-         early capability gate (codegen:c); unimplemented chelis#1192: compiled `dropout` \
+        // #1872: C's sealed entry is now an executed positive in cli.rs.
+        // The unimplemented device lane still owns this rejection record.
+        "hip_keyed_dropout",
+        "def noisy(k: key, x: tensor[4, f32]) -> tensor[4, f32] = dropout(k, x, 0.5)\n",
+        "hip",
+        "error: unsupported: compiled `dropout` op at lowered node 3 on `chelis build --target hip` \
+         early capability gate (codegen:hip); unimplemented chelis#1192: compiled `dropout` \
          kernels are not implemented; run this program with `chelis eval`\n",
     ),
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
@@ -197,7 +194,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "c_stub_tensor_scan",
         "def gen() -> tensor[5, f32] = \
-         tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+         tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
          out = gen()\n",
         "c",
         "error: unsupported: builtin `tensor_scan` on `chelis build --target c` host emission \
@@ -217,44 +214,35 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          placeholder is chelis#734)\n",
     ),
     (
-        "c_int64_max_reduce",
-        "def f(x: tensor[4, int64]) -> tensor[int64] = max_reduce(x, 0)\n\
-         out = f(to_tensor([cast(1, int64), cast(4, int64), cast(2, int64), \
-         cast(3, int64)]))\n",
-        "c",
-        "error: unsupported: op `max_reduce` on `int64` tensors in the C DAG emitter (node 1) \
-         (codegen:c); unimplemented chelis#729: the C reduce kernels are f32-hardcoded today \
-         (WS-A1/F1); cast to f32 before the reduction. The target capability table owns non-f32 \
-         widening\n",
-    ),
-    (
+        // [04-INF-9]: the Float admission contract rejects this before
+        // lowering. Retain the exact original source and byte comparator.
         "c_int_tensor_cos",
-        "def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
-         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-         cast(4, int32)]))\n",
+        "def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
+         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+         cast(4, i32)]))\n",
         "c",
-        "error: unsupported: builtin `cos` on tensor operands in `chelis build` host emission \
-         (no tensor emission arm for this op) (codegen:c); deliberate [04-TOT-2]: a checked \
-         tensor operation must route through the typed DAG lane; the C host scalar lane has no \
-         fallback tensor expression\n",
+        // [04-FIT-26] (chelis#1853): one projected line per diagnostic.
+        "error: Check errors: Type errors:\n  PrecisionMismatch: type variable bounded by dtype \
+         family `Float` (the active float dtypes) cannot be instantiated at `i32` at byte 47 \
+         [surf:47..53] (suggestion: Insert explicit cast)\n",
     ),
     (
         "c_nonliteral_window",
-        "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
+        "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n",
         "c",
-        "error: Lowering error: unsupported: a non-literal window list for `reduce_window_max` \
+        "error: unsupported: a non-literal window list for `reduce_window_max` \
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
          chelis#1058: window and stride lists must be integer literals for the compiled lane \
          today; a runtime-parameterized window previously lowered to a silent no-op; \
-         chelis#1058 owns compiled runtime-list support at source span `surf:86..89`\n",
+         chelis#1058 owns compiled runtime-list support at source span `surf:82..85`\n",
     ),
     (
         "hip_int64_neg",
-        "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
+        "def f(x: tensor[4, i64]) -> tensor[4, i64] = neg(x)\n",
         "hip",
-        "error: unsupported: dtype `int64` on a HIP kernel family with f32/f64 variants only \
+        "error: unsupported: dtype `i64` on a HIP kernel family with f32/f64 variants only \
          (codegen:hip); unimplemented chelis#689: this op has no typed HIP kernel for the \
          operand dtype; the former silent F32 fallback emitted a corrupting kernel \
          (chelis#689). Cast to f32/f64, or use the ops with typed templates (add/mul/div and \
@@ -274,6 +262,96 @@ fn rejected_cells_fail_the_build_with_their_pinned_diagnostics() {
     }
 }
 
+fn compare_cross_lane_rejection(
+    expected_lane: &str,
+    expected: &str,
+    actual_lane: &str,
+    actual: &str,
+) -> Result<(), String> {
+    compare_exact_observations(
+        &format!("{expected_lane} production rejection versus {actual_lane}"),
+        expected,
+        actual,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn cross_lane_rejection_comparison_rejects_a_lane_specific_wrapper() {
+    let c = "error: unsupported: same typed lowering rejection\n";
+    let hip = "error: Lowering error: unsupported: same typed lowering rejection\n";
+    assert!(
+        compare_cross_lane_rejection("c", c, "hip", hip).is_err(),
+        "a HIP-only wrapper must fail the C-output-derived comparison"
+    );
+}
+
+/// Actual CLI build entry paths converge on the lowering-stage rejection
+/// before target-specific code generation. This covers production stderr for
+/// C, HIP, and Metal; it does not claim device execution.
+#[test]
+fn nonliteral_window_rejection_is_equal_across_build_lanes() {
+    let (name, program, _, expected) = BUILD_REJECTION_ROWS
+        .iter()
+        .find(|(name, _, _, _)| *name == "c_nonliteral_window")
+        .expect("nonliteral-window corpus row");
+
+    let (c_ok, c_stderr, c_emitted) = build_target(program, &format!("{name}_c"), "c");
+    assert!(!c_ok, "c: lowering must reject before code generation");
+    assert!(c_emitted.is_empty(), "c: rejection emitted an artifact");
+    compare_exact_observations(
+        "reviewed C nonliteral-window rejection",
+        expected,
+        &c_stderr,
+    )
+    .unwrap_or_else(|error| panic!("c: {error}"));
+    assert!(
+        !c_stderr.contains("Lowering error:"),
+        "the explicitly cross-lane nonliteral-window identity stays wrapper-free: {c_stderr}"
+    );
+
+    for target in ["hip", "metal"] {
+        let (ok, stderr, emitted) = build_target(program, &format!("{name}_{target}"), target);
+        assert!(!ok, "{target}: lowering must reject before code generation");
+        assert!(
+            emitted.is_empty(),
+            "{target}: rejection emitted an artifact"
+        );
+        assert!(
+            !stderr.contains("Lowering error:"),
+            "{target}: the explicitly cross-lane nonliteral-window identity stays wrapper-free: \
+             {stderr}"
+        );
+        compare_cross_lane_rejection("c", &c_stderr, target, &stderr)
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+    }
+}
+
+/// Chelis#1870 changes only the named nonliteral-window rendering. Other
+/// failures crossing the HIP/Metal compiled-host lowering adapter retain their
+/// existing `Lowering error:` compatibility wrapper.
+#[test]
+fn unrelated_lowering_rejection_retains_the_legacy_wrapper() {
+    // Integer cos now fails ordinary checking under [04-INF-9]. Use the
+    // sum identity, which is not the max identity selected by #1870, to
+    // keep executing the production lowering adapter's other branch.
+    let program = "def f(x: tensor[6, f32], w: i64, s: i64) -> tensor[5, f32] = \
+         reduce_window_sum(x, [w], [s])\n\
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n";
+    let (ok, stderr, emitted) = build_target(program, "hip_window_sum_wrapper", "hip");
+    assert!(!ok, "HIP runtime-window sum must be rejected");
+    assert!(emitted.is_empty(), "rejected HIP build wrote: {emitted}");
+    assert!(
+        stderr.starts_with("error: Lowering error: unsupported:"),
+        "an unrelated lowering rejection lost its compatibility wrapper: {stderr}"
+    );
+    assert!(
+        stderr.contains("non-literal window list for `reduce_window_sum`"),
+        "the production witness must be the runtime-window sum rejection: {stderr}"
+    );
+}
+
 /// The Metal rank-2 gap is a typed build rejection. No aborting artifact may
 /// be presented as a successful build.
 #[test]
@@ -286,7 +364,8 @@ fn metal_rank2_gap_rejects_without_an_artifact() {
     assert!(!ok, "rank-2 metal must reject instead of writing a stub");
     assert!(stderr.contains("unsupported:"), "{stderr}");
     assert!(stderr.contains("codegen:metal"), "{stderr}");
-    assert!(emitted.is_empty(), "rejected Metal build wrote: {emitted}");
+    compare_exact_observations("rejected Metal build artifact", "", &emitted)
+        .unwrap_or_else(|error| panic!("rejected Metal build wrote an artifact: {error}"));
 }
 
 // ===========================================================================
@@ -299,9 +378,9 @@ const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[(
     // chelis#387 family: the portable integer div-by-zero guard, with a
     // runtime-computed divisor so nothing constant-folds it away.
     "int_div_by_zero",
-    "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
-         out = d(cast(7, int64), cast(5, int64), cast(5, int64))\n",
-    "numeric trap: division by zero in trunc_div at int64\n",
+    "def d(x: i64, y: i64, z: i64) -> i64 = trunc_div(x, sub(y, z))\n\
+         out = d(cast(7, i64), cast(5, i64), cast(5, i64))\n",
+    "numeric trap: division by zero in trunc_div at i64\n",
 )];
 
 /// Every runtime rejected cell aborts (nonzero exit) with its pinned

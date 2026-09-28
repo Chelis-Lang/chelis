@@ -12,11 +12,11 @@ use tempfile::{TempDir, tempdir};
 const MIXED_GRAD: &str = "module Repro.MixedGradFail\n\
 def mixed(x) = {\n\
   g = grad(sq_sum)(x)\n\
-  s = tensor_to_scalar(sum(x, cast(0, int32)))\n\
+  s = tensor_to_scalar(sum(x, cast(0, i32)))\n\
   guarded = if gt(s, cast(0.0, f32)) then fail(\"forward boom\") else neg(x)\n\
   add(g, guarded)\n\
 }\n\
-def sq_sum(x: tensor[3, f32]) -> tensor[f32] = sum(mul(x, x), cast(0, int32))\n";
+def sq_sum(x: tensor[3, f32]) -> tensor[f32] = sum(mul(x, x), cast(0, i32))\n";
 
 fn source_with_input(values: &str) -> String {
     format!("{MIXED_GRAD}out = mixed(to_tensor([{values}]))\n")
@@ -164,9 +164,9 @@ fn untaken_forward_fail_beside_grad_has_exact_lane_parity() {
 fn untaken_fail_inside_grad_subtree_does_not_change_sibling_routing() {
     let source = "module Repro.GradInternalFail\n\
 def loss(x: tensor[4, f32]) -> tensor[f32] =\n\
-  if gt(cast(2, int64), cast(shape(x, cast(0, int32)), int64))\n\
+  if gt(cast(2, i64), cast(shape(x, cast(0, i32)), i64))\n\
   then fail(\"kernel exceeds input length\")\n\
-  else sum(x, cast(0, int32))\n\
+  else sum(x, cast(0, i32))\n\
 out = grad(loss)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
     let eval = eval(source, "grad_internal_fail");
     assert!(
@@ -190,7 +190,7 @@ fn forward_fail_beside_vmap_aborts_in_both_lanes() {
 def negate_row(x: tensor[2, f32]) -> tensor[2, f32] = neg(x)\n\
 def mixed(xs: tensor[2, 2, f32]) -> tensor[2, 2, f32] = {\n\
   mapped = vmap(negate_row)(xs)\n\
-  total = tensor_to_scalar(sum(sum(xs, cast(0, int32)), cast(0, int32)))\n\
+  total = tensor_to_scalar(sum(sum(xs, cast(0, i32)), cast(0, i32)))\n\
   guarded = if gt(total, cast(0.0, f32)) then fail(\"vmap sibling boom\") else neg(xs)\n\
   add(mapped, guarded)\n\
 }\n\
@@ -220,11 +220,11 @@ out = mixed(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4
 fn transitive_forward_fail_through_defs_aborts_in_both_lanes() {
     let source = "module Repro.TransitiveForwardFail\n\
 def fail_leaf(x: tensor[3, f32]) -> tensor[3, f32] = {\n\
-  total = tensor_to_scalar(sum(x, cast(0, int32)))\n\
+  total = tensor_to_scalar(sum(x, cast(0, i32)))\n\
   if gt(total, cast(0.0, f32)) then fail(\"transitive boom\") else neg(x)\n\
 }\n\
 def fail_hop(x: tensor[3, f32]) -> tensor[3, f32] = fail_leaf(x)\n\
-def sq_sum_transitive(x: tensor[3, f32]) -> tensor[f32] = sum(mul(x, x), cast(0, int32))\n\
+def sq_sum_transitive(x: tensor[3, f32]) -> tensor[f32] = sum(mul(x, x), cast(0, i32))\n\
 def mixed_transitive(x: tensor[3, f32]) -> tensor[3, f32] = {\n\
   g = grad(sq_sum_transitive)(x)\n\
   add(g, fail_hop(x))\n\
@@ -237,7 +237,7 @@ out = mixed_transitive(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)
 fn shared_fail_def_is_visible_outside_transform_in_both_traversal_orders() {
     const PREFIX: &str = "module Repro.SharedFailDef\n\
 def maybe_fail(x: tensor[3, f32]) -> tensor[f32] = {\n\
-  total = sum(x, cast(0, int32))\n\
+  total = sum(x, cast(0, i32))\n\
   scalar = tensor_to_scalar(total)\n\
   if gt(scalar, cast(0.0, f32)) then fail(\"shared def boom\") else total\n\
 }\n";

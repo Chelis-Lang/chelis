@@ -19,8 +19,9 @@ chelis-reef.workspace = true
 # WS-C orchestration: reuse chelisup's toolchain-store path math (paths::Store)
 # and pin resolution (resolve) so `reef setup`/`doctor`/the unknown-subcommand
 # hint share one source of truth with the installer. chelisup has no `chelis-*`
-# deps, so this edge is cycle-free. Only `paths` + `resolve` are used; never
-# `install` (see the shim-corruption guard in cmd_reef_setup).
+# deps, so this edge is cycle-free. Only `paths` + `resolve` are used, plus the
+# pure asset-naming helpers in `install` from tests; never `install::install`
+# (see the shim-corruption guard in cmd_reef_setup).
 chelisup = { path = "../chelisup" }
 chelis-macros.workspace = true
 chelis-surf.workspace = true
@@ -28,6 +29,7 @@ chelis-types = { path = "../chelis-types" }
 chelis-effects.workspace = true
 chelis-ir = { path = "../chelis-ir" }
 chelis-runtime.workspace = true
+chelis-runtime-bundle.workspace = true
 chelis-backend-c = { path = "../chelis-backend-c" }
 chelis-backend-hip = { path = "../chelis-backend-hip" }
 chelis-backend-metal = { path = "../chelis-backend-metal" }
@@ -51,13 +53,21 @@ walkdir = "2"
 # that Tide uses, so solver availability cannot fork fuzz semantics.
 default = ["chelis-prove"]
 smt = ["chelis-prove/smt", "chelis-tide/smt"]
+# Distribution builds (release, Nix) are sealed builds (spec/08-backends.md
+# §2.1): they carry no checkout path and skip the development source-freshness
+# check. Staging receipts record the mode.
+sealed-runtime = ["chelis-runtime-bundle/sealed"]
+# Test-only: instruments the runtime this `chelis` build carries and stages, so
+# its programs record the ownership ledger. The ledger test requires it.
+ownership-ledger = ["chelis-runtime/ownership-ledger"]
 
 [dev-dependencies]
 assert_cmd = "2"
+chelis-reef.workspace = true
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 chelis-shell.workspace = true
 # `reef_setup.rs` synthesizes a chelis toolchain release tarball
-# (`chelis-vX.Y.Z-<slug>.tar.gz`, gzip) so the auto-install-via-chelisup path
+# (`chelis-vX.Y.Z-<build>.tar.gz`, gzip) so the auto-install-via-chelisup path
 # runs fully offline through the real chelisup binary.
 flate2 = "1"
 # `observation_roundtrip_harness.rs` (chelis#732 Phase 0) verifies f16/bf16
@@ -68,6 +78,7 @@ half.workspace = true
 chelis-std-bundle.workspace = true
 predicates = "3"
 sha2 = "0.10"
+syn.workspace = true
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -82,6 +93,11 @@ toml = "0.8"
 walkdir = "2"
 wiremock = "0.6"
 zstd = "0.13"
+
+[[test]]
+name = "issue_1314_json_bigint_ledger"
+path = "tests/issue_1314_json_bigint_ledger.rs"
+required-features = ["ownership-ledger"]
 
 [lints]
 workspace = true

@@ -12,10 +12,10 @@
 //! those boundaries distinct prevents a missing or unsupported type from being
 //! converted into a plausible emitted value.
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::fmt;
 
-use chelis_deep::ast::{Atom, Expr, MetaMap};
+use chelis_deep::ast::{Atom, Expr};
 use chelis_types::types::Prim;
 
 use crate::dag::{DimInfo, TensorType};
@@ -185,7 +185,7 @@ impl std::error::Error for HostTypeDecodeError {}
 impl HostTypeTerm {
     // Compatibility spellings for the scalar variants while the host lowerer
     // migrates from its former coarse enum.  They are exact logical
-    // precisions, not defaults: int32 and int64 no longer collapse at the
+    // precisions, not defaults: i32 and i64 no longer collapse at the
     // syntax boundary, and the narrow widths remain representable terms.
     #[allow(non_upper_case_globals)]
     pub const Int64: Self = Self::Scalar(HostPrecisionTerm::Concrete(Prim::Int64));
@@ -313,10 +313,16 @@ impl ConcreteHostType {
 /// the caller owns inference identity when a valid expression is
 /// underconstrained.
 pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError> {
-    if let Expr::MetaExpr(meta, _) = expr {
-        return decode_host_type(&meta.expr);
-    }
-    let (tag, _, children) = stamped_parts(expr)?;
+    let (tag, children) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::MetadataExpression(meta) => return decode_host_type(&meta.expr),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => {
+            return Err(malformed("expected a Deep type node"));
+        }
+    };
     match tag {
         DeepTag::TPrim => {
             let name = one_symbol_child(children, "t-prim")?;
@@ -364,28 +370,24 @@ pub fn decode_host_type(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError
 /// Absence and invalid type syntax have separate errors. This is the boundary
 /// that replaces `expr_type(...).unwrap_or(Unknown)` in the legacy lowerer.
 pub fn decode_host_type_metadata(expr: &Expr) -> Result<HostTypeTerm, HostTypeDecodeError> {
-    match expr {
-        Expr::List(_, _) | Expr::Node(_, _) => {
-            let (_, metadata, _) = stamped_parts(expr)?;
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) | ExprCarrier::UndecodableHead(_, metadata, _) => {
             let type_expr = metadata
-                .entries
-                .iter()
-                .find_map(|(key, value)| (key == "type").then_some(value))
+                .ty()
+                .map(|value| value.expression())
                 .ok_or(HostTypeDecodeError::MissingTypeMetadata)?;
             decode_host_type(type_expr)
         }
-        Expr::MetaExpr(meta, _) => {
-            if let Some(type_expr) = meta
-                .entries
-                .iter()
-                .find_map(|(key, value)| (key == "type").then_some(value))
-            {
+        ExprCarrier::MetadataExpression(meta) => {
+            if let Some(type_expr) = meta.metadata.ty().map(|value| value.expression()) {
                 decode_host_type(type_expr)
             } else {
                 decode_host_type_metadata(&meta.expr)
             }
         }
-        _ => Err(HostTypeDecodeError::MissingTypeMetadata),
+        ExprCarrier::StructuralList(_) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
+            Err(HostTypeDecodeError::MissingTypeMetadata)
+        }
     }
 }
 
@@ -431,8 +433,16 @@ fn decode_tensor_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeE
 }
 
 fn decode_precision(expr: &Expr) -> Result<HostPrecisionTerm, HostTypeDecodeError> {
-    let (tag, _, children) =
-        stamped_parts(expr).map_err(|_| malformed("tensor precision is not a type node"))?;
+    let (tag, children) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {
+            return Err(malformed("tensor precision is not a type node"));
+        }
+    };
     match tag {
         DeepTag::TPrim => {
             let name = one_symbol_child(children, "tensor t-prim")?;
@@ -459,8 +469,16 @@ fn decode_shape_slot(expr: &Expr) -> Result<HostShapeSlot, HostTypeDecodeError> 
     if let Expr::Atom(Atom::Int(value), _) = expr {
         return nonnegative_dim(*value);
     }
-    let (tag, _, children) =
-        stamped_parts(expr).map_err(|_| malformed("tensor dimension is not a dimension node"))?;
+    let (tag, children) = match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {
+            return Err(malformed("tensor dimension is not a dimension node"));
+        }
+    };
     match tag {
         DeepTag::DName | DeepTag::DVar => Ok(HostShapeSlot::Dim(DimInfo::Named(
             one_symbol_child(children, tag.as_str())?.to_string(),
@@ -495,7 +513,16 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
     let args = args
         .iter()
         .map(|argument| {
-            let (tag, _, _) = stamped_parts(argument)?;
+            let tag = match argument.carrier() {
+                ExprCarrier::DecodedNode(tag, _, _) => tag,
+                ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_) => {
+                    return Err(malformed("expected a Deep type node"));
+                }
+            };
             if matches!(
                 tag,
                 DeepTag::DName | DeepTag::DVar | DeepTag::DLit | DeepTag::DRank
@@ -522,23 +549,6 @@ fn decode_adt_type(children: &[Expr]) -> Result<HostTypeTerm, HostTypeDecodeErro
             "reserved host ADT `{name}` has the wrong arity"
         ))),
         _ => Ok(HostTypeTerm::Adt(name.to_string(), args)),
-    }
-}
-
-fn stamped_parts(expr: &Expr) -> Result<(DeepTag, &MetaMap, &[Expr]), HostTypeDecodeError> {
-    match expr {
-        Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(meta, _)) => Ok((
-                list.tag()
-                    .ok_or_else(|| malformed("type node has no symbolic tag"))?,
-                meta,
-                &list.elements[2..],
-            )),
-            Some(_) => Err(malformed("type node metadata slot is not a map")),
-            None => Err(malformed("type node has no metadata slot")),
-        },
-        Expr::Node(node, _) => Ok((node.tag(), node.meta(), node.children_slice())),
-        _ => Err(malformed("expected a Deep type node")),
     }
 }
 

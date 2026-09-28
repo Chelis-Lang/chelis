@@ -39,16 +39,16 @@ fn run_json_check(path: &Path) -> Value {
 /// `use_mismatch` body silently downgraded the precision invariant to
 /// a wildcard. After WS-A5, the precision slot is a real type variable
 /// that unifies with the call-site precisions, so the shape mismatch
-/// (input int32, output declared f32) must surface.
+/// (input i32, output declared f32) must surface.
 #[test]
 fn ws_c_blocker_polymorphic_precision_does_not_silently_accept_mismatch() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("ws_c_blocker.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
-def use_mismatch(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
+def use_mismatch(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)
 "#,
     );
 
@@ -69,19 +69,19 @@ def use_mismatch(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
     // The diagnostic kind may be either PrecisionMismatch (raised by
     // the unify path that hits the precision-var directly) or
     // TypeMismatch (raised by the def-body-vs-declared-sig check
-    // path that observes the inferred body type carries int32 once
-    // the precision var is bound to int32 by the input). Both shapes
-    // mention `f32` and `int32` in the message, which is what we
+    // path that observes the inferred body type carries i32 once
+    // the precision var is bound to i32 by the input). Both shapes
+    // mention `f32` and `i32` in the message, which is what we
     // actually want a user to see; the kind tag is a downstream
     // implementation detail.
     let any_mentions_both_precisions = errors.iter().any(|e| {
         let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("");
-        msg.contains("f32") && msg.contains("int32")
+        msg.contains("f32") && msg.contains("i32")
     });
     assert!(
         any_mentions_both_precisions,
         "WS-C blocker: at least one error should mention both f32 and \
-         int32 so the user can see the mismatched precisions, got {errors:?}"
+         i32 so the user can see the mismatched precisions, got {errors:?}"
     );
 }
 
@@ -95,10 +95,10 @@ fn polymorphic_precision_accepts_distinct_consistent_instantiations() {
     let path = dir.path().join("poly_distinct.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
-def use_int32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
+def use_int32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
 "#,
     );
 
@@ -125,7 +125,7 @@ fn polymorphic_precision_only_with_concrete_dims() {
     let path = dir.path().join("poly_prec_only.ch");
     write_file(
         &path,
-        r#"sig same_prec: tensor[3, p] -> tensor[3, p]
+        r#"sig same_prec[p]: tensor[3, p] -> tensor[3, p]
 def same_prec(x) = x
 def use_bf16(x: tensor[3, bf16]) -> tensor[3, bf16] = same_prec(x)
 "#,
@@ -148,16 +148,16 @@ def use_bf16(x: tensor[3, bf16]) -> tensor[3, bf16] = same_prec(x)
 fn polymorphic_precision_rejects_inconsistent_within_call() {
     // p and q are independent type variables in the sig. The first
     // arg is tensor[d, p], the result is tensor[d, p]; both must
-    // share the SAME precision. Calling with int32 input but
+    // share the SAME precision. Calling with i32 input but
     // declaring an f32 output forces p to bind to two different
     // precisions, which must fail.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("poly_inconsistent.ch");
     write_file(
         &path,
-        r#"sig poly_id: tensor[d, p] -> tensor[d, p]
+        r#"sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
-def break_it(x: tensor[3, int32]) -> tensor[3, f32] = poly_id(x)
+def break_it(x: tensor[3, i32]) -> tensor[3, f32] = poly_id(x)
 "#,
     );
 
@@ -180,9 +180,9 @@ fn concrete_precision_still_rejects_mismatch_baseline() {
     let path = dir.path().join("concrete_baseline.ch");
     write_file(
         &path,
-        r#"sig f32_id: tensor[d, f32] -> tensor[d, f32]
+        r#"sig f32_id[d]: tensor[d, f32] -> tensor[d, f32]
 def f32_id(x) = x
-def break_it(x: tensor[3, int32]) -> tensor[3, f32] = f32_id(x)
+def break_it(x: tensor[3, i32]) -> tensor[3, f32] = f32_id(x)
 "#,
     );
 

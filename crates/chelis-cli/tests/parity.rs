@@ -9,11 +9,19 @@
 //!       1. `chelis check <file>`              -> score == 1.0
 //!       2. `chelis eval --file <file>`        -> stdout (IR evaluator lane)
 //!       3. `chelis build --target c <file>`   -> writes <name>.c + runtime
-//!       4. `gcc <name>.c -L. -lchelis_runtime -o <name>` -> binary
+//!       4. `gcc <name>.c libchelis_runtime.a -o <name>` -> binary
 //!       5. `<name>`                           -> stdout (C backend lane)
 //!
 //!     Then assert the eval lane and the C lane agree: every line
 //!     byte-equal, tensor lines included.
+//!
+//! The runtime-shaped dropout example retains a bounded per-file exception:
+//! clean check, exact executable eval output, and the current typed C rejection
+//! are all tested. The fixed-stream example runs the ordinary three-lane
+//! driver and also pins its exact values, including the draw from the second
+//! half of its split key after AD.
+//! The annotated concat/softmax example likewise pins check, all eval values,
+//! and its explicit C rejection; it is not a C parity claim.
 //!
 //! There is deliberately NO tolerant fallback for tensor lines. The old
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
@@ -50,6 +58,40 @@
 //! initial landing (forcing `tensor_trace_value` to return `sum + 1.0`
 //! causes `tensor_structural_ops` parity to fail with a precise
 //! line/element diff).
+//!
+//! # Independent result controls (chelis#1351)
+//!
+//! Equal output proves agreement on this corpus, not correctness. A defect
+//! shared by both implementations can pass this comparison, as chelis#1349 did.
+//! `issue_1351_structural_axis_independent_oracle` supplies independent
+//! [05-OP-33] expectations for `diagonal` and `trace` on its declared cases.
+//! It compares each implementation with those expectations separately.
+//!
+//! Source-mutation receipt, 2026-09-14, at `07590f629b5687f018e0814260818d59372a614f`:
+//!
+//! - Eval only: read zero for the second diagonal axis. Both tests failed.
+//!   The independent test named the eval result.
+//! - C only: apply the same edit in `chelis_tensor_diagonal`. Both tests failed.
+//!   The independent test named the native result.
+//! - Both implementations: apply both edits. `parity_tensor_structural_ops`
+//!   passed, while the independent test rejected the shared wrong answer.
+//! - Reference only: add one to each expected diagonal element. Three
+//!   hand-computed controls and the execution test failed.
+//!
+//! The runtime came from each current Cargo artifact record, in a dedicated
+//! directory. The changed runtime had a different recorded archive digest.
+//! These probes rebuilt and executed actual code. They did not replace output
+//! strings in the comparator. All temporary mutations were restored.
+//!
+//! The paired command selected `parity_tensor_structural_ops` and
+//! `structural_axis_lanes_match_independent_op33_expectations` from the
+//! `parity` and `issue_1351_structural_axis_independent_oracle` targets with
+//! `cargo nextest run -p chelis-cli --no-fail-fast`. The reference-only probe
+//! ran all seven tests in the independent target. Final positive results are
+//! recorded in the PR receipt.
+//!
+//! This supplement covers its structural-operation cases only. It does not
+//! prove arithmetic reduction order, result dtypes, or other operations.
 
 use assert_cmd::Command;
 use chelis_types::agreement::compare_exact_observations;
@@ -58,6 +100,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
+
+#[path = "common/unsupported_wording.rs"]
+mod unsupported_wording;
+
+#[path = "common/parity_corpus.rs"]
+mod parity_corpus;
 
 // -----------------------------------------------------------------------------
 // Corpus discovery
@@ -68,23 +116,6 @@ fn examples_root() -> PathBuf {
         .join("../../examples")
         .canonicalize()
         .expect("examples directory should exist")
-}
-
-/// Discover every `.ch` file directly under `examples/`. Skip the
-/// `examples/illustrative/` subtree (those are syntax/design specimens, not
-/// the executable Phase 0 corpus), and skip any other subtrees.
-fn discover_executable_examples() -> Vec<PathBuf> {
-    let root = examples_root();
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(&root).expect("read examples dir") {
-        let entry = entry.expect("dir entry");
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ch") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths
 }
 
 // -----------------------------------------------------------------------------
@@ -235,7 +266,7 @@ fn try_link(out_dir: &Path, source: &str, binary: &str) -> Result<PathBuf, Strin
     cmd.arg("-O0");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     let output = cmd
@@ -300,7 +331,7 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 /// `parse_tensor_line -> Vec<f64>` and compare under 1e-6 tolerance) is
 /// deliberately gone (chelis#729 Phase 0, chelis#687): it engaged exactly
 /// when a real divergence was present and re-read integer payloads as
-/// floats, so an int64 corruption above 2^53 could never fail this
+/// floats, so an i64 corruption above 2^53 could never fail this
 /// harness. A mismatch now REPORTS. chelis#732 Phase 2 is the release
 /// valve for formatting differences by making both lanes canonical;
 /// Phase 3's explicit per-op table is the only release valve for a genuine
@@ -340,7 +371,7 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
 // (`migrated_render_equivalent`) lived here while the compiled lane kept
 // its pre-contract printf forms; Phase 2's generated printer restored
 // byte equality on every line and the function is deleted as Phase 1
-// promised. Its red-team-hardened blind-spot behaviors (exact-int64
+// promised. Its red-team-hardened blind-spot behaviors (exact-i64
 // refusal above 2^53, second-tensor and shape divergences, the rank-0
 // wrapper class) are now simply line diffs, which byte equality reports
 // by construction.
@@ -403,7 +434,7 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // -----------------------------------------------------------------------------
 //
 // One test per executable-corpus file so that a failure points straight at
-// the file. The corpus is small (~10 files) so individual tests are
+// the file. Individual tests are
 // preferable to a parametric loop that hides which file regressed.
 //
 // Files split into two shapes:
@@ -413,8 +444,94 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 //                   We compile the C source as an object file to confirm the
 //                   backend output is well-formed.
 //
-// If the corpus list changes, update `parity_corpus_is_complete` below so
-// the harness fails loud rather than silently shrinking.
+// The completeness check derives membership from these test inputs. A new
+// example needs its per-file test, with no second filename list to update.
+
+#[test]
+fn parity_generic_value_roots() {
+    drive_parity(&examples_root().join("generic_value_roots.ch"), true);
+}
+
+#[test]
+fn parity_grad_wrt_order() {
+    drive_parity(&examples_root().join("grad_wrt_order.ch"), true);
+}
+
+#[test]
+fn parity_grad_disconnected() {
+    let path = examples_root().join("grad_disconnected.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2, 3], data=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0])\n"
+    );
+}
+
+#[test]
+fn parity_grad_bitwise() {
+    let path = examples_root().join("grad_bitwise.ch");
+    drive_parity(&path, true);
+    let output = String::from_utf8(run_eval(&path)).expect("UTF-8 eval");
+    assert!(output.contains("derivative = 4.0"), "{output}");
+    assert!(
+        output.contains("mapped = tensor(shape=[2], data=[4.0, 8.0])"),
+        "{output}"
+    );
+    assert!(
+        output.contains("exact = tensor(shape=[2], data=[9007199254740993, -2])"),
+        "{output}"
+    );
+}
+
+#[test]
+fn parity_grad_extent_claim() {
+    let path = examples_root().join("grad_extent_claim.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out.0 = tensor(shape=[3], data=[0.0, 0.0, 0.0])\nout.1 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\nindependent.0 = tensor(shape=[3], data=[7.0, 7.0, 7.0])\nindependent.1 = tensor(shape=[2], data=[7.0, 7.0])\n"
+    );
+}
+
+#[test]
+fn parity_grad_scalar_extent_claim() {
+    let path = examples_root().join("grad_scalar_extent_claim.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out.0 = 21.0\nout.1 = tensor(shape=[3], data=[0.0, 0.0, 0.0])\n"
+    );
+}
+
+#[test]
+fn parity_grad_fused_zero() {
+    drive_parity(&examples_root().join("grad_fused_zero.ch"), true);
+}
+
+#[test]
+fn parity_vmap_shape_value() {
+    let path = examples_root().join("vmap_shape_value.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2], data=[3.0, 3.0])\n"
+    );
+}
+
+#[test]
+fn parity_source_file_names() {
+    drive_parity(&examples_root().join("source-file-names.ch"), true);
+}
+
+#[test]
+fn parity_checked_reshape() {
+    drive_parity(&examples_root().join("checked_reshape.ch"), true);
+}
+
+#[test]
+fn declared_operation_bounds_example() {
+    drive_parity(&examples_root().join("declared_operation_bounds.ch"), true);
+}
 
 #[test]
 fn parity_dict_foundation() {
@@ -422,8 +539,74 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_dropout_entry_library_only() {
+    drive_parity(&examples_root().join("dropout_entry.ch"), false);
+}
+
+#[test]
+fn parity_dropout_fixed_stream() {
+    let path = examples_root().join("dropout_fixed_stream.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"main.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nmain.1 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\n",
+    );
+    drive_parity(&path, true);
+}
+
+#[test]
+fn parity_tensor_key_operations() {
+    drive_parity(&examples_root().join("tensor_key_operations.ch"), true);
+}
+
+#[test]
+fn parity_dropout_static_rate() {
+    let path = examples_root().join("dropout_static_rate.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"result.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n",
+    );
+    drive_parity(&path, true);
+}
+
+#[test]
+fn parity_dropout_staged_claim() {
+    let path = examples_root().join("dropout_staged_claim.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"main = tensor(shape=[2, 2], data=[2.0, 2.0, 0.0, 0.0])\n",
+    );
+    drive_parity(&path, true);
+}
+
+#[test]
+fn parity_checked_window_geometry() {
+    drive_parity(&examples_root().join("checked_window_geometry.ch"), true);
+}
+
+#[test]
+fn parity_checked_sparse_axes() {
+    drive_parity(&examples_root().join("checked_sparse_axes.ch"), true);
+}
+
+#[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
+}
+
+#[test]
+fn parity_explicit_normalization() {
+    drive_parity(&examples_root().join("explicit_normalization.ch"), true);
+}
+
+#[test]
+fn parity_generic_explicit_shape() {
+    drive_parity(&examples_root().join("generic_explicit_shape.ch"), true);
+}
+
+#[test]
+fn parity_count_bool_device_entry_library_only() {
+    drive_parity(&examples_root().join("count_bool_device_entry.ch"), false);
 }
 
 #[test]
@@ -445,6 +628,55 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_checked_host_local_ascription() {
+    drive_parity(
+        &examples_root().join("checked_host_local_ascription.ch"),
+        true,
+    );
+}
+
+#[test]
+fn parity_checked_runtime_extents() {
+    drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
+}
+
+#[test]
+fn parity_mixed_signature_extents() {
+    drive_parity(&examples_root().join("mixed_signature_extents.ch"), true);
+}
+
+#[test]
+fn parity_ordered_extent_claims() {
+    drive_parity(&examples_root().join("ordered_extent_claims.ch"), true);
+}
+
+#[test]
+fn parity_pure_helper_result_claims() {
+    drive_parity(&examples_root().join("pure_helper_result_claims.ch"), true);
+}
+
+#[test]
+fn parity_literal_extent_claim() {
+    drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
+}
+
+#[test]
+fn parity_integer_functions() {
+    drive_parity(&examples_root().join("integer_functions.ch"), true);
+}
+
+/// chelis#1266: the record-projection broadcast a multi-input forward writes.
+#[test]
+fn parity_record_input_broadcast() {
+    drive_parity(&examples_root().join("record_input_broadcast.ch"), true);
+}
+
+#[test]
+fn parity_recursive_cast_targets() {
+    drive_parity(&examples_root().join("recursive_cast_targets.ch"), true);
+}
+
+#[test]
 fn parity_recursive_generic() {
     // chelis#1158: recursive generic host calls compile via bounded
     // memoized monomorphization; both lanes print the same value.
@@ -454,6 +686,16 @@ fn parity_recursive_generic() {
 #[test]
 fn parity_scalar_string_foundation() {
     drive_parity(&examples_root().join("scalar_string_foundation.ch"), true);
+}
+
+#[test]
+fn parity_unicode_string_foundation() {
+    drive_parity(&examples_root().join("unicode_string_foundation.ch"), true);
+}
+
+#[test]
+fn parity_signed_seed() {
+    drive_parity(&examples_root().join("signed_seed.ch"), true);
 }
 
 #[test]
@@ -483,6 +725,11 @@ fn parity_induction_bond_library_only() {
 }
 
 #[test]
+fn parity_beacon_scalar_range_library_only() {
+    drive_parity(&examples_root().join("beacon_scalar_range.ch"), false);
+}
+
+#[test]
 fn parity_linreg_library_only() {
     drive_parity(&examples_root().join("linreg.ch"), false);
 }
@@ -505,6 +752,17 @@ fn parity_transformer_block_library_only() {
 #[test]
 fn parity_vmap_relu_library_only() {
     drive_parity(&examples_root().join("vmap_relu.ch"), false);
+}
+
+#[test]
+fn parity_vmap_tensor_capture() {
+    let path = examples_root().join("vmap_tensor_capture.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"weights = tensor(shape=[2], data=[10.0, 20.0])\nout = tensor(shape=[3], data=[30.0, 60.0, 20.0])\n",
+    );
+    drive_parity(&path, true);
 }
 
 // The opaque-invariants worked example (RFC `opaque_invariants_rfc.md`).
@@ -538,6 +796,58 @@ fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
 }
 
+// A callable tensor entry: check/evaluate the declaration and compile its C
+// object. This is target admission coverage, not a claim of GPU execution.
+#[test]
+fn parity_resource_target_cpu_library_only() {
+    drive_parity(&examples_root().join("resource_target_cpu.ch"), false);
+}
+
+#[test]
+fn parity_wildcard_extents() {
+    drive_parity(&examples_root().join("wildcard_extents.ch"), true);
+}
+
+#[test]
+fn parity_annotated_concat_softmax_eval_and_c_rejection() {
+    let path = examples_root().join("annotated_concat_softmax.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"output = tensor(shape=[2, 4], data=[0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25])\n",
+    );
+    let directory = tempdir().unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .arg(directory.path().join("out"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "C host softmax rejects without a crash"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        unsupported_wording::stderr("annotated_concat_softmax_c")
+    );
+}
+
+#[test]
+fn parity_caller_actual_scope() {
+    drive_parity(&examples_root().join("caller_actual_scope.ch"), true);
+}
+
+#[test]
+fn parity_nested_tuple_projection() {
+    let path = examples_root().join("nested_tuple_projection.ch");
+    assert_check_clean(&path);
+    assert_eq!(run_eval(&path), b"main = 2\n");
+    drive_parity(&path, true);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -547,44 +857,8 @@ fn parity_rank_poly_borrow_library_only() {
 /// fails so the harness can't quietly stop covering the new file.
 #[test]
 fn parity_corpus_is_complete() {
-    let known: &[&str] = &[
-        "constraint_directed_risk_guards.ch",
-        "count_bool_axes.ch",
-        "dict_foundation.ch",
-        "hash_order_determinism.ch",
-        "hello_tensor.ch",
-        "induction_bond.ch",
-        "iter_foundation.ch",
-        "kinded_nominal_dimensions.ch",
-        "linreg.ch",
-        "list_foundation.ch",
-        "mnist.ch",
-        "opaque_invariants.ch",
-        "opaque_invariants_simplex.ch",
-        "rank_poly_borrow.ch",
-        "recursive_generic.ch",
-        "scalar_string_foundation.ch",
-        "tensor_structural_ops.ch",
-        "transformer_block.ch",
-        "vmap_relu.ch",
-    ];
-    let actual: Vec<String> = discover_executable_examples()
-        .iter()
-        .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
-        .collect();
-    let missing: Vec<&str> = known
-        .iter()
-        .copied()
-        .filter(|name| !actual.iter().any(|a| a == name))
-        .collect();
-    let extra: Vec<&String> = actual
-        .iter()
-        .filter(|name| !known.contains(&name.as_str()))
-        .collect();
-    assert!(
-        missing.is_empty() && extra.is_empty(),
-        "parity harness corpus drifted from examples/.\n  known but missing on disk: {missing:?}\n  on disk but not wired into harness: {extra:?}\nUpdate parity.rs to add a per-file test for any new entries.",
-    );
+    parity_corpus::validate(&examples_root(), include_str!("parity.rs"))
+        .unwrap_or_else(|error| panic!("parity corpus: {error}"));
 }
 
 // -----------------------------------------------------------------------------
@@ -626,4 +900,24 @@ fn parity_comparator_rejects_non_tensor_diff() {
     let a = b"len=4, items=4, shape=2x2\n";
     let b = b"len=5, items=4, shape=2x2\n";
     assert!(assert_parity(a, b, "byte-diff").is_err());
+}
+
+#[test]
+fn parity_generic_host_permutation() {
+    drive_parity(&examples_root().join("generic_host_permutation.ch"), true);
+}
+
+#[test]
+fn parity_grad_host_results() {
+    drive_parity(&examples_root().join("grad_host_results.ch"), true);
+}
+
+#[test]
+fn parity_keyed_state_wrapper() {
+    drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
+}
+
+#[test]
+fn parity_staged_adt_control() {
+    drive_parity(&examples_root().join("staged_adt_control.ch"), true);
 }

@@ -11,7 +11,7 @@
 //! It lives in chelis-prove so both the CLI prove path and the tide MCP
 //! tool reach one Surf->SMT lowering through the shared property runner.
 
-use chelis_deep::DeepTag;
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::{UnordMap, UnordSet};
 use std::cell::RefCell;
 
@@ -23,6 +23,8 @@ use crate::contracts::{
     QUANTILE_BOUNDARY, QUANTILE_MONOTONICITY, QUANTILE_RANGE,
 };
 use crate::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
+
+const NESTED_GRAD_SMT_BOUNDARY: &str = "scalar grad SMT lowering does not support nested gradients";
 
 pub(super) struct InlineCtx<'a> {
     pub(super) decls: &'a [Decl],
@@ -40,6 +42,9 @@ pub(super) struct DeepInlineCtx<'a> {
     pub(super) depth: usize,
     pub(super) max_depth: usize,
     pub(super) call_stack: Vec<String>,
+    /// First structured capability boundary encountered while lowering a
+    /// canonical Deep scalar `grad` application.
+    pub(super) grad_diagnostic: Option<&'a RefCell<Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -571,6 +576,10 @@ pub(super) fn deep_expr_to_smt(
 
 fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
+        record_deep_grad_diagnostic(ctx, reason);
+        return None;
+    }
     if let Some(name) = deep_var_name(expr) {
         return Some(SmtExpr::Var(name.to_string()));
     }
@@ -621,6 +630,7 @@ fn deep_arith(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<crate::solver::Smt
                     stack.push(name.to_string());
                     stack
                 },
+                grad_diagnostic: ctx.grad_diagnostic,
             };
             return deep_arith_subst(body, &subst, &deeper);
         }
@@ -646,6 +656,10 @@ fn deep_arith_subst(
     ctx: &DeepInlineCtx,
 ) -> Option<crate::solver::SmtExpr> {
     use crate::solver::{ArithOp as SA, SmtExpr};
+    if let Some(reason) = deep_grad_capability_reason(expr, ctx) {
+        record_deep_grad_diagnostic(ctx, reason);
+        return None;
+    }
     if let Some(name) = deep_var_name(expr) {
         return subst
             .get(name)
@@ -702,6 +716,7 @@ fn deep_arith_subst(
                     stack.push(name.to_string());
                     stack
                 },
+                grad_diagnostic: ctx.grad_diagnostic,
             };
             return deep_arith_subst(body, &inner_subst, &deeper);
         }
@@ -823,15 +838,7 @@ fn deep_fn_param_names(expr: &DeepExpr) -> Option<Vec<String>> {
     }
     params
         .iter()
-        .map(|param| {
-            deep_symbol_text(param)
-                .or_else(|| {
-                    deep_structural_elements(param)?
-                        .first()
-                        .and_then(deep_symbol_text)
-                })
-                .map(str::to_string)
-        })
+        .map(|param| deep_param_name(param).map(str::to_string))
         .collect()
 }
 
@@ -917,18 +924,27 @@ fn deep_tag(expr: &DeepExpr) -> Option<DeepTag> {
 }
 
 fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
-    match expr {
-        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
-fn deep_structural_elements(expr: &DeepExpr) -> Option<&[DeepExpr]> {
-    match expr {
-        DeepExpr::BareList(elements, _) => Some(elements),
-        DeepExpr::List(list, _) => Some(&list.elements),
-        _ => None,
+fn deep_param_name(expr: &DeepExpr) -> Option<&str> {
+    if let Some(name) = deep_symbol_text(expr) {
+        return Some(name);
+    }
+    match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(deep_symbol_text),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -977,6 +993,34 @@ fn record_grad_diagnostic(ctx: &InlineCtx, reason: String) {
         let mut diagnostic = diagnostic.borrow_mut();
         if diagnostic.is_none() {
             *diagnostic = Some(reason);
+        }
+    }
+}
+
+fn record_deep_grad_diagnostic(ctx: &DeepInlineCtx, reason: String) {
+    if let Some(diagnostic) = ctx.grad_diagnostic {
+        let mut diagnostic = diagnostic.borrow_mut();
+        if diagnostic.is_none() {
+            *diagnostic = Some(reason);
+        }
+    }
+}
+
+fn deep_grad_capability_reason(expr: &DeepExpr, ctx: &DeepInlineCtx) -> Option<String> {
+    let (DeepTag::App, app_children) = deep_node_parts(expr)? else {
+        return None;
+    };
+    let (DeepTag::Grad, grad_children) = deep_node_parts(app_children.first()?)? else {
+        return None;
+    };
+    let target = grad_children.first()?;
+    match deep_tag(target) {
+        Some(DeepTag::Grad) => Some(NESTED_GRAD_SMT_BOUNDARY.to_string()),
+        _ => {
+            let name = deep_var_name(target)?;
+            lookup_deep_fun_body(ctx.exprs, name)
+                .is_none()
+                .then(|| format!("scalar grad SMT lowering cannot resolve function `{name}`"))
         }
     }
 }
@@ -1099,7 +1143,7 @@ fn scalar_grad_application(
             (params, body, Some(name.as_str()), ret_ty)
         }
         Expr::Grad(_, _, _) => {
-            return Err("scalar grad SMT lowering does not support nested gradients".to_string());
+            return Err(NESTED_GRAD_SMT_BOUNDARY.to_string());
         }
         Expr::Vmap(_, _, _) => {
             return Err("scalar grad SMT lowering does not support nested `vmap`".to_string());
@@ -1389,9 +1433,7 @@ fn scalar_dual(
             "scalar grad SMT lowering does not support casts in differentiated bodies".to_string(),
         ),
         Expr::Annotate(inner, _, _) => scalar_dual(inner, env, ctx),
-        Expr::Grad(_, _, _) => {
-            Err("scalar grad SMT lowering does not support nested gradients".to_string())
-        }
+        Expr::Grad(_, _, _) => Err(NESTED_GRAD_SMT_BOUNDARY.to_string()),
         Expr::Vmap(_, _, _) => Err("scalar grad SMT lowering does not support `vmap`".to_string()),
         Expr::Jit(_, _) => Err("scalar grad SMT lowering does not support `jit`".to_string()),
         _ => Err("scalar grad SMT lowering encountered a non-scalar operation".to_string()),
@@ -1873,6 +1915,35 @@ mod tests {
     }
 
     #[test]
+    fn deep_param_name_rejects_unknown_form_but_reads_a_structural_param() {
+        let span = sp();
+        let structural = DeepExpr::BareList(
+            vec![
+                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                DeepExpr::Map(chelis_deep::Metadata::default(), span),
+            ],
+            span,
+        );
+        let unknown = DeepExpr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "x".into(),
+            meta: chelis_deep::Metadata::default(),
+            children: Vec::new(),
+            span,
+        }));
+        let malformed = DeepExpr::BareList(
+            vec![
+                DeepExpr::Atom(DeepAtom::Name("x".into()), span),
+                DeepExpr::Atom(DeepAtom::Int(0), span),
+            ],
+            span,
+        );
+
+        assert_eq!(deep_param_name(&structural), Some("x"));
+        assert_eq!(deep_param_name(&unknown), None);
+        assert_eq!(deep_param_name(&malformed), Some("x"));
+    }
+
+    #[test]
     fn quantile_monotonicity_implication_carries_validated_unit_interval_domain() {
         let low = SmtExpr::Var("p".into());
         let high = SmtExpr::Var("q".into());
@@ -2108,13 +2179,15 @@ mod tests {
 
     #[test]
     fn scalar_grad_effectful_target_reports_specific_boundary() {
+        // chelis#2413 retired the `Random` effect; `Resource` is the effect
+        // that remains, and the boundary is about any declared effect.
         assert_eq!(
             parsed_grad_error(
-                "def random_loss(x: f32) -> f32 ! { Random } = x * x\n",
-                "random_loss",
+                "def device_loss(x: f32) -> f32 ! { Resource(\"gpu:0\") } = x * x\n",
+                "device_loss",
                 &["x"],
             ),
-            "scalar grad SMT lowering does not support effectful function `random_loss`"
+            "scalar grad SMT lowering does not support effectful function `device_loss`"
         );
     }
 
@@ -2134,7 +2207,7 @@ mod tests {
     fn scalar_grad_named_non_float_result_fails_closed() {
         assert_eq!(
             parsed_grad_error(
-                "def integer_value(x: f32) -> int32 = 1\n",
+                "def integer_value(x: f32) -> i32 = 1\n",
                 "integer_value",
                 &["x"],
             ),

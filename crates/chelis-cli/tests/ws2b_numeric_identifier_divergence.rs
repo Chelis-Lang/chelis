@@ -16,7 +16,7 @@
 //! * #381 — `scalar_to_tensor` of a top-level scalar binding that a def
 //!   captures (and that the DAG lane materializes as a rank-0 tensor) must
 //!   evaluate, matching the C backend / the DAG pass-through.
-//! * #347 — the C backend must print `argmax_reduce`/`argmin_reduce` int64
+//! * #347 — the C backend must print `argmax_reduce`/`argmin_reduce` i64
 //!   results as the integer indices, not the reinterpreted f32 bit pattern.
 //! * #379 — top-level bindings spelled like C keywords or the emitted
 //!   helper scheme must produce compilable C (identifier mangling).
@@ -40,65 +40,6 @@ use tempfile::tempdir;
 // -----------------------------------------------------------------------------
 // Harness (mirrors issue_352_captured_global_c_emit.rs)
 // -----------------------------------------------------------------------------
-
-/// Locate `target/debug/` from the test binary's path. The test binary
-/// lives at `<target>/debug/deps/<binary>`, so `..` twice yields the
-/// debug dir.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// When `chelis-runtime` is built as a dev-dependency, cargo only emits the
-/// hashed staticlib in `target/debug/deps/`; the test cc invocation links
-/// against the conventional `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
 
 /// Run `chelis build --target c` on `source`, returning the build dir.
 fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
@@ -128,8 +69,12 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
 /// asserting on the outcome; returns the compiler `Output` and the path the
 /// binary lands at on success.
 fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, PathBuf) {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
+    assert!(
+        runtime.is_file(),
+        "`chelis build` did not stage the carried runtime at {}",
+        runtime.display()
+    );
 
     // Resolve the host toolchain the way `chelis build` and the other CLI test
     // harnesses (rank_poly_tier3.rs, parity.rs) do, so the link command carries
@@ -158,7 +103,7 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
         .arg("-I")
         .arg(build_dir.to_str().unwrap())
         .arg(kernel_c.to_str().unwrap())
-        .arg(canonical.to_str().unwrap())
+        .arg(runtime.to_str().unwrap())
         .args(&toolchain.link_flags)
         .arg("-o")
         .arg(bin.to_str().unwrap());
@@ -228,7 +173,7 @@ fn binding_line<'a>(stdout: &'a str, name: &str) -> &'a str {
 /// (`out = tensor(...)`); both render the value identically. This helper
 /// normalizes that asymmetry so eval-vs-C parity compares the values.
 /// Integer decode of a printed tensor payload for cross-lane VALUE
-/// comparison (chelis#732 P1): eval renders int64 tensor elements as
+/// comparison (chelis#732 P1): eval renders i64 tensor elements as
 /// integers ([05-OBS-2]) while the compiled lane keeps its float-formatted
 /// pre-contract form until Phase 2, so byte comparison of these lines is
 /// per-lane and the cross-lane assertion decodes both.
@@ -286,8 +231,8 @@ fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
 
 /// [04-NUM-9] branded diagnostics shared by eval and the C backend after
 /// chelis#729 Phase 3. The actual operation and dtype are part of the contract.
-const EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in trunc_div at int64";
-const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at int64";
+const EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in trunc_div at i64";
+const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at i64";
 
 /// POSITIVE: integer `trunc_div` is truncating (round toward zero) and
 /// agrees byte-for-byte between eval and the C backend. `7/2 == 3`,
@@ -296,8 +241,8 @@ const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at
 /// semantics.)
 #[test]
 fn issue_387_integer_trunc_div_truncates_eval_matches_backend() {
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
+    let source = "def d(x: tensor[2, i64], y: tensor[2, i64]) -> tensor[2, i64] = trunc_div(x, y)\n\
+out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
 
     let build = chelis_build_c(source, "inttruncdiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("inttruncdiv.c"));
@@ -322,8 +267,8 @@ out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
 /// spec/05-risc-primitives.md §2.1; matches Python `//`.
 #[test]
 fn chelis_178_integer_floor_div_rounds_toward_neg_inf_eval_matches_backend() {
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64]) -> tensor[2, int64] = floor_div(x, y)\n\
-out = d(cast(to_tensor([7, -7]), int64), cast(to_tensor([2, 2]), int64))\n";
+    let source = "def d(x: tensor[2, i64], y: tensor[2, i64]) -> tensor[2, i64] = floor_div(x, y)\n\
+out = d(cast(to_tensor([7, -7]), i64), cast(to_tensor([2, 2]), i64))\n";
 
     let build = chelis_build_c(source, "intfloordiv");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("intfloordiv.c"));
@@ -382,7 +327,7 @@ fn chelis_178_scalar_floor_trunc_div_exact_sign_rounding() {
         ("floor_div", -8, 2, "-4"),
     ];
     for (op, lhs, rhs, expected) in cases {
-        let expr = format!("{op}(cast({lhs}, int64), cast({rhs}, int64))");
+        let expr = format!("{op}(cast({lhs}, i64), cast({rhs}, i64))");
         let out = chelis_eval_expr(&expr);
         assert!(
             out.status.success(),
@@ -403,7 +348,7 @@ fn chelis_178_scalar_floor_trunc_div_exact_sign_rounding() {
 /// the zero-divisor trap moved to `trunc_div` / `floor_div`.)
 #[test]
 fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
-    let out = chelis_eval_expr("trunc_div(cast(7, int64), cast(0, int64))");
+    let out = chelis_eval_expr("trunc_div(cast(7, i64), cast(0, i64))");
     assert!(
         !out.status.success(),
         "integer trunc_div by zero must trap, not return a value; stdout={}",
@@ -426,7 +371,7 @@ fn issue_387_integer_trunc_div_by_zero_traps_in_eval() {
 /// distinguishes `mod` from `trunc_div` (pre-fix: a raw Rust panic).
 #[test]
 fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
-    let out = chelis_eval_expr("mod(cast(7, int64), cast(0, int64))");
+    let out = chelis_eval_expr("mod(cast(7, i64), cast(0, i64))");
     assert!(
         !out.status.success(),
         "integer mod by zero must trap; stdout={}",
@@ -457,8 +402,8 @@ fn issue_387_integer_div_by_zero_traps_in_backend() {
     // y - z = [2, 0]: the second divisor is zero, computed at runtime.
     // chelis#178: integer division is `trunc_div`; the zero-divisor guard
     // applies to it identically.
-    let source = "def d(x: tensor[2, int64], y: tensor[2, int64], z: tensor[2, int64]) -> tensor[2, int64] = trunc_div(x, sub(y, z))\n\
-out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_tensor([1, 5]), int64))\n";
+    let source = "def d(x: tensor[2, i64], y: tensor[2, i64], z: tensor[2, i64]) -> tensor[2, i64] = trunc_div(x, sub(y, z))\n\
+out = d(cast(to_tensor([7, 8]), i64), cast(to_tensor([3, 5]), i64), cast(to_tensor([1, 5]), i64))\n";
 
     let build = chelis_build_c(source, "intdivtrap");
     let kernel_c = build.path().join("intdivtrap.c");
@@ -507,8 +452,8 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
 /// above). chelis#178: scalar integer division is `trunc_div`.
 #[test]
 fn issue_387_scalar_integer_div_by_zero_traps_in_backend() {
-    let source = "def d(a: int64, b: int64) -> int64 = trunc_div(a, sub(b, b))\n\
-out = d(cast(7, int64), cast(5, int64))\n";
+    let source = "def d(a: i64, b: i64) -> i64 = trunc_div(a, sub(b, b))\n\
+out = d(cast(7, i64), cast(5, i64))\n";
 
     let build = chelis_build_c(source, "scalardivtrap");
     let kernel_c = build.path().join("scalardivtrap.c");
@@ -542,8 +487,8 @@ out = d(cast(7, int64), cast(5, int64))\n";
 /// on the backend as well as in eval.
 #[test]
 fn issue_387_scalar_integer_mod_by_zero_traps_in_backend() {
-    let source = "def d(a: int64, b: int64) -> int64 = mod(a, sub(b, b))\n\
-out = d(cast(7, int64), cast(5, int64))\n";
+    let source = "def d(a: i64, b: i64) -> i64 = mod(a, sub(b, b))\n\
+out = d(cast(7, i64), cast(5, i64))\n";
 
     let build = chelis_build_c(source, "scalarmodtrap");
     let kernel_c = build.path().join("scalarmodtrap.c");
@@ -613,7 +558,7 @@ out = d(1.0, 5.0)\n";
 fn issue_381_scalar_to_tensor_on_captured_scalar_evals_and_matches_backend() {
     let source = "c = cast(1.1, f64)\n\
 def make(n: tensor[2, f64]) -> tensor[2, f64] = \
-add(n, insert(scalar_to_tensor(c), cast(0, int32), cast(2, int64)))\n\
+add(n, insert(scalar_to_tensor(c), cast(0, i32), cast(2, i64)))\n\
 out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
 
     // Eval lane (the reference): 1.1 broadcast-added to [1.0, 2.0].
@@ -629,12 +574,11 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     // f32 and the C output was [1.0, 2.0] (the captured 1.1 dropped to ~0).
     let build = chelis_build_c(source, "s2t_capture");
     let kernel_c = build.path().join("s2t_capture.c");
-    // Emit-shape: the captured f64 scalar packs into a CHELIS_DTYPE_F64 rank-0
-    // tensor through a double*, not CHELIS_DTYPE_F32.
+    // The captured scalar crosses the tagged f64 boundary with exact bits.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)")
-            && c_source.contains("((double*)"),
+        c_source.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64,")
+            && c_source.contains("chelis_host_f64_bits(__tensor_scalar"),
         "captured f64 scalar must pack into a CHELIS_DTYPE_F64 rank-0 tensor (#381); \
          emitted C=\n{c_source}",
     );
@@ -672,17 +616,17 @@ fn issue_381_scalar_to_tensor_on_rank1_tensor_still_rejected() {
 }
 
 // -----------------------------------------------------------------------------
-// #347 — C backend prints int64 argmax/argmin indices, not f32 bit patterns
+// #347 — C backend prints i64 argmax/argmin indices, not f32 bit patterns
 // -----------------------------------------------------------------------------
 
 /// POSITIVE + parity: `argmax_reduce` over an integer axis prints the
 /// integer indices in the C backend, matching eval. Pre-fix the C backend
-/// stored the index as a float into the int64 buffer and the print path
+/// stored the index as a float into the i64 buffer and the print path
 /// read it back as the reinterpreted bit pattern (`0x3F800000` =
 /// `1065353216` for `1.0f`).
 #[test]
 fn issue_347_argmax_int_axis_backend_matches_eval() {
-    let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmax_reduce(x, 1)\n\
+    let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmax_reduce(x, 1)\n\
 out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 
     let build = chelis_build_c(source, "argmax");
@@ -702,14 +646,14 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmax int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
+        "eval and C backend must agree on the VALUES of argmax i64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
 /// POSITIVE + parity: the same fix covers `argmin_reduce` and a named axis.
 #[test]
 fn issue_347_argmin_named_axis_backend_matches_eval() {
-    let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, int64] = argmin_reduce(x, seq)\n\
+    let source = "def am(x: &tensor[batch, seq, f32]) -> tensor[batch, i64] = argmin_reduce(x, seq)\n\
 out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
 
     let build = chelis_build_c(source, "argmin");
@@ -728,7 +672,7 @@ out = am(to_tensor([[1.0, 9.0, 3.0], [7.0, 5.0, 6.0]]))\n";
     assert_eq!(
         tensor_ints(&stdout, "out"),
         tensor_ints(&eval_out, "out"),
-        "eval and C backend must agree on the VALUES of argmin int64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
+        "eval and C backend must agree on the VALUES of argmin i64 indices (#347) (the byte-form assertions above are chelis#732 Phase 2's)",
     );
 }
 
@@ -930,24 +874,24 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 }
 
 // -----------------------------------------------------------------------------
-// #476 — inline sparse gather/scatter read int32 indices through the
+// #476 — inline sparse gather/scatter read i32 indices through the
 // dtype-correct pointer, not `(int)t->data[i]`. Same #347 class as the
 // argmax/argmin index prints above: int tensors bit-pack their values into
 // the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_DTYPE_I32 index
-// `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
+// `(int)`-truncates the FLOAT reinterpretation of the i32 bits (index `2`
 // → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
-// surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
+// surface defaults integer literals to i32 (`to_tensor([2, 0, 1])` is a
 // CHELIS_DTYPE_I32 tensor), so this fires on ordinary index code; the pre-fix
 // corpus never reproduced it because every gather fixture cast indices to
-// int64 (`cast(_, int64)`), which took the always-correct CHELIS_DTYPE_I64 branch.
+// i64 (`cast(_, i64)`), which took the always-correct CHELIS_DTYPE_I64 branch.
 //
 // The acceptance oracle is BIT-IDENTITY eval-vs-C on the integer/index path
 // (no float summation here — indices are exact), PLUS a negative assertion
 // that the pre-fix reinterpreted-float corruption (every index → row 0) is
-// rejected. An int64-index control proves the i64 branch is untouched.
+// rejected. An i64-index control proves the i64 branch is untouched.
 // -----------------------------------------------------------------------------
 
-/// POSITIVE + parity: `gather` with the DEFAULT int32 index dtype agrees
+/// POSITIVE + parity: `gather` with the DEFAULT i32 index dtype agrees
 /// byte-for-byte between eval and the C backend. The gather is the program
 /// root, so it lowers to the inline WireDag tensor-lane emit
 /// (`emit_sparse_gather`), which is the buggy path — NOT the runtime helper
@@ -964,15 +908,15 @@ embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
     assert_eq!(
         binding_line(&stdout, "embed"),
         "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
-        "int32-index gather must select rows 2,0,1; stdout={stdout:?}",
+        "i32-index gather must select rows 2,0,1; stdout={stdout:?}",
     );
-    // NEGATIVE: the pre-fix corruption read every int32 index as 0 (the
+    // NEGATIVE: the pre-fix corruption read every i32 index as 0 (the
     // float reinterpretation of small ints rounds toward zero), so every
     // output row was row 0 (`[10,11]`). That signature must never appear.
     assert_ne!(
         binding_line(&stdout, "embed"),
         "embed = tensor(shape=[3, 2], data=[10.0, 11.0, 10.0, 11.0, 10.0, 11.0])",
-        "pre-fix #476 read every int32 index as row 0; that corruption must \
+        "pre-fix #476 read every i32 index as row 0; that corruption must \
          not recur; stdout={stdout:?}",
     );
 
@@ -980,37 +924,37 @@ embed = gather(table, to_tensor([2, 0, 1]), 0)\n";
     assert_eq!(
         binding_line(&stdout, "embed"),
         binding_line(&eval_out, "embed"),
-        "eval and C backend must agree byte-for-byte on int32-index gather (#476)",
+        "eval and C backend must agree byte-for-byte on i32-index gather (#476)",
     );
 }
 
-/// POSITIVE / control: the same gather with indices cast to int64 still
-/// agrees. The int64 branch was always correct; this proves the fix did not
+/// POSITIVE / control: the same gather with indices cast to i64 still
+/// agrees. The i64 branch was always correct; this proves the fix did not
 /// regress it.
 #[test]
 fn issue_476_gather_int64_indices_unchanged() {
     let source = "table = to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]])\n\
-embed = gather(table, cast(to_tensor([2, 0, 1]), int64), 0)\n";
+embed = gather(table, cast(to_tensor([2, 0, 1]), i64), 0)\n";
 
     let build = chelis_build_c(source, "gatheri64");
     let stdout = compile_and_run_emitted(build.path(), &build.path().join("gatheri64.c"));
     assert_eq!(
         binding_line(&stdout, "embed"),
         "embed = tensor(shape=[3, 2], data=[30.0, 31.0, 10.0, 11.0, 20.0, 21.0])",
-        "int64-index gather must select rows 2,0,1; stdout={stdout:?}",
+        "i64-index gather must select rows 2,0,1; stdout={stdout:?}",
     );
 
     let eval_out = chelis_eval_ok(source, "gatheri64");
     assert_eq!(
         binding_line(&stdout, "embed"),
         binding_line(&eval_out, "embed"),
-        "eval and C backend must agree on int64-index gather (control)",
+        "eval and C backend must agree on i64-index gather (control)",
     );
 }
 
-/// POSITIVE + parity: `scatter(..., "replace")` over an int32-index path
+/// POSITIVE + parity: `scatter(..., "replace")` over an i32-index path
 /// agrees byte-for-byte. Routed through the runtime helper at the program
-/// root, but the int32 read there is the same #347 class; the
+/// root, but the i32 read there is the same #347 class; the
 /// `read_index_slot` width-correct path keeps it honest. This guards the
 /// user-facing scatter surface in addition to the inline emit.
 #[test]
@@ -1024,7 +968,7 @@ out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.
     assert_eq!(
         binding_line(&stdout, "out"),
         "out = tensor(shape=[3, 2], data=[2.0, 2.0, 3.0, 3.0, 1.0, 1.0])",
-        "scatter_replace at int32 indices [2,0,1] places update row 0→pos2, \
+        "scatter_replace at i32 indices [2,0,1] places update row 0→pos2, \
          1→pos0, 2→pos1; stdout={stdout:?}",
     );
 
@@ -1032,13 +976,13 @@ out = scatter(base, to_tensor([2, 0, 1]), to_tensor([[1.0, 1.0], [2.0, 2.0], [3.
     assert_eq!(
         binding_line(&stdout, "out"),
         binding_line(&eval_out, "out"),
-        "eval and C backend must agree byte-for-byte on int32 scatter_replace (#476)",
+        "eval and C backend must agree byte-for-byte on i32 scatter_replace (#476)",
     );
 }
 
 /// POSITIVE + parity: the inline `emit_sparse_scatter_add` path — reached as
 /// the gather ADJOINT (grad of gather scatter-adds the upstream grad back to
-/// the gathered rows) — agrees byte-for-byte at int32 indices. This exercises
+/// the gathered rows) — agrees byte-for-byte at i32 indices. This exercises
 /// BOTH inline sparse emits in one program: `emit_sparse_gather` (forward)
 /// and `emit_sparse_scatter_add` (backward). Index 2 appears twice → its row
 /// accumulates grad 2; index 0 once → grad 1; index 1 never → grad 0.
@@ -1073,7 +1017,7 @@ out = df(to_tensor([[10.0, 11.0], [20.0, 21.0], [30.0, 31.0]]))\n";
     assert_eq!(
         tensor_value(&stdout, "out"),
         tensor_value(&eval_out, "out"),
-        "eval and C backend must agree byte-for-byte on int32 gather-grad \
+        "eval and C backend must agree byte-for-byte on i32 gather-grad \
          (scatter_add adjoint) (#476)",
     );
 }

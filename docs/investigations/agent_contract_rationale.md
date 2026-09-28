@@ -43,7 +43,7 @@ examples are here:
   `spec/design/dtype_semantics.md` §B1 calls amending the spec first "the
   protocol, not a failure."
 
-## 2. The build-contention measurement, behind "Build Concurrency And Process Hygiene"
+## 2. The build-contention measurement, behind "Build And Gate Commands"
 
 Several unrelated tests failing at near-identical wall-clock times, for example all
 around 217s (nextest's slow-kill), means CPU starvation rather than code breakage.
@@ -54,7 +54,7 @@ number to keep in mind before treating a wave of simultaneous timeouts as real
 failures.
 
 
-## 3. The five-session fleet run, behind "Fan-Out Budget"
+## 3. The five-session fleet run, behind "Subagents"
 
 Measured across a five-session, roughly forty-hour agent fleet run in 2026-08.
 
@@ -87,7 +87,7 @@ tier it took or why. The one clear success was a deliberate cheap-tier choice fo
 an agent whose whole job was waiting on CI. A per-spawn sentence is what turns a
 standing preference into an observable decision.
 
-## 4. Briefs that were re-derived, and briefs that survived, behind "Briefs"
+## 4. Briefs that were re-derived, and briefs that survived, behind "Subagents"
 
 Same run.
 
@@ -133,7 +133,7 @@ working out that a worktree's `.git` is a file and that the directory it points 
 is shared. Knowing the topology did not change the behaviour, so the contract
 names the shared surfaces explicitly rather than leaving them to be inferred.
 
-## 6. Pull requests that outran their oracle, behind "Pull Request Review Gate"
+## 6. Pull requests that outran their oracle, behind "Pull Request Lifecycle"
 
 Same run. Pull requests landed at 3,744 insertions across 24 files, and one branch
 reached 6,282 insertions across 88 files, about six times the figure in the
@@ -152,7 +152,7 @@ That ratio, not the diff size, is what produced two consecutive findings about
 claims outrunning their oracle, and it is measurable before a reviewer ever sees
 the branch.
 
-## 7. Nine hours of asserted free targets, behind "Fresh-Context Enforcement"
+## 7. Nine hours of asserted free targets, behind "Red Team Rounds"
 
 Same run. For about nine hours every round brief asserted that the reviewer's target
 was free, and every one of those assertions was produced the same way: the author
@@ -162,7 +162,7 @@ followed.
 
 The worst of them contaminated a gate run. A reviewer inserted a type variant into
 tracked source to prove that a guard fires, which is exactly the probe the round called
-for. The author's `--local` gate compiled the tree while that variant was in it and
+for. The author's `--local` gate (now `--validation`) compiled the tree while that variant was in it and
 failed with three errors unrelated to anything either agent was working on. Nothing in
 the failure pointed at the cause, and the shape of it, several unrelated errors at once,
 is the shape the contract elsewhere teaches you to read as contention rather than as
@@ -180,9 +180,9 @@ a neighbouring build narrows the window in which one agent's inserted variant re
 other's compile. It does not remove the window, and the collision above happened inside
 one.
 
-## 8. A gate run that described a head nobody merged, behind "Pull Request Review Gate"
+## 8. A gate run that described a head nobody merged, behind "Pull Request Lifecycle"
 
-The rule this replaces said the `--local` gate runs at most once per pull request, on
+An earlier rule said the `--local` gate (now `--validation`) runs at most once per pull request, on
 the committed candidate, immediately before ready-for-review. Both halves cannot hold at
 once as soon as a review round changes the candidate, and the run's first pull request
 showed it: the `--local` evidence described head `7ea68247`, the round-2 repairs landed
@@ -191,8 +191,9 @@ candidate were never the same commit. Later in the same run a merge shipped with
 `--local` evidence describing a head one commit behind the merged one.
 
 Neither case was a shortcut. Both are what the rule asks for when read literally, which
-is why the fix is to state the obligation as coverage of the shipped head rather than as
-a count of runs.
+is why validation evidence must identify the head it covered. Routine readiness now
+uses CI on the candidate head; `--validation` is optional. The same evidence rule applies
+when an optional local run is cited.
 
 The second rule is about the invocation rather than the cadence. The three `--local`
 runs that completed took 7m51s, 9m56s and 10m02s, against a ten-minute foreground

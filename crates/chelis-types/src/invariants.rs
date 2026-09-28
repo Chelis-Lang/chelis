@@ -131,14 +131,16 @@ fn validate_one_deftype(
     deftypes: &UnordMap<String, &Expr>,
     errors: &mut impl DiagnosticOutput,
 ) {
-    let invariant = meta_value(deftype, "invariant");
-    let Some(invariant_fn) = invariant else {
+    let invariant = meta_map(deftype)
+        .and_then(|m| m.invariant())
+        .map(|v| v.to_expression());
+    let Some(invariant_fn) = invariant.as_ref() else {
         return; // No invariant declared: nothing to check.
     };
     let type_name = children(deftype).first().and_then(sym_str).unwrap_or("_");
 
     // Check 1: invariant requires opaque: true.
-    if !has_true_meta(deftype, "opaque") {
+    if meta_map(deftype).is_none_or(|m| m.opaque().is_none()) {
         errors.push_error(err(format!(
             "invariant on type `{type_name}` requires `@opaque`: \
              assumption injection is unsound for a forgeable type"
@@ -354,7 +356,10 @@ fn validate_predicate(
     // Recorded amenability equals recomputation (protects hand-written
     // `.dp`).
     let recomputed = chelis_pred::classify_predicate(invariant_fn);
-    match meta_value(deftype, "invariant_amenability").and_then(str_value) {
+    match meta_map(deftype)
+        .and_then(|m| m.invariant_amenability())
+        .map(|v| v.value().spelling())
+    {
         Some(recorded) => {
             if PredAmenability::from_str(recorded) != Some(recomputed) {
                 errors.push_error(err(format!(
@@ -427,7 +432,7 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 // ===========================================================================
 
 // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these three
-// readers are the whole module's view of a Deep node, and they were
+// readers are the whole module's view of a Deep node, and they were once
 // `Expr::List`-only. On the stamped ingress every node arrives as an
 // `Expr::Node`, so `tag` returned `None` for the `module` wrapper,
 // `flatten_with_modules` never descended into it, and NO `deftype` was ever
@@ -442,7 +447,6 @@ fn describe_grammar_error(e: &PredGrammarError) -> String {
 fn tag(expr: &Expr) -> Option<DeepTag> {
     match expr {
         Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
         _ => None,
     }
 }
@@ -450,7 +454,6 @@ fn tag(expr: &Expr) -> Option<DeepTag> {
 fn children(expr: &Expr) -> &[Expr] {
     match expr {
         Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
         _ => &[],
     }
 }
@@ -470,32 +473,9 @@ fn var_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn meta_map(expr: &Expr) -> Option<&chelis_deep::MetaMap> {
+fn meta_map(expr: &Expr) -> Option<&chelis_deep::Metadata> {
     match expr {
         Expr::Node(node, _) => Some(node.meta()),
-        Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(map, _)) => Some(map),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
-    meta_map(expr)?
-        .entries
-        .iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v)
-}
-
-fn has_true_meta(expr: &Expr, key: &str) -> bool {
-    matches!(meta_value(expr, key), Some(Expr::Atom(Atom::Bool(true), _)))
-}
-
-fn str_value(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Str(s), _) => Some(s.as_str()),
         _ => None,
     }
 }

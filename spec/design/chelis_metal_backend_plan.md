@@ -480,7 +480,7 @@ The compile command printed by `cmd_build_metal`:
 
 ```sh
 clang++ -std=c++17 -fobjc-arc -O2 <func>_metal.mm \
-  -L<runtime_dir> -lchelis_runtime \
+  <output_dir>/libchelis_runtime.a \
   -framework Metal -framework Foundation \
   -o <func>
 ```
@@ -601,7 +601,7 @@ spec/08-backends.md                 -- new "Phase M: Metal Backend" top-level se
 spec/12-roadmap.md                  -- add Phase M row
 docs/manual_gates.md                -- register M6 manual oracle
 docs/phase_oracles.md               -- register M1-M7 phase oracles
-.github/workflows/ci.yml            -- append metal compile/link step to macos-workspace-shard job (shard 2)
+.github/workflows/ci.yml            -- append metal compile/link step to macos-workspace-shard job (shard 2) in macos-nightly.yml (daily or manual, not per PR)
 ```
 
 **Notably NOT modified** (deliberate, per architectural decision in §3.3):
@@ -626,7 +626,7 @@ crates/chelis-runtime/build.rs      -- no Metal/Foundation framework links
 
 ### Integration tests (in `crates/chelis-cli/tests/`)
 
-- **Elementwise correctness:** `chelis build --target metal` on `def f(a: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(a, b)`, compile, run, verify output matches evaluator. Per-dtype matrix coverage (f32 plus the WS-M1 admit set: f16, bf16, int8, int16, int32, int64, bool — see `spec/04-type-system.md` §1.1.3) extends the elementwise test family with the same shape per dtype.
+- **Elementwise correctness:** `chelis build --target metal` on `def f[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[n, f32] = add(a, b)`, compile, run, verify output matches evaluator. Per-dtype matrix coverage (f32 plus the WS-M1 admit set: f16, bf16, i8, i16, i32, i64, bool — see `spec/04-type-system.md` §1.1.3) extends the elementwise test family with the same shape per dtype.
 - **Reduction correctness:** Same for `sum(a, 0)`, verify against evaluator. Per-dtype coverage applies the §5.7.1 accumulator rule (f16/bf16 reduce_sum → f32 accumulator → operand-precision result; integer reduce_sum widens per spec) for the dtypes the Metal backend admits.
 - **Matmul correctness:** Same for `matmul(a, b)`. The f32 and f16 paths route through the MPS wrapper helpers (`chelis_metal_mps_gemm_f32` / `chelis_metal_mps_gemm_f16`) per the ARC ownership model in `spec/04-type-system.md` §1.1.3; bf16 routes through the parameterized 16x16 tiled MSL kernel; integer matmul is rejected at type-check per §5.7.2 and never reaches the backend. Verify f32/f16 against an MPS-reference baseline; verify bf16 against an f32 reference within bf16 tolerance.
 - **Fused correctness:** Same for `exp(add(mul(a, b), c))`, verify the output is from a single fused kernel (grep generated C for kernel count) and numerically correct.
@@ -657,8 +657,8 @@ M1: Scaffolding + CLI dispatch (default-gate)
 ├── --target metal arm in chelis-cli/src/main.rs (stub codegen + cmd_build_metal)
 ├── reject_unsupported_metal_ops (pad/shrink now implemented as MSL movement kernels, WS-8A; sort/argsort/cumsum/cumprod are not yet IR variants)
 ├── reject_unsupported_metal_precisions per the Metal column of
-│   `spec/04-type-system.md` §1.1.3: admit f32, f16, bf16, int8, int16,
-│   int32, int64, bool; hard-reject f64 with the FP64-ALU diagnostic
+│   `spec/04-type-system.md` §1.1.3: admit f32, f16, bf16, i8, i16,
+│   i32, i64, bool; hard-reject f64 with the FP64-ALU diagnostic
 │   ("Apple Silicon GPUs lack FP64 ALUs; use `--target c` or
 │   `--target hip` for f64 workloads"). bf16 admits at codegen but the
 │   runtime surfaces the Apple7+ requirement on M1/M2 devices per

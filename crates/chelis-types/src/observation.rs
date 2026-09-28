@@ -205,7 +205,29 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             "format_element formats numeric/bool element payloads; string \
              values render as themselves at their exits and never arrive here"
         ),
+        Prim::Key => panic!(
+            "format_element formats numeric/bool element payloads; a random key \
+             has no element carrier"
+        ),
     }
+}
+
+/// THE printed form of a random key: `key(` then its 64 bits as the 16
+/// lowercase hex digits of spec/10 section 3.1's key carrier, then `)`. A
+/// key has no numeric value, so no numeric formatter renders it.
+pub fn format_key(key: crate::dtype_semantics::RandomKey) -> String {
+    format_key_bits(key.bits())
+}
+
+/// [`format_key`] over a key's stored 64 bits, for a native runtime that
+/// holds a key as its storage word ([05-OBS-2]).
+pub fn format_key_bits(bits: u64) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let hex = (0..16)
+        .rev()
+        .map(|nibble| char::from(DIGITS[((bits >> (nibble * 4)) & 0xf) as usize]))
+        .collect::<String>();
+    format!("key({hex})")
 }
 
 /// Shortest-round-trip rendering for a half-precision value, in the
@@ -449,7 +471,7 @@ mod tests {
             format_element(Prim::Int32, ElementRef::I32(2147483647)),
             "2147483647"
         );
-        // int64 prints all digits exactly, never through double.
+        // i64 prints all digits exactly, never through double.
         assert_eq!(
             format_element(Prim::Int64, ElementRef::I64(9007199254740993)),
             "9007199254740993"

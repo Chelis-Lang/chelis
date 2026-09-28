@@ -29,7 +29,7 @@ fn int_atom_under_f32_metadata_is_rejected() {
 #[test]
 fn all_canonical_atom_prim_pairs_are_accepted() {
     for source in [
-        "(lit {type: (t-prim {} int32)} 7)",
+        "(lit {type: (t-prim {} i32)} 7)",
         "(lit {type: (t-prim {} f32)} 7.0)",
         "(lit {type: (t-prim {} f32), literal_source: integer} 18014399583223809)",
         "(lit {type: (t-prim {} bool)} true)",
@@ -46,17 +46,16 @@ fn all_canonical_atom_prim_pairs_are_accepted() {
 #[test]
 fn every_cross_family_atom_prim_pair_is_rejected() {
     for source in [
-        "(lit {type: (t-prim {} int32)} 1.0)",
-        "(lit {type: (t-prim {} int32)} true)",
-        "(lit {type: (t-prim {} int32)} \"x\")",
+        "(lit {type: (t-prim {} i32)} 1.0)",
+        "(lit {type: (t-prim {} i32)} true)",
+        "(lit {type: (t-prim {} i32)} \"x\")",
         "(lit {type: (t-prim {} f64)} 1)",
         "(lit {type: (t-prim {} f64)} true)",
         "(lit {type: (t-prim {} bool)} 1)",
         "(lit {type: (t-prim {} bool)} \"x\")",
         "(lit {type: (t-prim {} string)} 1)",
         "(lit {type: (t-prim {} string)} false)",
-        "(lit {type: (t-prim {} int32), literal_source: integer} 1)",
-        "(lit {type: (t-prim {} f32), literal_source: float} 1)",
+        "(lit {type: (t-prim {} i32), literal_source: integer} 1)",
         "(lit {type: (t-prim {} f32), literal_source: integer} 1.0)",
         "(lit {literal_source: integer} 1)",
     ] {
@@ -81,7 +80,8 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
          def vector() -> tensor[2, f32] = [1, 2]",
     )
     .expect("Surf producer fixture must parse");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+    let program =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let errors = match check_typed_program(&program) {
         Ok(_) => Vec::new(),
         Err(result) => result.errors,
@@ -90,4 +90,10 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
         errors.is_empty(),
         "Surf's suffix/context producers emitted contradictory atoms: {errors:#?}"
     );
+}
+
+#[test]
+fn unknown_literal_origin_is_rejected_at_annotation_admission() {
+    let error = parse_str("(lit {type: (t-prim {} f32), literal_source: float} 1)").unwrap_err();
+    assert!(error.to_string().contains("literal_source"));
 }

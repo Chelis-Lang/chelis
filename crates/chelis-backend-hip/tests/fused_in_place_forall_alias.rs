@@ -63,29 +63,33 @@ fn fan_in_dag(
     out_ty: TensorType,
 ) -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(decl, RiscOp::Copy, vec![x_a], a_ty.clone(), None);
 
     let x_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_b".into() },
         vec![],
         b_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Copy, vec![x_b], b_ty.clone(), None);
+    let b = dag.add_node(decl, RiscOp::Copy, vec![x_b], b_ty.clone(), None);
 
     let x_c = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_c".into() },
         vec![],
         c_ty.clone(),
         None,
     );
-    let c = dag.add_node(RiscOp::Copy, vec![x_c], c_ty.clone(), None);
+    let c = dag.add_node(decl, RiscOp::Copy, vec![x_c], c_ty.clone(), None);
 
     let ops = vec![
         FusedStep {
@@ -97,29 +101,31 @@ fn fan_in_dag(
             input_indices: vec![FusedInput::PreviousStep(0), FusedInput::External(2)],
         },
     ];
-    let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![a, b, c], out_ty, None);
+    let fused = dag.add_node(decl, RiscOp::FusedElem { ops }, vec![a, b, c], out_ty, None);
     dag.set_reusable_input(fused, a);
     dag.add_root(fused);
     (dag, fused, a)
 }
 
 /// Build the exact-string host-side branch that admits the in-place
-/// alias view on HIP. The wrapper opens with the bare-declaration of
-/// the FusedElem's GPU tensor, then a runtime contiguity guard. The
-/// contiguous branch aliases the FusedElem's view onto the reusable
-/// input's device data + storage_size.
-fn expected_in_place_view_alias(fused_id: usize, reusable_id: usize, shape: &str) -> String {
+/// alias owner on HIP. The wrapper opens with the bare declaration of
+/// the FusedElem's device owner, then a runtime contiguity guard. The
+/// contiguous branch borrows the reusable input's device data and byte
+/// capacity under the output metadata plan.
+fn expected_in_place_owner_alias(fused_id: usize, reusable_id: usize) -> String {
     format!(
-        "d_t{fused_id} = chelis_gpu_alloc_view(1, (int[]){{ {shape} }}, CHELIS_DTYPE_F32, d_t{reusable_id}->data, d_t{reusable_id}->storage_size);"
+        "o_t{fused_id} = chelis_device_tensor_borrow(plan_t{fused_id}, d_t{reusable_id}->data, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(d_t{reusable_id}->byte_capacity)));"
     )
 }
 
-fn expected_contiguity_guard(reusable_id: usize) -> String {
-    format!("if (chelis_gpu_is_contiguous(d_t{reusable_id})) {{")
+fn expected_contiguity_guard(fused_id: usize, reusable_id: usize) -> String {
+    format!(
+        "bool contiguous_t{fused_id} = d_t{reusable_id}->rank == chelis_metadata_plan_rank(plan_t{fused_id});"
+    )
 }
 
 fn expected_bare_declaration(fused_id: usize) -> String {
-    format!("chelis_gpu_tensor *d_t{fused_id};")
+    format!("chelis_device_tensor_owner *o_t{fused_id};")
 }
 
 // ---------------------------------------------------------------------
@@ -129,9 +135,9 @@ fn expected_bare_declaration(fused_id: usize) -> String {
 /// Pinning regression: fan-in with literal-equal shapes aliases the
 /// FusedElem's output view onto the reusable input's device buffer.
 /// This is the W2-B shipped behavior on HIP. The wrapper must emit
-/// the bare `chelis_gpu_tensor *d_t{fused};` declaration (not a slot
-/// allocation), the runtime contiguity guard, and the
-/// `chelis_gpu_alloc_view` aliased onto `d_t{reusable}->data`.
+/// the bare `chelis_device_tensor_owner *o_t{fused};` declaration (not
+/// a slot allocation), the runtime contiguity guard, and the owner
+/// borrow aliased onto `d_t{reusable}->data`.
 #[test]
 fn fan_in_literal_equal_shapes_aliases_reusable_input() {
     let (dag, fused, a) = fan_in_dag(
@@ -148,14 +154,14 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
     let bare_decl = expected_bare_declaration(fused_id);
     assert!(
         hip.contains(&bare_decl),
-        "expected bare GPU tensor declaration `{bare_decl}` for in-place fused; got:\n{hip}"
+        "expected bare device-owner declaration `{bare_decl}` for in-place fused; got:\n{hip}"
     );
-    let guard = expected_contiguity_guard(a_id);
+    let guard = expected_contiguity_guard(fused_id, a_id);
     assert!(
         hip.contains(&guard),
         "expected contiguity guard `{guard}` on reusable input; got:\n{hip}"
     );
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         hip.contains(&alias),
         "expected literal-shape fan-in to alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
@@ -195,13 +201,13 @@ fn fan_in_resolved_lit_to_named_aliases_reusable_input() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         hip.contains(&alias),
         "exact Lit->resolved-Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
     assert!(
-        hip.contains(&expected_contiguity_guard(a_id)),
+        hip.contains(&expected_contiguity_guard(fused_id, a_id)),
         "expected contiguity guard on reusable input; got:\n{hip}"
     );
     assert!(
@@ -225,7 +231,7 @@ fn fan_in_resolved_named_to_lit_aliases_reusable_input() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         hip.contains(&alias),
         "exact resolved-Named->Lit fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
@@ -246,7 +252,7 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         hip.contains(&alias),
         "matching resolved Named fan-in must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
@@ -268,12 +274,15 @@ fn fan_in_unresolved_axis_does_not_alias_resolved_literal() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let forbidden_alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_alias),
         "an unresolved axis must not authorize reuse as literal four; got:\n{hip}"
     );
-    assert!(!hip.contains(&expected_contiguity_guard(a_id)), "{hip}");
+    assert!(
+        !hip.contains(&expected_contiguity_guard(fused_id, a_id)),
+        "{hip}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -295,13 +304,13 @@ fn fan_in_different_resolved_names_alias_exact_equal_shape() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         hip.contains(&alias),
         "resolved exact-equal shapes must alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
     );
     assert!(
-        hip.contains(&expected_contiguity_guard(a_id)),
+        hip.contains(&expected_contiguity_guard(fused_id, a_id)),
         "exact reuse must emit the guard derived from the same source token; got:\n{hip}"
     );
 }
@@ -320,14 +329,12 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    // FusedElem output is `Named("seq", Some(8))` so the alias view
-    // shape literal would be `(int[]){ 8 }` if the gate misfired.
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "8");
+    let forbidden_alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_alias),
         "conflicting known sizes must NOT alias; got:\n{hip}"
     );
-    let forbidden_guard = expected_contiguity_guard(a_id);
+    let forbidden_guard = expected_contiguity_guard(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_guard),
         "conflicting size must NOT emit contiguity guard; got:\n{hip}"
@@ -339,7 +346,7 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
 ///
 /// Re-authored by chelis#730 Phase 1 (census row 5, chelis#689): the
 /// former `elem_kind` F32 wildcard let this mixed-precision fused
-/// fan-in EMIT (reading the int32 operand through the f32 kernel - the
+/// fan-in EMIT (reading the i32 operand through the f32 kernel - the
 /// corruption class chelis#689 runtime-confirmed), and the old
 /// assertion only checked the alias line was absent in that corrupt
 /// emission. There is no typed mixed-precision fused kernel, so HIP
@@ -357,10 +364,10 @@ fn fan_in_different_precision_does_not_alias() {
     );
     let err = codegen_hip(&dag, "test_fan_in_different_precision")
         .map(|_| ())
-        .expect_err("a mixed int32/f32 fused fan-in has no typed HIP kernel");
+        .expect_err("a mixed i32/f32 fused fan-in has no typed HIP kernel");
     let rendered = err.to_string();
     assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("int32"),
+        rendered.starts_with("unsupported:") && rendered.contains("i32"),
         "the rejection must be branded and name the dtype; got: {rendered}"
     );
 }
@@ -372,26 +379,30 @@ fn fan_in_different_precision_does_not_alias() {
 #[test]
 fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_a".into() },
         vec![],
         vec_lit_f32(4),
         None,
     );
-    let a = dag.add_node(RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
+    let a = dag.add_node(decl, RiscOp::Copy, vec![x_a], vec_named_f32("seq", 4), None);
     let x_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_b".into() },
         vec![],
         vec_named_f32("seq", 4),
         None,
     );
-    let b = dag.add_node(RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
+    let b = dag.add_node(decl, RiscOp::Copy, vec![x_b], vec_named_f32("seq", 4), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
     }];
     let fused = dag.add_node(
+        decl,
         RiscOp::FusedElem { ops },
         vec![a, b],
         vec_named_f32("seq", 4),
@@ -400,7 +411,7 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     dag.set_reusable_input(fused, a);
 
     // The second consumer keeps `a` live and forces a fresh fused output.
-    let other = dag.add_node(RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
+    let other = dag.add_node(decl, RiscOp::Neg, vec![a], vec_named_f32("seq", 4), None);
     dag.add_root(fused);
     dag.add_root(other);
 
@@ -409,20 +420,21 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let forbidden_alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_alias),
         "multi-consumer reusable input must NOT alias even with exact shape; got:\n{hip}"
     );
-    let forbidden_guard = expected_contiguity_guard(a_id);
+    let forbidden_guard = expected_contiguity_guard(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_guard),
         "multi-consumer must NOT emit contiguity guard; got:\n{hip}"
     );
 }
 
-/// Negative: equal total capacity does not satisfy the per-axis exact-shape
-/// requirement when source and consumer ranks differ.
+/// Negative: equal total capacity does not make a mixed-positive-rank
+/// same-shape producer valid. The malformed relation must be rejected before
+/// storage planning can consider an in-place alias.
 #[test]
 fn fan_in_different_rank_does_not_alias() {
     let ty_r1 = TensorType {
@@ -433,24 +445,18 @@ fn fan_in_different_rank_does_not_alias() {
         dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
         precision: Prim::F32,
     };
-    let (dag, fused, a) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
-    let result = codegen_hip(&dag, "test_fan_in_different_rank").unwrap();
-    let hip = &result.c_source;
-    let fused_id = fused.0;
-    let a_id = a.0;
-
-    // Forbidden alias for the rank-2 output shape literal.
-    let forbidden_r2 = format!(
-        "d_t{fused_id} = chelis_gpu_alloc_view(2, (int[]){{ 2, 4 }}, CHELIS_DTYPE_F32, d_t{a_id}->data, d_t{a_id}->storage_size);"
-    );
+    let (dag, _, _) = fan_in_dag(ty_r1.clone(), ty_r2.clone(), ty_r2.clone(), ty_r2);
+    let error = match chelis_ir::ownership::lower_dag_ownership(dag) {
+        Ok(_) => panic!("mixed-positive-rank same-shape producer must be rejected"),
+        Err(error) => error,
+    };
+    let rendered = error.to_string();
     assert!(
-        !hip.contains(&forbidden_r2),
-        "different-rank fan-in must NOT alias d_t{fused_id} onto d_t{a_id}->data; got:\n{hip}"
-    );
-    let forbidden_guard = expected_contiguity_guard(a_id);
-    assert!(
-        !hip.contains(&forbidden_guard),
-        "different-rank must NOT emit contiguity guard; got:\n{hip}"
+        rendered.contains("same-shape result at node 6")
+            && rendered.contains("positive-rank operand")
+            && rendered.contains("rank 1")
+            && rendered.contains("expected rank 2"),
+        "unexpected malformed-agreement rejection: {error}"
     );
 }
 
@@ -461,27 +467,30 @@ fn fan_in_different_rank_does_not_alias() {
 #[test]
 fn fan_in_no_reusable_input_keeps_slot_backed_path() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = vec_lit_f32(4);
     let x_a = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_a".into() },
         vec![],
         a_ty.clone(),
         None,
     );
-    let a = dag.add_node(RiscOp::Copy, vec![x_a], a_ty.clone(), None);
+    let a = dag.add_node(decl, RiscOp::Copy, vec![x_a], a_ty.clone(), None);
     let x_b = dag.add_node(
+        decl,
         RiscOp::Load { name: "x_b".into() },
         vec![],
         a_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Copy, vec![x_b], a_ty.clone(), None);
+    let b = dag.add_node(decl, RiscOp::Copy, vec![x_b], a_ty.clone(), None);
 
     let ops = vec![FusedStep {
         op: FusedStepOp::Add,
         input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
     }];
-    let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![a, b], a_ty, None);
+    let fused = dag.add_node(decl, RiscOp::FusedElem { ops }, vec![a, b], a_ty, None);
     // No set_reusable_input.
     dag.add_root(fused);
 
@@ -490,12 +499,12 @@ fn fan_in_no_reusable_input_keeps_slot_backed_path() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias = expected_in_place_view_alias(fused_id, a_id, "4");
+    let forbidden_alias = expected_in_place_owner_alias(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_alias),
         "no-reusable-input fused must NOT alias; got:\n{hip}"
     );
-    let forbidden_guard = expected_contiguity_guard(a_id);
+    let forbidden_guard = expected_contiguity_guard(fused_id, a_id);
     assert!(
         !hip.contains(&forbidden_guard),
         "no-reusable-input must NOT emit contiguity guard; got:\n{hip}"
@@ -503,7 +512,7 @@ fn fan_in_no_reusable_input_keeps_slot_backed_path() {
     let forbidden_bare = expected_bare_declaration(fused_id);
     assert!(
         !hip.contains(&forbidden_bare),
-        "no-reusable-input must NOT emit bare GPU tensor declaration; got:\n{hip}"
+        "no-reusable-input must NOT emit bare device-owner declaration; got:\n{hip}"
     );
     // Legacy kernel shape: no __restrict__ anywhere in the fused kernel.
     assert!(

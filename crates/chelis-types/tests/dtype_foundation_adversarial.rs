@@ -15,7 +15,7 @@ use chelis_types::types::Prim;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -65,54 +65,54 @@ fn parse_name_rejects_fp32_misspelling() {
 // D. Literal-default rule (§5.3)
 // ---------------------------------------------------------------
 
-/// §5.3: bare integer literal defaults to int32.
+/// §5.3: bare integer literal defaults to i32.
 #[test]
 fn bare_int_literal_defaults_to_int32() {
-    let src = "def main() -> int32 = 42";
+    let src = "def main() -> i32 = 42";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
-        "bare `42` should type-check as int32 against an int32 declared return; \
+        "bare `42` should type-check as i32 against an i32 declared return; \
          got: {:?}",
         res.err().map(|e| e.errors)
     );
 }
 
-/// §5.3: bare integer literal must NOT default to int64.
-/// A program that asserts `int64` against bare `42` must fail.
+/// §5.3: bare integer literal must NOT default to i64.
+/// A program that asserts `i64` against bare `42` must fail.
 #[test]
 fn bare_int_literal_rejected_against_int64_context() {
-    let src = "def main() -> int64 = 42";
+    let src = "def main() -> i64 = 42";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     // Per §5.3 contextual inference (§5.6) should NOT widen a bare
-    // integer literal to int64 outside a tensor literal context. So
+    // integer literal to i64 outside a tensor literal context. So
     // either: (a) the checker rejects mismatch, or (b) it silently
     // widens. We pin (a) and let a failure flag (b) as a finding.
     if res.is_ok() {
         panic!(
-            "spec §5.3: bare integer literal `42` defaults to int32 and must NOT \
-             silently widen to int64 in a non-tensor scalar context. The program \
-             `def main() -> int64 = 42` should be rejected, not accepted."
+            "spec §5.3: bare integer literal `42` defaults to i32 and must NOT \
+             silently widen to i64 in a non-tensor scalar context. The program \
+             `def main() -> i64 = 42` should be rejected, not accepted."
         );
     }
 }
 
 /// §5.3 + §5.6 boundary: bare float literal defaults to f32 even inside an
-/// int64-typed scalar binding. Should error.
+/// i64-typed scalar binding. Should error.
 #[test]
 fn bare_float_literal_does_not_satisfy_int64() {
-    let src = "def main() -> int64 = 1.0";
+    let src = "def main() -> i64 = 1.0";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_err(),
-        "spec §5.3: bare float literal `1.0` is f32 by default, never int64"
+        "spec §5.3: bare float literal `1.0` is f32 by default, never i64"
     );
 }
 
-// The `def main() -> int32 = 2147483648` out-of-i32-range default case is
+// The `def main() -> i32 = 2147483648` out-of-i32-range default case is
 // pinned with the exact §5.3 range diagnostic by
 // `int_literal_overflow.rs::
 // literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic`, which
@@ -161,7 +161,7 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -179,7 +179,7 @@ fn literal_suffix_f32_is_implemented_per_spec_5_5() {
 /// WS-B1 status: implemented; see `literal_suffix_f32_is_implemented_per_spec_5_5`.
 #[test]
 fn literal_suffix_i64_is_implemented_per_spec_5_5() {
-    let src = "def main() -> int64 = 42i64";
+    let src = "def main() -> i64 = 42i64";
     let decls = match chelis_surf::parser::parse_str(src) {
         Ok(d) => d,
         Err(e) => panic!(
@@ -188,7 +188,7 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
         ),
     };
     let exprs = chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -196,7 +196,7 @@ fn literal_suffix_i64_is_implemented_per_spec_5_5() {
     let res = check_ir_program(&exprs);
     assert!(
         res.is_ok(),
-        "spec §5.5: `42i64` should bind at int64 against an int64 return"
+        "spec §5.5: `42i64` should bind at i64 against an i64 return"
     );
 }
 
@@ -211,7 +211,7 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
         // else is divergence. If desugar/check don't catch it either,
         // it's silent acceptance — a SPEC-DIVERGENCE finding.
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls),
+            &desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
@@ -229,10 +229,10 @@ fn literal_suffix_f8e4m3_is_lex_error_per_spec_5_5() {
 /// §5.5: deferred suffix `u8` (unsigned, §1.1.2) must be a parse error.
 #[test]
 fn literal_suffix_u8_is_lex_error_per_spec_5_5() {
-    let src = "def main() -> int32 = 42u8";
+    let src = "def main() -> i32 = 42u8";
     if let Ok(decls) = chelis_surf::parser::parse_str(src) {
         let exprs = chelis_macros::expand_program(
-            &desugar_program(&decls),
+            &desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("macro expand")
@@ -279,15 +279,15 @@ fn bf16_literal_suffix_infers_bf16() {
     );
 }
 
-/// §5.5: `42i64` infers `int64`.
+/// §5.5: `42i64` infers `i64`.
 #[test]
 fn i64_literal_suffix_infers_int64() {
-    let src = "def main() -> int64 = 42i64";
+    let src = "def main() -> i64 = 42i64";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
         res.is_ok(),
-        "spec §5.5: `42i64` should bind at int64; got: {:?}",
+        "spec §5.5: `42i64` should bind at i64; got: {:?}",
         res.err().map(|e| e.errors)
     );
 }
@@ -324,7 +324,7 @@ fn hex_float_suffix_is_rejected_at_lex_time() {
 /// §5.5 integer-suffix rule: canonical decimal `255i8` is well-formed.
 #[test]
 fn decimal_integer_suffix_is_well_formed() {
-    let src = "def main() -> int8 = 255i8";
+    let src = "def main() -> i8 = 255i8";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     // 255 is out of range for i8 [-128, 127] but the suffix
@@ -345,7 +345,7 @@ fn decimal_integer_suffix_is_well_formed() {
 /// §5.5: `1.0i8` is a parse error (integer suffix on float literal).
 #[test]
 fn integer_suffix_on_float_literal_is_lex_error() {
-    let src = "def main() -> int8 = 1.0i8";
+    let src = "def main() -> i8 = 1.0i8";
     let err = parse_str(src).expect_err("spec §5.5: int suffix on float lits must lex-error");
     let msg = format!("{err}");
     assert!(
@@ -368,20 +368,20 @@ fn unknown_suffix_is_lex_error() {
 
 /// D1 + WS-B1 interaction (spec §5.3 + §5.5): the i32-overflow
 /// diagnostic now suggests both the `i64` literal suffix AND the
-/// `cast(_, int64)` workaround, since the suffix grammar is shipped.
-/// The cast hint must use the prec type name `int64`, not the suffix
+/// `cast(_, i64)` workaround, since the suffix grammar is shipped.
+/// The cast hint must use the prec type name `i64`, not the suffix
 /// spelling `i64` — `cast(N, i64)` is not a valid cast target and
 /// re-fires this same diagnostic (issue #308 review fix).
 ///
 /// Distinct input from `int_literal_overflow.rs`: this snippet
-/// declares an `int64` return position (`def main() -> int64 = ...`),
-/// pinning that even an int64-typed context does not rescue a bare
-/// integer literal from the §5.3 int32 default and the D1 diagnostic
-/// still fires. The `ws_a0_*` exact-diagnostic version uses an `int32`
+/// declares an `i64` return position (`def main() -> i64 = ...`),
+/// pinning that even an i64-typed context does not rescue a bare
+/// integer literal from the §5.3 i32 default and the D1 diagnostic
+/// still fires. The `ws_a0_*` exact-diagnostic version uses an `i32`
 /// return position, so it does not cover this case.
 #[test]
 fn d1_diagnostic_mentions_i64_suffix_and_cast() {
-    let src = "def main() -> int64 = 2147483648";
+    let src = "def main() -> i64 = 2147483648";
     let deep = surf_to_deep(src);
     let rep = check_ir_program(&deep).expect_err("D1: literal must overflow i32 default");
     let messages: Vec<&str> = rep.errors.iter().map(|e| e.message.as_str()).collect();
@@ -391,8 +391,8 @@ fn d1_diagnostic_mentions_i64_suffix_and_cast() {
         "D1 diagnostic must mention `i64` suffix; got: {combined}"
     );
     assert!(
-        combined.contains("cast(2147483648, int64)"),
+        combined.contains("cast(2147483648, i64)"),
         "D1 diagnostic must recommend the working cast spelling \
-         cast(_, int64), not the suffix spelling `i64`; got: {combined}"
+         cast(_, i64), not the suffix spelling `i64`; got: {combined}"
     );
 }

@@ -60,7 +60,7 @@ mylib = {{ path = "./mylib" }}
     );
     write_file(
         &root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> i32 = cast(0, i32)\n",
     );
 
     write_file(
@@ -78,9 +78,9 @@ module_prefix = "Mylib"
     write_file(
         &root.join("mylib/src/math.ch"),
         "module Mylib.Math\nexport (add, double, square)\n\n\
-         def add(x: int32, y: int32) -> int32 = x + y\n\
-         def double(x: int32) -> int32 = x + x\n\
-         def square(x: int32) -> int32 = x * x\n",
+         def add(x: i32, y: i32) -> i32 = x + y\n\
+         def double(x: i32) -> i32 = x + x\n\
+         def square(x: i32) -> i32 = x * x\n",
     );
 
     write_file(
@@ -127,7 +127,7 @@ fn list_cache_files(reef_home: &Path) -> Vec<PathBuf> {
 fn cmd_eval_warm_cache_hit_byte_identical_to_cold() {
     let (_pkg_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalwarm.ch");
-    let snippet = "module App.EvalWarm\n\ndef warm_value() -> int32 = 99\n";
+    let snippet = "module App.EvalWarm\n\ndef warm_value() -> i32 = 99\n";
     write_file(&entry_path, snippet);
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -204,7 +204,8 @@ fn cmd_eval_source_edit_invalidates_cache_and_re_saves() {
     // filename). Negative parity to the warm-hit test above.
     let (_pkg_dir, root) = path_dep_package();
     let entry_path = root.join("src/evaledit.ch");
-    let snippet = "module App.EvalEdit\nimport Mylib.Math (square)\n\ndef edit_value() -> int32 = square(3)\n";
+    let snippet =
+        "module App.EvalEdit\nimport Mylib.Math (square)\n\ndef edit_value() -> i32 = square(3)\n";
     write_file(&entry_path, snippet);
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -266,15 +267,15 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
     // re-run with unchanged sources reuses the on-disk artifact instead
     // of paying the full library compile.
     //
-    // We need at least one test file: `chelis test` short-circuits on an
-    // empty tests dir BEFORE the parent's compile_reef_context call, so
-    // an empty dir wouldn't exercise the disk-cache wire-up at all.
-    // A trivial `def test_*` is enough.
+    // We need at least one runnable test: `chelis test` rejects a zero-test
+    // selection BEFORE the parent's compile_reef_context call, so an empty
+    // selection wouldn't exercise the disk-cache wire-up at all.
+    // A trivial runnable `def test_*` is enough.
     let (_pkg_dir, root) = path_dep_package();
     fs::create_dir_all(root.join("tests")).expect("mkdir tests");
     write_file(
         &root.join("tests/smoke.ch"),
-        "module App.SmokeTest\n\ndef test_trivial() -> bool = true\n",
+        "module App.SmokeTest\n\ndef test_trivial() -> unit = test_assert(true, \"trivial\")\n",
     );
 
     let reef_home = tempdir().expect("reef_home tempdir");
@@ -294,7 +295,7 @@ fn cmd_test_warm_cache_creates_and_reuses_compiled_context() {
         .expect("run chelis test (cold)");
     assert!(
         cold.status.success(),
-        "cold chelis test must succeed on empty tests dir; exit={:?} stderr={}",
+        "cold chelis test must succeed on populated tests dir; exit={:?} stderr={}",
         cold.status,
         String::from_utf8_lossy(&cold.stderr)
     );

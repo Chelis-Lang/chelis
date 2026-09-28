@@ -21,7 +21,6 @@ mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,62 +51,12 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
+/// Write the public runtime headers the test build carries, the ones staging
+/// publishes (spec/08-backends.md §2.1).
+fn copy_runtime_headers(dst: &Path) {
+    for (header, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        write_temp_file(dst, header, contents);
     }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-hip tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
 }
 
 /// Compile a generated HIP `.cpp` source via `hipcc -c` (object only).
@@ -126,7 +75,7 @@ fn compile_hip_kernel_only(test_name: &str, c_source: &str) -> Result<(), String
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    copy_runtime_headers(tmp.path());
     write_temp_file(tmp.path(), "model.cpp", c_source);
 
     let obj = tmp.path().join("model.o");
@@ -188,13 +137,21 @@ fn extract_kernel_string(c_source: &str, kernel_name: &str) -> Option<String> {
 #[test]
 fn s4_hip_canonical_span_id_emitted_host_side() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
+    dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(chelis_ir::dag::NodeId(1));
 
     let result = codegen_hip(&dag, "s4_hip_canonical").unwrap();
@@ -231,8 +188,15 @@ fn s4_hip_canonical_span_id_emitted_host_side() {
 #[test]
 fn s4_hip_merged_spans_emitted_lex_sorted_after_canonical() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
@@ -277,8 +241,15 @@ fn s4_hip_merged_spans_emitted_lex_sorted_after_canonical() {
 #[test]
 fn s4_hip_no_spans_emits_no_comment_block() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(neg);
 
     let result = codegen_hip(&dag, "s4_hip_nospan").unwrap();
@@ -299,14 +270,28 @@ fn s4_hip_per_node_kernel_string_carries_spans_inside() {
     // string carries the originating node's spans embedded inside the
     // string literal so they survive into the runtime-compiled HIP.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), Some("op.exp".into()));
-    let n = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), Some("op.neg".into()));
+    let e = dag.add_node(
+        decl,
+        RiscOp::Exp,
+        vec![a],
+        vec_f32(4),
+        Some("op.exp".into()),
+    );
+    let n = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![e],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(n);
     let fused = fuse(&dag);
 
@@ -360,14 +345,17 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
     // merged_spans only, both, neither) combinations. Asserts host-side
     // grep count >= sum and compile-success.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
 
     let n1 = dag.add_node(
+        decl,
         RiscOp::Load { name: "in".into() },
         vec![],
         vec_f32(4),
         Some("n1.canonical".into()),
     );
     let n2 = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![n1],
         vec_f32(4),
@@ -377,13 +365,14 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
         let node = dag.node_mut(n2).unwrap();
         node.merged_spans = vec!["n2.m1".into(), "n2.m2".into()];
     }
-    let n3 = dag.add_node(RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
-    let n4 = dag.add_node(RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
     let n5 = dag.add_node(
+        decl,
         RiscOp::Sin,
         vec![n4],
         vec_f32(4),
@@ -436,13 +425,15 @@ fn s4_hip_oracle_richer_combinations_compile_and_grep() {
 #[test]
 fn s4_hip_forbidden_newline_in_span_is_escaped_at_emit() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op\nint INJECTED_HIP_CODE = 42;".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_hip(&dag, "s4_hip_forbidden_newline").unwrap();
@@ -468,19 +459,28 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     // both for host-side correctness and so the runtime-compiled HIP
     // kernel sees a comment-safe identifier.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Exp,
         vec![a],
         vec_f32(4),
         Some("op.exp\nINJECTED_HIP_KERNEL".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![e], vec_f32(4), Some("op.neg".into()));
+    let n = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![e],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(n);
     let fused = fuse(&dag);
 
@@ -532,13 +532,16 @@ fn s4_hip_forbidden_newline_in_per_node_kernel_string_is_escaped() {
 #[test]
 fn s4_hip_clean_span_emitted_verbatim_audit_invariant() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("eq1.σ_body".into()),
     );
     let n = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![a],
         vec_f32(4),

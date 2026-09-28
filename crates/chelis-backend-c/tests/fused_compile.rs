@@ -26,11 +26,24 @@ fn mat_f32(rows: usize, cols: usize) -> TensorType {
 fn c_fused_codegen_compiles() {
     // Build a fusible DAG
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let a = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
-    let c = dag.add_node(RiscOp::Exp, vec![b], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let a = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let b = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
+    let c = dag.add_node(decl, RiscOp::Exp, vec![b], vec_f32(4), None);
     dag.add_root(c);
 
     // Fuse and codegen
@@ -48,6 +61,7 @@ fn c_fused_codegen_compiles() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -99,7 +113,7 @@ fn c_fused_codegen_compiles() {
             panic!("Fused C codegen does NOT compile:\n{stderr}");
         }
         Err(e) => {
-            eprintln!("gcc not available ({e}), skipping compile check");
+            panic!("C compiler is required for the fused contract: {e}");
         }
     }
 }
@@ -113,21 +127,25 @@ fn c_fused_reduce_sum_no_intermediate() {
     // add(x, const) → neg → sum(axis=1): add→neg fuses into FusedElem,
     // then the FusedElem feeds sum as sole consumer → inlined into reduction.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -148,46 +166,50 @@ fn c_fused_reduce_sum_no_intermediate() {
         src.contains("float v0"),
         "Fused reduce should contain step variable 'float v0'"
     );
-    // Stride-4 ILP cascade (issue #163): four accumulator lanes,
-    // each updated from the fused step variable inside the
-    // `switch (__reduce_i & 3)` dispatch.
-    assert!(
-        src.contains("acc0 += v"),
-        "Fused reduce should accumulate into stride-4 lane 0 from a step variable"
-    );
-    assert!(
-        src.contains("(acc0 + acc1) + (acc2 + acc3)"),
-        "Fused reduce should combine four stride-4 lanes pairwise"
-    );
+    // Fused leaves enter the same canonical tree as materialized Sum.
+    assert!(src.contains("__sum_level_"));
+    assert!(src.contains("] = v"));
+    assert!(!src.contains("acc0 +="));
 
     // There should be NO separate allocation for the FusedElem output.
-    // With fusion: 1 const alloc + 1 reduction alloc = 2 chelis_alloc calls.
-    // Without fusion: 1 const alloc + 1 FusedElem alloc + 1 reduction alloc = 3.
+    // The tree scratch is now a checked runtime tensor. It is distinct from
+    // materializing the fused elementwise result across every output group.
     let alloc_count = src.matches("chelis_alloc(").count();
     assert_eq!(
-        alloc_count, 2,
-        "Fused add→neg→sum should have 2 allocs (1 const + 1 reduction output), got {alloc_count}"
+        alloc_count, 3,
+        "Fused add→neg→sum requires one constant, one result, and checked tree scratch"
     );
+    let fused_node = fused
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        .unwrap();
+    assert!(!src.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
+    assert!(src.contains("chelis_reduction_check_scratch("));
 }
 
 #[test]
 fn c_fused_reduce_max_no_intermediate() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let maxed = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 1 },
         vec![negated],
         vec_f32(3),
@@ -220,21 +242,25 @@ fn c_fused_reduce_max_no_intermediate() {
 fn c_fused_reduce_compiles() {
     // Verify the fused reduction C code compiles with gcc -fsyntax-only.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -258,6 +284,7 @@ fn c_fused_reduce_compiles() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -286,7 +313,7 @@ fn c_fused_reduce_compiles() {
             );
         }
         Err(e) => {
-            eprintln!("gcc not available ({e}), skipping compile check");
+            panic!("C compiler is required for the fused contract: {e}");
         }
     }
 }

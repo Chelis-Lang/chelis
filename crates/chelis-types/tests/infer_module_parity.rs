@@ -28,7 +28,7 @@ use chelis_types::{CheckedProgram, InferResult, check_ir_program};
 fn surf_to_deep(source: &str, label: &str) -> Vec<Expr> {
     let decls = parse_surf(source).unwrap_or_else(|e| panic!("{label}: surf parse failed: {e:?}"));
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .unwrap_or_else(|e| panic!("{label}: macro expansion failed: {e:?}"))
@@ -201,11 +201,11 @@ fn accepted_generic_calls() {
     assert_accepted_parity(
         "accepted_generic_calls",
         r#"module Parity.GenericCalls
-def apply_twice(f: (int32) -> int32, x: int32) -> int32 = f(f(x))
-def bump(n: int32) -> int32 = add(n, 1)
-def run() -> int32 = apply_twice(bump, 3)
-def identity_pair(a: int32, b: f32) -> (int32, f32) = (a, b)
-def use_pair() -> int32 = identity_pair(1, 2.0).0
+def apply_twice(f: (i32) -> i32, x: i32) -> i32 = f(f(x))
+def bump(n: i32) -> i32 = add(n, 1)
+def run() -> i32 = apply_twice(bump, 3)
+def identity_pair(a: i32, b: f32) -> (i32, f32) = (a, b)
+def use_pair() -> i32 = identity_pair(1, 2.0).0
 "#,
     );
 }
@@ -218,7 +218,7 @@ fn accepted_shape_operations() {
 def project(x: tensor[64, 32, f32], w: tensor[32, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
 def broadcast_bias(b: tensor[1, f32]) -> tensor[64, f32] = expand(b, 0, 64i64)
 def swap(x: tensor[4, 6, f32]) -> tensor[6, 4, f32] = permute(x, 1, 0)
-def collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, int64)])
+def collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, i64)])
 def reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)
 "#,
     );
@@ -229,12 +229,12 @@ fn accepted_collections() {
     assert_accepted_parity(
         "accepted_collections",
         r#"module Parity.Collections
-values: List[int32] = [1, 2, 3, 4]
-doubled = map(fn (v: int32) -> mul(v, 2), values)
-kept = filter(fn (v: int32) -> gt(v, 2), values)
-total = fold(fn (acc: int32, v: int32) -> add(acc, v), 0, values)
+values: List[i32] = [1, 2, 3, 4]
+doubled = map(fn (v: i32) -> mul(v, 2), values)
+kept = filter(fn (v: i32) -> gt(v, 2), values)
+total = fold(fn (acc: i32, v: i32) -> add(acc, v), 0, values)
 item_total = len(values)
-first_two = take(values, cast(2, int64))
+first_two = take(values, cast(2, i64))
 paired = zip(values, values)
 "#,
     );
@@ -266,7 +266,7 @@ def area(s: Shape) -> f32 = match s with {
   | Circle(r) => mul(3.14, mul(r, r))
   | Rect(w, h) => mul(w, h)
 }
-def first_or(xs: List[int32], fallback: int32) -> int32 = match xs with {
+def first_or(xs: List[i32], fallback: i32) -> i32 = match xs with {
   | Cons(head, tail) => head
   | Nil => fallback
 }
@@ -292,8 +292,8 @@ fn rejected_numeric_restrictions() {
     assert_rejected_parity(
         "rejected_numeric_restrictions",
         r#"module Parity.NumericRestrictions
-def mixed(n: int32) -> f32 = add(1.0, n)
-def int_div(a: int32, b: int32) -> int32 = div(a, b)
+def mixed(n: i32) -> f32 = add(1.0, n)
+def int_div(a: i32, b: i32) -> i32 = div(a, b)
 "#,
     );
 }
@@ -304,7 +304,7 @@ fn rejected_invalid_shapes() {
         "rejected_invalid_shapes",
         r#"module Parity.InvalidShapes
 def bad_matmul(x: tensor[64, 32, f32], w: tensor[16, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
-def bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, int64)])
+def bad_reshape(x: tensor[4, 6, f32]) -> tensor[25, f32] = reshape(x, [cast(25, i64)])
 "#,
     );
 }
@@ -314,9 +314,9 @@ fn rejected_collection_callbacks() {
     assert_rejected_parity(
         "rejected_collection_callbacks",
         r#"module Parity.CollectionCallbacks
-values: List[int32] = [1, 2, 3]
+values: List[i32] = [1, 2, 3]
 wrong_element = map(fn (v: f32) -> mul(v, 2.0), values)
-wrong_predicate = filter(fn (v: int32) -> v, values)
+wrong_predicate = filter(fn (v: i32) -> v, values)
 "#,
     );
 }
@@ -329,7 +329,7 @@ fn rejected_records() {
 type Point =
   | Point { x: f32, y: f32 }
 def read_missing(p: Point) -> f32 = p.z
-def build_wrong(a: int32) -> Point = Point { x: a, y: 1.0 }
+def build_wrong(a: i32) -> Point = Point { x: a, y: 1.0 }
 "#,
     );
 }

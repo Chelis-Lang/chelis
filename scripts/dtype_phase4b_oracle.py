@@ -7,13 +7,12 @@ Usage:
 
     .venv/bin/python scripts/dtype_phase4b_oracle.py
 
-The freeze has three legs. Narrow ``FROZEN_ATOM_DIGESTS`` and
-``FROZEN_REGION_DIGESTS`` pin the exact text of individual normative atoms and
-delimited contract regions. The third leg is the additive-contradiction gate:
-a region digest cannot defend its own boundaries, so contradictory prose can be
-inserted immediately before a region's start or after its end, and prose can be
-appended to a contract file that carries no region at all. That leg is an
-explicit per-file acknowledgement, not a whole-file digest.
+Required atom identities and unambiguous contract-region boundaries are reviewed
+literal declarations. Required semantic clauses, schema checks and fresh
+source/compiler agreement remain independent guards. Text changes are named
+by the committed report and require exact file/atom/region acknowledgements in
+PR mode. No atom or region text digest needs recomputing. Acknowledgement is a
+review obligation, not permission to omit a required clause or identity.
 
 Acknowledgement gate
 --------------------
@@ -25,12 +24,27 @@ line in the pull request body::
 
     Frozen-contract-change: spec/04-type-system.md
 
-one line per changed file. The grammar is exact and case-sensitive: no leading
-whitespace, exactly one space after the colon, a repo-relative POSIX path with
-no glob metacharacter and no ``.``/``..`` segment, and nothing after the path.
-An unacknowledged change and an acknowledgement naming a file that did not
-change are both failures: a stale acknowledgement is how a reviewer stops
-reading them.
+one line per changed file. The committed change report additionally requires
+one line for each changed atom and region::
+
+    Frozen-contract-change: atom:05-OP-33
+    Frozen-contract-change: region:"agent numeric-surface discipline"
+
+Region labels are JSON strings; atoms use their exact unbracketed identity.
+File lines remain required even when the same edit changes an atom or region,
+or removes its file from the contract inventory.
+Registry-only edits require each owning atom, and removed identities or changed
+protection/region declarations remain visible through both inventories. A file
+line never substitutes for an identity line. Missing, duplicate, stale, unknown
+or malformed addresses fail the enforcing mode. JSON escape spellings decode
+to one region identity, so alternate spellings cannot evade duplicate checks.
+
+The grammar is case-sensitive: no leading whitespace, exactly one space after
+the colon, and no trailing content. File addresses are repo-relative POSIX
+paths without glob metacharacters or `.`/`..` segments. The file leg compares
+working-tree bytes; the identity leg compares committed snapshots. PR execution
+validates the synthetic merge against `--pr-head` and uses its first parent,
+the same comparison that produced the report artifact.
 
 Lines inside fenced code blocks are ignored so a body can quote the grammar.
 That exemption is pragmatic, not a CommonMark implementation: it tracks the
@@ -41,13 +55,15 @@ from a reader). The disagreement costs reviewer visibility, never soundness: no
 shape of it admits an unacknowledged change, because a line the parser does not
 read is a file that goes unacknowledged and fails.
 
-``--require-acknowledgement`` is the enforcing mode and is what CI runs on a
-pull request. Without it the oracle reports the changed contract files and the
-exact lines the body must carry, then exits 0, so a local run is a checklist
-rather than a gate. An unresolvable merge base fails the enforcing mode loudly;
-it can never be read as "nothing changed".
+``--require-acknowledgement`` is this oracle's local enforcing mode. The
+dedicated ``PR Contract Acknowledgements`` check applies the same grammar and
+change report through ``phase4b_change_report.py``; the Docs job runs this full
+oracle independently. Without the flag the oracle reports the changed contract
+files and the exact lines the body must carry, then exits 0, so a local run is a
+checklist rather than a gate. An unresolvable merge base fails the enforcing
+mode loudly; it can never be read as "nothing changed".
 
-This replaces a table of whole-file SHA-256 digests. That table made two pull
+The acknowledgement gate first replaced whole-file SHA-256 digests. That table made two pull
 requests that edited *different* contract files conflict on adjacent lines of
 one Python dict, and two that edited the *same* file conflict on one line whose
 correct post-rebase value is the digest of the merged text, so the conflict was
@@ -62,12 +78,26 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+
+from phase4b_contract_text import (
+    ATOM_START, OracleError, frozen_region, strict_atom_block,
+)
+from phase4b_change_report import (
+    acknowledgement_line, changed_contracts, identity_acknowledgement_violations,
+    resolve_comparison,
+)
+from phase4b_acknowledgements import (
+    ACKNOWLEDGEMENT_KEY,
+    acknowledgement_identity,
+    parse_acknowledgements,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -92,21 +122,16 @@ CONTRACT_FILES = (
     "spec/design/runtime_representation.md",
     "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
-    "openspec/specs/risc-primitives/spec.md",
-    "openspec/specs/serialization/spec.md",
-    "openspec/specs/transformations/spec.md",
-    "openspec/specs/type-system/spec.md",
+    "spec/registry/builtin_semantic_identities.md",
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
     "spec/registry/c_tensor_runtime.md",
     "spec/registry/c_heap_lifetime.md",
     "spec/registry/stdlib_adt_identities.md",
     "spec/registry/stdlib_numeric_manifest.md",
+    "spec/registry/python_tensor_metadata.md",
 )
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
-ATOM_START = re.compile(
-    r"^> \*\*\[(\d{2}-[A-Z]+-\d+)\]\*\*", re.MULTILINE
-)
 EXPECTED_PHASE4B_OP_HEADINGS = {
     1: "`round_to(x, places) -> r`",
     2: "Ingestion preserves",
@@ -115,9 +140,9 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     5: "`io/json::to_json`",
     6: "`cast_trunc(source, target)`",
     7: "The runtime extent read",
-    8: "`uniform_like(template, low, high) -> result`",
+    8: "`uniform_like(k, template, low, high) -> result`",
     9: "`pad_sequences(sequences: List[List[T]], pad: T) ->",
-    10: "`pad_sequences_to(sequences: List[List[T]], width: int64,",
+    10: "`pad_sequences_to(sequences: List[List[T]], width: i64,",
     11: "`mean(x, axes...) -> result`",
     12: "`max_reduce(x, axes...) -> result`",
     13: "`min_reduce(x, axes...) -> result`",
@@ -144,7 +169,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     34: "`numeric_adt(fields...) -> value`",
     35: "`stdlib_numeric_def(arguments...) -> result`",
     36: "`comparison(left, right) -> result`",
-    37: "`dropout(input, rate) -> result`",
+    37: "`dropout(k, input, rate) -> result`",
     38: "`host_numeric_builtin(arguments...) -> result`",
     39: "`window_reduction(arguments...) -> result`",
     40: "`max_elem(left, right) -> result` and",
@@ -152,6 +177,7 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     42: "`stop_gradient(value) -> result`",
     43: "`relu(x) -> result`",
     44: "`heap_lifetime(handle, parameters...) -> result`",
+    45: "`python_tensor_shape(tensor) -> extents`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -159,6 +185,9 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
 # these rows make a missing, renamed, duplicated, or retyped callable explain
 # itself as a manifest failure rather than only as an opaque hash mismatch.
 EXPECTED_OP_MANIFESTS = {
+    "05-OP-45": (
+        "| full tensor shape | `chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>` |",
+    ),
     "05-OP-31": tuple(
         """\
 | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
@@ -174,6 +203,10 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-32": tuple(
         """\
+| length-aware string construction | `chelis_string chelis_string_from_utf8(const uint8_t *value, int64_t len)` |
+| character code | `int64_t chelis_char_code(chelis_string value)` |
+| character from code | `chelis_string chelis_char_from_code(int64_t value)` |
+| string print | `void chelis_print_string(chelis_string value)` |
 | string length | `int64_t chelis_string_len(chelis_string value)` |
 | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
 | list length | `int64_t chelis_list_len(const chelis_list *list)` |
@@ -208,9 +241,27 @@ EXPECTED_OP_MANIFESTS = {
     "05-OP-33": tuple(
         """\
 | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
+| owned allocation with input shape | `chelis_tensor *chelis_tensor_alloc_like(const chelis_tensor *input, chelis_scalar exemplar)` |
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
+| contiguous metadata plan | `chelis_metadata_plan *chelis_metadata_plan_new(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar)` |
+| strided metadata plan | `chelis_metadata_plan *chelis_metadata_plan_view(chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *strides, chelis_scalar exemplar, chelis_scalar byte_capacity)` |
+| metadata plan rank | `int32_t chelis_metadata_plan_rank(const chelis_metadata_plan *plan)` |
+| metadata plan shape | `const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan)` |
+| metadata plan strides | `const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan)` |
+| metadata plan count | `int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan)` |
+| metadata plan logical bytes | `int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan)` |
+| metadata plan dtype | `chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan)` |
+| metadata plan capacity check | `void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity)` |
+| metadata plan logical byte offset | `int64_t chelis_metadata_plan_byte_offset(const chelis_metadata_plan *plan, chelis_scalar linear_index)` |
+| metadata plan release | `void chelis_metadata_plan_release(chelis_metadata_plan *plan)` |
+| contiguous stride | `int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis)` |
+| logical byte count | `int64_t chelis_tensor_byte_count(const chelis_tensor *tensor)` |
+| tensor iteration index step | `int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain)` |
+| shape iteration index step | `int64_t chelis_tensor_elementwise_index_step_for_shape(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *shape)` |
+| reshape validation | `void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape)` |
+| owned reshape | `chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape)` |
 | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
 | typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
 | row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
@@ -228,27 +279,86 @@ EXPECTED_OP_MANIFESTS = {
 | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
+| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |
+| checked coordinate decoding | `void chelis_tensor_unravel_index(const chelis_tensor *tensor, chelis_scalar index, chelis_scalar *coordinates)` |
+| checked coordinate encoding | `int64_t chelis_tensor_flat_index(const chelis_tensor *tensor, const chelis_scalar *coordinates)` |
+| permutation target validation | `void chelis_tensor_check_permute(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *axes)` |
+| expansion target validation | `void chelis_tensor_check_expand(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, int32_t axis)` |
+| padding shape construction | `void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *before, const chelis_scalar *after, chelis_scalar *shape)` |
+| shrinking shape construction | `void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape)` |
+| striding shape construction | `void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape)` |
+| affine coordinate projection | `int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps)` |
+| checked reduction tensor_reduction_plan | `chelis_reduction_plan *chelis_tensor_reduction_plan(const chelis_tensor *tensor, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction shape_reduction_plan | `chelis_reduction_plan *chelis_shape_reduction_plan(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction reduction_count | `int64_t chelis_reduction_count(const chelis_reduction_plan *plan)` |
+| checked reduction reduction_extent | `int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis)` |
+| checked reduction reduction_index | `int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf)` |
+| checked reduction reduction_check_target | `void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked reduction reduction_check_scratch | `void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar)` |
+| checked reduction reduction_plan_release | `void chelis_reduction_plan_release(chelis_reduction_plan *plan)` |
+| checked sparse tensor_sparse_plan | `chelis_sparse_plan *chelis_tensor_sparse_plan(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, chelis_scalar axis, chelis_sparse_op operation)` |
+| checked sparse sparse_extent | `int64_t chelis_sparse_extent(const chelis_sparse_plan *plan, chelis_scalar axis)` |
+| checked sparse sparse_count | `int64_t chelis_sparse_count(const chelis_sparse_plan *plan)` |
+| checked sparse sparse_index_slot | `int64_t chelis_sparse_index_slot(const chelis_sparse_plan *plan, chelis_scalar linear)` |
+| checked sparse sparse_data_index | `int64_t chelis_sparse_data_index(const chelis_sparse_plan *plan, chelis_scalar linear, chelis_scalar selected)` |
+| checked sparse sparse_check_target | `void chelis_sparse_check_target(const chelis_sparse_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked sparse sparse_plan_release | `void chelis_sparse_plan_release(chelis_sparse_plan *plan)` |
+| checked matrix tensor_matmul_plan | `chelis_matmul_plan *chelis_tensor_matmul_plan(const chelis_tensor *left, const chelis_tensor *right, chelis_scalar exemplar)` |
+| checked matrix matmul_extent | `int64_t chelis_matmul_extent(const chelis_matmul_plan *plan, chelis_scalar axis)` |
+| checked matrix matmul_dimension | `int64_t chelis_matmul_dimension(const chelis_matmul_plan *plan, chelis_matmul_dimension_kind dimension)` |
+| checked matrix matmul_batch_count | `int64_t chelis_matmul_batch_count(const chelis_matmul_plan *plan)` |
+| checked matrix matmul_matrix_count | `int64_t chelis_matmul_matrix_count(const chelis_matmul_plan *plan, chelis_matmul_part part)` |
+| checked matrix matmul_index | `int64_t chelis_matmul_index(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar batch, chelis_scalar element)` |
+| checked matrix matmul_check_target | `void chelis_matmul_check_target(const chelis_matmul_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked matrix matmul_check_scratch | `void chelis_matmul_check_scratch(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar exemplar)` |
+| checked matrix matmul_check_vendor | `void chelis_matmul_check_vendor(const chelis_matmul_plan *plan, chelis_scalar maximum)` |
+| checked matrix matmul_plan_release | `void chelis_matmul_plan_release(chelis_matmul_plan *plan)` |
+| checked movement chelis_tensor_permute_plan | `chelis_movement_plan *chelis_tensor_permute_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *axes)` |
+| checked movement chelis_tensor_expand_plan | `chelis_movement_plan *chelis_tensor_expand_plan(const chelis_tensor *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation)` |
+| checked movement chelis_tensor_affine_plan | `chelis_movement_plan *chelis_tensor_affine_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *first, const chelis_scalar *second, chelis_movement_op operation)` |
+| checked movement chelis_movement_extent | `int64_t chelis_movement_extent(const chelis_movement_plan *plan, chelis_movement_side side, chelis_scalar axis)` |
+| checked movement chelis_movement_count | `int64_t chelis_movement_count(const chelis_movement_plan *plan)` |
+| checked movement chelis_movement_index | `int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear)` |
+| checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
+| checked window tensor_window_plan | `chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation)` |
+| checked window window_extent | `int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis)` |
+| checked window window_count | `int64_t chelis_window_count(const chelis_window_plan *plan)` |
+| checked window window_index | `int64_t chelis_window_index(const chelis_window_plan *plan, chelis_scalar group, chelis_scalar leaf)` |
+| checked window window_check_tensor | `void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side)` |
+| checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |
+| checked literal tensor_check_literal | `void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count)` |
+| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |
+| device allocation | `chelis_device_tensor_owner *chelis_device_tensor_alloc(chelis_metadata_plan *plan)` |
+| device storage borrow | `chelis_device_tensor_owner *chelis_device_tensor_borrow(chelis_metadata_plan *plan, void *data, chelis_scalar byte_capacity)` |
+| device packet import | `chelis_device_tensor_owner *chelis_device_tensor_import(const chelis_gpu_tensor *packet)` |
+| device packet observation | `const chelis_gpu_tensor *chelis_device_tensor_view(const chelis_device_tensor_owner *owner)` |
+| independent device clone | `chelis_device_tensor_owner *chelis_device_tensor_clone(const chelis_device_tensor_owner *source)` |
+| device owner finalization | `void chelis_device_tensor_release(chelis_device_tensor_owner *owner)` |
+| host to device transfer | `void chelis_device_tensor_copy_from_host(chelis_device_tensor_owner *destination, const chelis_tensor *source)` |
+| device to host transfer | `void chelis_device_tensor_copy_to_host(chelis_tensor_write *destination, const chelis_device_tensor_owner *source)` |
+| device owner device | `int32_t chelis_device_tensor_device(const chelis_device_tensor_owner *owner)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
-| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-| `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-| `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-| `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |""".splitlines()
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(i64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `decimal::Decimal` | `Decimal { coefficient: i64, scale: i64 }` |
+| `time::Date` | `Date { year: i64, month: i64, day: i64 }` |
+| `time::Duration` | `Duration { days: i64, hours: i64, minutes: i64, seconds: i64 }` |
+| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,i64], Dict[string,i64], Dict[i64,string], i64)` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
 | `contracts::normal_cdf` | `(p_float)->p_float` |
-| `contracts::normal_cdf_contract_samples` | `()->int64` |
-| `contracts::normal_cdf_contract_seed` | `()->int64` |
+| `contracts::normal_cdf_contract_samples` | `()->i64` |
+| `contracts::normal_cdf_contract_seed` | `()->i64` |
 | `contracts::standard_contract_tolerance` | `()->f32` |
 | `decimal::decimal` | `(string)->Decimal` |
 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-| `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
+| `decimal::decimal_div` | `(Decimal,Decimal,i64,RoundingMode)->Decimal` |
 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-| `decimal::decimal_from_int` | `(int64)->Decimal` |
+| `decimal::decimal_from_int` | `(i64)->Decimal` |
 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
@@ -258,21 +368,21 @@ EXPECTED_OP_MANIFESTS = {
 | `decimal::decimal_to_float` | `(Decimal)->f64` |
 | `decimal::decimal_to_string` | `(Decimal)->string` |
 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-| `index::drop_list` | `(List[T],int64)->List[T]` |
-| `index::list_index` | `(List[T],int64)->T` |
-| `index::take_list` | `(List[T],int64)->List[T]` |
-| `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-| `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-| `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-| `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `index::list_index` | `(List[T],i64)->T` |
+| `index::skip_list` | `(List[T],i64)->List[T]` |
+| `index::take_list` | `(List[T],i64)->List[T]` |
+| `init/kaiming::kaiming_normal` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
+| `init/kaiming::kaiming_uniform` | `(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]` |
+| `init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::trunc_normal` | `(key,&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::xavier_normal` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
+| `init/xavierext::xavier_uniform` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]` |
 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-| `io/json::json_int` | `(Option[Json])->Option[int64]` |
+| `io/json::json_int` | `(Option[Json])->Option[i64]` |
 | `io/json::json_is_null` | `(Option[Json])->bool` |
 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
 | `io/json::json_string` | `(Option[Json])->Option[string]` |
@@ -284,27 +394,27 @@ EXPECTED_OP_MANIFESTS = {
 | `io/json::try_to_json` | `(Json)->Option[string]` |
 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-| `io::mmap_size` | `(string)->int64!{IO}` |
-| `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-| `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-| `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
+| `io::mmap_size` | `(string)->i64!{IO}` |
+| `io::read_head_bytes` | `(string,i64)->List[i64]!{IO}` |
+| `process::run` | `(string,List[string])->(i64,string,string)!{IO}` |
+| `process::run_chelis` | `(List[string])->(i64,string,string)!{IO}` |
 | `scalar::abs` | `(p_numeric)->p_numeric` |
 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-| `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
+| `sort::sort` | `(&tensor[..r,p_numeric],i32)->(tensor[..r,p_numeric],tensor[..r,i64])` |
 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-| `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-| `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
+| `tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]` |
+| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]` |
+| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]` |
+| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]` |
+| `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,i64]` |
 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-| `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-| `time::add_days` | `(Date,int64)->Date` |
-| `time::date` | `(int64,int64,int64)->Date` |
+| `test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}` |
+| `time::add_days` | `(Date,i64)->Date` |
+| `time::date` | `(i64,i64,i64)->Date` |
 | `time::date_gt` | `(Date,Date)->bool` |
 | `time::date_gte` | `(Date,Date)->bool` |
 | `time::date_lt` | `(Date,Date)->bool` |
@@ -312,16 +422,16 @@ EXPECTED_OP_MANIFESTS = {
 | `time::date_to_string` | `(Date)->string` |
 | `time::day_of_week` | `(Date)->DayOfWeek` |
 | `time::day_of_week_name` | `(Date)->string` |
-| `time::day_of_year` | `(Date)->int64` |
-| `time::days_between` | `(Date,Date)->int64` |
-| `time::duration` | `(int64,int64,int64,int64)->Duration` |
-| `time::is_leap_year` | `(int64)->bool` |
+| `time::day_of_year` | `(Date)->i64` |
+| `time::days_between` | `(Date,Date)->i64` |
+| `time::duration` | `(i64,i64,i64,i64)->Duration` |
+| `time::is_leap_year` | `(i64)->bool` |
 | `time::parse_date` | `(string)->Option[Date]` |
-| `time::sub_days` | `(Date,int64)->Date` |
-| `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-| `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-| `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-| `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
+| `time::sub_days` | `(Date,i64)->Date` |
+| `time::try_date` | `(i64,i64,i64)->Option[Date]` |
+| `tokenizer::batch_encode` | `(Tokenizer,List[string],i64,i64)->tensor[batch,seq,i64]` |
+| `tokenizer::decode` | `(Tokenizer,List[i64])->string` |
+| `tokenizer::encode` | `(Tokenizer,string)->List[i64]` |
 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
@@ -382,174 +492,161 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-38": tuple(
         """\
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
-> | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | `tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E` |
+> | `process_run` | `(string,List[string])->(i64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 > | `test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |""".splitlines()
     ),
 }
 
-FROZEN_ATOM_DIGESTS = {
-    "04-LIN-3": "52a61c21d53b8eaf194feebed4eee608f49bc30ebb0008fcc4d366fd93c3e649",
-    "04-LIN-4": "ab21050a84236c40236b7d8d53453767dc15839a44ae1fd012d33bed411fecf9",
-    "04-LIN-5": "2ad4e07442bf890a6fdd434362f50ab86215d6bd35c3d680e515de6fba5f9a29",
-    "04-LIN-6": "6cfcc780a3f5b9836507772cf7ef76ce231a0505f07e9a06b3c1ba55e0946d92",
-    "04-LIN-7": "6c1d8d77d251d245df6e1aa6e2138458048bdac31a407adfeba586302b0f3625",
-    "04-LIN-8": "3e0013311e070716145da9245eea66361c8cf91fc6914ad200b68790b41313eb",
-    "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
-    "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
-    "04-NUM-8": "8887537f42a0c8263569296700826dc7466a0a3bf05e5c854ffff2406f075028",
-    "04-NUM-11": "903b437e9aaa98b7c4d7c0c019393bee203d8bf76621902fc2ad53d872945f3f",
-    "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
-    "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
-    "04-SHAPE-1": "0f3f3f71731481b457b226bbcc8877d54962d268ec8787fbc6aa56ab4324d17c",
-    "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
-    "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
-    "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
-    "05-OP-4": "f45693d5e3ef37033aef4c9a3f03de1806ea034d8247390c3ff6113d1c2ffa13",
-    "05-OP-5": "00b9b1ecfdb42d0def6cc38296a518d9a25039cb2af3bdac53f1648225377d9a",
-    "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
-    "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
-    "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
-    "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
-    "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
-    "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
-    "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
-    "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
-    "05-OP-15": "a9ad8cf1423e99bf092e6dd52ce273555cda77b4beb52ff3a78564db1800933e",
-    "05-OP-16": "b5ee19533f9f7241117f5958e092978446b49faacba312eec5781be548b3303d",
-    "05-OP-17": "7c85fa51323c9993bb63f97ee4728c8fc5c13bd2c30315f6bcf7a69a77a39304",
-    "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
-    "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
-    "05-OP-20": "302cee9a558337a469751b4a5ec3ef009a2ee5ef5d9c68e32fd40c23cf1479f1",
-    "05-OP-21": "ced775b654a61c4d36d2313191145b3543e55ef75825a5066e04b3c114437545",
-    "05-OP-22": "f7c7c00b0fbea5176eb3427b517f5fb9f7434e24caaacd86fc1408455658329a",
-    "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
-    "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
-    "05-OP-25": "29f27a57545efd179e0f6b2766f48d7fdafb7c2ac6c3bbaeeaf5b0c0646ed502",
-    "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
-    "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
-    "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
-    "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
-    "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
-    "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "ca99addff76d91d2125e820dcadbd31c0460f9e0de6ec69bfaec5894d51b1e08",
-    "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
-    "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
-    "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
-    "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
-    "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
-    "05-OP-40": "4d3da3d13beca3c53b18515dbd15178b214fa3baa015ab975257ef778899dc18",
-    "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
-    "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
-    "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
-    "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
-}
+REQUIRED_ATOMS = (
+    '05-OP-45',
+    '04-FIT-18',
+    '04-LIN-3',
+    '04-LIN-4',
+    '04-LIN-5',
+    '04-LIN-6',
+    '04-LIN-7',
+    '04-LIN-8',
+    '04-NUM-2',
+    '04-NUM-4',
+    '04-NUM-8',
+    '04-NUM-11',
+    '04-NUM-14',
+    '04-NUM-16',
+    '04-SHAPE-1',
+    '05-OP-1',
+    '05-OP-2',
+    '05-OP-3',
+    '05-OP-4',
+    '05-OP-5',
+    '05-OP-6',
+    '05-OP-7',
+    '05-OP-8',
+    '05-OP-9',
+    '05-OP-10',
+    '05-OP-11',
+    '05-OP-12',
+    '05-OP-13',
+    '05-OP-14',
+    '05-OP-15',
+    '05-OP-16',
+    '05-OP-17',
+    '05-OP-18',
+    '05-OP-19',
+    '05-OP-20',
+    '05-OP-21',
+    '05-OP-22',
+    '05-OP-23',
+    '05-OP-24',
+    '05-OP-25',
+    '05-OP-26',
+    '05-OP-27',
+    '05-OP-28',
+    '05-OP-29',
+    '05-OP-30',
+    '05-OP-31',
+    '05-OP-32',
+    '05-OP-33',
+    '05-OP-34',
+    '05-OP-35',
+    '05-OP-36',
+    '05-OP-37',
+    '05-OP-38',
+    '05-OP-39',
+    '05-OP-40',
+    '05-OP-41',
+    '05-OP-42',
+    '05-OP-43',
+    '05-OP-44',
+)
 
-# The markers are part of the freeze contract: each must occur exactly once,
-# and the end marker is excluded from the digest. Digests are not a self-bless
-# mechanism. An intentional change owes the owning spec/design update, every
-# consuming contract, and an adversarial mutation before this manifest moves.
-FROZEN_REGION_DIGESTS = {
-    "agent numeric surface discipline": (
-        "AGENTS.md",
-        "### Numeric Surface Discipline",
-        "### Public-Surface Change Rule",
-        "de1f56b43a92495cc8a71d7e543b888372f4fb803946a1fed78eb603fb67f917",
+# Each boundary must occur exactly once; the end marker is excluded from the
+# reported region. An intentional declaration change owes its owning contract,
+# consumers, adversarial controls and exact PR acknowledgement.
+REQUIRED_REGIONS = {
+    'Python numeric boundary': (
+        'spec/11-ffi.md',
+        '## 1. Python Interop',
+        '## 2. C Interop',
     ),
-    "numeric value semantics": (
-        "spec/04-type-system.md",
-        "## 9. Numeric Value Semantics",
-        "## 10. Checker Totality",
-        "edb150de60effbadeaff33f02ba39929dbde7ae61db4bdedaa8f4bfb3e334086",
+    'numeric wire codecs and roles': (
+        'spec/10-serialization.md',
+        '### 3.2 Exact Numeric Value Codec',
+        '## 4. Invariant Revalidation At Decode Boundaries',
     ),
-    "numeric primitive contracts": (
-        "spec/05-risc-primitives.md",
-        "### 2.1 Elementwise Binary",
-        "### 2.4 Movement",
-        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
+    'numeric value semantics': (
+        'spec/04-type-system.md',
+        '## 9. Numeric Value Semantics',
+        '## 10. Checker Totality',
     ),
-    "logical builtin contract": (
-        "spec/05-risc-primitives.md",
-        "### 3.2 Comparison and Logical Operations",
-        "### 3.3 Activation Functions",
-        "0f5112fa156d699d2bff79b65c0447d1075a381556b5f887f57d8dd0646dfd57",
+    'numeric primitive contracts': (
+        'spec/05-risc-primitives.md',
+        '### 2.1 Elementwise Binary',
+        '### 2.4 Movement',
     ),
-    "name-preserving rank polymorphism": (
-        "spec/04-type-system.md",
-        "#### 4.5.3 Name-Preserving Rank Polymorphism",
-        "#### 4.5.4 Concat Result Typing",
-        "3c84ab77716d7d9f2d5f2024141086c209f3f094a1949a3bdd06685d65b25aea",
+    'logical builtin contract': (
+        'spec/05-risc-primitives.md',
+        '### 3.2 Comparison and Logical Operations',
+        '### 3.3 Activation Functions',
     ),
-    "window extrema contract": (
-        "spec/05-risc-primitives.md",
-        "### 2.3.1 Windowed Reduction",
-        "### 2.4 Movement",
-        "cc2096d327307abec84098d50e4788d1a599f8ce2fadd930541ee078e1d7c786",
+    'name-preserving rank polymorphism': (
+        'spec/04-type-system.md',
+        '#### 4.5.3 Name-Preserving Rank Polymorphism',
+        '#### 4.5.4 Concat Result Typing',
     ),
-    "to_string contract section": (
-        "spec/05-risc-primitives.md",
-        "### 3.6.3 Canonical value-to-string conversion",
-        "### 3.7 Host-Lane Data I/O Numeric Operations",
-        "8520543d576332fce2cd9821a3d917b083bfeb54e16f2054ccc7b94217dcecda",
+    'window extrema contract': (
+        'spec/05-risc-primitives.md',
+        '### 2.3.1 Windowed Reduction',
+        '### 2.4 Movement',
     ),
-    "named lossy cast section": (
-        "spec/05-risc-primitives.md",
-        "### 3.8 Named Lossy Cast Forms",
-        "## 4. Standard Lowerings",
-        "4c2e336e26005cfea1a4cd649236231db3f5a4add35305f385434bbd3c68f089",
+    'to_string contract section': (
+        'spec/05-risc-primitives.md',
+        '### 3.6.3 Canonical value-to-string conversion',
+        '### 3.7 Host-Lane Data I/O Numeric Operations',
     ),
-    "capability schema": (
-        "spec/design/capability_table.md",
-        "## The two-table design",
-        "## Seed dispositions the table must ship with",
-        "e623262cd4cd37b6646c651fd0596435cf28f24423b8d9d755620d009520c09d",
+    'named lossy cast section': (
+        'spec/05-risc-primitives.md',
+        '### 3.8 Named Lossy Cast Forms',
+        '## 4. Standard Lowerings',
     ),
-    "capability seed dispositions": (
-        "spec/design/capability_table.md",
-        "## Seed dispositions the table must ship with",
-        "## New numeric ops before the table lands (added 2026-07-30)",
-        "b236eef3448e4147a85f531b7d8b1a7bfcc8b9d933f96470deff2a305a7c011b",
+    'capability schema': (
+        'spec/design/capability_table.md',
+        '## The two-table design',
+        '## Seed dispositions the table must ship with',
     ),
-    "Phase 4 handoff": (
-        "spec/design/dtype_semantics.md",
-        "## Phase 4 - the capability table becomes the permanent guard",
-        "## I1. Interlock with loud unsupported ([#730])",
-        "ba1662900de06295d99f6b5fd00875a8eac6a7b8d9e3fc5d2806929d6cdf9469",
+    'capability seed dispositions': (
+        'spec/design/capability_table.md',
+        '## Seed dispositions the table must ship with',
+        '## New numeric ops before the table lands (added 2026-07-30)',
     ),
-    "compiled stdlib consumer": (
-        "spec/design/loud_unsupported.md",
-        "### LU5 - derived compiled-stdlib acceptance corpus ([#955])",
-        "### LU6 - exhaustive checked host-cast planning ([#1150])",
-        "30ba46096ab69975228a288c42633ace364da7c5fe92307fd696d8100df3a17e",
+    'Phase 4 handoff': (
+        'spec/design/dtype_semantics.md',
+        '## Phase 4 - the capability table becomes the permanent guard',
+        '## I1. Interlock with loud unsupported ([#730])',
     ),
-    "provenance governed surfaces": (
-        "spec/design/spec_provenance.md",
-        "| Capability-row, Deep-tag, tolerance-row, and diagnostic citations |",
-        "| OpenSpec proving inadequate as the trigger for provenance work |",
-        "56675ebf30876d376c9eeb1817472381d9cfb0254522f57a3894366762da782c",
+    'compiled stdlib consumer': (
+        'spec/design/loud_unsupported.md',
+        '### LU5 - derived compiled-stdlib acceptance corpus ([#955])',
+        '### LU6 - exhaustive checked host-cast planning ([#1150])',
     ),
-    "roadmap ownership": (
-        "spec/design/remediation_roadmap.md",
-        "| **v0.19.0 - grounded dtype storage break",
-        "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ec37b8cab3f013cdc17f9c792291922b0bfbdebf5b2fa48a44bb8ba2aad2f516",
+    'provenance governed surfaces': (
+        'spec/design/spec_provenance.md',
+        '| Capability-row, Deep-tag, tolerance-row, and diagnostic citations |',
+        '| OpenSpec proving inadequate as the trigger for provenance work |',
     ),
-    "status dtype row": (
-        "docs/investigations/remediation_status_2026_08_04.md",
-        "| **#729 dtype semantics** |",
-        "| **#730 loud unsupported** |",
-        "bbb8be3bf01b8143b368b59211a1f123318a53df2a8f6b803d088878c2c34793",
+    'roadmap ownership': (
+        'spec/design/remediation_roadmap.md',
+        '| **v0.19.0 - grounded dtype storage break',
+        '| **v0.20.0 - behavior-preserving permanent guards**',
+    ),
+    'status dtype row': (
+        'docs/investigations/remediation_status_2026_08_04.md',
+        '| **#729 dtype semantics** |',
+        '| **#730 loud unsupported** |',
     ),
 }
-
-
-class OracleError(RuntimeError):
-    """The frozen Phase 4B contract is incomplete or internally inconsistent."""
 
 
 def read(root: Path, relative: str) -> str:
@@ -584,6 +681,7 @@ def atom_blocks(text: str) -> dict[str, str]:
 
 
 OP_MANIFEST_REGISTRY_FILES = {
+    "05-OP-45": "spec/registry/python_tensor_metadata.md",
     "05-OP-31": "spec/registry/c_scalar_carrier.md",
     "05-OP-32": "spec/registry/c_container_boundary.md",
     "05-OP-33": "spec/registry/c_tensor_runtime.md",
@@ -666,136 +764,11 @@ def validate_op_manifests(
         )
 
 
-def strict_atom_block(text: str, atom: str) -> str:
-    starts = [match for match in ATOM_START.finditer(text) if match.group(1) == atom]
-    if len(starts) != 1:
-        raise OracleError(
-            f"frozen normative atom {atom} must occur exactly once, got {len(starts)}"
-        )
-    start = starts[0].start()
-    end = start
-    for line in text[start:].splitlines(keepends=True):
-        if end > start and ATOM_START.match(line):
-            break
-        if not line.startswith(">"):
-            break
-        end += len(line)
-    return text[start:end]
-
-
-def normalize_frozen_block(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in normalized.split("\n")]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines) + "\n"
-
-
-def frozen_digest(text: str) -> str:
-    return hashlib.sha256(normalize_frozen_block(text).encode("utf-8")).hexdigest()
-
-
-def frozen_region(text: str, start: str, end: str, label: str) -> str:
-    start_count = text.count(start)
-    end_count = text.count(end)
-    if start_count != 1 or end_count != 1:
-        raise OracleError(
-            f"frozen {label} markers must occur exactly once "
-            f"(start={start_count}, end={end_count})"
-        )
-    start_index = text.index(start)
-    end_index = text.index(end)
-    if end_index <= start_index:
-        raise OracleError(f"frozen {label} end marker precedes its start")
-    return text[start_index:end_index]
-
-
 # --------------------------------------------------------------------------
 # Frozen-contract acknowledgement gate (the additive-contradiction leg)
 # --------------------------------------------------------------------------
 
-ACKNOWLEDGEMENT_KEY = "Frozen-contract-change:"
 DEFAULT_BASE_REF = "origin/main"
-
-# The exact accepted line. No leading whitespace, exactly one space after the
-# colon, and nothing after the path.
-ACKNOWLEDGEMENT_LINE = re.compile(
-    r"^Frozen-contract-change: (?P<path>[^\s]+)$"
-)
-# A line that is trying to be an acknowledgement and failing. Leading
-# whitespace, a Markdown list bullet, a blockquote marker, or any casing of the
-# key all land here so the author is told the canonical spelling instead of
-# silently losing the acknowledgement.
-ACKNOWLEDGEMENT_NEAR_MISS = re.compile(
-    r"^[\s>]*(?:[-*+]\s+)?frozen[-_ ]?contract[-_ ]?change\s*:",
-    re.IGNORECASE,
-)
-# CommonMark fence tracking. The opening run's character and length are both
-# part of the contract: a `~~~` run never closes a ``` block, and a closing run
-# must be at least as long as the one that opened it. One boolean would let a
-# line that renders as code still acknowledge a change.
-FENCE_LINE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
-# A repo-relative POSIX path. The character class excludes every glob
-# metacharacter, the backslash, and whitespace; the segment rule excludes an
-# absolute path, an empty segment, and `.`/`..`.
-ACKNOWLEDGEMENT_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-
-
-def parse_acknowledgements(body: str) -> tuple[list[str], list[str]]:
-    """Return ``(paths, errors)`` parsed from an acknowledgement document.
-
-    ``body`` is normally a pull request body. Lines inside fenced code blocks
-    are ignored so a body can quote the grammar without acknowledging anything.
-    A fence that is never closed is an error rather than a silent swallow of
-    every line after it.
-    """
-
-    paths: list[str] = []
-    errors: list[str] = []
-    open_fence: str | None = None
-    for raw in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        line = raw.rstrip()
-        fence = FENCE_LINE.match(line)
-        if fence is not None:
-            run = fence.group("fence")
-            if open_fence is None:
-                open_fence = run
-                continue
-            if run[0] == open_fence[0] and len(run) >= len(open_fence):
-                open_fence = None
-            continue
-        if open_fence is not None:
-            continue
-        match = ACKNOWLEDGEMENT_LINE.match(line)
-        if match is None:
-            if ACKNOWLEDGEMENT_NEAR_MISS.match(line):
-                errors.append(
-                    f"malformed frozen contract acknowledgement {line!r}: the "
-                    f"only accepted form is '{ACKNOWLEDGEMENT_KEY} <repo-relative "
-                    "path>' at the start of a line, outside a code fence"
-                )
-            continue
-        candidate = match.group("path")
-        if not ACKNOWLEDGEMENT_PATH.match(candidate) or any(
-            segment in {".", ".."} for segment in candidate.split("/")
-        ):
-            errors.append(
-                f"malformed frozen contract acknowledgement path {candidate!r}: "
-                "expected a repo-relative POSIX path with no glob, no absolute "
-                "root, and no '.' or '..' segment"
-            )
-            continue
-        paths.append(candidate)
-    if open_fence is not None:
-        errors.append(
-            f"unclosed {open_fence!r} code fence in the acknowledgement "
-            "document: every line after it was ignored, so an acknowledgement "
-            "there would be lost"
-        )
-    return paths, errors
-
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
@@ -892,9 +865,12 @@ def validate_frozen_contract_changes(
     body: str | None = None,
     require_acknowledgement: bool = False,
     contract_files: tuple[str, ...] = CONTRACT_FILES,
+    committed_contract_changes: tuple[str, ...] = (),
 ) -> list[str]:
     """Check that every changed contract file is acknowledged by name.
 
+    ``committed_contract_changes`` retains file additions/removals named by both
+    committed inventories, including a removed declaration whose file remains.
     Returns the report lines. In ``require_acknowledgement`` mode any violation
     raises ``OracleError``; otherwise the report is advisory and the caller
     continues.
@@ -918,9 +894,10 @@ def validate_frozen_contract_changes(
 
     try:
         merge_base = resolve_merge_base(root, base)
-        changed = changed_contract_files(root, merge_base, contract_files)
+        changed = sorted(set(changed_contract_files(root, merge_base, contract_files))
+                         | set(committed_contract_changes))
     except OracleError as error:
-        # Advisory mode reports and continues so the atom and region digests
+        # Advisory mode reports and continues so the independent contract checks
         # still run on a checkout whose git state this leg cannot read. The
         # enforcing mode re-raises: a check that did not run is never a pass.
         if require_acknowledgement:
@@ -928,12 +905,12 @@ def validate_frozen_contract_changes(
         return [
             f"frozen contract acknowledgement: {error}",
             "frozen contract acknowledgement: change detection skipped "
-            "(advisory mode); CI runs --require-acknowledgement and will fail "
+            "(advisory mode); the dedicated PR acknowledgement check fails "
             "on an unreadable base",
         ]
 
     changed_set = set(changed)
-    known = set(contract_files)
+    known = set(contract_files) | set(committed_contract_changes)
 
     for path in sorted(set(acknowledged)):
         if path not in known:
@@ -973,43 +950,25 @@ def validate_frozen_contract_changes(
     return report
 
 
-def validate_frozen_contract(
+def validate_required_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    # These digests identify the owning contract when an existing clause
-    # changes. They cannot defend their own boundaries: contradictory prose
-    # inserted immediately before a region's start or after its end leaves
-    # every digest here intact. The additive-contradiction gate is the
-    # per-file acknowledgement in `validate_frozen_contract_changes`, which
-    # sees any byte that moved in any CONTRACT_FILES path. Moving a digest
-    # below is a semantic freeze change and owes the owning spec/design
-    # update, every consuming contract, and an adversarial mutation.
-    for atom, expected in FROZEN_ATOM_DIGESTS.items():
+    # Required identities and boundaries survive text-hash retirement. The
+    # committed report and enforcing acknowledgements own deliberate text edits;
+    # required semantic clauses below still fail independently of Git history.
+    for atom in REQUIRED_ATOMS:
         relative = (
             "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"
         )
         try:
-            actual = frozen_digest(strict_atom_block(docs[relative], atom))
+            strict_atom_block(docs[relative], atom)
         except OracleError as error:
             violations.append(str(error))
-            continue
-        if actual != expected:
-            violations.append(
-                f"frozen normative atom {atom} digest mismatch: "
-                f"expected {expected}, got {actual}"
-            )
-
-    for label, (relative, start, end, expected) in FROZEN_REGION_DIGESTS.items():
+    for label, (relative, start, end) in REQUIRED_REGIONS.items():
         try:
-            block = frozen_region(docs[relative], start, end, label)
+            frozen_region(docs[relative], start, end, label)
         except OracleError as error:
             violations.append(str(error))
-            continue
-        actual = frozen_digest(block)
-        if actual != expected:
-            violations.append(
-                f"frozen {label} digest mismatch: expected {expected}, got {actual}"
-            )
 
 
 def normalize_atom_body(body: str) -> str:
@@ -1044,18 +1003,22 @@ def require_atom(
 def validate_normative_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
-    agents = docs["AGENTS.md"]
     spec02 = docs["spec/02-surf-syntax.md"]
     spec03 = docs["spec/03-deep-syntax.md"]
     spec04 = docs["spec/04-type-system.md"]
+    require(
+        spec04,
+        "`and` / `or` / `not` are the\n  logical operations and "
+        "`count` is the bool-tensor counting operation",
+        "bool counting operation",
+        violations,
+    )
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
     spec11 = docs["spec/11-ffi.md"]
     ownership_design = docs["spec/design/compiled_value_ownership.md"]
     implicit_linearity = docs["spec/design/implicit_linearity.md"]
-    captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
-    captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
     atoms = [int(number) for number in OP_ATOM.findall(spec05)]
     counts = Counter(atoms)
@@ -1089,12 +1052,18 @@ def validate_normative_contract(
                 "Surf dtype-family bound production",
             ),
             (
-                "A bound belongs to one binder\nlist per declaration",
-                "Surf single bound binder list",
+                "A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and\n"
+                "`d-rank` name in the signature appears exactly once.",
+                "Surf complete declaration binder list",
             ),
             (
-                "A listed name **that declares a\nbound** must occur in the declared type.",
+                "A listed name **that declares\na bound** must occur in the declared type.",
                 "Surf occurrence rule is bounded-binder only",
+            ),
+            (
+                "One binder list owns each\ndeclaration: a standalone `sig` carries it, "
+                "and a matching `def` must\nnot carry a second list.",
+                "Surf single declaration binder-list owner",
             ),
         ),
         violations,
@@ -1126,12 +1095,13 @@ def validate_normative_contract(
     require_all(
         spec04,
         (
-            ("The active primitive set is exactly ten names", "ten active primitives"),
+            ("The active primitive set is exactly eleven names", "eleven active primitives"),
             (
-                "one of the ten active primitives is well-typed",
+                "one of the eleven active primitives is well-typed",
                 "backend-neutral active primitive set",
             ),
-            ("nine active tensor element dtypes", "nine tensor element dtypes"),
+            ("ten active tensor element dtypes", "ten tensor element dtypes"),
+            ("nine active data element dtypes", "nine data element dtypes"),
             (
                 "For an unconsumed local owner, the compiler inserts `Drop` at the "
                 "earliest\npost-dominating point after its last use",
@@ -1190,10 +1160,22 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 7 is explicitly\npresent", "wire v7 presence"),
+            ("Schema version 20 is explicitly\npresent", "wire v20 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
+            (
+                "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`",
+                "wire literal-witness requirement carrier",
+            ),
+            (
+                "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes",
+                "wire shape-dependency references",
+            ),
+            (
+                "`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and\n`declaration` are mandatory fields",
+                "wire mandatory invocation fields",
+            ),
             ("WireRiscOp::Count { axes }", "wire count variant"),
             (
                 "complete\nnon-empty vector of unique normalized original-axis "
@@ -1212,7 +1194,7 @@ def validate_normative_contract(
                 "wire Pad payload rejection",
             ),
             (
-                "No v5\nnumeric-fill migration or inferred fill dtype exists",
+                "No\nnumeric-fill migration or inferred fill dtype exists",
                 "wire Pad no compatibility",
             ),
         ),
@@ -1230,6 +1212,36 @@ def validate_normative_contract(
             ("independently owned and may\nbe released in either order", "FFI root owners"),
             ("governed by [05-OP-31..33]", "FFI complete C authority range"),
         ),
+        violations,
+    )
+    require_all(
+        spec10,
+        (
+            ("f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
+            ("No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
+            ("A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
+            ("A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("Bounds alone never establish transport authority.", "wire report numeric authority"),
+            ("`schema_version: 4`", "execution v4 exactness"),
+        ),
+        violations,
+    )
+    require_all(
+        spec04,
+        (("untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),),
+        violations,
+    )
+    require_all(
+        spec11,
+        (
+            ("Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
+            ("DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
+        ),
+        violations,
+    )
+    require_all(
+        docs["spec/design/dtype_semantics.md"],
+        (("No partial WireDag v9 is published.", "wire atomic cutover"),),
         violations,
     )
     require_all(
@@ -1409,8 +1421,7 @@ def validate_normative_contract(
                 "top-level tuple external owner",
             ),
             (
-                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
-                "recursive-host operation support remains [#729]/[#730] capability "
+                "Recursive-host operation support remains [#729]/[#730] capability "
                 "work",
                 "recursive support external owners",
             ),
@@ -1452,17 +1463,6 @@ def validate_normative_contract(
         ),
         violations,
     )
-    require_all(
-        agents,
-        (
-            (
-                "No grandfather, permanent-disposition,",
-                "agent zero-exception policy",
-            ),
-        ),
-        violations,
-    )
-
     spec04_blocks = atom_blocks(spec04)
     require_atom(
         spec04_blocks,
@@ -1562,8 +1562,8 @@ def validate_normative_contract(
         spec04_blocks,
         "04-NUM-11",
         (
-            "A language binding or device descriptor SHALL preserve rank as int32 "
-            "and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor SHALL preserve rank as i32 "
+            "and each extent, stride, element count, and byte capacity as i64",
             "It SHALL carry the exact dtype tag and dynamic rank",
             "a fixed-rank carrier, a narrower metadata field, or an element pointer "
             "not coupled to the exact tag in the same validated descriptor is not a "
@@ -1580,7 +1580,7 @@ def validate_normative_contract(
             "expressions",
             "SHALL NOT wrap, saturate, truncate, or substitute an overflow sentinel "
             "that can make unequal mathematical counts equal",
-            "Projection from the exact count into `int64`, `usize`, or a target "
+            "Projection from the exact count into `i64`, `usize`, or a target "
             "allocation-size domain SHALL be checked",
             "a reuse decision is not exempt because no bytes have yet been touched",
         ),
@@ -1715,7 +1715,7 @@ def validate_normative_contract(
                 "total sum result precision rule",
             ),
             (
-                "`int32` | `int32`, `int64` | accumulator dtype `a`",
+                "`i32` | `i32`, `i64` | accumulator dtype `a`",
                 "explicit wider integer accumulator result",
             ),
             (
@@ -1744,7 +1744,7 @@ def validate_normative_contract(
                 "precondition guard finalized-quantity dtype",
             ),
             (
-                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at i64`",
                 "runtime extent guard trap line",
             ),
             (
@@ -1831,8 +1831,8 @@ def validate_normative_contract(
             "A JSON number token containing `.`, `e`, or `E`",
             "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
             "any other number token",
-            "ingest as `JsonInt` carrying its exact int64 value",
-            "An integer-form token outside int64 range SHALL ingest as",
+            "ingest as `JsonInt` carrying its exact i64 value",
+            "An integer-form token outside i64 range SHALL ingest as",
             "`JsonBigInt` carrying the token's exact decimal spelling",
             "never\n> selects a lossy float image for an integer-form token",
             "CSV cells are TEXT at parse time",
@@ -1840,27 +1840,27 @@ def validate_normative_contract(
             "An empty or non-conforming cell is a loud error",
         ),
         "05-OP-3": (
-            "`io/json::json_int` returns the stored `JsonInt` int64 exactly",
+            "`io/json::json_int` returns the stored `JsonInt` i64 exactly",
             "`io/json::json_float` returns a stored `JsonFloat` f64 exactly",
             "It never truncates or rounds a float into an integer",
-            "`csv_int` | `(List[Dict[string,string]], int64, string) -> int64`",
-            "`csv_ints` | `(List[Dict[string,string]], string) -> List[int64]`",
-            "`csv_f64` | `(List[Dict[string,string]], int64, string) -> f64`",
+            "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
+            "`csv_ints` | `(List[Dict[string,string]], string) -> List[i64]`",
+            "`csv_f64` | `(List[Dict[string,string]], i64, string) -> f64`",
             "`csv_f64s` | `(List[Dict[string,string]], string) -> List[f64]`",
-            "`csv_nrows` | `(List[Dict[string,string]]) -> int64`",
+            "`csv_nrows` | `(List[Dict[string,string]]) -> i64`",
             "no JSON variant or default cell is fabricated",
             "structurally rejected inside `grad`",
             "They have no accumulator",
         ),
         "05-OP-4": (
             "`JsonFloat(value)` accepts exactly f64",
-            "`JsonInt(value)` accepts exactly int64",
+            "`JsonInt(value)` accepts exactly i64",
             "every other operand width is a type error",
             "No construction path widens or narrows a numeric value",
             "feeds the byte-exact serialization channel of [05-OP-5]",
         ),
         "05-OP-5": (
-            "emits a stored `JsonInt` int64 as its exact decimal digits",
+            "emits a stored `JsonInt` i64 as its exact decimal digits",
             "a stored f64 through the [05-OBS-1]",
             "every finite emission parses back to the identical f64",
             "A non-finite `JsonFloat` is a loud serialization error",
@@ -1882,7 +1882,7 @@ def validate_normative_contract(
             "has no accumulator",
         ),
         "05-OP-7": (
-            "returns the stored extent of `x` along `axis` as an exact `int64`",
+            "returns the stored extent of `x` along `axis` as an exact `i64`",
             "a negative value first normalizes by adding the rank exactly once",
             "an axis still outside `0..rank` is a loud error",
             "read has a zero-cotangent adjoint",
@@ -1895,8 +1895,9 @@ def validate_normative_contract(
             "returns `tensor[D, p]` with the template's dimensions",
             "Both bounds must be finite and `low <= high`",
             "At the selected arithmetic width, `high - low` must also be finite",
-            "complete before the operation consumes a Random call ordinal",
-            "failure traps `Domain` as `uniform_like` and consumes none",
+            "consumes the key `k`",
+            "complete before any element is drawn",
+            "failure traps `Domain` as `uniform_like` before any element is produced",
             "Equal bounds are valid and produce that stored value",
             "For `p = f64`, the element is the one f64 fused multiply-add",
             "For `p = f32`, it is the one f32 fused multiply-add",
@@ -1905,8 +1906,8 @@ def validate_normative_contract(
             "the result narrows exactly once to `p`",
             "There is no f32 public-bound signature, default bound, or f64 "
             "intermediate",
-            "introduces `Random`",
-            "does not observe the template's element values",
+            "does not observe the template's element values, and the key carries no "
+            "cotangent",
             "pathwise adjoint contributes zero to the template",
             "contributes `g_i * (1-u_i)` to `low` and `g_i * u_i` to `high`",
             "canonical adjacent-pair balanced tree",
@@ -1958,7 +1959,7 @@ def validate_normative_contract(
             "first stored representation among equal\n> values",
             "execution-time extent is zero",
             "equal positive or negative infinities",
-            "tie count `k` is\n> counted exactly as `int64`",
+            "tie count `k` is\n> counted exactly as `i64`",
             "`div(g, k)`",
             "full cotangent flows to the\n> first NaN",
             "Integer operands are forward-only and `grad` rejects them",
@@ -1982,11 +1983,11 @@ def validate_normative_contract(
         ),
         "05-OP-15": (
             "every active\n> signed integer and float tensor dtype",
-            "returns `int64` indices",
+            "returns `i64` indices",
             "lowest\n> axis index containing NaN",
             "Comparisons never convert through another dtype",
             "execution-time extent is zero",
-            "result dtype `int64`",
+            "result dtype `i64`",
             "non-differentiable: `grad` rejects it",
         ),
         "05-OP-16": (
@@ -2048,7 +2049,7 @@ def validate_normative_contract(
             "`to_string(value) -> result` borrows exactly one value",
             "without consuming it and returns `string`",
             "It admits exactly an active numeric, `bool`, or `string` scalar",
-            "a tensor whose element dtype is one of the nine active tensor element dtypes",
+            "a tensor whose element dtype is one of the nine active data element dtypes",
             "a `List` whose reachable elements are recursively admitted by this rule",
             "Unit, tuples, `Dict`, `Option`, ADTs, functions, resource handles, and "
             "deferred values are type errors",
@@ -2090,12 +2091,12 @@ def validate_normative_contract(
         ),
         "05-OP-29": (
             "admits exactly a `bool` tensor operand",
-            "returns an `int64` tensor",
+            "returns an `i64` tensor",
             "one or more unique named axes",
             "Missing axes, mixed positional/named axes, duplicate normalized "
             "positions or names",
             "visited in original row-major order",
-            "checked `int64` addition",
+            "checked `i64` addition",
             "traps `Overflow` as operation `count`",
             "result is `0i64`",
             "dedicated reduction and is not a `cast` plus `sum` lowering",
@@ -2136,7 +2137,7 @@ def validate_normative_contract(
             "chelis_dict_entry;",
             "rank in `0..=INT32_MAX`",
             "a rank-zero descriptor has no extents",
-            "exactly `rank` nonnegative int64 extents",
+            "exactly `rank` nonnegative i64 extents",
             "with the rank-zero empty product equal to one",
             "There is no rank-eight limit",
             "byte size is the checked product `count * chelis_dtype_size(dtype)`",
@@ -2180,13 +2181,18 @@ def validate_normative_contract(
             "chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)",
             "chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)",
             "chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)",
-            "All lengths, indices, offsets, sizes, and returned counts are exact `int64`",
+            "All lengths, indices, offsets, sizes, and returned counts are exact `i64`",
             "Negative lengths, indices, offsets, and counts trap `Domain`",
             "result-length and allocation arithmetic traps `Overflow`",
             "half-open increasing sequence",
             "Unicode scalar values",
             "A slice whose nonnegative start is at or beyond the scalar length "
             "is empty",
+            "Length-aware UTF-8 construction copies exactly the declared bytes",
+            "permits a null source pointer only for zero length",
+            "Character-code conversion follows [05-OP-58] exactly",
+            "Length-aware string observation writes every stored UTF-8 byte",
+            "without C-string termination semantics",
             "Dictionary keys are exactly `string`, `bool`, or a scalar of any active "
             "signed-integer dtype",
             "Equality includes the key kind and integer dtype",
@@ -2196,7 +2202,7 @@ def validate_normative_contract(
             "only for absence",
             "An option node renders as `None` when it owns no child and otherwise "
             "as `Some(` followed by `R` of its child and `)`",
-            "A mapped file renders as `<mapped-file:` followed by its exact int64 "
+            "A mapped file renders as `<mapped-file:` followed by its exact i64 "
             "byte length in decimal digits and then `>`",
             "Recursive dictionary observation is canonical rather than "
             "insertion-ordered",
@@ -2220,15 +2226,24 @@ def validate_normative_contract(
             "outside AD and have no accumulator",
         ),
         "05-OP-33": (
-            "exactly the twenty-two final public C callable identities",
-            "axes and rank are `int32_t`",
-            "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
-            "handles, and every tensor result is a new owner",
+            "returns exact i64 zero for a rank-zero input, or one when the input shape",
+            "is identical to the domain shape",
+            "It validates every extent and the exact zero-aware element product before",
+            "An iteration domain requires neither storage byte counts nor contiguous suffix strides",
+            "A caller validates the original input before repurposing its storage",
+            "excluding spare storage capacity",
+            "takes rank and every target extent as exact tagged i64 scalars",
+            "changes no metadata, ownership, or payload",
+            "preserves every stored element bit",
+            "exactly the public C callable identities enumerated in",
+            "unboxed axes and rank are `int32_t`",
+            "host tensor arguments and results are [05-OP-44]'s opaque "
+            "`chelis_tensor` handles, and every host tensor result is a new owner",
             "alignment, live-owner state, and write-guard state, before reading "
             "data",
-            "Foreign storage enters only through [05-OP-44]'s entry borrow; no "
-            "callable in this family constructs a non-owning view, adopts caller "
-            "bytes, or frees storage",
+            "Foreign host tensor storage enters only through [05-OP-44]'s entry "
+            "borrow; host tensor callables in this family do not construct a "
+            "non-owning host tensor view, adopt caller bytes, or free storage",
             "extents, sizes, offsets, counts, and element counts are `int64_t`",
             "rank is nonnegative",
             "before allocation or element access",
@@ -2252,7 +2267,7 @@ def validate_normative_contract(
             "are zero-based",
             "must lie in the selected base-axis extent",
             "Any negative or out-of-range index traps `Domain` before any write",
-            "no int32/int64-only dispatch exception",
+            "no i32/i64-only dispatch exception",
             "Replace admits every active dtype, including bool",
             "admits exactly active signed-integer and float dtypes",
             "NaNs follow all non-NaNs",
@@ -2295,16 +2310,16 @@ def validate_normative_contract(
         ),
         "05-OP-35": (
             "exactly the eighty-four final exported stdlib numeric definitions",
-            "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | "
-            "`(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
+            "`(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
             "`tensor/construct::linspace` | "
-            "`(p_float,p_float,int64)->tensor[n,p_float]`",
+            "`(p_float,p_float,i64)->tensor[n,p_float]`",
             "`tensor/construct::arange` | "
             "`(p_int,p_int)->tensor[n,p_int]`",
-            "`sort::sort` | `(&tensor[..r,p_numeric],int32)->"
-            "(tensor[..r,p_numeric],tensor[..r,int64])`",
+            "`sort::sort` | `(&tensor[..r,p_numeric],i32)->"
+            "(tensor[..r,p_numeric],tensor[..r,i64])`",
             "`scalar::abs` | `(p_numeric)->p_numeric`",
             "`scalar::max` | `(p_numeric,p_numeric)->p_numeric`",
             "`scalar::min` | `(p_numeric,p_numeric)->p_numeric`",
@@ -2316,7 +2331,7 @@ def validate_normative_contract(
             "`test::assert_eq_tensor` | "
             "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
             "`tensor/construct::stack` | "
-            "`(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]`",
+            "`(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "Every primitive-width intermediate in a graph whose contract names a dtype",
             "Decimal rational and calendar ordinal computations explicitly named as "
             "mathematical below use an exact internal domain",
@@ -2357,7 +2372,7 @@ def validate_normative_contract(
             "returns the increasing half-open same-dtype sequence",
             "Its length and every step are checked in exact mathematical integers",
             "an unrepresentable length or element traps `Overflow`",
-            "requires finite endpoints and int64 `count >= 1`",
+            "requires finite endpoints and i64 `count >= 1`",
             "Squeeze removes the selected singleton dimension",
             "Unsqueeze inserts a singleton dimension and stack inserts the "
             "input-list length at the selected position",
@@ -2400,7 +2415,7 @@ def validate_normative_contract(
             "requires equal shapes and one common active element dtype",
             "signed-integer and bool elements use exact equality",
             "`assert_shape` requires its expected list to contain only nonnegative "
-            "int64 extents",
+            "i64 extents",
             "compares its length and every entry to the tensor's complete shape "
             "in axis order",
             "Each finite element pair computes `abs(actual - expected)` at that "
@@ -2409,14 +2424,15 @@ def validate_normative_contract(
             "without invoking a shell",
             "every random stdlib callable has the pathwise adjoint of its exact "
             "graph above",
-            "source units and mask comparisons contribute zero cotangent",
+            "the key, source units, and mask comparisons contribute zero cotangent",
+            "splits `k` by [05-OP-70] into `(k1, k2)`",
             "rounded result equals the stored upper endpoint",
             "computed denominator must be finite and strictly positive",
             "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
-            "final normalized `days` field has no int64 representation",
+            "final normalized `days` field has no i64 representation",
             "A negative year uses `-` followed by exactly "
             "`max(4, digits(|year|))` decimal digits",
-            "`|year|` is the exact mathematical magnitude rather than an int64 `abs`",
+            "`|year|` is the exact mathematical magnitude rather than an i64 `abs`",
             "no token pair occurs at more than one merge rank",
             "repeatedly selects the lowest merge rank and then the leftmost pair",
             "`encode` maps each final token through `vocab`",
@@ -2466,9 +2482,10 @@ def validate_normative_contract(
             "admits every active float dtype `p`",
             "requires `input: &tensor[D,p]` and a scalar `rate: p`",
             "rate must be finite and satisfy `0 <= rate < 1`",
-            "validation completes before Random consumption",
-            "failure traps `Domain` as `dropout` while consuming no call ordinal",
-            "accepted call consumes exactly one ordinal",
+            "consumes the key `k`",
+            "validation completes before any element is drawn",
+            "failure traps `Domain` as `dropout` before any element is produced",
+            "accepted call consumes its key",
             "including for an empty tensor or `rate = 0`",
             "saved forward mask drops the element exactly when that value is less "
             "than the rate",
@@ -2482,21 +2499,27 @@ def validate_normative_contract(
             "no f32 public-rate signature, f64 funnel, unscaled-dropout alias, or "
             "special `rate >= 1` default exists",
             "pathwise adjoint reuses the exact saved mask",
-            "Dropped elements contribute positive zero",
-            "contributions combine by the canonical adjacent-pair balanced tree",
+            "the language does not differentiate that selection",
+            "through a data-flow path on which every operand slot has an adjoint "
+            "contract",
+            "a path through a zero-cotangent slot or a [05-OP-42] `stop_gradient` "
+            "does not count",
+            "`AdRejectionReason::RandomSelectionParameter`; otherwise the rate "
+            "receives the exact zero cotangent",
             "mask comparison itself has zero cotangent",
             "has no accumulator parameter",
         ),
         "05-OP-38": (
             "governs exactly these five numeric-capacity identities and signatures",
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
-            "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`",
+            "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
             "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
             "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)"
             "->unit!{Test}`",
-            "`T` is one active numeric or bool scalar type",
+            "`T` is a scalar or tensor state",
+            "shape and dtype are invariant across every callback application",
             "`Q` is one static type in [05-OP-36]'s scalar or recursive equality "
             "domain",
             "Repeated variables denote the same type, dtype, rank, and dimensions",
@@ -2655,12 +2678,13 @@ def validate_normative_contract(
             "no accumulator and is outside AD",
         ),
         "05-RNG-1": (
-            "Every conforming evaluation of a `with seed(N)` program produces "
-            "byte-identical random results",
+            "A random primitive is a pure function of the key it is given",
+            "Every conforming evaluation produces byte-identical random results "
+            "for the same key",
             "compiler version and target do not vary this result",
-            "high 53 bits divided by `2^53`",
-            "Each entered random primitive consumes exactly one call ordinal",
-            "validation that precedes Random consumption consumes none",
+            "No handler, ordinal, execution order, or other state contributes to a "
+            "draw",
+            "A draw in an `if` or `match` arm that is not selected is not evaluated",
         ),
         "05-OBS-1": (
             "every NaN payload renders as the exact spelling `NaN`",
@@ -2697,7 +2721,7 @@ def validate_normative_contract(
             "no index dtype is widened, narrowed, or otherwise converted",
             "public C gather and scatter callables in [05-OP-33] have this same "
             "complete index-dtype domain",
-            "no int32/int64-only exception",
+            "no i32/i64-only exception",
         ),
         "05-HOST-3": (
             "`test_assert` admits bool",
@@ -2771,7 +2795,7 @@ def validate_normative_contract(
                 "C axis family names both movement primitives",
             ),
             (
-                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> "
                 "tensor[D_plus,p]` | Insert a new dimension of width `size` "
                 "at position `axis`, producing rank `rank(x) + 1`.",
                 "insert movement row",
@@ -2906,41 +2930,6 @@ def validate_normative_contract(
         violations,
     )
 
-    require_all(
-        captured_risc,
-        (
-            (
-                "`sub`, `max_elem`, and `min_elem` are Tier-1\nidentities",
-                "captured direct arithmetic identities",
-            ),
-            (
-                "it remains direct checked subtraction rather than becoming "
-                "`add(a, neg(b))`",
-                "captured direct sub lowering",
-            ),
-            (
-                "it remains direct selection rather than becoming "
-                "`neg(max_elem(neg(a), neg(b)))`",
-                "captured direct min_elem lowering",
-            ),
-            (
-                "first NaN in operand order with exact stored bits",
-                "captured extrema stored-bit selection",
-            ),
-        ),
-        violations,
-    )
-    require_all(
-        captured_transformations,
-        (
-            (
-                "the selected operand receives the whole cotangent,\n  including "
-                "the first operand on equality",
-                "captured extrema tie rule",
-            ),
-        ),
-        violations,
-    )
 
 
 def validate_schema_and_consumers(
@@ -3127,7 +3116,7 @@ def validate_schema_and_consumers(
                 "effect disposition key",
             ),
             (
-                "`Random | Accum | IO | Test | Resource(ResourceId)`",
+                "`Accum | IO | Test | Resource(ResourceId)`",
                 "closed effect requirement domain",
             ),
             (
@@ -3151,15 +3140,15 @@ def validate_schema_and_consumers(
                 "derived stdlib execution rule",
             ),
             (
-                "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
-                "reduction implementation owner",
+                "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
+                "device reduction implementation owner",
             ),
             (
                 "Unimplemented { issue: #1290, diagnostic_kind: UnsupportedFeature }",
                 "product implementation owner",
             ),
             (
-                "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+                "Unimplemented { issue: #2266, diagnostic_kind: UnsupportedFeature }",
                 "logical implementation owner",
             ),
             (
@@ -3169,16 +3158,16 @@ def validate_schema_and_consumers(
             ("[05-OP-29], [#1287], [#1291]", "count capability owner"),
             (
                 "`max_elem`/`min_elem` x Scalar/Tensor x active numeric dtypes "
-                "([05-OP-40], [#715], [#1306])",
+                "([05-OP-40], [#715], [#1306], [#2338])",
                 "extrema capability owner",
             ),
             (
                 "`sub` x Scalar/Tensor x active numeric dtypes "
-                "([05-OP-41], [#1306])",
+                "([05-OP-41], [#1306], [#2338])",
                 "sub capability owner",
             ),
             (
-                "Unimplemented { issue: #1306, diagnostic_kind: "
+                "Unimplemented { issue: #2338, diagnostic_kind: "
                 "UnsupportedFeature }",
                 "direct arithmetic implementation owner",
             ),
@@ -3248,7 +3237,9 @@ def validate_schema_and_consumers(
             (
                 "An unacknowledged\nchange and an acknowledgement naming an "
                 "unchanged file both fail\n`--require-acknowledgement`, which "
-                "is the mode CI runs on a pull request.",
+                "the dedicated `PR Contract Acknowledgements`\ncheck applies "
+                "through `phase4b_change_report.py`. The full Phase 4B oracle "
+                "runs\nindependently in Docs.",
                 "Phase 4B acknowledgement enforcing mode",
             ),
             (
@@ -3680,7 +3671,7 @@ def validate_contract(root: Path = REPO_ROOT) -> None:
     violations: list[str] = []
     validate_normative_contract(docs, violations)
     validate_schema_and_consumers(docs, violations)
-    validate_frozen_contract(docs, violations)
+    validate_required_contract(docs, violations)
     if violations:
         raise OracleError("; ".join(violations))
 
@@ -3717,7 +3708,8 @@ def build_parser() -> argparse.ArgumentParser:
             "acknowledged by name."
         )
     )
-    parser.add_argument(
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument(
         "--base",
         default=DEFAULT_BASE_REF,
         help=(
@@ -3727,13 +3719,17 @@ def build_parser() -> argparse.ArgumentParser:
             "never reported as this branch's."
         ),
     )
+    comparison.add_argument(
+        "--pr-head", default=None,
+        help="exact PR event head; validate the synthetic merge and use its first parent",
+    )
     parser.add_argument(
         "--acknowledge",
         action="append",
         default=[],
         metavar="PATH",
         help=(
-            "acknowledge one changed contract file by repo-relative path; "
+            "acknowledge one changed file path, atom:<ID>, or region:<JSON string>; "
             "repeatable. The local equivalent of a pull request body line."
         ),
     )
@@ -3742,7 +3738,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "read acknowledgement lines from FILE (a saved pull request body). "
-            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <path>'."
+            f"'-' reads stdin. Each line is '{ACKNOWLEDGEMENT_KEY} <address>'."
         ),
     )
     parser.add_argument(
@@ -3759,9 +3755,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "fail on an unacknowledged contract change, a stale or malformed "
-            "acknowledgement, or an unresolvable merge base. CI passes this on "
-            "pull request events; without it the acknowledgement leg reports "
-            "and exits 0."
+            "acknowledgement, or an unresolvable merge base. This is the local "
+            "full-oracle equivalent of the dedicated PR acknowledgement "
+            "check; without it the acknowledgement leg reports and exits 0."
         ),
     )
     return parser
@@ -3801,14 +3797,48 @@ def main(argv: list[str] | None = None, root: Path = REPO_ROOT) -> None:
     args = build_parser().parse_args(argv)
     body = acknowledgement_body(args)
     try:
+        values, errors = parse_acknowledgements(body or "")
+        identities = []
+        for value in [*values, *args.acknowledge]:
+            try:
+                identities.append(acknowledgement_identity(value))
+            except OracleError as error:
+                errors.append(str(error))
+        if errors and args.require_acknowledgement:
+            raise OracleError("; ".join(errors))
+        base = args.base
+        if args.pr_head is not None:
+            base, _ = resolve_comparison(root, "HEAD", "", args.pr_head)
+        changes = None
+        comparison_error = None
+        try:
+            changes = changed_contracts(root, base)
+        except (ValueError, OSError) as error:
+            comparison_error = str(error)
         report = validate_frozen_contract_changes(
             root=root,
-            base=args.base,
-            acknowledgements=tuple(args.acknowledge),
-            body=body,
+            base=base,
+            acknowledgements=tuple(identity for kind, identity in identities if kind == "file"),
             require_acknowledgement=args.require_acknowledgement,
+            contract_files=CONTRACT_FILES,
+            committed_contract_changes=tuple(changes["changed_contract_files"]) if changes is not None else (),
         )
-    except OracleError as error:
+        report.extend(f"  ISSUE {error}" for error in errors)
+        if comparison_error is not None:
+            if args.require_acknowledgement:
+                raise OracleError(comparison_error)
+            report.append(f"identity acknowledgement: comparison unavailable (advisory): {comparison_error}")
+        if changes is not None:
+            named = [(kind, identity) for kind, identity in identities if kind != "file"]
+            violations = identity_acknowledgement_violations(changes, named)
+            if violations and args.require_acknowledgement:
+                raise OracleError("; ".join(violations))
+            for row in changes["changes"]:
+                key = (row["kind"], row["identity"])
+                marker = "ok " if key in named else "NEEDS"
+                report.append(f"  {marker} {acknowledgement_line(*key)}")
+            report.extend(f"  ISSUE {violation}" for violation in violations)
+    except (OracleError, ValueError) as error:
         raise SystemExit(f"DTYPE PHASE 4B ORACLE: FAIL: {error}") from error
     for line in report:
         print(line)

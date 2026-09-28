@@ -21,7 +21,7 @@
 //!
 //! Negative test parity: the fix must NOT blanket-accept any borrow of a
 //! `params`-named binding. A `&` borrow of a genuinely non-tensor
-//! `params: int32` still rejects (from the inference layer), identically to
+//! `params: i32` still rejects (from the inference layer), identically to
 //! a non-tensor `p`.
 
 use assert_cmd::Command;
@@ -153,7 +153,7 @@ fn other_tag_colliding_param_names_check_clean() {
 fn params_named_non_tensor_borrow_still_rejects() {
     // Negative parity: the fix must not blanket-accept any borrow of a
     // `params`-named binding. A `&` borrow of a genuinely non-tensor
-    // `params: int32` still rejects — the error surfaces from the
+    // `params: i32` still rejects — the error surfaces from the
     // inference-layer borrow arm (TypeMismatch: borrow requires tensor or
     // tensor-carrying input), exactly as it does for a non-tensor `p`.
     let dir = tempdir().expect("tempdir");
@@ -162,7 +162,7 @@ fn params_named_non_tensor_borrow_still_rejects() {
         &path,
         "module Repro.Borrow\n\
          def take_ref(x: &tensor[1, f32]) -> tensor[1, f32] = copy(x)\n\
-         def repro(params: int32) -> int32 = {\n\
+         def repro(params: i32) -> i32 = {\n\
            d = take_ref(&params)\n\
            params\n\
          }\n",
@@ -172,6 +172,6 @@ fn params_named_non_tensor_borrow_still_rejects() {
     assert!(
         msgs.iter()
             .any(|m| m.contains("borrow requires tensor or tensor-carrying input")),
-        "a borrow of a non-tensor `params: int32` must still reject; got {msgs:?}",
+        "a borrow of a non-tensor `params: i32` must still reject; got {msgs:?}",
     );
 }

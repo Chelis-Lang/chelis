@@ -12,8 +12,8 @@ pub(super) fn check_layer_norm_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if arg_tys.len() != 3 {
-        return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
+    if arg_tys.len() != 4 {
+        return report_builtin_arity_bare(errors, "layer_norm", "4 arguments", arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -117,7 +117,34 @@ pub(super) fn check_layer_norm_signature(
         );
     }
 
+    if let TensorPrec::Concrete(prim) = x_prec {
+        if !prim.is_float() {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    "layer_norm requires one active float dtype".to_string(),
+                    vec![],
+                ),
+            );
+        }
+        let epsilon_ty = type_for_readonly_check(&arg_tys[3], subst);
+        if let Err(error) = unify(&epsilon_ty, &Type::Prim(prim), subst) {
+            return report(errors, error.into());
+        }
+    }
+
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
+    if subst.observe_dim(&hidden_dim).known_extent() == Some(0) {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "layer_norm requires a positive hidden extent".to_string(),
+                vec![],
+            ),
+        );
+    }
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
         return report(errors, te.into());
     }
@@ -135,62 +162,80 @@ pub(super) fn check_layer_norm_signature(
     subst.apply(&canonical)
 }
 
-/// If `arg_exprs[2]` and `arg_exprs[3]` are integer literals and the
-/// input/kernel spatial dims (axes 2, 3) resolve to concrete
-/// `Dim::Lit` values after substitution, return the computed output
-/// spatial extents `(out_h, out_w)`. Returns `None` if any of the
-/// inputs are non-literal or non-concrete; the caller falls back to
-/// fresh dim-vars in that case.
-///
-/// `extract_int_literal` already handles the canonical
-/// `(lit {type: ...} N)` Deep shape used for stride/padding literals.
-pub(super) fn compute_concrete_conv2d_spatial(
+/// Literal per-axis metadata. Unknown values remain shape obligations; malformed
+/// literal values are errors, never defaults. The declared scheme owns types.
+pub(super) type ConvAxisParameters = (i64, i64, i64);
+
+pub(super) fn conv_parameters(
+    strides: &deep::Expr,
+    padding: &deep::Expr,
+    rank: usize,
+) -> Result<Option<Vec<ConvAxisParameters>>, String> {
+    let strides = collect_shape_list_elements(strides);
+    let padding = collect_shape_list_elements(padding);
+    if strides.as_ref().is_some_and(|xs| xs.len() != rank)
+        || padding.as_ref().is_some_and(|xs| xs.len() != rank)
+    {
+        return Err(format!(
+            "conv requires exactly {rank} stride and padding entries"
+        ));
+    }
+    let (Some(strides), Some(padding)) = (strides, padding) else {
+        return Ok(None);
+    };
+    let mut result = Vec::with_capacity(rank);
+    let mut concrete = true;
+    for (axis, (stride, pair)) in strides.into_iter().zip(padding).enumerate() {
+        let pair = stamped_parts(pair)
+            .filter(|(tag, _, kids)| *tag == DeepTag::Tuple && kids.len() == 2)
+            .map(|(_, _, kids)| kids);
+        let stride = extract_int_for_dim(stride);
+        let low = pair.and_then(|xs| extract_int_for_dim(&xs[0]));
+        let high = pair.and_then(|xs| extract_int_for_dim(&xs[1]));
+        if stride.is_some_and(|s| s <= 0) {
+            return Err(format!(
+                "conv requires a positive stride, got {} (spatial axis {axis})",
+                stride.expect("known nonpositive stride")
+            ));
+        }
+        if low.is_some_and(|p| p < 0) || high.is_some_and(|p| p < 0) {
+            return Err(format!(
+                "conv requires non-negative padding at spatial axis {axis}"
+            ));
+        }
+        if let (Some(stride), Some(low), Some(high)) = (stride, low, high) {
+            result.push((stride, low, high));
+        } else {
+            concrete = false;
+        }
+    }
+    Ok(concrete.then_some(result))
+}
+
+pub(super) fn compute_concrete_conv_spatial(
     arg_exprs: &[deep::Expr],
     input_dims: &[Dim],
     kernel_dims: &[Dim],
     subst: &Subst,
-) -> Option<(i64, i64)> {
-    // Issue #216: cast-aware so cast-wrapped stride/padding still
-    // resolve the concrete spatial output dims at infer time.
-    let stride = arg_exprs.get(2).and_then(extract_int_for_dim)?;
-    let padding = arg_exprs.get(3).and_then(extract_int_for_dim)?;
-    if stride <= 0 || padding < 0 {
+) -> Option<Vec<i64>> {
+    let rank = input_dims.len().checked_sub(2)?;
+    if rank == 0 || kernel_dims.len() != input_dims.len() {
         return None;
     }
-    let in_h = match subst.apply_dim(input_dims.get(2)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let in_w = match subst.apply_dim(input_dims.get(3)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let k_h = match subst.apply_dim(kernel_dims.get(2)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let k_w = match subst.apply_dim(kernel_dims.get(3)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    // `conv2d_output_extent` returns None on i64 overflow (RT-205
-    // round-2 F1); fall back to fresh dim-vars in that case so the
-    // validator's arm reports the overflow with a precise diagnostic
-    // rather than us computing here with saturating math and
-    // producing a confusing dim-lit-vs-dim-lit mismatch.
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
-    if out_h <= 0 || out_w <= 0 {
-        // Let the validator's arm emit the diagnostic; here we just
-        // fall back to fresh dim-vars so the inference pass produces
-        // a useful (declared-vs-fresh) mismatch instead of failing
-        // here with a confusing dim-lit-vs-dim-lit unify error.
-        return None;
-    }
-    Some((out_h, out_w))
+    let params = conv_parameters(arg_exprs.get(2)?, arg_exprs.get(3)?, rank).ok()??;
+    input_dims[2..]
+        .iter()
+        .zip(&kernel_dims[2..])
+        .zip(params)
+        .map(|((input, kernel), (stride, low, high))| {
+            let input = subst.observe_dim(input).known_extent()?;
+            let kernel = subst.observe_dim(kernel).known_extent()?;
+            conv_output_extent(input, kernel, stride, low, high)
+        })
+        .collect()
 }
 
-pub(super) fn check_conv2d_signature(
+pub(super) fn check_conv_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
@@ -198,62 +243,35 @@ pub(super) fn check_conv2d_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if arg_tys.len() < 2 {
-        return report_builtin_arity_bare(errors, "conv2d", "at least 2 arguments", arg_tys.len());
+    if arg_tys.len() != 4 {
+        return report_builtin_arity_bare(errors, "conv", "4 arguments", arg_tys.len());
     }
-
-    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
-    let kernel_ty = type_for_readonly_check(&arg_tys[1], subst);
-
-    let (input_dims, input_prec) = match input_ty {
-        Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
-        other => {
+    let input = type_for_readonly_check(&arg_tys[0], subst);
+    let kernel = type_for_readonly_check(&arg_tys[1], subst);
+    let (input_dims, input_prec, kernel_dims, kernel_prec) = match (&input, &kernel) {
+        (Type::Var(_) | Type::Error(_), _) | (_, Type::Var(_) | Type::Error(_)) => {
+            return subst.apply(result_ty);
+        }
+        (Type::Tensor(ds, p), Type::Tensor(ks, q)) => (ds, p, ks, q),
+        _ => {
             return report(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("conv2d expects tensor input, got {other}"),
+                    "conv requires tensor input and kernel".to_string(),
                     vec![],
                 ),
             );
         }
     };
-    let (kernel_dims, kernel_prec) = match kernel_ty {
-        Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
-        other => {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("conv2d expects tensor kernel, got {other}"),
-                    vec![],
-                ),
-            );
-        }
-    };
-
-    if input_dims.len() != 4 {
+    if input_dims.len() < 3 || kernel_dims.len() != input_dims.len() {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "conv2d expects rank-4 input tensor, got rank {}",
-                    input_dims.len()
-                ),
-                vec![],
-            ),
-        );
-    }
-    if kernel_dims.len() != 4 {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "conv2d expects rank-4 kernel tensor, got rank {}",
+                    "conv requires equal input/kernel ranks of at least 3, got {} and {}",
+                    input_dims.len(),
                     kernel_dims.len()
                 ),
                 vec![],
@@ -265,83 +283,41 @@ pub(super) fn check_conv2d_signature(
             errors,
             CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "conv2d requires matching input/kernel precision, got {} and {}",
-                    input_prec.name(),
-                    kernel_prec.name()
-                ),
-                vec!["Insert explicit cast".to_string()],
+                "conv requires matching input/kernel precision".to_string(),
+                vec![],
             ),
         );
     }
-    if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
-        return report(errors, te.into());
+    if let TensorPrec::Concrete(p) = input_prec
+        && !p.is_float()
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                "conv requires an active float dtype".to_string(),
+                vec![],
+            ),
+        );
     }
-
-    // RT-205 F8: when stride/padding are integer literals and the
-    // input/kernel spatial dims are concrete Dim::Lit values, compute
-    // the output spatial dims via the canonical formula
-    // (`floor((in + 2 * padding - kernel) / stride) + 1`) and place
-    // concrete `Dim::Lit` values into the output template. Without
-    // this the placeholders are fresh dim-vars that unify with any
-    // positive declared spatial dim, so an explicit but WRONG
-    // declared output (e.g. `tensor[1, 8, 100, 100]` for the
-    // canonical 8x8 input + 3x3 kernel case whose real output is
-    // 6x6) silently type-checks.
-    let computed_spatial =
-        compute_concrete_conv2d_spatial(arg_exprs, &input_dims, &kernel_dims, subst);
-    let (out_h_dim, out_w_dim) = match computed_spatial {
-        Some((h, w)) => (Dim::Lit(h), Dim::Lit(w)),
-        None => (Dim::Var(vg.fresh_dvar()), Dim::Var(vg.fresh_dvar())),
-    };
-    let output_template = Type::Tensor(
-        vec![
-            subst.apply_dim(&input_dims[0]),
-            subst.apply_dim(&kernel_dims[0]),
-            out_h_dim,
-            out_w_dim,
-        ],
-        input_prec.clone(),
-    );
-    if let Err(te) = unify(result_ty, &output_template, subst) {
-        return report(errors, te.into());
+    if let Err(error) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
+        return report(errors, error.into());
     }
-
-    let resolved_output = subst.apply(&output_template);
-    if let Type::Tensor(out_dims, out_prec) = &resolved_output {
-        if out_dims.len() != 4 {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
-                    vec![],
-                ),
-            );
-        }
-        if *out_prec != input_prec {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "conv2d result precision must match input/kernel precision {}, got {}",
-                        input_prec.name(),
-                        out_prec.name()
-                    ),
-                    vec!["Insert explicit cast".to_string()],
-                ),
-            );
-        }
-        if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
-            return report(errors, te.into());
-        }
-        if let Err(te) = unify_dim(&out_dims[1], &kernel_dims[0], subst) {
-            return report(errors, te.into());
-        }
+    let rank = input_dims.len() - 2;
+    let spatial = compute_concrete_conv_spatial(arg_exprs, input_dims, kernel_dims, subst);
+    let mut output_dims = vec![
+        subst.apply_dim(&input_dims[0]),
+        subst.apply_dim(&kernel_dims[0]),
+    ];
+    output_dims.extend(match spatial {
+        Some(dims) => dims.into_iter().map(Dim::Lit).collect::<Vec<_>>(),
+        None => (0..rank).map(|_| Dim::Var(vg.fresh_dvar())).collect(),
+    });
+    let output = Type::Tensor(output_dims, input_prec.clone());
+    if let Err(error) = unify(result_ty, &output, subst) {
+        return report(errors, error.into());
     }
-
-    subst.apply(&output_template)
+    subst.apply(&output)
 }
 
 pub(super) fn check_matmul_signature(
@@ -402,7 +378,7 @@ pub(super) fn check_matmul_signature(
     }
     // RT-2 fixup B6: per spec/04-type-system.md §5.7.2, the active
     // matmul signature does not admit integer operand precisions
-    // (int8, int16, int32, int64). Reject upfront at the call site
+    // (i8, i16, i32, i64). Reject upfront at the call site
     // with a §5.7.2-citing diagnostic so users see the spec rule
     // here, not as a downstream IR-verify or codegen failure. The
     // verify-layer F1 guard remains as defense in depth.
@@ -466,9 +442,9 @@ pub(super) fn check_matmul_signature(
             (Some(lhs_dim), Some(rhs_dim)) => {
                 let lhs_applied = subst.apply_dim(lhs_dim);
                 let rhs_applied = subst.apply_dim(rhs_dim);
-                if lhs_applied == Dim::Lit(1) {
+                if subst.observe_dim(lhs_dim).known_extent() == Some(1) {
                     rhs_applied
-                } else if rhs_applied == Dim::Lit(1) {
+                } else if subst.observe_dim(rhs_dim).known_extent() == Some(1) {
                     lhs_applied
                 } else {
                     if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
@@ -538,7 +514,7 @@ pub(super) fn check_reduction_signature(
     // Resolve which axis (or axes) the reduction removes. Two modes:
     //
     //  * Positional (legacy): a single compile-time-constant integer axis on a
-    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, int32))`).
+    //    *concrete-rank* operand (`sum(x, 0)` / `sum(x, cast(-1, i32))`).
     //    `normalize_static_axis` handles negative indexing and bounds (issue
     //    #216), consistent with gather/scatter and IR lowering's
     //    `normalize_axis`.
@@ -599,7 +575,7 @@ pub(super) fn check_reduction_signature(
             && axis_exprs.iter().any(|axis| {
                 symbolic_dim_ref_name(axis).is_some_and(|axis_name| {
                     dims.iter()
-                        .any(|dim| matches!(dim, Dim::Name(name) if name == axis_name))
+                        .any(|dim| matches!(subst.semantic_dim(dim), Dim::Name(name) if name == axis_name))
                 })
             });
         if selects_concrete_named_axis {
@@ -607,7 +583,7 @@ pub(super) fn check_reduction_signature(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    "count on a concrete-rank operand requires one or more positional int32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    "count on a concrete-rank operand requires one or more positional i32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
                     vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
                 ),
             );
@@ -631,7 +607,7 @@ pub(super) fn check_reduction_signature(
                     ),
                 );
             }
-            // Issue #259: a non-literal, non-name axis (a runtime `int32`
+            // Issue #259: a non-literal, non-name axis (a runtime `i32`
             // binding) cannot determine which dimension is removed; emit the
             // targeted compile-time-constant diagnostic rather than leaking an
             // unresolved output type downstream.
@@ -655,7 +631,7 @@ pub(super) fn check_reduction_signature(
             let hits: Vec<usize> = dims
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == axis_name))
+                .filter(|(_, d)| matches!(subst.semantic_dim(d), Dim::Name(n) if n == axis_name))
                 .map(|(i, _)| i)
                 .collect();
             match hits.as_slice() {
@@ -694,7 +670,7 @@ pub(super) fn check_reduction_signature(
                 [] => {
                     // Concrete operand: `axis_name` is neither a literal nor a
                     // named axis of the operand. Two causes share this arm — a
-                    // runtime `int32` binding (issue #259) and a mistyped/absent
+                    // runtime `i32` binding (issue #259) and a mistyped/absent
                     // axis name — so the message stays neutral between them
                     // rather than asserting "runtime value".
                     return report(
@@ -704,10 +680,10 @@ pub(super) fn check_reduction_signature(
                             format!(
                                 "{name} axis `{axis_name}` is neither a compile-time constant nor a \
                              named axis of the operand: a reduction axis must be a literal or \
-                             `cast(N, int32)` constant, or the name of an existing axis"
+                             `cast(N, i32)` constant, or the name of an existing axis"
                             ),
                             vec![format!(
-                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, int32)`, or \
+                                "Pass a literal axis (e.g. `{name}(x, 0)`) or `cast(N, i32)`, or \
                              name an existing axis of the operand (e.g. `{name}(x, seq)`)."
                             )],
                         ),
@@ -741,8 +717,8 @@ pub(super) fn check_reduction_signature(
     }
 
     // RT-2 fixup B1: per spec/04-type-system.md §5.7.1, the result
-    // precision of `reduce_sum` follows the §5.7.1 table — int8/int16
-    // operand → int32 result, int32/int64/f32/f64 → operand precision,
+    // precision of `reduce_sum` follows the §5.7.1 table — i8/i16
+    // operand → i32 result, i32/i64/f32/f64 → operand precision,
     // bf16/f16 → operand precision (the f32 accumulator is consumed
     // inside the op and downcast on output). For `max_reduce`,
     // `min_reduce`, `prod_reduce`, and `mean` the result precision is
@@ -750,13 +726,13 @@ pub(super) fn check_reduction_signature(
     //
     // Issue #230: `argmax_reduce` and `argmin_reduce` are index-returning
     // reductions — they produce element indices, not reduced operand
-    // values. Their result precision is canonically `int64`, regardless
+    // values. Their result precision is canonically `i64`, regardless
     // of the input dtype. The std-package signatures in
     // `packages/chelis-std/src/tensor/reduce.ch` pin this (`tensor[b,
-    // int64]`); the type checker was returning the input precision and
+    // i64]`); the type checker was returning the input precision and
     // diverging from std. (The host-runtime/backend still stores
     // integer-valued floats internally per the Phase 3j-pre Batch 1
-    // caveat documented on `RiscOp::Argmax`; the int64 label is the
+    // caveat documented on `RiscOp::Argmax`; the i64 label is the
     // declarative output type.)
     //
     // WS-A5: the §5.7.1 widening rule is defined over a known operand
@@ -790,7 +766,7 @@ pub(super) fn check_reduction_signature(
     };
     // RT-2 fixup B1: emit a §5.7.1-citing diagnostic at the call site
     // before falling back to the generic unify error, so users binding
-    // `sum(int8 tensor)` to `tensor[int8]` see the spec-row hint
+    // `sum(i8 tensor)` to `tensor[i8]` see the spec-row hint
     // instead of the opaque "doesn't match declared signature" trail.
     if name == "sum" && result_prec != prec {
         let resolved_result = subst.apply(result_ty);
@@ -804,7 +780,7 @@ pub(super) fn check_reduction_signature(
                     format!(
                         "sum on operand precision `{}` produces result precision `{}` per \
                      spec/04-type-system.md §5.7.1 (the §5.7.1 result-precision table \
-                     widens narrow integer operands to int32 to prevent silent overflow); \
+                     widens narrow integer operands to i32 to prevent silent overflow); \
                      declared result precision `{}` is incompatible. Use `tensor[{}]` or \
                      omit the result type to accept the spec default.",
                         prec.render(),
@@ -842,10 +818,18 @@ pub(super) fn check_reduction_signature(
 /// Everything else, a named dim or an unconstrained extent, is admitted here
 /// and carries the claim into the IR, where the §4.7 runtime extent guard
 /// compares it against the value observed.
-fn unit_extent_claim_error(builtin: &str, input_dims: &[Dim], axis: usize) -> Option<CheckError> {
-    match input_dims.get(axis) {
-        Some(Dim::Lit(1)) => None,
-        Some(Dim::Lit(extent)) => Some(CheckError::new(
+fn unit_extent_claim_error(
+    builtin: &str,
+    input_dims: &[Dim],
+    axis: usize,
+    subst: &Subst,
+) -> Option<CheckError> {
+    match input_dims
+        .get(axis)
+        .and_then(|d| subst.observe_dim(d).literal_extent())
+    {
+        Some(1) => None,
+        Some(extent) => Some(CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "{builtin} requires the operand's extent at axis {axis} to be 1, got \
@@ -920,10 +904,10 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} takes a positional int32 axis, not the dimension \
+                        "{builtin} takes a positional i32 axis, not the dimension \
                          name `{new_name}`: the named-axis form adds an axis and \
                          belongs to `insert`. Write `insert(x, {new_name}, size)` to \
-                         add a named axis, or `{builtin}(x, <int32 axis>, size)` to \
+                         add a named axis, or `{builtin}(x, <i32 axis>, size)` to \
                          broadcast an existing size-1 axis \
                          (spec/05-risc-primitives.md \u{00a7}2.4)"
                     ),
@@ -1005,9 +989,9 @@ pub(super) fn check_expand_signature(
         );
     }
 
-    // Uses `extract_int_for_dim` so a `cast(N, int32)`-wrapped literal axis
+    // Uses `extract_int_for_dim` so a `cast(N, i32)`-wrapped literal axis
     // reaches the non-negative-axis check. Extent folding has its own exact
-    // int64 path below.
+    // i64 path below.
     let axis = match arg_exprs.get(1).and_then(extract_int_for_dim) {
         Some(axis) if axis >= 0 => axis as usize,
         Some(axis) => {
@@ -1035,13 +1019,13 @@ pub(super) fn check_expand_signature(
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
                     format!(
-                        "{builtin} axis must be a compile-time constant of type int32 for the output \
+                        "{builtin} axis must be a compile-time constant of type i32 for the output \
                      shape to be inferable, got {}",
                         describe_axis_arg(arg_exprs.get(1)),
                     ),
                     vec![format!(
                         "Pass a literal axis (e.g. `{builtin}(x, 0, n)`) or a \
-                             `cast(N, int32)` literal. The axis selects where the new \
+                             `cast(N, i32)` literal. The axis selects where the new \
                              dimension is inserted, so it must be known at compile time."
                     )],
                 ),
@@ -1108,7 +1092,7 @@ pub(super) fn check_expand_signature(
         // surface spelling. A size whose value provably folds to a constant
         // (`Static`) or derives from an in-scope tensor's `shape(t, axis)`
         // read / dimension name (`ShapeSourced`) is materializable; a truly
-        // sourceless runtime scalar (`Sourceless` — a bare `int32`/`int64`
+        // sourceless runtime scalar (`Sourceless` — a bare `i32`/`i64`
         // parameter, a `cast`/arithmetic over one, or a `let` bound to such)
         // has no backend representation and is rejected here so check, build,
         // and eval all agree (a check-clean program must build). The walk
@@ -1129,7 +1113,10 @@ pub(super) fn check_expand_signature(
             // and `let`-bound sizes) defers the output dim slot to
             // the declared return-type / call-context via unification.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-                Some(name) if env.lookup(name).is_none() || env.tensor_carries_dim(name) => {
+                Some(name)
+                    if env.lookup(name).is_none()
+                        || env.tensor_carries_dim_with_subst(name, subst) =>
+                {
                     Dim::Name(name.to_string())
                 }
                 _ => Dim::Wildcard,
@@ -1192,7 +1179,7 @@ pub(super) fn check_expand_signature(
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else {
-                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
                     return report(errors, error);
                 }
                 let mut expected = input_dims.clone();
@@ -1210,7 +1197,7 @@ pub(super) fn check_expand_signature(
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else {
-                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
                     return report(errors, error);
                 }
                 let mut expected = input_dims.clone();
@@ -1235,6 +1222,59 @@ pub(super) fn check_expand_signature(
         return report(errors, te.into());
     }
     subst.apply(&canonical)
+}
+
+/// [05-OP-71]: `split_keys(k, n)`'s result extent follows
+/// spec/04-type-system.md §4.7.2's rule for `expand` and `insert`. A count
+/// that folds to a literal gives that literal extent and a negative one is a
+/// type error; any other count gives a fresh runtime extent `*`, which the
+/// lowered graph checks for equality wherever a declared or shared extent
+/// meets it. The scheme's free result dimension is never the answer: it
+/// would take whatever extent the context offers, whatever the count.
+pub(super) fn check_split_keys_signature(
+    arg_exprs: &[deep::Expr],
+    result_ty: &Type,
+    env: &Env,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let rows = match arg_exprs
+        .get(1)
+        .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
+    {
+        Some(count) if count >= 0 => Dim::Lit(count),
+        Some(count) => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!("split_keys requires a non-negative count, got {count} ([05-OP-71])"),
+                    vec![],
+                ),
+            );
+        }
+        None => Dim::Wildcard,
+    };
+    let mut dims = match subst.apply(result_ty) {
+        Type::Tensor(dims, _) => dims,
+        _ => vec![Dim::Wildcard],
+    };
+    let Some(last) = dims.last_mut() else {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "split_keys must append a count axis".to_string(),
+                vec![],
+            ),
+        );
+    };
+    *last = rows;
+    let canonical = Type::Tensor(dims, TensorPrec::Concrete(Prim::Key));
+    if let Err(error) = unify(result_ty, &canonical, subst) {
+        return report(errors, error.into());
+    }
+    canonical
 }
 
 /// The named-axis expand arm (chelis#339, spec/04-type-system.md §4.5.3):
@@ -1262,7 +1302,7 @@ pub(super) fn check_named_expand_signature(
     // anchor location) ambiguous.
     if input_dims
         .iter()
-        .any(|d| matches!(d, Dim::Name(n) if n == new_name))
+        .any(|d| matches!(subst.semantic_dim(d), Dim::Name(n) if n == new_name))
     {
         return report(
             errors,
@@ -1280,8 +1320,8 @@ pub(super) fn check_named_expand_signature(
     }
 
     // The named-insert size must be a non-negative compile-time literal (an
-    // `Ni64` literal or `cast(N, int64)`; extent-domain under [05-DIM-1]).
-    // A symbolic-dim or runtime int64 size cannot
+    // `Ni64` literal or `cast(N, i64)`; extent-domain under [05-DIM-1]).
+    // A symbolic-dim or runtime i64 size cannot
     // be stamped onto the inserted named dim at lowering: the eval lane has
     // no extent to stage and the C backend would emit an undeclared dim
     // symbol (silent shape-0 output) — both verified failure modes, so the
@@ -1297,7 +1337,7 @@ pub(super) fn check_named_expand_signature(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "{builtin}: the named-axis insert form requires a compile-time literal size \
-                 (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
+                 (an Ni64 literal or `cast(N, i64)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
                     describe_axis_arg(arg_exprs.get(2)),
@@ -1338,7 +1378,7 @@ pub(super) fn check_named_expand_signature(
             let hits: Vec<usize> = input_dims
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == anchor))
+                .filter(|(_, d)| matches!(subst.semantic_dim(d), Dim::Name(n) if n == anchor))
                 .map(|(i, _)| i)
                 .collect();
             match hits.as_slice() {
@@ -1410,9 +1450,12 @@ pub(super) fn check_named_expand_signature(
 pub(super) enum ToTensorPeel<'a> {
     /// Successfully peeled `rank` `List` layers down to a `Prim`.
     Ok { rank: usize, precision: Prim },
-    /// Some inner type is still a `Var(_)` or `Error`; the typer should
-    /// defer to the explicit result type rather than emit a diagnostic.
-    Pending,
+    /// The type `rank` `List` layers in is still a variable. The caller
+    /// decides whether that variable's restriction already makes it a scalar
+    /// leaf dtype ([05-OP-57]); otherwise the leaf is still pending.
+    Pending { rank: usize, element: TypeVar },
+    /// Some inner type is an `Error` that already owns its diagnostic.
+    Poisoned,
     /// Reached a non-`List`, non-prim leaf — the innermost element is
     /// not numeric or bool, so emit a typed diagnostic.
     BadInner(&'a Type),
@@ -1435,9 +1478,13 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
                     precision: *precision,
                 };
             }
-            Type::Var(_) | Type::Error(_) => {
-                return ToTensorPeel::Pending;
+            Type::Var(element) => {
+                return ToTensorPeel::Pending {
+                    rank,
+                    element: *element,
+                };
             }
+            Type::Error(_) => return ToTensorPeel::Poisoned,
             other => {
                 if rank == 0 {
                     return ToTensorPeel::NotList;
@@ -1451,13 +1498,13 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
 /// Extract an int literal from a Deep expr, recognizing the canonical
 /// literal forms (`Atom::Int`, `(lit {type: ...} N)`) and the `neg` app
 /// wrapper. Float-in-cast intentionally is not recognized: the spec
-/// says integer literals default to `int32` and require explicit
+/// says integer literals default to `i32` and require explicit
 /// notation for other widths, so a float wrapped in a cast to an int
 /// dtype is a precision-narrowing operation that the runtime should
 /// validate -- not a literal int (round 3 LOW-2 design note).
 ///
 /// The `neg` arm recurses through `extract_int_for_dim` so that
-/// `neg(cast(N, int32))` peels both wrappers and resolves to `-N` at
+/// `neg(cast(N, i32))` peels both wrappers and resolves to `-N` at
 /// infer time (red team round 3 finding R3-MED1). Mutual recursion
 /// with `extract_int_for_dim` is bounded: each call strictly reduces
 /// the expression depth (peels one wrapper layer).

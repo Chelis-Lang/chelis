@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn ignores_list_drop_with_two_arguments() {
-        let violations = run("def f(ys: list[int64]) -> list[int64] = drop(ys, cast(1, int64))\n");
+        let violations = run("def f(ys: list[i64]) -> list[i64] = skip(ys, cast(1, i64))\n");
         assert!(violations.is_empty());
     }
 

@@ -15,16 +15,16 @@ use common::{build_and_run, write_file};
 
 const BLOCK_LOCAL_BUILTIN: &str = "\
 def apply3(x: f64) -> f64 = {
-  round_to = fn (v: f64, p: int64) -> mul(v, 1000.0f64)
-  round_to(x, cast(0, int64))
+  round_to = fn (v: f64, p: i64) -> mul(v, 1000.0f64)
+  round_to(x, cast(0, i64))
 }
 out = apply3(1.55f64)
 ";
 
 const PARAM_BUILTIN: &str = "\
-def apply(round_to: (f64 -> int64 -> f64), x: f64) -> f64 =
-  round_to(x, cast(0, int64))
-def scale(v: f64, p: int64) -> f64 = mul(v, 1000.0f64)
+def apply(round_to: (f64 -> i64 -> f64), x: f64) -> f64 =
+  round_to(x, cast(0, i64))
+def scale(v: f64, p: i64) -> f64 = mul(v, 1000.0f64)
 out = apply(scale, 1.55f64)
 ";
 
@@ -38,8 +38,8 @@ out = apply_pipe(-2.0f64)
 
 const NAMED_AXIS_SHAPED_LOCAL: &str = "\
 def apply_sum(x: f64) -> f64 = {
-  axis = cast(2, int32)
-  sum = fn (value: f64, offset: int32) -> add(value, cast(offset, f64))
+  axis = cast(2, i32)
+  sum = fn (value: f64, offset: i32) -> add(value, cast(offset, f64))
   sum(x, axis)
 }
 out = apply_sum(3.0f64)
@@ -47,8 +47,8 @@ out = apply_sum(3.0f64)
 
 const SHAPE_SENSITIVE_LOCAL: &str = "\
 def call_local(x: f64) -> f64 = {
-  conv2d = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
-  conv2d(x, 2.0f64, 3.0f64, 4.0f64)
+  conv = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
+  conv(x, 2.0f64, 3.0f64, 4.0f64)
 }
 out = call_local(1.0f64)
 ";
@@ -158,11 +158,18 @@ def add_hundred(x: f64) -> f64 = add(x, 100.0f64)
 out = apply_n(add_hundred, 1.0f64)
 ";
 
-const INVALID_BUILTIN_CONV2D: &str = "\
+const INVALID_BUILTIN_CONV2D_STRIDE_DTYPE: &str = "\
 def bad_conv(
   x: tensor[1, 1, 3, 3, f32],
   k: tensor[1, 1, 1, 1, f32]
-) -> tensor[1, 1, 3, 3, f32] = conv2d(x, k, 1.0f64, 0)
+) -> tensor[1, 1, 3, 3, f32] = conv(x, k, [1.0f64, 1.0f64], [(0i64, 0i64), (0i64, 0i64)])
+";
+
+const INVALID_BUILTIN_CONV2D_ZERO_STRIDE: &str = "\
+def bad_conv(
+  x: tensor[1, 1, 3, 3, f32],
+  k: tensor[1, 1, 1, 1, f32]
+) -> tensor[1, 1, 3, 3, f32] = conv(x, k, [0i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 ";
 
 const PRELUDE_COLLISION: &str = "\
@@ -381,19 +388,48 @@ fn applied_uppercase_head_without_a_declared_constructor_rejects() {
 #[test]
 fn real_shape_sensitive_builtin_keeps_its_validation() {
     let dir = tempdir().expect("tempdir");
-    let source = dir.path().join("invalid_builtin_conv2d.ch");
-    write_file(&source, INVALID_BUILTIN_CONV2D);
+    let source = dir.path().join("invalid_builtin_conv.ch");
+    write_file(&source, INVALID_BUILTIN_CONV2D_ZERO_STRIDE);
 
     let output = chelis()
         .args(["check", source.to_str().unwrap()])
         .output()
         .expect("run check");
     assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
     assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("IR builtin `conv2d` requires a literal integer stride"),
-        "stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
+        report["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["kind"] == "DimensionMismatch"
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("conv requires a positive stride, got 0 (spatial axis 0)")
+                    })
+            })
+        }),
+        "check report: {report}"
+    );
+}
+
+#[test]
+fn real_shape_sensitive_builtin_keeps_its_stride_dtype() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("invalid_builtin_conv_stride_dtype.ch");
+    write_file(&source, INVALID_BUILTIN_CONV2D_STRIDE_DTYPE);
+
+    let output = chelis()
+        .args(["check", source.to_str().unwrap()])
+        .output()
+        .expect("run check");
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).expect("check JSON");
+    assert!(
+        report["errors"].as_array().is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error["kind"] == "PrecisionMismatch"
+                    && error["message"] == "precision mismatch: expected i64, got f64"
+            })
+        }),
+        "check report: {report}"
     );
 }
 
@@ -407,7 +443,21 @@ fn ordinary_def_cannot_collide_with_standard_prelude_macro() {
         .args(["check", source.to_str().unwrap()])
         .output()
         .expect("run check");
-    assert_eq!(output.status.code(), Some(1));
+    // chelis#886 [04-FIT-12]: this failure is now transported by the check
+    // report rather than only by a display string, so it exits 2 like every
+    // other non-empty errors array instead of 1. `spec/04` § Gating pins
+    // only "`0` iff empty, non-zero otherwise", so both values conform; 2
+    // converges this path on the rest of `chelis check`. The stderr message
+    // below is deliberately unchanged -- the report is additional to the
+    // terminal line, not a replacement for it.
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("the collision must reach the report: {e}"));
+    assert_eq!(
+        report["errors"].as_array().map(Vec::len),
+        Some(1),
+        "the collision is transported as one diagnostic: {report}"
+    );
     let message = String::from_utf8_lossy(&output.stderr);
     assert!(
         message.contains("`def cross_entropy`")

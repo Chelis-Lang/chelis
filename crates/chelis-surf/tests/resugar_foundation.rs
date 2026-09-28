@@ -6,7 +6,7 @@
 //! `cast` and `par` nodes.  Resugaring must preserve those node classes and
 //! malformed Deep must fail rather than turn into a placeholder program.
 
-use chelis_deep::ast::{Atom as DeepAtom, MetaMap, UnknownFormData};
+use chelis_deep::ast::{Atom as DeepAtom, Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str as parse_deep;
 use chelis_deep::printer::print_canonical;
 use chelis_deep::{DeepTag, Expr as DeepExpr, Span};
@@ -25,7 +25,7 @@ fn parse_one_deep(source: &str) -> DeepExpr {
 fn redesugar_expression(source: &str) -> String {
     let decls = parse_surf(&format!("def result() = {source}"))
         .unwrap_or_else(|error| panic!("resugared Surf did not parse: {error}\n{source}"));
-    print_canonical(&desugar_program(&decls))
+    print_canonical(&desugar_program(&decls).expect("Surf fixture must desugar"))
 }
 
 #[test]
@@ -165,14 +165,14 @@ fn incompatible_literal_type_metadata_is_rejected() {
 
 #[test]
 fn int64_minimum_resugars_to_parseable_typed_surf() {
-    let deep = parse_one_deep("(lit {type: (t-prim {} int64)} -9223372036854775808)");
+    let deep = parse_one_deep("(lit {type: (t-prim {} i64)} -9223372036854775808)");
 
     let surf = format_expression(&resugar_expression(&deep).expect("i64 minimum resugars"));
 
     assert_eq!(surf, "-9223372036854775808i64");
     let redesugared = redesugar_expression(&surf);
     assert!(
-        redesugared.contains("type: (t-prim {} int64)"),
+        redesugared.contains("type: (t-prim {} i64)"),
         "the typed minimum must survive the round trip:\n{redesugared}"
     );
 }
@@ -216,7 +216,7 @@ fn par_resugars_through_the_canonical_surf_ast_printer() {
 fn public_decompiler_uses_the_shared_ast_spelling_for_cast_and_par() {
     let source = "def result() = par { cast(1.0, f32); cast(2.0, f32) }";
     let decls = parse_surf(source).expect("canonical Surf fixture parses");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
 
     let emitted = decompile_program(&deep);
 
@@ -254,7 +254,7 @@ fn public_decompiler_propagates_malformed_foundation_nodes() {
     let span = Span::new(0, 0);
     let malformed = DeepExpr::UnknownForm(Box::new(UnknownFormData {
         head: "future-form".to_string(),
-        meta: MetaMap::default(),
+        meta: Metadata::default(),
         children: vec![DeepExpr::Atom(DeepAtom::Name("value".to_string()), span)],
         span,
     }));
@@ -293,7 +293,7 @@ fn constructed_non_finite_deep_float_fails_loudly() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         let deep = DeepExpr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![DeepExpr::Atom(DeepAtom::Float(value), span)],
             span,
         );
@@ -337,18 +337,48 @@ fn structural_bare_lists_fail_closed_in_expression_position() {
 
 #[test]
 fn non_finite_deep_literals_are_explicitly_unrepresentable_in_surf() {
+    // Textual overflow is rejected at ingress; exercise the resugar boundary
+    // with programmatic Deep, including a literal in pattern position.
+    let span = Span::new(0, 0);
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let pattern = DeepExpr::node(
+            DeepTag::PatLit,
+            Metadata::default(),
+            vec![DeepExpr::Atom(DeepAtom::Float(value), span)],
+            span,
+        );
+        let arm = DeepExpr::node(
+            DeepTag::Arm,
+            Metadata::default(),
+            vec![
+                pattern,
+                DeepExpr::BareList(vec![], span),
+                parse_one_deep("(lit {} 1)"),
+            ],
+            span,
+        );
+        let deep = DeepExpr::node(
+            DeepTag::Match,
+            Metadata::default(),
+            vec![parse_one_deep("(var {} x)"), arm],
+            span,
+        );
+        let error = resugar_expression(&deep)
+            .expect_err("non-finite Deep patterns have no canonical Surf literal");
+        assert!(error.to_string().contains("non-finite float"), "{error}");
+    }
+}
+
+#[test]
+fn overflowing_deep_text_is_rejected_before_resugaring() {
     for source in [
         "(lit {} 1e400)",
         "(match {} (var {} x) (arm {} (pat-lit {} 1e400) () (lit {} 1)))",
     ] {
-        let deep = parse_one_deep(source);
-
-        let error = resugar_expression(&deep)
-            .expect_err("non-finite Deep floats have no canonical Surf literal");
-
+        let error = parse_deep(source).expect_err("overflowing source number must reject");
         assert!(
-            error.to_string().contains("non-finite float"),
-            "diagnostic must identify the unrepresentable value for {source}: {error}"
+            error.to_string().contains("invalid number") && error.to_string().contains("1e400"),
+            "diagnostic must identify source-number overflow: {error}"
         );
     }
 }

@@ -1,4 +1,4 @@
-//! Chelis-Lang/chelis#813 -- a one-argument `conv2d` call emitted its
+//! Chelis-Lang/chelis#813 -- a one-argument `conv` call emitted its
 //! inference-layer arity diagnostic and then panicked in the symbolic
 //! validator while unconditionally indexing the missing kernel argument.
 //!
@@ -18,27 +18,35 @@ use chelis_types::{BUILTIN_NAMES, check_ir_fitness};
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("Surf fixture must expand")
     .into_exprs()
 }
 
-fn conv2d_program(arity: usize) -> String {
-    let args = ["x", "k", "1", "0", "0", "0"][..arity].join(", ");
+fn conv_program(arity: usize) -> String {
+    let args = [
+        "x",
+        "k",
+        "[1i64,1i64]",
+        "[(0i64,0i64),(0i64,0i64)]",
+        "0",
+        "0",
+    ][..arity]
+        .join(", ");
     format!(
         "def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) \
-         -> tensor[1, 8, 6, 6, f32] = conv2d({args})\n"
+         -> tensor[1, 8, 6, 6, f32] = conv({args})\n"
     )
 }
 
 #[test]
-fn conv2d_arity_zero_through_six_is_total_and_exact() {
+fn conv_arity_zero_through_six_is_total_and_exact() {
     for arity in 0..=6 {
-        let deep = surf_to_deep(&conv2d_program(arity));
+        let deep = surf_to_deep(&conv_program(arity));
         let outcome = catch_unwind(AssertUnwindSafe(|| check_ir_fitness(&deep)));
-        let report = outcome.unwrap_or_else(|_| panic!("conv2d arity {arity} must not panic"));
+        let report = outcome.unwrap_or_else(|_| panic!("conv arity {arity} must not panic"));
 
         if arity == 4 {
             assert_eq!(report.score, 1.0, "canonical arity must score perfectly");
@@ -52,17 +60,17 @@ fn conv2d_arity_zero_through_six_is_total_and_exact() {
 
         assert!(
             report.score < 1.0,
-            "conv2d arity {arity} must score below perfect"
+            "conv arity {arity} must score below perfect"
         );
         assert_eq!(
             report.errors.len(),
             1,
-            "conv2d arity {arity} must produce one owning diagnostic without spray: {:?}",
+            "conv arity {arity} must produce one owning diagnostic without spray: {:?}",
             report.errors
         );
         assert!(
             matches!(report.errors[0].kind, CheckErrorKind::ArityMismatch),
-            "conv2d arity {arity} must report ArityMismatch, got {:?}",
+            "conv arity {arity} must report ArityMismatch, got {:?}",
             report.errors[0]
         );
     }

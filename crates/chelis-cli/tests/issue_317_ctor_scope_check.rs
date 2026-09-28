@@ -53,7 +53,7 @@ fn reef_toml() -> String {
 const ADT: &str = "module Pkg.Adt\n\
      export (Mode, classify)\n\
      type Mode = | Alpha | Beta | Gamma\n\
-     def classify(m: Mode) -> int32 = match m with { | Alpha => 0 | Beta => 1 | Gamma => 2 }\n";
+     def classify(m: Mode) -> i32 = match m with { | Alpha => 0 | Beta => 1 | Gamma => 2 }\n";
 
 /// Run `chelis check <dir>` with the style gate disabled (the fixtures
 /// synthesize ad-hoc Surf to exercise resolution, not formatting) and return
@@ -105,14 +105,14 @@ fn type_only_import_then_construct_is_unknown_constructor() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt (Mode, classify)\n\
-         def use_alpha() -> int32 = classify(Alpha)\n",
+         def use_alpha() -> i32 = classify(Alpha)\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then construct must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -135,14 +135,14 @@ fn type_only_import_then_match_pattern_is_unknown_constructor() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt (Mode, classify)\n\
-         def relabel(m: Mode) -> int32 = match m with { | Alpha => 10 | Beta => 11 | Gamma => 12 }\n",
+         def relabel(m: Mode) -> i32 = match m with { | Alpha => 10 | Beta => 11 | Gamma => 12 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then match must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -168,15 +168,15 @@ fn import_by_name_construct_and_match_checks_clean() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt (Mode, Alpha, Beta, Gamma, classify)\n\
-         def use_alpha() -> int32 = classify(Alpha)\n\
-         def relabel(m: Mode) -> int32 = match m with { | Alpha => 10 | Beta => 11 | Gamma => 12 }\n",
+         def use_alpha() -> i32 = classify(Alpha)\n\
+         def relabel(m: Mode) -> i32 = match m with { | Alpha => 10 | Beta => 11 | Gamma => 12 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "imported-by-name constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -199,14 +199,14 @@ fn local_constructor_construct_and_match_checks_clean() {
         "module Pkg.Local\n\
          type Color = | Red | Green | Blue\n\
          def first() -> Color = Red\n\
-         def rank(c: Color) -> int32 = match c with { | Red => 0 | Green => 1 | Blue => 2 }\n",
+         def rank(c: Color) -> i32 = match c with { | Red => 0 | Green => 1 | Blue => 2 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "local.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "local constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -229,14 +229,14 @@ fn module_qualified_constructor_checks_clean() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt\n\
-         def use_alpha() -> int32 = Pkg.Adt.classify(Pkg.Adt.Alpha)\n",
+         def use_alpha() -> i32 = Pkg.Adt.classify(Pkg.Adt.Alpha)\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "module-qualified constructor must resolve and check clean: {combo}"
     );
     assert!(
@@ -257,16 +257,16 @@ fn builtin_option_constructors_check_clean() {
     write_file(
         &root.join("src/opt.ch"),
         "module Pkg.Opt\n\
-         def wrap() -> Option[int32] = Some(7)\n\
-         def empty() -> Option[int32] = None\n\
-         def unwrap_or(o: Option[int32]) -> int32 = match o with { | Some(n) => n | None => 0 }\n",
+         def wrap() -> Option[i32] = Some(7)\n\
+         def empty() -> Option[i32] = None\n\
+         def unwrap_or(o: Option[i32]) -> i32 = match o with { | Some(n) => n | None => 0 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "opt.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "builtin Option constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -286,15 +286,15 @@ fn builtin_list_constructors_check_clean() {
     write_file(
         &root.join("src/lst.ch"),
         "module Pkg.Lst\n\
-         def one() -> List[i64] = Cons(cast(1, int64), Nil)\n\
-         def head_or(xs: List[int32]) -> int32 = match xs with { | Cons(h, _) => h | Nil => 0 }\n",
+         def one() -> List[i64] = Cons(cast(1, i64), Nil)\n\
+         def head_or(xs: List[i32]) -> i32 = match xs with { | Cons(h, _) => h | Nil => 0 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "lst.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "builtin List Cons/Nil constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -314,8 +314,8 @@ fn builtin_list_constructors_check_clean() {
 // scope, so it is not the bug surface.)
 const REC_ADT: &str = "module Pkg.Rec\n\
      export (Adam, use)\n\
-     type Adam = | AdamState { rate: int64 }\n\
-     def use(c: Adam) -> int64 = match c with { | AdamState { rate } => rate }\n";
+     type Adam = | AdamState { rate: i64 }\n\
+     def use(c: Adam) -> i64 = match c with { | AdamState { rate } => rate }\n";
 
 #[test]
 fn type_only_import_then_record_construct_is_unknown_constructor() {
@@ -332,14 +332,14 @@ fn type_only_import_then_record_construct_is_unknown_constructor() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Rec (Adam)\n\
-         def make() -> Adam = AdamState { rate: cast(7, int64) }\n",
+         def make() -> Adam = AdamState { rate: cast(7, i64) }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then record construct must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -363,14 +363,14 @@ fn import_record_constructor_by_name_checks_clean() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Rec (Adam, AdamState, use)\n\
-         def make() -> int64 = use(AdamState { rate: cast(7, int64) })\n",
+         def make() -> i64 = use(AdamState { rate: cast(7, i64) })\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "imported-by-name record constructor must resolve and check clean: {combo}"
     );
     assert!(
@@ -412,14 +412,14 @@ fn ambiguous_foreign_constructor_pattern_under_wildcard_is_rejected() {
         "module Pkg.Consumer\n\
          import Pkg.One\n\
          import Pkg.Two\n\
-         def label(n: int32) -> int32 = match n with { | Dup => 1 | _ => 0 }\n",
+         def label(n: i32) -> i32 = match n with { | Dup => 1 | _ => 0 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "ambiguous foreign constructor pattern under a wildcard must NOT score perfect: {combo}"
     );
     assert!(
@@ -445,7 +445,7 @@ fn module_qualified_constructor_pattern_checks_clean() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt (Mode)\n\
-         def relabel(m: Mode) -> int32 = match m with { \
+         def relabel(m: Mode) -> i32 = match m with { \
            | Pkg.Adt.Alpha => 10 | Pkg.Adt.Beta => 11 | Pkg.Adt.Gamma => 12 }\n",
     );
 
@@ -453,7 +453,7 @@ fn module_qualified_constructor_pattern_checks_clean() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "module-qualified constructor pattern must resolve and check clean: {combo}"
     );
     assert!(
@@ -476,14 +476,14 @@ fn nested_out_of_scope_constructor_pattern_is_unknown_constructor() {
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
          import Pkg.Adt (Mode)\n\
-         def peek(o: Option[Mode]) -> int32 = match o with { | Some(Alpha) => 1 | _ => 0 }\n",
+         def peek(o: Option[Mode]) -> i32 = match o with { | Some(Alpha) => 1 | _ => 0 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "nested out-of-scope constructor pattern must NOT score perfect: {combo}"
     );
     assert!(

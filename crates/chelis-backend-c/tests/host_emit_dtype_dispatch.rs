@@ -1,32 +1,10 @@
-//! Host-emit elementwise code-generation dtype-dispatch pin.
+//! Host-emit dtype dispatch and exact scalar transport.
 //!
-//! W2 PR 3 of the 0.7.8 compiler cleanup workstream
-//! (`CRuntime-F32Coupling`). Locks the invariant that the six
-//! `host_emit.rs` code-generation sites listed below emit C code
-//! that accesses the opaque tensor's guarded/read view through dtype-typed
-//! pointers (e.g. `((double*)view.data)[i]`) rather than a public descriptor
-//! field. The legacy untyped form was a 4-byte float load
-//! regardless of dtype against the public `float *data` declaration
-//! in `crates/chelis-runtime/include/chelis_runtime.h`, mirroring
-//! the bug class closed by PR #64 (CastMemcpy), PR #67
-//! (ReshapeMemcpy), and PR #72 (PrintTensorF64).
-//!
-//! Migrated sites (line numbers in `crates/chelis-backend-c/src/host_emit.rs`):
-//!   * L1587 elementwise binary operator (`add`, `sub`, `mul`, `div`).
-//!   * L1623 elementwise binary func (direct extrema selectors).
-//!   * L1649 elementwise unary operator (`neg`, `not`).
-//!   * L1675 elementwise unary func (`expf`, `logf`, `sinf`, ...).
-//!   * L1749/L1753/L1757 scalar-to-tensor coercion arms for int64,
-//!     bool, and f32 helper-call inputs respectively.
-//!
-//! Each fixture builds a tiny `HostProgram` whose body forces the
-//! emitter through one of the six sites, then asserts the generated
-//! C source contains the expected typed-pointer pattern (the new
-//! shape) and does NOT contain the unmigrated bare-data pattern.
-//!
-//! Diagnosis: `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`.
-//! Spec lock: `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2.
-//! §5 entry: `docs/gap_synthesis.md` `CRuntime-F32Coupling`.
+//! Elementwise operations use dtype-typed guarded/read views. Scalar inputs
+//! to tensor helpers use the tagged scalar carrier and its exact constructor,
+//! preserving the dtype and stored bits without hand-written buffer packing.
+//! Source checks lock those ABI boundaries; CLI standard-lowering tests also
+//! execute bool, signed-integer, and float scalar inputs through generated C.
 
 use std::fs;
 use std::process::Command;
@@ -72,6 +50,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![
                 HostParam {
@@ -91,6 +70,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -108,6 +88,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "a".to_string(),
@@ -121,6 +102,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -141,6 +123,7 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "input".to_string(),
@@ -154,6 +137,7 @@ fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -174,6 +158,7 @@ fn make_scalar_to_tensor_program() -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "input".to_string(),
@@ -187,6 +172,7 @@ fn make_scalar_to_tensor_program() -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -196,22 +182,22 @@ fn tensor_to_scalar_i64_never_round_trips_through_f64() {
         &make_tensor_to_scalar_program(Prim::Int64, HostType::Int64),
         "tensor_to_scalar_i64_exact",
     )
-    .expect("rank-zero int64 extraction must emit");
+    .expect("rank-zero i64 extraction must emit");
 
     assert!(
         source.contains("chelis_host_scalar_as_i64("),
-        "int64 tensor_to_scalar must read back through the dtype-checked \
+        "i64 tensor_to_scalar must read back through the dtype-checked \
          exact scalar reader of the tagged-carrier ABI:\n{source}"
     );
     assert!(
         source.contains(
             "CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }"
         ),
-        "the exact reader must recover int64 bits at their declared width:\n{source}"
+        "the exact reader must recover i64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_tensor_to_f64("),
-        "int64 tensor_to_scalar must not pass through double:\n{source}"
+        "i64 tensor_to_scalar must not pass through double:\n{source}"
     );
 }
 
@@ -239,20 +225,20 @@ fn scalar_to_tensor_i64_uses_exact_i64_storage() {
         &make_scalar_to_tensor_program(),
         "scalar_to_tensor_i64_exact",
     )
-    .expect("rank-zero int64 packing must emit");
+    .expect("rank-zero i64 packing must emit");
 
     assert!(
         source.contains("chelis_host_scalar_from_i64("),
-        "int64 scalar_to_tensor must pack through the tagged exact-width \
+        "i64 scalar_to_tensor must pack through the tagged exact-width \
          scalar of the tagged-carrier ABI:\n{source}"
     );
     assert!(
         source.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value)"),
-        "the packer must tag int64 bits at their declared width:\n{source}"
+        "the packer must tag i64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_scalar_tensor_from_i64("),
-        "int64 scalar_to_tensor must not call the legacy I32 storage helper:\n{source}"
+        "i64 scalar_to_tensor must not call the legacy I32 storage helper:\n{source}"
     );
 }
 
@@ -271,6 +257,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "input".to_string(),
@@ -284,6 +271,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -356,7 +344,7 @@ fn compile_generated_i32_binary_assignment(op_name: &str, lhs: i32, rhs: i32) ->
     let assignment = arm
         .lines()
         .find(|line| line.contains("__target_data[i] ="))
-        .unwrap_or_else(|| panic!("the int32 arm contains no assignment:\n{arm}"))
+        .unwrap_or_else(|| panic!("the i32 arm contains no assignment:\n{arm}"))
         .trim();
 
     let c_source = format!(
@@ -397,14 +385,14 @@ int main(void) {{
         .unwrap_or_else(|error| panic!("failed to run gcc: {error}"));
     assert!(
         compile.status.success(),
-        "generated int32 assignment failed to compile:\n{}",
+        "generated i32 assignment failed to compile:\n{}",
         String::from_utf8_lossy(&compile.stderr)
     );
 
     let output = Command::new(&binary_path).output().unwrap();
     assert!(
         output.status.success(),
-        "generated int32 assignment failed to run:\n{}",
+        "generated i32 assignment failed to run:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout)
@@ -476,12 +464,12 @@ fn binary_elementwise_int32_arm_uses_int32_t_pointers() {
 
     assert!(
         arm.contains("int32_t *__target_data = (int32_t*)"),
-        "the int32 target pointer must use int32_t; arm:\n{arm}"
+        "the i32 target pointer must use int32_t; arm:\n{arm}"
     );
     assert!(
         arm.contains("const int32_t *__lhs_data = (const int32_t*)")
             && arm.contains("const int32_t *__rhs_data = (const int32_t*)"),
-        "the int32 input pointers must use int32_t; arm:\n{arm}"
+        "the i32 input pointers must use int32_t; arm:\n{arm}"
     );
 }
 
@@ -493,7 +481,7 @@ fn binary_elementwise_int32_arm_contains_no_float_pointer() {
 
     assert!(
         !arm.contains("float"),
-        "the int32 arm must not use an IEEE binary32 pointer; arm:\n{arm}"
+        "the i32 arm must not use an IEEE binary32 pointer; arm:\n{arm}"
     );
 }
 
@@ -637,25 +625,19 @@ fn unary_func_int32_arm_aborts_without_binary32_conversion() {
 
     assert!(
         arm.contains("abort();"),
-        "the int32 arm must abort; arm:\n{arm}"
+        "the i32 arm must abort; arm:\n{arm}"
     );
     assert!(
         !arm.contains("__target_data")
             && !arm.contains("(float*)")
             && !arm.contains("(const float*)"),
-        "the int32 arm must not convert through binary32; arm:\n{arm}"
+        "the i32 arm must not convert through binary32; arm:\n{arm}"
     );
 }
 
-// ---- L1749/L1753/L1757 scalar-to-tensor coercion -----------------------
-//
-// `assign_tensor_call` handles the case where a host helper takes a
-// scalar argument; the emitter allocates a rank-0 tensor and writes
-// the scalar through a guarded write view. Three arms today: int64
-// (already typed via `(int64_t*)` cast), bool, and the f32-default
-// fallback. The bool and f32 arms must cast the view data to a typed
-// pointer.  Sites 5 and 6 are exercised together by a single fixture
-// that constructs a TensorCall taking a scalar arg of each type.
+// ---- Exact scalar-to-tensor helper arguments -------------------------
+// `assign_tensor_call` transports a scalar through chelis_scalar, then
+// constructs the rank-zero tensor with the same dtype and stored bits.
 
 fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -> HostProgram {
     // The host-side fallback path uses `HostExprKind::TensorCall` to
@@ -676,7 +658,9 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
         precision,
     };
     let mut helper_dag = Dag::new();
+    let helper_dag_decl = helper_dag.declare("test");
     let helper_root = helper_dag.add_node(
+        helper_dag_decl,
         RiscOp::Load {
             name: "input".into(),
         },
@@ -712,6 +696,7 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
         global_tensor_helpers: vec![helper],
         functions: Vec::new(),
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -742,6 +727,7 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
         global_tensor_helpers: Vec::new(),
         functions: Vec::new(),
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     };
 
     let source = emit_host_program(&program, "exact_list_ingress").unwrap();
@@ -765,70 +751,52 @@ fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
 }
 
 #[test]
-fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
+fn scalar_to_tensor_coercion_bool_uses_exact_tagged_carrier() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
     let src = emit_host_program(&program, "scalar_bool").unwrap();
-    // [05-OP-31] fixes Bool tensor storage at one canonical byte. The host
-    // scalar bridge must therefore write through uint8_t and preserve only
-    // the two valid Bool8 bit patterns.
     assert!(
-        src.contains("((uint8_t*)")
-            && src.contains("_write.data)[0]")
-            && src.contains("? UINT8_C(1) : UINT8_C(0)"),
-        "bool scalar-to-tensor coercion must write canonical Bool8 bytes; got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL,")
+            && src.contains("__tensor_scalar0_0 ? 1 : 0"),
+        "bool helper input must use the exact tagged Bool8 carrier:\n{src}"
     );
     assert!(
         !src.lines().any(|line| line.contains("? 1.0f : 0.0f")),
-        "bool scalar-to-tensor coercion must not retain four-byte float storage; got:\n{src}"
+        "bool helper input must not use four-byte float storage:\n{src}"
     );
 }
 
 #[test]
-fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
-    // #381: a captured f64 scalar fed to a tensor helper must pack into a
-    // CHELIS_DTYPE_F64 rank-0 tensor written through a `(double*)`. The pre-fix
-    // code packed an f64 scalar into a CHELIS_DTYPE_F32 tensor via `(float)value`
-    // (only 4 bytes), so the f64 kernel read garbage and the value collapsed
-    // to ~0. The dtype tag and the typed-pointer width must match the f64
-    // operand.
+fn scalar_to_tensor_coercion_f64_preserves_tag_and_bits() {
     let program = make_tensor_call_with_scalar_arg(
         HostType::Float64,
         HostExpr::new(HostExprKind::Float(7.5)),
     );
     let src = emit_host_program(&program, "scalar_f64").unwrap();
     assert!(
-        src.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)"),
-        "f64 scalar-to-tensor coercion must allocate a CHELIS_DTYPE_F64 rank-0 tensor (#381); got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(__tensor_scalar0_0)))"),
+        "f64 helper input must retain its F64 tag and bits (#381):\n{src}"
     );
-    assert!(
-        src.contains("(double*)") && src.contains("_write.data"),
-        "f64 scalar-to-tensor coercion must cast guarded view data to a `(double*)` (#381); got:\n{src}"
-    );
-    // Must NOT pack an f64 scalar through the f32 path (the pre-fix bug).
     assert!(
         !src.lines()
-            .any(|l| l.contains("_write.data)[0] = (float)(") && !l.contains("(double*)")),
-        "f64 scalar-to-tensor coercion must not pack through the f32 `(float)(...)` path (#381); got:\n{src}"
+            .any(|line| line.contains("_write.data)[0] = (float)(")),
+        "f64 helper input must not narrow through a hand-packed f32 buffer:\n{src}"
     );
 }
 
-// Note: the host lane classifies every float literal as `Float64`
-// (`host_type(HostExprKind::Float)` is coarse per issue #308), so a bare
-// f32 scalar arg cannot be synthesized through `make_tensor_call_with_scalar_arg`;
-// the f32 packing arm is exercised end-to-end by the eval-vs-C parity test
-// `ws2b_numeric_identifier_divergence` (f32 captured-scalar programs) instead.
-
 #[test]
-fn scalar_to_tensor_coercion_int64_keeps_typed_pointer() {
-    // Already-typed today: `((int64_t*)tensor_name_write.data)[0] =
-    // value;`.  Locks the invariant that this arm's typed cast
-    // survives the host_emit migration.
-    let program =
-        make_tensor_call_with_scalar_arg(HostType::Int64, HostExpr::new(HostExprKind::Int(42)));
+fn scalar_to_tensor_coercion_int64_preserves_tag_and_integer_bits() {
+    let program = make_tensor_call_with_scalar_arg(
+        HostType::Int64,
+        HostExpr::new(HostExprKind::Int(9_007_199_254_740_993)),
+    );
     let src = emit_host_program(&program, "scalar_i64").unwrap();
     assert!(
-        src.contains("(int64_t*)") && src.contains("_write.data"),
-        "int64 scalar-to-tensor coercion must use `(int64_t*)` cast; got:\n{src}"
+        src.contains("= chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)__tensor_scalar0_0))"),
+        "i64 helper input must preserve its tag and all integer bits:\n{src}"
+    );
+    assert!(
+        !src.contains("chelis_host_f64_bits(__tensor_scalar0_0)"),
+        "i64 helper input must not round-trip through f64:\n{src}"
     );
 }

@@ -63,19 +63,23 @@ fn canonical_matmul_pattern_is_detected() {
     //   p  = mul(ea, eb)                 -> [2, 3, 4]
     //   c  = sum(p, axis=1)              -> [2, 4]
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(2, 3).precision, 1.0),
         vec![],
         mat(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(3, 4).precision, 1.0),
         vec![],
         mat(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -85,6 +89,7 @@ fn canonical_matmul_pattern_is_detected() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -93,8 +98,9 @@ fn canonical_matmul_pattern_is_detected() {
         t3(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -119,19 +125,23 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     // keys off `mul.inputs[i].op == Expand`, so any node in between hides
     // the Expand and the BLAS specializer falls through.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(2, 3).precision, 1.0),
         vec![],
         mat(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(3, 4).precision, 1.0),
         vec![],
         mat(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -141,6 +151,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -152,6 +163,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
     // Useless casts: f32 -> f32. Identity at the value level, hostile to the
     // pattern matcher.
     let ca = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -160,6 +172,7 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
         None,
     );
     let cb = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -167,8 +180,9 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
         t3(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -218,20 +232,30 @@ fn cast_perturbed_matmul_specializes_after_noop_cleanup() {
 #[test]
 fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let values = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(3, 2).precision, 1.0),
         vec![],
         mat(3, 2),
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_i64(4).precision, 0.0),
         vec![],
         vec_i64(4),
         None,
     );
-    let one_hot = dag.add_node(RiscOp::OneHot { vocab: 3 }, vec![indices], mat(4, 3), None);
+    let one_hot = dag.add_node(
+        decl,
+        RiscOp::OneHot { vocab: 3 },
+        vec![indices],
+        mat(4, 3),
+        None,
+    );
     let expanded_one_hot = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -241,6 +265,7 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
         None,
     );
     let expanded_values = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -250,12 +275,14 @@ fn internal_one_hot_gather_tree_specializes_to_sparse_gather() {
         None,
     );
     let product = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![expanded_one_hot, expanded_values],
         t3(4, 3, 2),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,

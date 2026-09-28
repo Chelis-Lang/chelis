@@ -1,5 +1,5 @@
 use chelis_deep::{DtypeFamily, Span};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// One entry of a declaration's bracketed binder list
 /// (`spec/02-surf-syntax.md` §P4b/§P4c).
@@ -59,9 +59,8 @@ pub enum Decl {
     },
     Sig {
         name: String,
-        /// `[..]` binder list. Partial for a sig: it declares bounds for the
-        /// names it lists, and every other free name in `ty` stays implicitly
-        /// quantified (`spec/02-surf-syntax.md` §P4c).
+        /// Complete `[..]` binder list for every type, dimension, or rank
+        /// variable used by the signature (`spec/02-surf-syntax.md` §P4b).
         type_binders: Vec<TypeBinder>,
         ty: TypeExpr,
         effects: Option<Vec<EffectExpr>>,
@@ -90,7 +89,8 @@ pub enum Decl {
     },
     FunDef {
         name: String,
-        /// `[a, b]` binder list; unkinded, optionally dtype-family bounded.
+        /// Complete `[a, b]` binder list; unkinded, optionally
+        /// dtype-family bounded.
         type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         ret_ty: Option<TypeExpr>,
@@ -100,6 +100,9 @@ pub enum Decl {
     },
     Property {
         name: String,
+        /// Complete `[..]` binder list for every type, dimension, or rank
+        /// variable used by this property declaration.
+        type_binders: Vec<TypeBinder>,
         params: Vec<Param>,
         preconditions: Vec<Expr>,
         body: Expr,
@@ -227,14 +230,13 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
-    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, int32)
+    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, i32)
     Grad(Box<Expr>, Option<Vec<String>>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),
     Realize(Box<Expr>, Span),
     Copy(Box<Expr>, Span),
     Borrow(Box<Expr>, Span),
-    WithSeed(Box<Expr>, Box<Expr>, Span),
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
     Do(Vec<Expr>, Span),                     // do { e1; e2; ... }
@@ -266,7 +268,7 @@ pub use chelis_deep::LiteralSuffix;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Literal {
-    /// Bare integer literal. Defaults to `int32` per spec §5.3 unless
+    /// Bare integer literal. Defaults to `i32` per spec §5.3 unless
     /// disambiguated by a suffix variant or surrounding context.
     Int(i64),
     /// Bare float literal. Defaults to `f32` per spec §5.3.
@@ -349,23 +351,111 @@ impl std::fmt::Display for DimensionLiteral {
     }
 }
 
+/// A tensor precision spelling with the exact token span that authored it.
+///
+/// Direct human-readable Serde of [`TypeExpr`] accepts the former string field
+/// as a compatibility input. The compiler API's separate `surf_ast` wire type
+/// remains string-valued and is not this Rust AST representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TensorPrecision {
+    name: String,
+    span: Span,
+}
+
+impl TensorPrecision {
+    pub fn new(name: impl Into<String>, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            span,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl<'de> Deserialize<'de> for TensorPrecision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Current {
+            name: String,
+            span: Span,
+        }
+
+        if !deserializer.is_human_readable() {
+            let Current { name, span } = Current::deserialize(deserializer)?;
+            return Ok(Self { name, span });
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Representation {
+            Current(Current),
+            Legacy(String),
+        }
+
+        match Representation::deserialize(deserializer)? {
+            Representation::Current(Current { name, span }) => Ok(Self { name, span }),
+            Representation::Legacy(name) => Ok(Self {
+                name,
+                // The former human-readable field carried only the spelling,
+                // so no exact token location can be reconstructed honestly.
+                span: Span::new(0, 0),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for TensorPrecision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.name.fmt(formatter)
+    }
+}
+
+impl std::ops::Deref for TensorPrecision {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for TensorPrecision {
+    fn eq(&self, other: &str) -> bool {
+        self.name == other
+    }
+}
+
+impl PartialEq<&str> for TensorPrecision {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeExpr {
-    Named(String, Span),                       // f32, bool, MyType
-    DimensionLiteral(DimensionLiteral, Span),  // integer only in Name[...]
-    Tensor(Vec<TypeExpr>, String, Span),       // tensor[batch, hidden, f32]
-    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span), // A -> B -> C (flat)
-    Ref(Box<TypeExpr>, Span),                  // &T
-    App(String, Vec<TypeExpr>, Span),          // Option f32
-    Tuple(Vec<TypeExpr>, Span),                // (f32, f32)
-    Infer(Span),                               // _
-    RankSpread(String, Span),                  // ..r (rank variable; whole-shape spread)
+    Named(String, Span),                          // f32, bool, MyType
+    DimensionLiteral(DimensionLiteral, Span),     // integer only in Name[...]
+    Tensor(Vec<TypeExpr>, TensorPrecision, Span), // tensor[batch, hidden, f32]
+    Arrow(Vec<TypeExpr>, Box<TypeExpr>, Span),    // A -> B -> C (flat)
+    Ref(Box<TypeExpr>, Span),                     // &T
+    App(String, Vec<TypeExpr>, Span),             // Option f32
+    Tuple(Vec<TypeExpr>, Span),                   // (f32, f32)
+    Infer(Span),                                  // _
+    RankSpread(String, Span),                     // ..r (rank variable; whole-shape spread)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectExpr {
     Diff(Span),
-    Random(Span),
     Accum(Span),
     Io(Span),
     Test(Span),
@@ -376,7 +466,6 @@ impl EffectExpr {
     pub fn span(&self) -> Span {
         match self {
             Self::Diff(span)
-            | Self::Random(span)
             | Self::Accum(span)
             | Self::Io(span)
             | Self::Test(span)

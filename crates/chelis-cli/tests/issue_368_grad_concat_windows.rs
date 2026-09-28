@@ -116,18 +116,18 @@ fn assert_close(label: &str, got: &[f64], want: &[f64]) {
 
 const AVGPOOL_FWD: &str = "module Repro.AvgFwd\n\
 def pool(x: tensor[4, f32]) -> tensor[2, f32] = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
+  r0 = reshape(shrink(&x, [[cast(0, i64), cast(2, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, i64), cast(4, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  mean(concat([r0, r1], cast(0, i32)), cast(0, i32))\n\
 }\n\
 out = pool(to_tensor([cast(2.0, f32), cast(4.0, f32), cast(6.0, f32), cast(8.0, f32)]))\n";
 
 const AVGPOOL_GRAD: &str = "module Repro.AvgGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  pooled = mean(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
-  sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
+  r0 = reshape(shrink(&x, [[cast(0, i64), cast(2, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, i64), cast(4, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  pooled = mean(concat([r0, r1], cast(0, i32)), cast(0, i32))\n\
+  sum(pooled, cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(pool)(to_tensor([cast(2.0, f32), cast(4.0, f32), cast(6.0, f32), cast(8.0, f32)]))\n";
 
@@ -162,10 +162,10 @@ fn issue_368_avgpool_grad_is_inverse_window_size() {
 
 const MAXPOOL_GRAD: &str = "module Repro.MaxGrad\n\
 def pool(x: tensor[4, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int64), cast(2, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(2, int64), cast(4, int64)]]), [cast(1, int64), cast(2, int64)])\n\
-  pooled = max_reduce(concat([r0, r1], cast(0, int32)), cast(0, int32))\n\
-  sum(pooled, cast(0, int32)) |> tensor_to_scalar\n\
+  r0 = reshape(shrink(&x, [[cast(0, i64), cast(2, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  r1 = reshape(shrink(&x, [[cast(2, i64), cast(4, i64)]]), [cast(1, i64), cast(2, i64)])\n\
+  pooled = max_reduce(concat([r0, r1], cast(0, i32)), cast(0, i32))\n\
+  sum(pooled, cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(pool)(to_tensor([cast(1.0, f32), cast(5.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 
@@ -192,12 +192,12 @@ fn issue_368_maxpool_grad_is_onehot_to_max_element() {
 
 const CONCAT3_GRAD: &str = "module Repro.Concat3\n\
 def f(x: tensor[3, f32]) -> f32 = {\n\
-  r0 = reshape(shrink(&x, [[cast(0, int64), cast(1, int64)]]), [cast(1, int64), cast(1, int64)])\n\
-  r1 = reshape(shrink(&x, [[cast(1, int64), cast(2, int64)]]), [cast(1, int64), cast(1, int64)])\n\
-  r2 = reshape(shrink(&x, [[cast(2, int64), cast(3, int64)]]), [cast(1, int64), cast(1, int64)])\n\
+  r0 = reshape(shrink(&x, [[cast(0, i64), cast(1, i64)]]), [cast(1, i64), cast(1, i64)])\n\
+  r1 = reshape(shrink(&x, [[cast(1, i64), cast(2, i64)]]), [cast(1, i64), cast(1, i64)])\n\
+  r2 = reshape(shrink(&x, [[cast(2, i64), cast(3, i64)]]), [cast(1, i64), cast(1, i64)])\n\
   rows = [r0, r1, r2]\n\
-  stacked = concat(rows, cast(0, int32))\n\
-  sum(sum(stacked, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  stacked = concat(rows, cast(0, i32))\n\
+  sum(sum(stacked, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(3.0, f32), cast(5.0, f32), cast(7.0, f32)]))\n";
 
@@ -228,9 +228,9 @@ fn issue_368_three_way_concat_named_rows_grad_is_ones() {
 // `issue631_*` tests.)
 const CONCAT_FWD_ONLY: &str = "module Repro.ConcatFwdOnly\n\
 def f(x: tensor[2, f32]) = {\n\
-  r0 = reshape(&x, [cast(1, int64), cast(2, int64)])\n\
-  r1 = reshape(mul(&x, to_tensor([cast(10.0, f32), cast(10.0, f32)])), [cast(1, int64), cast(2, int64)])\n\
-  concat([r0, r1], cast(0, int32))\n\
+  r0 = reshape(&x, [cast(1, i64), cast(2, i64)])\n\
+  r1 = reshape(mul(&x, to_tensor([cast(10.0, f32), cast(10.0, f32)])), [cast(1, i64), cast(2, i64)])\n\
+  concat([r0, r1], cast(0, i32))\n\
 }\n\
 out = f(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
 
@@ -255,8 +255,8 @@ fn issue_368_plain_forward_concat_stacks_correctly() {
 /// `lower_tensor_concat` — accepted it, an eval-forward-vs-IR divergence.
 const CONCAT_NEG_AXIS_FWD: &str = "module Repro.ConcatNegAxis\n\
 def f(x: tensor[2, f32]) = {\n\
-  a = reshape(&x, [cast(1, int64), cast(2, int64)])\n\
-  b = mul(reshape(&x, [cast(1, int64), cast(2, int64)]), to_tensor([[cast(5.0, f32), cast(7.0, f32)]]))\n\
+  a = reshape(&x, [cast(1, i64), cast(2, i64)])\n\
+  b = mul(reshape(&x, [cast(1, i64), cast(2, i64)]), to_tensor([[cast(5.0, f32), cast(7.0, f32)]]))\n\
   concat([a, b], -1)\n\
 }\n\
 out = f(to_tensor([cast(1.0, f32), cast(2.0, f32)]))\n";
@@ -297,8 +297,8 @@ const SYM_BATCH_LINEAR: &str = "module Repro.SymBatchLinear\n\
 def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
   a = add(&x, &x)\n\
   b = add(add(&x, &x), &x)\n\
-  c = concat([a, b], cast(1, int32))\n\
-  sum(sum(c, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  c = concat([a, b], cast(1, i32))\n\
+  sum(sum(c, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(loss)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
 
@@ -323,9 +323,9 @@ const SYM_BATCH_NONLINEAR: &str = "module Repro.SymBatchNonlinear\n\
 def loss(x: tensor[batch, 2, f32]) -> f32 = {\n\
   a = sub(add(&x, &x), &x)\n\
   b = add(&x, &x)\n\
-  c = concat([a, b], cast(1, int32))\n\
+  c = concat([a, b], cast(1, i32))\n\
   sq = mul(c, c)\n\
-  sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(sum(sq, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(loss)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
 
@@ -385,19 +385,19 @@ fn issue_368_runtime_symbolic_window_grad_is_half_everywhere() {
     // The exact #368 reproducer: avgpool1d with a RUNTIME-derived window
     // count `m` AND runtime `shrink`/`stride` bounds, behind a symbolic-rank
     // callee sig + `if/fail` guard + a `[n]`-quantified `window_row` helper.
-    let avgpool = "sig avgpool1d: tensor[n, f32] -> tensor[m, f32]\n\
+    let avgpool = "sig avgpool1d[n, m]: tensor[n, f32] -> tensor[m, f32]\n\
 def avgpool1d(x) = {\n\
-  n = cast(shape(x, cast(0, int32)), int64)\n\
-  if gt(cast(2, int64), n) then fail(\"kernel exceeds input length\") else {\n\
-    m = add(floor_div(sub(n, cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-    rows = [window_row(&x, m, cast(0, int64)), window_row(&x, m, cast(1, int64))]\n\
-    mean(concat(rows, cast(0, int32)), cast(0, int32))\n\
+  n = cast(shape(x, cast(0, i32)), i64)\n\
+  if gt(cast(2, i64), n) then fail(\"kernel exceeds input length\") else {\n\
+    m = add(floor_div(sub(n, cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+    rows = [window_row(&x, m, cast(0, i64)), window_row(&x, m, cast(1, i64))]\n\
+    mean(concat(rows, cast(0, i32)), cast(0, i32))\n\
   }\n\
 }\n\
-def window_row[n](x: &tensor[n, f32], m: int64, k: int64) -> tensor[u, m, f32] = {\n\
-  start = cast(k, int64)\n\
-  extent = cast(add(add(k, mul(sub(m, cast(1, int64)), cast(2, int64))), cast(1, int64)), int64)\n\
-  reshape(stride(shrink(x, [[start, extent]]), cast(2, int64)), [cast(1, int64), m])\n\
+def window_row[n, u, m](x: &tensor[n, f32], m: i64, k: i64) -> tensor[u, m, f32] = {\n\
+  start = cast(k, i64)\n\
+  extent = cast(add(add(k, mul(sub(m, cast(1, i64)), cast(2, i64))), cast(1, i64)), i64)\n\
+  reshape(stride(shrink(x, [[start, extent]]), cast(2, i64)), [cast(1, i64), m])\n\
 }";
 
     // Forward parity: the pooled means themselves.
@@ -414,7 +414,7 @@ out = avgpool1d(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(
     let grad_source = |literal: &str| {
         format!(
             "module Repro.SymOracle\n{avgpool}\n\
-def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, int32)) |> tensor_to_scalar\n\
+def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, i32)) |> tensor_to_scalar\n\
 out = grad(loss)(to_tensor([{literal}]))\n"
         )
     };
@@ -433,7 +433,7 @@ out = grad(loss)(to_tensor([{literal}]))\n"
             .join(", ");
         format!(
             "module Repro.SymOracleLoss\n{avgpool}\n\
-def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, int32)) |> tensor_to_scalar\n\
+def loss(x: tensor[4, f32]) -> f32 = sum(avgpool1d(x), cast(0, i32)) |> tensor_to_scalar\n\
 out = loss(to_tensor([{literal}]))\n"
         )
     };

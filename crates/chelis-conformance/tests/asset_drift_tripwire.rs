@@ -2,8 +2,8 @@
 //!
 //! `scripts/regenerate_conformance_assets.py` copies `agent-skills/` into
 //! `assets/skills/`, which `src/skills.rs` embeds via `include_str!`. This test
-//! asserts three things agree: the embedded bytes, the `SHARED_SKILLS` list, and
-//! the live `agent-skills/` directory. A forgotten re-run (or a hand-edited
+//! asserts the embedded bytes, both agent-surface symlinks, the `SHARED_SKILLS`
+//! list, and the live `agent-skills/` directory agree. A forgotten re-run (or a hand-edited
 //! embedded copy, or a skill added/removed upstream) fails here with a pointer
 //! back at the regenerate script — the same guarantee `chelis-std-bundle`'s
 //! `archive_self_consistency` gives for the runtime bytes.
@@ -63,4 +63,45 @@ fn embedded_skills_match_repo() {
         "embedded skill copy is stale for {stale:?}. Run `{regen}` and commit \
          crates/chelis-conformance/assets/."
     );
+
+    for surface in [".claude/skills", ".codex/skills"] {
+        let path = root.join(surface);
+        let metadata =
+            std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("inspect {path:?}: {e}"));
+        assert!(
+            metadata.file_type().is_symlink(),
+            "{surface} is not a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&path).unwrap(),
+            std::path::Path::new("../agent-skills"),
+            "{surface} must point to the one authored skill tree"
+        );
+    }
+}
+
+#[test]
+fn embedded_agents_contract_and_documented_skill_list_match_repo() {
+    let root = repo_root();
+    let agents_path = root.join("AGENTS.md");
+    let agents = std::fs::read_to_string(&agents_path)
+        .unwrap_or_else(|e| panic!("read {agents_path:?}: {e}"));
+    let embedded = chelis_conformance::canonical::body("agents-inheritance")
+        .expect("agents-inheritance canonical body");
+    assert_eq!(
+        embedded, agents,
+        "the embedded agents-inheritance body must be regenerated from root AGENTS.md; \
+         run `python3 scripts/regenerate_conformance_assets.py`"
+    );
+
+    let pointers = agents
+        .split_once("## Pointers")
+        .map(|(_, section)| section)
+        .expect("AGENTS.md must carry its Pointers section");
+    for skill in SHARED_SKILLS {
+        assert!(
+            pointers.contains(&format!("`{skill}`")),
+            "AGENTS.md's shared-skill list omits repository skill {skill:?}"
+        );
+    }
 }

@@ -4,87 +4,87 @@
   (defsig {}
     apply_twice
     (t-fn {}
-      (t-fn {} (t-prim {} int32) (t-prim {} int32))
-      (t-prim {} int32)
-      (t-prim {} int32)))
+      (t-fn {} (t-prim {} i32) (t-prim {} i32))
+      (t-prim {} i32)
+      (t-prim {} i32)))
   (def {type: (t-fn {}
-                 (t-fn {} (t-prim {} int32) (t-prim {} int32))
-                 (t-prim {} int32)
-                 (t-prim {} int32))
+                 (t-fn {} (t-prim {} i32) (t-prim {} i32))
+                 (t-prim {} i32)
+                 (t-prim {} i32))
        }
     apply_twice
     (fn {type: (t-fn {}
-                  (t-fn {} (t-prim {} int32) (t-prim {} int32))
-                  (t-prim {} int32)
-                  (t-prim {} int32))
+                  (t-fn {} (t-prim {} i32) (t-prim {} i32))
+                  (t-prim {} i32)
+                  (t-prim {} i32))
         }
       (params {}
-        (f {type: (t-fn {} (t-prim {} int32) (t-prim {} int32))})
-        (x {type: (t-prim {} int32)}))
-      (app {span: "surf:85..92", type: (t-prim {} int32)}
-        (var {span: "surf:85..86"} f)
-        (app {span: "surf:87..91", type: (t-prim {} int32)}
-          (var {span: "surf:87..88"} f)
-          (var {span: "surf:89..90"} x)))))
-  (defsig {} bump (t-fn {} (t-prim {} int32) (t-prim {} int32)))
-  (def {type: (t-fn {} (t-prim {} int32) (t-prim {} int32))}
+        (f {type: (t-fn {} (t-prim {} i32) (t-prim {} i32))})
+        (x {type: (t-prim {} i32)}))
+      (app {span: "surf:77..84", type: (t-prim {} i32)}
+        (var {span: "surf:77..78"} f)
+        (app {span: "surf:79..83", type: (t-prim {} i32)}
+          (var {span: "surf:79..80"} f)
+          (var {span: "surf:81..82"} x)))))
+  (defsig {} bump (t-fn {} (t-prim {} i32) (t-prim {} i32)))
+  (def {type: (t-fn {} (t-prim {} i32) (t-prim {} i32))}
     bump
-    (fn {type: (t-fn {} (t-prim {} int32) (t-prim {} int32))}
-      (params {} (n {type: (t-prim {} int32)}))
-      (app {span: "surf:123..132", type: (t-prim {} int32)}
-        (var {span: "surf:123..126"} add)
-        (var {span: "surf:127..128"} n)
-        (lit {span: "surf:130..131", type: (t-prim {} int32)} 1))))
-  (defsig {} run (t-fn {} (t-prim {} int32)))
-  (def {type: (t-fn {} (t-prim {} int32))}
+    (fn {type: (t-fn {} (t-prim {} i32) (t-prim {} i32))}
+      (params {} (n {type: (t-prim {} i32)}))
+      (app {span: "surf:111..120", type: (t-prim {} i32)}
+        (var {span: "surf:111..114"} add)
+        (var {span: "surf:115..116"} n)
+        (lit {span: "surf:118..119", type: (t-prim {} i32)} 1))))
+  (defsig {} run (t-fn {} (t-prim {} i32)))
+  (def {type: (t-fn {} (t-prim {} i32))}
     run
-    (fn {type: (t-fn {} (t-prim {} int32))}
+    (fn {type: (t-fn {} (t-prim {} i32))}
       (params {})
-      (app {span: "surf:154..174", type: (t-prim {} int32)}
-        (var {span: "surf:154..165"} apply_twice)
-        (var {span: "surf:166..170"} bump)
-        (lit {span: "surf:172..173", type: (t-prim {} int32)} 3))))
+      (app {span: "surf:140..160", type: (t-prim {} i32)}
+        (var {span: "surf:140..151"} apply_twice)
+        (var {span: "surf:152..156"} bump)
+        (lit {span: "surf:158..159", type: (t-prim {} i32)} 3))))
   (defsig {}
     identity_pair
     (t-fn {}
-      (t-prim {} int32)
+      (t-prim {} i32)
       (t-prim {} f32)
-      (t-tuple {} (t-prim {} int32) (t-prim {} f32))))
+      (t-tuple {} (t-prim {} i32) (t-prim {} f32))))
   (def {type: (t-fn {}
-                 (t-prim {} int32)
+                 (t-prim {} i32)
                  (t-prim {} f32)
-                 (t-tuple {} (t-prim {} int32) (t-prim {} f32)))
+                 (t-tuple {} (t-prim {} i32) (t-prim {} f32)))
        }
     identity_pair
     (fn {type: (t-fn {}
-                  (t-prim {} int32)
+                  (t-prim {} i32)
                   (t-prim {} f32)
-                  (t-tuple {} (t-prim {} int32) (t-prim {} f32)))
+                  (t-tuple {} (t-prim {} i32) (t-prim {} f32)))
         }
-      (params {} (a {type: (t-prim {} int32)}) (b {type: (t-prim {} f32)}))
-      (tuple {span: "surf:229..235"}
-        (var {span: "surf:230..231"} a)
-        (var {span: "surf:233..234"} b))))
-  (defsig {} use_pair (t-fn {} (t-prim {} int32)))
-  (def {type: (t-fn {} (t-prim {} int32))}
+      (params {} (a {type: (t-prim {} i32)}) (b {type: (t-prim {} f32)}))
+      (tuple {span: "surf:211..217"}
+        (var {span: "surf:212..213"} a)
+        (var {span: "surf:215..216"} b))))
+  (defsig {} use_pair (t-fn {} (t-prim {} i32)))
+  (def {type: (t-fn {} (t-prim {} i32))}
     use_pair
-    (fn {type: (t-fn {} (t-prim {} int32))}
+    (fn {type: (t-fn {} (t-prim {} i32))}
       (params {})
-      (tuple-get {span: "surf:262..285"}
-        (app {span: "surf:262..283",
-               type: (t-tuple {} (t-prim {} int32) (t-prim {} f32))
+      (tuple-get {span: "surf:242..265"}
+        (app {span: "surf:242..263",
+               type: (t-tuple {} (t-prim {} i32) (t-prim {} f32))
              }
-          (var {span: "surf:262..275"} identity_pair)
-          (lit {span: "surf:276..277", type: (t-prim {} int32)} 1)
-          (lit {span: "surf:279..282", type: (t-prim {} f32)} 2.0))
-        (lit {type: (t-prim {} int32)} 0)))))
+          (var {span: "surf:242..255"} identity_pair)
+          (lit {span: "surf:256..257", type: (t-prim {} i32)} 1)
+          (lit {span: "surf:259..262", type: (t-prim {} f32)} 2.0))
+        (lit {type: (t-prim {} i32)} 0)))))
 
 == type env ==
-apply_twice : (t-fn {} (t-fn {} (t-prim {} int32) (t-prim {} int32)) (t-prim {} int32) (t-prim {} int32))
-bump : (t-fn {} (t-prim {} int32) (t-prim {} int32))
-identity_pair : (t-fn {} (t-prim {} int32) (t-prim {} f32) (t-tuple {} (t-prim {} int32) (t-prim {} f32)))
-run : (t-fn {} (t-prim {} int32))
-use_pair : (t-fn {} (t-prim {} int32))
+apply_twice : (t-fn {} (t-fn {} (t-prim {} i32) (t-prim {} i32)) (t-prim {} i32) (t-prim {} i32))
+bump : (t-fn {} (t-prim {} i32) (t-prim {} i32))
+identity_pair : (t-fn {} (t-prim {} i32) (t-prim {} f32) (t-tuple {} (t-prim {} i32) (t-prim {} f32)))
+run : (t-fn {} (t-prim {} i32))
+use_pair : (t-fn {} (t-prim {} i32))
 
 == signature inference ==
 binding = apply_twice
@@ -129,5 +129,5 @@ binding = use_pair
   display_signature = Fn([], Prim(Int32))
 
 == infer stats ==
-typed_nodes = 21
-total_nodes = 21
+typed_nodes = 22
+total_nodes = 22

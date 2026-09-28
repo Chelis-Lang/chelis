@@ -55,17 +55,17 @@ impl LiteralSuffix {
         )
     }
 
-    /// Returns the canonical Deep `t-prim` precision name, e.g. `"int64"`.
+    /// Returns the canonical Deep `t-prim` precision name, e.g. `"i64"`.
     pub fn t_prim_name(self) -> &'static str {
         match self {
             LiteralSuffix::F32 => "f32",
             LiteralSuffix::F64 => "f64",
             LiteralSuffix::Bf16 => "bf16",
             LiteralSuffix::F16 => "f16",
-            LiteralSuffix::I8 => "int8",
-            LiteralSuffix::I16 => "int16",
-            LiteralSuffix::I32 => "int32",
-            LiteralSuffix::I64 => "int64",
+            LiteralSuffix::I8 => "i8",
+            LiteralSuffix::I16 => "i16",
+            LiteralSuffix::I32 => "i32",
+            LiteralSuffix::I64 => "i64",
         }
     }
 }
@@ -532,6 +532,15 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             text: text.to_string(),
             offset: start,
         })?;
+        // spec/03 §6.4 and spec/10 §3.3 admit finite source floats only.
+        // Rust's parser returns infinity for exponent overflow; rejecting it
+        // here keeps every source consumer behind the same lexical boundary.
+        if !val.is_finite() {
+            return Err(LexError::InvalidNumber {
+                text: text.to_string(),
+                offset: start,
+            });
+        }
         if let Some(s) = suffix {
             if s.is_integer() {
                 return Err(LexError::IntegerSuffixOnFloat {
@@ -790,6 +799,37 @@ mod tests {
                 TokenKind::Float(2.0e-3),
             ]
         );
+    }
+
+    #[test]
+    fn source_float_finiteness_includes_exponent_overflow_and_signed_zero() {
+        for text in ["1e999", "-1e999", "1e999f16", "-1e999f64"] {
+            let source = format!("  {text}");
+            assert!(
+                matches!(lex(&source), Err(LexError::InvalidNumber { offset: 2, .. })),
+                "{text}"
+            );
+        }
+        for (text, bits) in [
+            ("1.7976931348623157e308", f64::MAX.to_bits()),
+            ("-1.7976931348623157e308", (-f64::MAX).to_bits()),
+            ("-0.0", (-0.0_f64).to_bits()),
+            ("5e-324", 1),
+        ] {
+            for suffix in ["", "f64"] {
+                let tokens = lex(&format!("{text}{suffix}")).unwrap();
+                let [
+                    Token {
+                        kind: TokenKind::Float(value) | TokenKind::TypedFloat(value, _),
+                        ..
+                    },
+                ] = tokens.as_slice()
+                else {
+                    panic!("expected one float token");
+                };
+                assert_eq!(value.to_bits(), bits);
+            }
+        }
     }
 
     #[test]

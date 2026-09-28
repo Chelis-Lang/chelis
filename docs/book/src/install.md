@@ -55,7 +55,13 @@ chelisup install 0.13.0        # into ~/.chelis/toolchains/0.13.0/
 ```
 
 The first install also records `0.13.0` as the default and installs the
-`chelis` shim, so `chelis --version` works from anywhere.
+`chelis` shim, so `chelis --version` works from anywhere. Before placing a
+toolchain, chelisup checks that the runtime files it ships under `lib/` and
+`include/` are the ones its `chelis runtime export` reports, and refuses the
+release otherwise. Releases up to 0.18.11 predate that export; they install
+with a warning that their runtime files are unchecked. If chelisup refuses a
+release newer than itself, re-run the bootstrap to get the latest chelisup and
+try again.
 
 ### 3. Provision a project in one command
 
@@ -236,6 +242,58 @@ chelis --help
 
 If you install a release build instead, make sure `chelis --help` works before starting
 the first program loop.
+
+## Build the Python distribution wheel
+
+From the repository root, a standard wheel build seals the runtime into the
+extension. Editable installs remain development builds:
+
+```sh
+uv pip install -e bindings/python
+```
+
+They use the checkout's runtime and reject changed declared runtime sources
+until the extension is rebuilt. The wheel-only `sealed-runtime` feature does
+not apply to editable installs or `maturin develop`.
+
+Build a wheel directly with:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 \
+CARGO_TARGET_DIR="$PWD/target/python-wheel" \
+uv build --wheel --out-dir target/python-wheel/wheels bindings/python
+```
+
+For end-to-end source-free acceptance, run the smoke instead of first building
+the wheel. It performs one standard wheel build from a disposable source copy,
+removes the copy before installed execution, and tests persisted reload in a
+second Python process:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 \
+CARGO_TARGET_DIR="$PWD/target/python-wheel-smoke/cargo" \
+.venv/bin/python bindings/python/tests/python_wheel_smoke.py \
+  --receipt target/python-wheel-smoke/cargo/wheel-smoke.json
+```
+
+To avoid rebuilding an already-produced wheel, pass it with `--wheel <path>`.
+That mode proves installed consumer behavior but not source-free wheel
+production. `--crossed-bundle` builds a synthetic second sealed wheel with a
+changed exported key-seed operation. A native C program links each staged archive
+and requires seed 7 to yield key bits 7 in A and 8 in B; the first wheel must
+reject B's compiled artifact. The receipt includes archive and linked-library
+digests, exact results, separate compile/reload process evidence, and negative
+controls. Failure logs and receipts are retained under the Cargo target
+directory. This is a bounded Python distribution check, not the aggregate
+runtime-artifact oracle.
+
+On macOS the installed-wheel processes run in a filesystem sandbox denying
+reads from the original checkout, and their receipts record a denied read
+of its `Cargo.toml`. On Linux the copy is removed and the developer target
+withheld, but the original checkout is still readable; a receipt with
+`checkout_read_denied: false` is not checkout-denied evidence.
+`source_free_build_proven` is true only when the smoke built the wheel and
+every installed consumer verified that checkout read denial.
 
 ## Build the Book
 

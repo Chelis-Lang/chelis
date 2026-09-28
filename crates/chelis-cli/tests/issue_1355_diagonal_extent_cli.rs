@@ -135,3 +135,109 @@ fn correct_declared_extent_scores_one_and_matches_the_runtime_shape() {
         "the runtime shape must equal the declared tensor[3, f32], got {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1739 through the CLI: the literal selected axis bounds the declared
+// result extent even when the other selected axis is symbolic.
+//
+// `min(n, 4) <= 4` for every runtime `n`, so `-> tensor[9, f32]` on a
+// `tensor[n, 4, f32]` operand is unreachable and must not score 1.0. At the
+// bound stays accepted and must still run, which is the control that the
+// rejection is an upper bound and not an equality.
+// ---------------------------------------------------------------------------
+
+/// A three-row operand, whose diagonal against a four-wide axis is
+/// `[1.0, 6.0, 11.0]`.
+const THREE_BY_FOUR: &str =
+    "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]])\n";
+
+/// A five-row operand, whose diagonal against a four-wide axis reaches the
+/// bound exactly: `[1.0, 6.0, 11.0, 16.0]`.
+const FIVE_BY_FOUR: &str = "m = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], \
+                            [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0], \
+                            [17.0, 18.0, 19.0, 20.0]])\n";
+
+fn symbolic_program(declared: &str, operand: &str) -> String {
+    format!(
+        "def f[n](x: tensor[n, 4, f32]) -> tensor[{declared}, f32] = diagonal(x, 0, 1)\n\
+         {operand}out = f(m)\n"
+    )
+}
+
+/// REGRESSION TEST. The chelis#1739 program scored a perfect 1.0 with an empty
+/// error list before the fix, because the mixed (symbolic, literal) pair left
+/// the result extent a wildcard. It must now score strictly below 1.0 and carry
+/// exactly one `DimensionMismatch` naming the bound and the declared extent.
+#[test]
+fn a_symbolic_pair_declared_wider_than_its_literal_axis_does_not_score_one() {
+    let (_dir, path) = write_program(&symbolic_program("9", THREE_BY_FOUR));
+    let json = check_json(&path);
+
+    let score = json["score"].as_f64().expect("numeric score");
+    assert!(
+        score < 1.0,
+        "a diagonal declared tensor[9, f32] on a tensor[n, 4, f32] operand \
+         must not score 1.0, got {score}"
+    );
+
+    let errors = json["errors"].as_array().expect("errors array");
+    let [error] = errors.as_slice() else {
+        panic!("expected exactly one error, got {errors:?}");
+    };
+    assert_eq!(error["kind"].as_str(), Some("DimensionMismatch"));
+    let message = error["message"].as_str().expect("message string");
+    assert_eq!(
+        message,
+        "diagonal declares the smaller selected extent ([05-OP-33]): axis 1 is \
+         literal 4, so the result extent is at most 4, but the declared result \
+         extent is 9",
+        "the CLI must carry the same exact diagnostic the checker suite pins"
+    );
+}
+
+/// REGRESSION TEST. `chelis eval --file` refuses the same program before
+/// running it. Before the fix it ran and printed a `shape=[3]` result under a
+/// `tensor[9, f32]` declaration.
+#[test]
+fn a_symbolic_pair_declared_wider_than_its_literal_axis_is_rejected_before_evaluation() {
+    let (_dir, path) = write_program(&symbolic_program("9", THREE_BY_FOUR));
+    let (ok, stdout, stderr) = eval_file(&path);
+
+    assert!(!ok, "eval must fail; stdout was {stdout}");
+    assert!(
+        stderr.contains("DimensionMismatch") && stderr.contains("at most 4"),
+        "eval must reject with the upper-bound mismatch, got {stderr}"
+    );
+    assert!(
+        !stdout.contains("out ="),
+        "eval must not print a result for a rejected program, got {stdout}"
+    );
+}
+
+/// DISPOSITION LOCK plus the shape-agreement evidence. A declaration AT the
+/// bound is satisfiable and must still score 1.0 and run, with the runtime
+/// shape equal to the declared one. Green before the fix too, so it proves
+/// only that the bound rejects strictly greater rather than not-equal.
+#[test]
+fn a_symbolic_pair_declared_at_its_literal_axis_scores_one_and_runs() {
+    let (_dir, path) = write_program(&symbolic_program("4", FIVE_BY_FOUR));
+
+    let json = check_json(&path);
+    assert_eq!(
+        json["score"].as_f64(),
+        Some(1.0),
+        "a declaration at the bound must still score 1.0, got {json}"
+    );
+    assert_eq!(
+        json["errors"].as_array().map(Vec::len),
+        Some(0),
+        "a score-1 program must carry an empty error list, got {json}"
+    );
+
+    let (ok, stdout, stderr) = eval_file(&path);
+    assert!(ok, "eval must succeed; stderr was {stderr}");
+    assert!(
+        stdout.contains("out = tensor(shape=[4], data=[1.0, 6.0, 11.0, 16.0])"),
+        "the runtime shape must equal the declared tensor[4, f32], got {stdout}"
+    );
+}

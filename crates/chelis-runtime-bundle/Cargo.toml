@@ -1,0 +1,26 @@
+[package]
+name = "chelis-runtime-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The runtime static archive and headers a Chelis compiler carries and stages."
+
+[features]
+# Release and Nix builds of the CLI are sealed builds (spec/08-backends.md
+# §2.1): they carry no checkout path and skip the development source-freshness
+# check. Staging receipts record the mode.
+sealed = []
+
+[dependencies]
+chelis-runtime.workspace = true
+chelis-runtime-bundle-macro.workspace = true
+serde_json = "1"
+sha2 = "0.10"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

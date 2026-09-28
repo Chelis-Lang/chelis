@@ -74,7 +74,7 @@ fn defsig_dim_enforcement_leaks_through_wildcard_body_in_callers() {
 sig do_thing: tensor[32, 128, f32] -> f32
 
 def make() -> tensor[1, 3, f32] =
-  pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]], cast(3, int64), cast(0.0, f32))
+  pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]], cast(3, i64), cast(0.0, f32))
 
 result = do_thing(make())
 "#,

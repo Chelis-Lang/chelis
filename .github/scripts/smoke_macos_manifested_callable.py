@@ -101,6 +101,11 @@ int main(void) {
         }
         return 1;
     }
+    if (memcmp(chelis_tensor_read_view(a).data, a_bits, sizeof(a_bits)) != 0 ||
+        memcmp(chelis_tensor_read_view(b).data, b_bits, sizeof(b_bits)) != 0) {
+        fprintf(stderr, "manifested callable changed a borrowed input\\n");
+        return 1;
+    }
 
     chelis_tensor_release(outputs[0]);
     chelis_tensor_release(a);

@@ -11,7 +11,7 @@ use chelis_types::{InferResult, check_ir_program};
 fn surf_to_deep_macro(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -32,43 +32,34 @@ fn reject_messages(source: &str, label: &str) -> Vec<String> {
 
 // ─── structural Deep-AST helpers (mirrors issue_319 detector) ─────────────
 
-fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+fn node_tag(expr: &Expr) -> Option<&str> {
     // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    // head string.
+    expr.tag().map(|tag| tag.as_str())
 }
 
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return None;
-    };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    node.meta().ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
+    if node_tag(expr) != Some("app") {
         return None;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(app, _) = expr else {
         return None;
     };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
+    let callee = app.children_slice().first()?;
+    if node_tag(callee) != Some("var") {
         return None;
     }
-    let Expr::List(var_list, _) = callee else {
+    let Expr::Node(var, _) = callee else {
         return None;
     };
-    match var_list.elements.get(2) {
+    match var.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -77,26 +68,17 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                visit(child, f);
-            }
-        }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                visit(value, f);
-            }
+            map.visit_expressions(&mut |value, _| visit(value, f));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                visit(value, f);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| visit(value, f));
             visit(&meta.expr, f);
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                visit(value, f);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| visit(value, f));
             for child in node.children_iter() {
                 match child {
                     chelis_deep::node::ChildRef::Expr(expr)
@@ -115,9 +97,7 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                visit(value, f);
-            }
+            data.meta.visit_expressions(&mut |value, _| visit(value, f));
             for child in &data.children {
                 visit(child, f);
             }
@@ -127,18 +107,18 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 }
 
 fn is_named_def(expr: &Expr, def_name: &str) -> bool {
-    if list_tag(expr) != Some("def") {
+    if node_tag(expr) != Some("def") {
         return false;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(def, _) = expr else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
+    matches!(def.children_slice().first(), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
     let decls = parse_surf(src).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()
@@ -153,7 +133,7 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
     visit(def, &mut |node| {
         if app_callee_name(node).is_some()
             && let Some(ty) = node_type_meta(node)
-            && list_tag(ty) == Some("t-var")
+            && node_tag(ty) == Some("t-var")
         {
             found = true;
         }
@@ -166,7 +146,7 @@ fn app_type_tags(def: &Expr, callee_name: &str) -> Vec<String> {
     visit(def, &mut |node| {
         if app_callee_name(node) == Some(callee_name)
             && let Some(ty) = node_type_meta(node)
-            && let Some(tag) = list_tag(ty)
+            && let Some(tag) = node_tag(ty)
         {
             tags.push(tag.to_string());
         }
@@ -228,7 +208,7 @@ def driver() -> f32 = {{
 // ─── (3b) fresh separate-sig def, shape-computed builtins, no bare tvar ───
 
 const FRESH_SEPARATE_SIG: &str = "\
-sig ffn: tensor[n, d, p] -> tensor[d, h, p] -> tensor[h, d, p] -> tensor[n, d, p] -> tensor[n, d, p]
+sig ffn[n, d, h, p: Float]: tensor[n, d, p] -> tensor[d, h, p] -> tensor[h, d, p] -> tensor[n, d, p] -> tensor[n, d, p]
 def ffn(x, w1, w2, r) = {
   hidden = matmul(x, w1)
   proj = matmul(hidden, w2)
@@ -243,7 +223,8 @@ fn fresh_separate_sig_two_builtins_checks_clean() {
     // 4 params sharing precision var `p` and dim vars n/d/h; let-bound
     // intermediates; three distinct builtins (matmul, permute, mul). Must
     // check clean — the var-ID-collision fix must not spuriously error.
-    let deep = desugar_program(&parse_surf(FRESH_SEPARATE_SIG).expect("surf parse"));
+    let deep = desugar_program(&parse_surf(FRESH_SEPARATE_SIG).expect("surf parse"))
+        .expect("Surf fixture must desugar");
     let rep = check_ir_program(&deep);
     assert!(
         rep.is_ok(),
@@ -283,8 +264,8 @@ fn expand_error_inline_size_still_fires_form3_gate_once() {
     // Form-3 gate: the #469 sourceless-size reject must fire EXACTLY ONCE
     // (not skipped, not doubled), and never an ICE.
     let msgs = reject_messages(
-        "def g[a, n](b: tensor[n, f32], t: (int64, int64)) -> tensor[a, n, f32] = \
-         insert(b, 0, add(t.1, cast(1, int64)))\n",
+        "def g[a, n](b: tensor[n, f32], t: (i64, i64)) -> tensor[a, n, f32] = \
+         insert(b, 0, add(t.1, cast(1, i64)))\n",
         "3c: expand Error size",
     );
     let form3: Vec<_> = msgs

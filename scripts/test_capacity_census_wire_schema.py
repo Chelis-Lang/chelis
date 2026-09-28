@@ -1,0 +1,1165 @@
+"""Paired controls for actual fixed-number and execution schema adapters."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+import unittest
+
+from capacity_census_graph import GraphError
+
+ROOT = Path(__file__).resolve().parent.parent
+
+VOCABULARY = [
+    {"name": "f64", "width": 8, "kind": "float"},
+    {"name": "int64", "width": 8, "kind": "integer"},
+    {"name": "bool", "width": 1, "kind": "bool"},
+]
+ORDER = tuple(d["name"] for d in VOCABULARY)
+
+
+def diagnostic_artifacts():
+    """Compiler-shaped producer/consumer declarations with a non-serde sidecar."""
+    from test_capacity_census_graph import Artifact, primitive, reference
+
+    api = Artifact("chelis_compiler_api")
+    types = Artifact("chelis_types")
+    source = "crates/chelis-compiler-api/src/schema.rs"
+    span = {"filename": source, "begin": [1, 1], "end": [2, 1]}
+    api.external(40, "core::option::Option")
+    api.external(41, "alloc::boxed::Box")
+    api.external(42, "chelis_types::unsupported::Unsupported")
+    api.external(43, "schemars::JsonSchema")
+    types.external(40, "core::num::nonzero::NonZeroU32")
+    hidden = types.struct(
+        1,
+        "Unsupported",
+        [types.field("issue", reference(40))],
+        path=["chelis_types", "unsupported", "Unsupported"],
+    )
+    types.doc["index"][str(hidden)]["inner"]["struct"]["impls"] = []
+    sidecar = api.field(
+        "unsupported",
+        reference(40, reference(41, reference(42))),
+        attrs=("#[serde(skip)]", "#[schemars(skip)]"),
+    )
+    api.doc["index"][str(sidecar)]["visibility"] = "crate"
+    api.doc["index"][str(sidecar)]["span"] = dict(span)
+    producer_field = api.field("severity", primitive("f64"))
+    consumer_field = api.field("severity", primitive("f64"))
+    for item_id, name, fields, direction in (
+        (1, "Diagnostic", [producer_field, sidecar], "Serialize"),
+        (2, "WireDiagnostic", [consumer_field], "Deserialize"),
+    ):
+        api.struct(item_id, name, fields, path=["chelis_compiler_api", "schema", name])
+        item = api.doc["index"][str(item_id)]
+        item["span"] = dict(span)
+        body = item["inner"]["struct"]
+        impl_id = body["impls"][0 if direction == "Serialize" else 1]
+        body["impls"] = [impl_id]
+        implementation = api.doc["index"][str(impl_id)]
+        implementation["span"] = dict(span)
+        implementation["inner"]["impl"]["for"] = reference(item_id)
+        api.next_id += 1
+        method = api.add(api.next_id, direction.lower(), {"function": {}})
+        api.doc["index"][str(method)]["span"] = dict(span)
+        implementation["inner"]["impl"]["items"] = [method]
+        methods = []
+        for method_name in ("schema_name", "schema_id", "json_schema"):
+            api.next_id += 1
+            method = api.add(api.next_id, method_name, {"function": {}})
+            api.doc["index"][str(method)]["span"] = dict(span)
+            methods.append(method)
+        api.next_id += 1
+        schema_impl = api.add(
+            api.next_id,
+            None,
+            {
+                "impl": {
+                    "trait": {"path": "JsonSchema", "id": 43},
+                    "items": methods,
+                    "for": reference(item_id),
+                }
+            },
+            attrs=("automatically_derived",),
+        )
+        api.doc["index"][str(schema_impl)]["span"] = dict(span)
+        body["impls"].append(schema_impl)
+    return [api.doc, types.doc], sidecar, producer_field, consumer_field
+
+
+class SchemaCases(unittest.TestCase):
+    def test_diagnostic_codec_selection_pairs_producer_omission_and_consumer_domains(
+        self,
+    ):
+        from capacity_census_wire_schema import diagnostic_cases
+
+        cases = diagnostic_cases()
+        self.assertEqual(len(cases), len({case.identity for case in cases}))
+        self.assertEqual(
+            {case.identity for case in cases},
+            {
+                "Diagnostic/construct/0.5",
+                "Diagnostic/construct/-0.0",
+                "Diagnostic/json/0.5",
+                "Diagnostic/json/-0.0",
+                "Diagnostic/construct/reject--0.1",
+                "Diagnostic/construct/reject-1.1",
+                "Diagnostic/json/reject--0.1",
+                "Diagnostic/json/reject-1.1",
+                "Diagnostic/json/missing-severity",
+            },
+        )
+        for codec in ("construct", "json"):
+            selected = [case for case in cases if case.codec == codec]
+            self.assertTrue(any(case.expected is not None for case in selected))
+            self.assertTrue(any(case.expected is None for case in selected))
+        zero = next(
+            case for case in cases if case.identity == "Diagnostic/construct/-0.0"
+        )
+        self.assertEqual(zero.expected["severity_bits"], "8000000000000000")
+        self.assertTrue(zero.expected["internal_identity"])
+        self.assertNotIn("unsupported", zero.expected["wire"])
+        self.assertNotIn("unsupported", zero.expected["producer_schema_fields"])
+        self.assertNotIn("unsupported", zero.expected["consumer_schema_fields"])
+
+    def test_diagnostic_projection_omits_only_the_verified_nonserialized_sidecar(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+
+        documents, _, _, _ = diagnostic_artifacts()
+        graph = _SchemaShapeGraph(documents, VOCABULARY).discover_exports(
+            "chelis_compiler_api"
+        )
+        self.assertEqual(
+            {leaf.path for leaf in graph.numeric_leaves},
+            {
+                "chelis_compiler_api::schema::Diagnostic.severity",
+                "chelis_compiler_api::schema::WireDiagnostic.severity",
+            },
+        )
+        self.assertFalse(
+            any(d.identity.endswith("::Unsupported") for d in graph.definitions)
+        )
+        producer = next(
+            d for d in graph.definitions if d.identity.endswith("::Diagnostic")
+        )
+        self.assertIn("off-wire-derived-field", repr(producer.layout))
+        self.assertIn("chelis_types::unsupported::Unsupported", repr(producer.layout))
+
+    def test_diagnostic_projection_rejects_changed_omission_type_codec_and_decoder(
+        self,
+    ):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import primitive
+
+        for mutation in (
+            "serde-skip",
+            "schema-skip",
+            "visibility",
+            "payload",
+            "missing-definition",
+            "missing-field",
+            "extra-field",
+            "decoder-type",
+            "decoder-name",
+            "custom-serde",
+            "serde-source",
+            "serde-method",
+            "serde-receiver",
+            "custom-schema",
+            "schema-source",
+            "schema-method",
+            "schema-receiver",
+            "missing-schema-span",
+            "missing-field-span",
+            "schema-method-source",
+            "serde-method-source",
+        ):
+            with self.subTest(mutation=mutation):
+                documents, sidecar_id, producer_id, consumer_id = diagnostic_artifacts()
+                api = documents[0]
+                sidecar = api["index"][str(sidecar_id)]
+                producer = api["index"]["1"]["inner"]["struct"]
+                if mutation == "serde-skip":
+                    sidecar["attrs"] = [{"other": "#[schemars(skip)]"}]
+                elif mutation == "schema-skip":
+                    sidecar["attrs"] = [{"other": "#[serde(skip)]"}]
+                elif mutation == "visibility":
+                    sidecar["visibility"] = "public"
+                elif mutation == "missing-field-span":
+                    sidecar["span"] = None
+                elif mutation == "payload":
+                    sidecar["inner"]["struct_field"] = primitive("u64")
+                elif mutation == "missing-definition":
+                    documents.pop()
+                elif mutation == "missing-field":
+                    producer["kind"]["plain"]["fields"].remove(sidecar_id)
+                elif mutation == "extra-field":
+                    field = copy.deepcopy(api["index"][str(producer_id)])
+                    field["id"], field["name"] = 800, "extra"
+                    api["index"]["800"] = field
+                    producer["kind"]["plain"]["fields"].append(800)
+                elif mutation.startswith("decoder-"):
+                    field = api["index"][str(consumer_id)]
+                    if mutation == "decoder-type":
+                        field["inner"]["struct_field"] = primitive("u64")
+                    else:
+                        field["name"] = "other"
+                else:
+                    schema = "schema" in mutation
+                    implementation = api["index"][str(producer["impls"][int(schema)])]
+                    if mutation.startswith("custom-"):
+                        implementation["attrs"] = []
+                    elif mutation == "missing-schema-span":
+                        implementation["span"] = None
+                    elif mutation.endswith("method-source"):
+                        method = api["index"][
+                            str(implementation["inner"]["impl"]["items"][0])
+                        ]
+                        method["span"]["filename"] = "unrelated.rs"
+                    elif mutation.endswith("source"):
+                        implementation["span"]["filename"] = "unrelated.rs"
+                    elif mutation.endswith("receiver"):
+                        implementation["inner"]["impl"]["for"]["resolved_path"][
+                            "id"
+                        ] = 2
+                    else:
+                        implementation["inner"]["impl"]["items"] = []
+                with self.assertRaises(GraphError):
+                    _SchemaShapeGraph(documents, VOCABULARY).discover_exports(
+                        "chelis_compiler_api"
+                    )
+
+    def test_diagnostic_projection_preserves_generic_skip_and_import_rejections(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive, reference
+
+        for skipped in (False, True):
+            artifact = Artifact()
+            artifact.external(40, "core::num::nonzero::NonZeroU32")
+            field = artifact.field(
+                "value",
+                primitive("u64") if skipped else reference(40),
+                attrs=("#[serde(skip)]",) if skipped else (),
+            )
+            artifact.struct(1, "Other", [field])
+            with self.assertRaisesRegex(
+                GraphError, "only the supported nonnumeric|missing defining"
+            ):
+                _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports(
+                    "fixture"
+                )
+
+    def test_required_span_decoder_is_confined_to_its_exact_optional_text_field(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive, reference
+
+        artifact = Artifact("chelis_compiler_api")
+        artifact.external(40, "core::option::Option")
+        artifact.external(41, "alloc::string::String")
+        field = artifact.field(
+            "span_id", reference(40, reference(41)),
+            attrs=('#[serde(deserialize_with = "require_explicit_span")]',),
+        )
+        artifact.struct(1, "WireDagNode", [field])
+        artifact.doc["paths"]["1"]["path"] = [
+            "chelis_compiler_api", "schema", "WireDagNode"
+        ]
+        graph = _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports(
+            "chelis_compiler_api"
+        )
+        self.assertFalse(graph.numeric_leaves)
+        for mutation in ("owner", "field", "helper", "numeric", "container", "default"):
+            changed = copy.deepcopy(artifact.doc)
+            item = changed["index"][str(field)]
+            if mutation == "owner":
+                changed["paths"]["1"]["path"][-1] = "Unrelated"
+            elif mutation == "field":
+                item["name"] = "arbitrary_data"
+            elif mutation == "helper":
+                item["attrs"] = [{"other": '#[serde(deserialize_with = "custom")]'}]
+            elif mutation == "numeric":
+                item["inner"]["struct_field"] = reference(40, primitive("f64"))
+            elif mutation == "container":
+                item["inner"]["struct_field"] = reference(41)
+            else:
+                item["attrs"].append({"other": "#[serde(default)]"})
+            with self.assertRaisesRegex(GraphError, "required span decoder"):
+                _SchemaShapeGraph([changed], VOCABULARY).discover_exports(
+                    "chelis_compiler_api"
+                )
+
+    def test_source_admission_selection_keeps_each_decided_field_obligation(self):
+        from capacity_census_wire_materialization import (
+            materialization_cases,
+            source_field_evidence,
+        )
+
+        cases = {c.identity: c for c in materialization_cases()}
+        for field, pairs in source_field_evidence().items():
+            for accepted, rejected in pairs:
+                self.assertIsNotNone(cases[accepted].expected, field)
+                self.assertIsNone(cases[rejected].expected, field)
+
+    def test_artifact_manifest_and_discriminator_have_independent_codec_pairs(self):
+        from capacity_census_wire_artifact import artifact_cases
+
+        cases = artifact_cases()
+        for carrier in ("ArtifactAbiVersion", "CompiledArtifactManifest"):
+            for codec in ("json", "construct"):
+                selected = [
+                    c for c in cases if c.carrier == carrier and c.codec == codec
+                ]
+                self.assertTrue(any(c.expected is not None for c in selected))
+                self.assertTrue(any(c.expected is None for c in selected))
+        self.assertTrue(
+            any(c.rejection_contains == "artifact ABI version" for c in cases)
+        )
+
+    def test_boolean_default_does_not_admit_a_numeric_default_function(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive
+
+        artifact = Artifact()
+        field = artifact.field("check", primitive("bool"))
+        artifact.doc["index"][str(field)]["attrs"] = [
+            {"other": '#[serde(default = "default_true")]'}
+        ]
+        artifact.struct(1, "Request", [field])
+        self.assertFalse(
+            _SchemaShapeGraph([artifact.doc], VOCABULARY)
+            .discover_exports("fixture")
+            .numeric_leaves
+        )
+        for ty, predicate in (("i64", "default_true"), ("bool", "custom_default")):
+            artifact.doc["index"][str(field)]["inner"]["struct_field"] = primitive(ty)
+            artifact.doc["index"][str(field)]["attrs"] = [
+                {"other": f'#[serde(default = "{predicate}")]'}
+            ]
+            with self.assertRaisesRegex(GraphError, "unsupported.*default"):
+                _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports(
+                    "fixture"
+                )
+
+    def test_map_omission_follows_both_types_and_rejects_wrong_container(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+        from test_capacity_census_graph import Artifact, primitive, reference
+
+        artifact = Artifact()
+        artifact.external(40, "alloc::collections::btree::map::BTreeMap")
+        field = artifact.field(
+            "scores", reference(40, primitive("u64"), primitive("f64"))
+        )
+        artifact.doc["index"][str(field)]["attrs"] = [
+            {"other": '#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]'}
+        ]
+        artifact.struct(1, "Map", [field])
+        graph = _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports(
+            "fixture"
+        )
+        self.assertEqual(
+            {leaf.primitive for leaf in graph.numeric_leaves}, {"u64", "f64"}
+        )
+        artifact.doc["index"][str(field)]["inner"]["struct_field"] = primitive("f64")
+        with self.assertRaisesRegex(GraphError, "type-mismatched serde omission"):
+            _SchemaShapeGraph([artifact.doc], VOCABULARY).discover_exports("fixture")
+
+    def test_every_number_adapter_executes_json_binary_and_carrier_admission(self):
+        from capacity_census_wire_schema import schema_cases
+
+        cases = schema_cases(VOCABULARY, ORDER)
+        self.assertEqual(len(cases), len({case.identity for case in cases}))
+        for carrier in (
+            "UnitInterval",
+            "SourceFloat",
+            "SourceInteger",
+            "NonnegativeCount",
+            "NonnegativeExtent",
+        ):
+            for codec in ("json", "binary", "scalar"):
+                selected = [
+                    case
+                    for case in cases
+                    if case.carrier == carrier and case.codec == codec
+                ]
+                self.assertTrue(
+                    any(case.expected is not None for case in selected),
+                    (carrier, codec),
+                )
+                self.assertTrue(
+                    any(case.expected is None for case in selected), (carrier, codec)
+                )
+        source_zero = next(
+            case for case in cases if case.identity == "SourceFloat/json/-0.0"
+        )
+        self.assertEqual(source_zero.expected["elements"], ["8000000000000000"])
+        count = next(
+            case
+            for case in cases
+            if case.identity == "NonnegativeCount/json/9007199254740993"
+        )
+        self.assertEqual(count.expected["elements"], [9007199254740993])
+
+    def test_result_reference_maps_have_producer_consumer_ownership_pairs(self):
+        from capacity_census_wire_envelopes import result_reference_cases
+
+        cases = result_reference_cases()
+        for carrier in ("LowerResult", "GradResult"):
+            for codec in ("json", "construct"):
+                selected = [
+                    c for c in cases if c.carrier == carrier and c.codec == codec
+                ]
+                self.assertTrue(any(c.expected is not None for c in selected))
+                self.assertTrue(any(c.expected is None for c in selected))
+
+    def test_source_coordinates_preserve_point_empty_absent_and_checked_access(self):
+        from capacity_census_wire_sources import source_cases
+
+        cases = source_cases()
+        for carrier in ("Span", "DiagnosticLocation"):
+            selected = [c for c in cases if c.carrier == carrier]
+            self.assertTrue(any(c.expected is not None for c in selected))
+            self.assertTrue(any(c.expected is None for c in selected))
+        self.assertTrue(
+            any(c.codec == "slice" and c.rejection_contains == "UTF-8" for c in cases)
+        )
+        self.assertTrue(
+            any(
+                c.identity.endswith("/absent") and c.expected["extent"] is None
+                for c in cases
+            )
+        )
+
+    def test_envelope_matrix_requires_versions_before_values_and_exact_dispatch(self):
+        from capacity_census_wire_envelopes import envelope_cases
+
+        cases = envelope_cases()
+        for carrier in ("EvalResult", "WireApiEnvelope<EvalResult>", "WireBatchResult"):
+            selected = [c for c in cases if c.carrier == carrier]
+            self.assertTrue(any(c.expected is not None for c in selected))
+            self.assertTrue(any(c.expected is None for c in selected))
+        self.assertTrue(any(c.rejection_contains == "schema_version" for c in cases))
+        self.assertTrue(any("duplicate-bits" in c.identity for c in cases))
+
+    def test_reports_execute_producer_consumer_and_owned_reference_checks(self):
+        from capacity_census_wire_schema import report_cases
+
+        cases = report_cases()
+        for carrier in ("CheckResult", "OrderedInferredParameters"):
+            for codec in ("json", "construct"):
+                selected = [
+                    c for c in cases if c.carrier == carrier and c.codec == codec
+                ]
+                self.assertTrue(any(c.expected is not None for c in selected))
+                self.assertTrue(any(c.expected is None for c in selected))
+        self.assertTrue(
+            any(c.rejection_contains == "owning list position" for c in cases)
+        )
+
+    def test_tensor_and_numeric_subset_have_positive_negative_pairs(self):
+        from capacity_census_wire_schema import schema_cases
+
+        cases = schema_cases(VOCABULARY, ORDER)
+        for carrier in ("NumericScalar", "TensorValue"):
+            selected = [case for case in cases if case.carrier == carrier]
+            self.assertTrue(any(case.expected is not None for case in selected))
+            self.assertTrue(any(case.expected is None for case in selected))
+
+    def test_a_key_tensor_execution_value_has_exactly_the_digit_spelling(self):
+        # spec/10 section 3.2: a key tensor's storage object is
+        # `{"dtype":"key","bits":[h,...]}`. It is admitted as a TensorValue in
+        # every codec, every other spelling is rejected, and the key adds
+        # nothing to the numeric subset or to a carried dtype's cases.
+        from capacity_census_wire_schema import schema_cases
+
+        keyed = VOCABULARY + [{"name": "key", "width": 8, "kind": "key"}]
+        plain = schema_cases(VOCABULARY, ORDER)
+        cases = schema_cases(keyed, ORDER)
+        keys = [case for case in cases if case.dtype == "key"]
+        self.assertEqual([case for case in cases if case.dtype != "key"], plain)
+        self.assertEqual({case.carrier for case in keys}, {"TensorValue"})
+        self.assertEqual({case.codec for case in keys}, {"json", "binary", "construct"})
+        admitted = {case.identity: case for case in keys if case.expected is not None}
+        self.assertEqual(
+            set(admitted),
+            {
+                f"TensorValue/{codec}/key/{label}"
+                for codec in ("json", "binary", "construct")
+                for label in ("scalar", "one", "matrix", "empty", "late-zero")
+            },
+        )
+        one = admitted["TensorValue/binary/key/one"]
+        self.assertEqual(
+            one.expected["json"],
+            {"shape": [1], "data": {"dtype": "key", "bits": ["8fd06b2e7bad8630"]}},
+        )
+        # Independent bincode: rank, extent, the ordinal after every carried
+        # dtype, one element, then the 16 digits as a length-prefixed string.
+        self.assertEqual(
+            bytes.fromhex(one.input),
+            (1).to_bytes(8, "little")
+            + (1).to_bytes(8, "little")
+            + len(ORDER).to_bytes(4, "little")
+            + (1).to_bytes(8, "little")
+            + (16).to_bytes(8, "little")
+            + b"8fd06b2e7bad8630",
+        )
+        rejected = {case.identity for case in keys if case.expected is None}
+        for label in (
+            "values-member",
+            "fifteen-digits",
+            "seventeen-digits",
+            "uppercase",
+            "prefixed",
+            "json-number",
+        ):
+            for codec in ("json", "construct"):
+                self.assertIn(f"TensorValue/{codec}/key/{label}", rejected)
+
+    def test_a_malformed_key_tensor_observation_fails_the_executed_check(self):
+        from capacity_census_wire_adapters import check_observations
+        from capacity_census_wire_schema import schema_cases
+
+        keyed = VOCABULARY + [{"name": "key", "width": 8, "kind": "key"}]
+        selected = {
+            case.identity: case
+            for case in schema_cases(keyed, ORDER)
+            if case.identity
+            in {"TensorValue/json/key/one", "TensorValue/json/key/uppercase"}
+        }
+        one = selected["TensorValue/json/key/one"]
+        cases = list(selected.values())
+        admitted = {"id": one.identity, "observation": one.expected}
+        refused = {
+            "id": "TensorValue/json/key/uppercase",
+            "observation": None,
+            "decode_error": "a key's bits require exactly 16 lowercase hexadecimal digits",
+        }
+        self.assertEqual(len(check_observations(cases, [admitted, refused])), 2)
+        # An admitted uppercase spelling, or a key read back as a signed
+        # integer, is a wrong observation, not a pass.
+        signed = {
+            "id": one.identity,
+            "observation": {
+                **one.expected,
+                "elements": [int("8fd06b2e7bad8630", 16) - (1 << 64)],
+            },
+        }
+        uppercase = {"id": refused["id"], "observation": one.expected}
+        for rows in ([signed, refused], [admitted, uppercase]):
+            with self.subTest(rows=rows), self.assertRaises(GraphError):
+                check_observations(cases, rows)
+
+    def test_runtime_reference_owner_matrix_covers_all_admission_entry_points(self):
+        from capacity_census_wire_envelopes import dag_cases
+
+        cases = {c.identity: c for c in dag_cases()}
+        current = cases["WireDag/json/empty"]
+        self.assertEqual(current.expected["schema_version"], 20)
+        self.assertIsNone(cases["WireDag/json/version-16"].expected)
+        self.assertIsNone(cases["WireDag/json/version-17"].expected)
+        self.assertIsNone(cases["WireDag/json/version-18"].expected)
+        self.assertIsNone(cases["WireDag/json/version-19"].expected)
+        self.assertIsNone(cases["WireDag/json/version-21"].expected)
+        for codec in ("json", "construct", "admit"):
+            for owner in ("expand", "reshape", "pad", "shrink", "stride"):
+                prefix = f"WireDag/{codec}/owner-{owner}-"
+                self.assertIsNotNone(cases[prefix + "node"].expected)
+                self.assertIsNone(cases[prefix + "node-zero-slot"].expected)
+                axis = cases[prefix + "input-axis"]
+                self.assertEqual(
+                    axis.expected is not None, owner in {"expand", "reshape"}
+                )
+            self.assertIsNotNone(cases[f"WireDag/{codec}/owner-shrink-to-end"].expected)
+            full_axis = cases[f"WireDag/{codec}/owner-shrink-to-end"]
+            self.assertEqual(
+                full_axis.expected["nodes"][1]["op"]["bounds"][0][0],
+                {"bound": "lit", "value": 0},
+            )
+            self.assertIsNone(
+                cases[f"WireDag/{codec}/owner-shrink-to-end-start-one"].expected
+            )
+        for codec in ("json", "admit"):
+            self.assertIsNone(cases[f"WireDag/{codec}/duplicate-bits"].expected)
+        self.assertNotIn("WireDag/construct/duplicate-bits", cases)
+
+    def test_literal_witness_matrix_covers_domains_provenance_and_mandatory_fields(self):
+        from capacity_census_wire_envelopes import dag_cases
+
+        cases = {case.identity: case for case in dag_cases()}
+        for codec in ("json", "construct", "admit"):
+            prefix = f"WireDag/{codec}/"
+            good = cases[prefix + "extent-witness-owned"]
+            self.assertEqual(
+                good.expected["nodes"][1]["op"]["requirements"], [4, 4, 9]
+            )
+            self.assertEqual(good.expected["nodes"][2]["shape_deps"], [1])
+            for name in (
+                "shape-dep-self",
+                "shape-dep-large",
+                "shape-dep-negative",
+                "shape-dep-float",
+                "witness-negative-requirement",
+                "witness-float-requirement",
+                "witness-axis-out-of-range",
+                "witness-no-input",
+                "witness-extra-input",
+                "witness-wrong-output",
+                "witness-ranked-output",
+                "missing-witness-parameter",
+                "missing-witness-axis",
+                "missing-witness-requirements",
+                "missing-node-shape_deps",
+                "missing-node-span_id",
+                "missing-node-merged_spans",
+                "missing-node-declaration",
+            ):
+                self.assertIsNone(cases[prefix + name].expected, name)
+
+    def test_local_ascription_identity_is_opaque_u64_with_exact_codec_rejections(self):
+        from capacity_census_wire_envelopes import dag_cases
+
+        cases = {case.identity: case for case in dag_cases()}
+        for codec in ("json", "construct", "admit"):
+            prefix = f"WireDag/{codec}/"
+            good = cases[prefix + "local-ascription-owned"]
+            self.assertEqual(
+                good.expected["nodes"][1]["op"]["site"][
+                    "local_ascription_claim"
+                ]["ascription_id"],
+                18446744073709551615,
+            )
+            self.assertIsNone(
+                cases[prefix + "local-ascription-id-negative"].expected
+            )
+            self.assertIsNone(cases[prefix + "local-ascription-id-float"].expected)
+            named = cases[prefix + "named-local-ascription-owned"]
+            self.assertEqual(
+                named.expected["nodes"][2]["shape_deps"],
+                [1],
+            )
+            self.assertEqual(
+                named.expected["nodes"][3]["shape_deps"],
+                [2],
+            )
+            for name in (
+                "named-local-ascription-missing-declaration",
+                "named-local-ascription-wrong-declaration",
+                "named-local-ascription-empty-parameter",
+                "named-local-ascription-literal-hybrid",
+                "named-local-ascription-missing-owner",
+            ):
+                self.assertIsNone(cases[prefix + name].expected, name)
+
+
+class ActualSchemaCodec(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from capacity_census_wire_schema import verify_schema_codecs
+
+        cls.receipt = verify_schema_codecs(
+            ROOT, ROOT / "target/agents/wire-codec-rustdoc"
+        )
+        report = ROOT / "target/coordination/schema-codec-execution.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(cls.receipt.execution_report(), indent=2) + "\n")
+        cls.documents = [
+            json.loads(cls.receipt.canonical.document),
+            json.loads(cls.receipt.document),
+            *(json.loads(d) for d in cls.receipt.imported_documents),
+        ]
+
+    def test_actual_diagnostic_projection_binds_omission_and_codec_execution(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph, diagnostic_cases
+
+        required = {case.identity for case in diagnostic_cases()}
+        self.assertLessEqual(
+            required, {case.identity for case in self.receipt.outcomes}
+        )
+        vocabulary = json.loads(self.receipt.canonical.vocabulary)
+        graph = _SchemaShapeGraph(self.documents, vocabulary)
+        owner, item_id = graph.locations["chelis_compiler_api::schema::Diagnostic"]
+        found = graph.discover(owner, {"graph_export": (owner, item_id)})
+        self.assertFalse(
+            any(d.identity.endswith("::Unsupported") for d in found.definitions)
+        )
+        api = copy.deepcopy(self.documents[1])
+        diagnostic = next(
+            i
+            for i in api["index"].values()
+            if i.get("name") == "Diagnostic" and "struct" in i["inner"]
+        )
+        sidecar = next(
+            api["index"][str(i)]
+            for i in diagnostic["inner"]["struct"]["kind"]["plain"]["fields"]
+            if api["index"][str(i)]["name"] == "unsupported"
+        )
+        for attributes in (
+            [{"other": "#[serde(skip)]"}],
+            [{"other": "#[schemars(skip)]"}],
+        ):
+            sidecar["attrs"] = attributes
+            changed = [self.documents[0], api, *self.documents[2:]]
+            with self.assertRaisesRegex(GraphError, "omission changed"):
+                _SchemaShapeGraph(changed, vocabulary).discover(
+                    owner, {"graph_export": (owner, item_id)}
+                )
+
+    def test_structural_roles_require_current_shape_and_actual_admission_observations(
+        self,
+    ):
+        from capacity_census_wire_schema import SchemaWireGraph
+        from capacity_census_wire_structural import (
+            structural_contracts,
+            structural_evidence,
+        )
+
+        graph = SchemaWireGraph(self.documents, self.receipt).schema_graph()
+        self.assertEqual(self.receipt.structural, structural_contracts())
+        required = {
+            identity
+            for pairs in structural_evidence().values()
+            for pair in pairs
+            for identity in pair
+        }
+        self.assertEqual(set(self.receipt.structural_executions), required)
+        self.assertLessEqual(required, {o.identity for o in self.receipt.outcomes})
+        self.assertEqual(self.receipt.graph_identity, graph.identity)
+        report = self.receipt.execution_report()
+        self.assertEqual(report["structural_executions"], sorted(required))
+        self.assertEqual(
+            {row["field"] for row in report["structural_roles"]},
+            {c.field for c in structural_contracts()},
+        )
+
+    def test_classification_plan_is_bijective_with_the_executed_numeric_graph(self):
+        from dataclasses import replace
+        from capacity_census_graph import Leaf
+        from capacity_census_wire_adapters import CanonicalWireGraph
+        from capacity_census_wire_authority import classification_plan
+        from capacity_census_wire_schema import SchemaWireGraph
+
+        graph = SchemaWireGraph(self.documents, self.receipt).schema_graph()
+        canonical = CanonicalWireGraph(
+            self.documents, self.receipt.canonical
+        ).canonical_graph()
+        plan = classification_plan(
+            graph, canonical, self.receipt.operations, self.receipt.structural
+        )
+        self.assertEqual(plan, self.receipt.classifications)
+        self.assertEqual({c.leaf for c in plan}, set(graph.numeric_leaves))
+        self.assertEqual(len(plan), len(graph.numeric_leaves))
+        for arbitrary in (
+            Leaf("chelis_compiler_api::schema::Metadata::Value.value", "f64"),
+            Leaf("chelis_compiler_api::schema::DiagnosticSpan::Point.score", "f64"),
+        ):
+            with self.assertRaisesRegex(GraphError, "authority.*bijection"):
+                classification_plan(
+                    replace(graph, numeric_leaves=graph.numeric_leaves + (arbitrary,)),
+                    canonical,
+                    self.receipt.operations,
+                    self.receipt.structural,
+                )
+        with self.assertRaisesRegex(GraphError, "authority.*bijection"):
+            classification_plan(
+                graph, canonical, self.receipt.operations[1:], self.receipt.structural
+            )
+        self.assertEqual(
+            {
+                c["leaf"]["path"]
+                for c in self.receipt.execution_report()["classification_plan"]
+            },
+            {leaf.path for leaf in graph.numeric_leaves},
+        )
+
+    def test_all_nominal_serializers_are_graph_roots_or_explicit_binary_obligations(
+        self,
+    ):
+        from capacity_census_wire_publication import COMPILER_BINARY_OWNERS
+        from capacity_census_wire_schema import SchemaWireGraph
+
+        engine = SchemaWireGraph(self.documents, self.receipt)
+        publication = engine.publication_graph()
+        nominal = engine.serialization_definitions("chelis_compiler_api")
+        self.assertEqual({d.identity for d in publication.declarations}, set(nominal))
+        reached = {d.identity for d in publication.graph.definitions}
+        self.assertEqual(set(nominal) - reached, set(COMPILER_BINARY_OWNERS))
+        self.assertEqual(self.receipt.declarations, publication.declarations)
+        report = self.receipt.execution_report()
+        self.assertEqual(
+            {d["identity"] for d in report["serialization_definitions"]}, set(nominal)
+        )
+
+    def test_actual_source_execution_is_required_by_the_schema_receipt(self):
+        from capacity_census_wire_materialization import materialization_cases
+
+        report = self.receipt.execution_report()
+        selected = {case.identity for case in materialization_cases()}
+        observed = {row["identity"] for row in report["cases"]}
+        self.assertTrue(selected <= observed)
+        self.assertTrue(self.receipt.materialization_executions)
+        self.assertTrue(set(self.receipt.materialization_executions) <= selected)
+        self.assertIn(
+            "SourceProgram/eval-deep/f32-no-double-round",
+            self.receipt.materialization_executions,
+        )
+
+    def test_local_declaration_closure_binds_actual_compiler_provenance(self):
+        report = self.receipt.execution_report()["local_declarations"]
+        self.assertEqual(len(report["expanded_identity"]), 64)
+        self.assertEqual(len(report["probe_sha256"]), 64)
+        self.assertGreater(report["module_nominals"], 0)
+        self.assertGreater(report["serde_derives"], 0)
+        self.assertIn("serde_derive@", report["serde_package"])
+        self.assertGreater(report["schema_derives"], 0)
+        self.assertIn("schemars_derive@", report["schema_package"])
+
+    def test_actual_consumers_have_framework_execution_evidence(self):
+        report = self.receipt.execution_report()
+        executions = report["consumer_executions"]
+        self.assertEqual(len(executions), 2)
+        expected = [
+            "actual_facade_and_native_preserve_exact_values_and_reject_malformed_carriers"
+        ]
+        self.assertEqual(list(executions[0]["selected"]), expected)
+        self.assertEqual(list(executions[0]["executed"]), expected)
+        self.assertEqual(len(executions[0]["output_sha256"]), 64)
+        report_tests = [
+            "report_document_producer_and_consumer_preserve_typed_values",
+            "report_document_producer_rejects_inconsistent_counts",
+        ]
+        self.assertEqual(list(executions[1]["selected"]), report_tests)
+        self.assertEqual(list(executions[1]["executed"]), report_tests)
+        self.assertEqual(len(executions[1]["output_sha256"]), 64)
+        self.assertNotIn("Python facade execution", report["remaining"])
+
+    def test_numeric_parameters_bind_the_actual_graph_and_operation_authority(self):
+        from capacity_census_wire_operations import (
+            operation_contracts,
+            validate_numeric_operation_fields,
+        )
+        from capacity_census_wire_schema import SchemaWireGraph
+
+        graph = SchemaWireGraph(self.documents, self.receipt).schema_graph()
+        self.assertEqual(self.receipt.operations, operation_contracts())
+        self.assertEqual(
+            self.receipt.operations,
+            validate_numeric_operation_fields(
+                graph,
+                self.receipt.operations,
+                (ROOT / "spec/05-risc-primitives.md").read_text(),
+            ),
+        )
+        report = self.receipt.execution_report()
+        self.assertEqual(
+            {row["field"] for row in report["numeric_operations"]},
+            {row.field for row in self.receipt.operations},
+        )
+
+    def test_actual_fixed_number_and_execution_graph_requires_executed_domains(self):
+        from capacity_census_wire_schema import SchemaWireGraph
+
+        graph = SchemaWireGraph(self.documents, self.receipt).schema_graph()
+        names = {leaf.path: leaf.primitive for leaf in graph.numeric_leaves}
+        for name, primitive in (
+            ("UnitInterval", "f64"),
+            ("SourceFloat", "f64"),
+            ("SourceInteger", "i64"),
+            ("NonnegativeCount", "i64"),
+            ("NonnegativeExtent", "i64"),
+        ):
+            self.assertEqual(
+                names[f"chelis_compiler_api::schema::numbers::{name}.$number"],
+                primitive,
+            )
+        self.assertEqual(
+            names["chelis_compiler_api::schema::execution::TensorWire.shape"], "i64"
+        )
+        self.assertEqual(
+            names["chelis_compiler_api::schema::WireInferredParameter.index"], "u64"
+        )
+        self.assertTrue(
+            any(d.identity.endswith("::reports::ReportWire") for d in graph.definitions)
+        )
+        self.assertEqual(self.receipt.canonical.profile, "compiler-api")
+        self.assertTrue(self.receipt.outcomes)
+        self.assertTrue(
+            all(
+                row.executed and row.outcome == "passed"
+                for row in self.receipt.outcomes
+            )
+        )
+
+    def test_codec_relocation_preserves_shape_but_invalidates_saved_artifact_proof(self):
+        from capacity_census_wire_schema import SchemaWireGraph, _SchemaShapeGraph
+
+        documents = copy.deepcopy(self.documents)
+        api = documents[1]
+        moved = 0
+        for item in api["index"].values():
+            span = item.get("span")
+            if span and span["filename"] == "crates/chelis-compiler-api/src/schema.rs":
+                span["begin"][0] += 6
+                span["end"][0] += 6
+                moved += 1
+        self.assertGreater(moved, 0)
+        vocabulary = json.loads(self.receipt.canonical.vocabulary)
+        original = _SchemaShapeGraph(self.documents, vocabulary).publication_graph()
+        relocated = _SchemaShapeGraph(documents, vocabulary).publication_graph()
+        self.assertEqual(original.graph.numeric_leaves, relocated.graph.numeric_leaves)
+        self.assertEqual(original.identity, relocated.identity)
+        # Matching structural identity never makes an old execution witness
+        # authoritative for altered rustdoc, including relocated source spans.
+        with self.assertRaisesRegex(GraphError, "does not bind this artifact"):
+            SchemaWireGraph(documents, self.receipt)
+
+    def test_complete_public_exports_include_metadata_requests_and_templates(self):
+        from capacity_census_wire_schema import SchemaWireGraph
+
+        publication = SchemaWireGraph(self.documents, self.receipt).publication_graph()
+        candidates = {c.export: c for c in publication.candidates}
+        self.assertIn("chelis_compiler_api::compiler::ExecutionDim", candidates)
+        self.assertIn("chelis_compiler_api::schema::ChangeSignatureRequest", candidates)
+        self.assertIn(
+            "chelis_compiler_api::schema::CompiledArtifactManifest", candidates
+        )
+        self.assertEqual(
+            candidates["chelis_compiler_api::ContextHash"].owner, "context-cache"
+        )
+        self.assertEqual(
+            candidates["chelis_compiler_api::schema::ApiEnvelope"].parameters, ("T",)
+        )
+        definitions = {d.identity for d in publication.graph.definitions}
+        self.assertIn("chelis_compiler_api::schema::ApiEnvelope", definitions)
+        self.assertIn("chelis_compiler_api::schema::BatchRequest", definitions)
+        self.assertEqual(self.receipt.publication_identity, publication.identity)
+        with self.assertRaisesRegex(GraphError, "complete defining artifact set"):
+            SchemaWireGraph(self.documents[:2], self.receipt)
+
+    def test_actual_python_artifact_has_no_unowned_nominal_serde_protocol(self):
+        from capacity_census_graph import RustdocGraph
+        from capacity_census_wire_publication import require_shared_binding_protocols
+
+        graph = RustdocGraph(self.documents)
+        self.assertIn("chelis_python", graph.documents)
+        require_shared_binding_protocols(graph)
+        self.assertFalse(graph.serialization_definitions("chelis_python"))
+
+    def test_fixed_adapter_cannot_promote_an_unrelated_field(self):
+        from capacity_census_wire_schema import _SchemaShapeGraph
+
+        documents = copy.deepcopy(self.documents)
+        api = documents[1]
+        source_field = next(
+            i
+            for i in api["index"].values()
+            if i.get("name") == "value"
+            and "SourceFloat" in json.dumps(i.get("inner", {}))
+        )
+        request = next(
+            i
+            for i in api["index"].values()
+            if i.get("name") == "CheckRequest" and "struct" in i["inner"]
+        )
+        request["inner"]["struct"]["kind"]["plain"]["fields"].append(source_field["id"])
+        with self.assertRaisesRegex(
+            GraphError, "unregistered fixed-number field.*CheckRequest.value"
+        ):
+            _SchemaShapeGraph(
+                documents, json.loads(self.receipt.canonical.vocabulary)
+            ).schema_graph()
+
+    def test_private_field_carrier_dtype_and_codec_identity_mutations_reject(self):
+        from capacity_census_wire_schema import SchemaWireGraph, _SchemaShapeGraph
+
+        for mutation in (
+            "public-field",
+            "bare-f64",
+            "unknown-serde",
+            "missing-decoder",
+            "wrong-codec-source",
+            "wrong-shape-width",
+            "wrong-parameter-width",
+            "public-parameter-list",
+            "missing-report-mirror",
+            "wrong-envelope-version-width",
+            "missing-envelope-mirror",
+            "wrong-response-discriminator",
+            "removed-batch-kind",
+            "weak-source-discriminator",
+            "wrong-artifact-version-width",
+            "wrong-artifact-version-vocabulary",
+            "missing-artifact-version-header",
+            "wrong-artifact-metadata-mirror",
+            "tensor-data-codec",
+            "key-bits-word",
+        ):
+            with self.subTest(mutation=mutation):
+                documents = copy.deepcopy(self.documents)
+                api = documents[1]
+                number = next(
+                    i for i in api["index"].values() if i.get("name") == "UnitInterval"
+                )
+                field = api["index"][str(number["inner"]["struct"]["kind"]["tuple"][0])]
+                if mutation.startswith("wrong-artifact-version"):
+                    version = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "ArtifactAbiVersion"
+                    )
+                    if mutation.endswith("width"):
+                        version["attrs"] = [
+                            {"other": '#[serde(try_from = "u64", into = "u64")]'}
+                        ]
+                    else:
+                        api["index"][str(version["inner"]["enum"]["variants"][0])][
+                            "name"
+                        ] = "V1"
+                elif mutation in {
+                    "missing-artifact-version-header",
+                    "wrong-artifact-metadata-mirror",
+                }:
+                    name = (
+                        "ArtifactAbiHeader"
+                        if mutation.startswith("missing")
+                        else "CompiledArtifactManifestFields"
+                    )
+                    helper = next(
+                        i for i in api["index"].values() if i.get("name") == name
+                    )
+                    field_id = helper["inner"]["struct"]["kind"]["plain"]["fields"][0]
+                    api["index"][str(field_id)]["inner"]["struct_field"] = {
+                        "primitive": "u32"
+                    }
+                elif mutation == "wrong-envelope-version-width":
+                    header = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "VersionHeader"
+                    )
+                    member = api["index"][
+                        str(header["inner"]["struct"]["kind"]["plain"]["fields"][0])
+                    ]
+                    member["inner"]["struct_field"]["resolved_path"]["args"][
+                        "angle_bracketed"
+                    ]["args"][0]["type"] = {"primitive": "u64"}
+                elif mutation == "missing-envelope-mirror":
+                    mirror = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "ExecutionFieldsRef"
+                    )
+                    del api["index"][str(mirror["id"])]
+                elif mutation == "wrong-response-discriminator":
+                    header = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "ResponseHeader"
+                    )
+                    member = api["index"][
+                        str(header["inner"]["struct"]["kind"]["plain"]["fields"][0])
+                    ]
+                    member["inner"]["struct_field"] = {"primitive": "u8"}
+                elif mutation == "removed-batch-kind":
+                    header = next(
+                        i for i in api["index"].values() if i.get("name") == "BatchKind"
+                    )
+                    header["inner"]["enum"]["variants"].pop()
+                elif mutation == "weak-source-discriminator":
+                    location = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "DiagnosticSpan"
+                    )
+                    location["attrs"] = [
+                        {"other": '#[serde(tag = "span", rename_all = "snake_case")]'}
+                    ]
+                elif mutation == "wrong-parameter-width":
+                    parameter = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "WireInferredParameter"
+                    )
+                    index = api["index"][
+                        str(parameter["inner"]["struct"]["kind"]["plain"]["fields"][0])
+                    ]
+                    index["inner"]["struct_field"] = {"primitive": "usize"}
+                elif mutation == "public-parameter-list":
+                    ordered = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "OrderedInferredParameters"
+                    )
+                    api["index"][str(ordered["inner"]["struct"]["kind"]["tuple"][0])][
+                        "visibility"
+                    ] = "public"
+                elif mutation == "missing-report-mirror":
+                    mirror = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "ReportWire"
+                    )
+                    del api["index"][str(mirror["id"])]
+                elif mutation == "tensor-data-codec":
+                    # The execution storage codec relocated to another module.
+                    tensor = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "TensorWire"
+                    )
+                    data = api["index"][
+                        str(tensor["inner"]["struct"]["kind"]["plain"]["fields"][1])
+                    ]
+                    data["attrs"] = [
+                        {"other": '#[serde(with = "chelis_types::arbitrary_storage")]'}
+                    ]
+                elif mutation == "key-bits-word":
+                    # The scalar key carrier's opaque key replaced by a bare word.
+                    types = documents[0]
+                    carrier = next(
+                        i
+                        for i in types["index"].values()
+                        if i.get("name") == "KeyBits" and "struct" in i["inner"]
+                    )
+                    types["index"][str(carrier["inner"]["struct"]["kind"]["tuple"][0])][
+                        "inner"
+                    ]["struct_field"] = {"primitive": "u64"}
+                elif mutation == "public-field":
+                    field["visibility"] = "public"
+                elif mutation == "bare-f64":
+                    field["inner"]["struct_field"] = {"primitive": "f64"}
+                elif mutation == "unknown-serde":
+                    number["attrs"] = [{"other": "#[serde(transparent)]"}]
+                elif mutation == "wrong-shape-width":
+                    tensor = next(
+                        i
+                        for i in api["index"].values()
+                        if i.get("name") == "TensorWire"
+                    )
+                    shape = api["index"][
+                        str(tensor["inner"]["struct"]["kind"]["plain"]["fields"][0])
+                    ]
+                    shape["inner"]["struct_field"]["resolved_path"]["args"][
+                        "angle_bracketed"
+                    ]["args"][0]["type"] = {"primitive": "u64"}
+                else:
+                    for impl_id in number["inner"]["struct"]["impls"]:
+                        item = api["index"][str(impl_id)]
+                        trait = item.get("inner", {}).get("impl", {}).get("trait")
+                        if trait and trait["path"] == "Deserialize":
+                            if mutation == "missing-decoder":
+                                number["inner"]["struct"]["impls"].remove(impl_id)
+                            else:
+                                item["span"]["filename"] = "unverified.rs"
+                            break
+                with self.assertRaises(GraphError):
+                    SchemaWireGraph(documents, self.receipt).schema_graph()
+                with self.assertRaises(GraphError):
+                    _SchemaShapeGraph(
+                        documents, json.loads(self.receipt.canonical.vocabulary)
+                    ).schema_graph()
+
+
+if __name__ == "__main__":
+    unittest.main()

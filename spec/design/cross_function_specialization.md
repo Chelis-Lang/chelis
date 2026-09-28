@@ -55,7 +55,7 @@ For sparse summaries the recognizer requires:
   `RiscOp::Scatter`
 - every sparse-op operand is a direct `RiscOp::Load` referencing one of the
   helper's input parameters by name
-- indices precision is `int32` or `int64`
+- indices precision is `i32` or `i64`
 - payload precisions match across `values`/`updates`/`target`/`output`
 - no helper input or output carries a wildcard `Named("*", None)` dim (type-
   inference placeholder); wildcard helpers fall back to the marshaling shim
@@ -82,7 +82,7 @@ The semantic contract is:
 The initial accepted surface is deliberately narrow:
 
 - rank >= 2 `f32` matmul with the same constraints as the IR BLAS recognizer
-- helper body is pure tensor code with no `Random`, `IO`, or host-side effects
+- helper body is pure tensor code with no random draws, `IO`, or host-side effects
 - no data-dependent control flow around the equivalent operation
 - no hidden allocation or mutation semantics beyond the ordinary tensor DAG nodes
 

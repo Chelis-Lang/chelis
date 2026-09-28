@@ -32,7 +32,7 @@ fn errors_for(deep_src: &str) -> Vec<String> {
 }
 
 const T2: &str =
-    "(def {} t (tuple {} (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} f32)} 2.0)))";
+    "(def {} t (tuple {} (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} f32)} 2.0)))";
 
 #[test]
 fn negative_bare_atom_index_is_diagnosed_not_silent() {
@@ -48,7 +48,7 @@ fn negative_bare_atom_index_is_diagnosed_not_silent() {
 
 #[test]
 fn negative_bare_atom_index_on_nontuple_is_diagnosed() {
-    let src = "(def {} x (tuple-get {} (lit {type: (t-prim {} int32)} 5) -1))";
+    let src = "(def {} x (tuple-get {} (lit {type: (t-prim {} i32)} 5) -1))";
     let errs = errors_for(src);
     assert!(
         !errs.is_empty(),

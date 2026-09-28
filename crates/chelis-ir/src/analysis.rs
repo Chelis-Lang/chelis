@@ -13,9 +13,7 @@ use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorTy
 ///
 /// Phase 2's evaluator supports that exact typed kernel, while compiled
 /// backends do not until Phase 3. Keeping the fused-step dtype walk here gives
-/// every backend one classification rather than three output-dtype heuristics;
-/// importantly, it still finds `abs(int) -> cmplt(...)` when the fused node's
-/// final output dtype is `bool`.
+/// every backend one classification rather than three output-dtype heuristics.
 pub fn first_integer_abs_node(dag: &Dag) -> Option<NodeId> {
     for node in dag.nodes() {
         if matches!(node.op, RiscOp::Abs)
@@ -70,11 +68,7 @@ fn fused_node_applies_integer_abs(dag: &Dag, node_id: NodeId) -> bool {
         {
             return true;
         }
-        step_precisions.push(if step.op == FusedStepOp::CmpLt {
-            Some(Prim::Bool)
-        } else {
-            input_precision
-        });
+        step_precisions.push(input_precision);
     }
     false
 }
@@ -239,6 +233,8 @@ fn element_size_bytes(prim: Prim) -> usize {
              should have been rejected upstream"
         ),
         Prim::String => 8,
+        // A random key is one 64-bit word.
+        Prim::Key => 8,
     }
 }
 
@@ -266,29 +262,39 @@ mod tests {
     }
 
     #[test]
-    fn integer_abs_analysis_sees_direct_and_bool_output_fused_forms() {
+    fn integer_abs_analysis_sees_direct_and_fused_forms() {
         let int_ty = tensor(vec![DimInfo::Lit(1)], Prim::Int64);
-        let bool_ty = tensor(vec![DimInfo::Lit(1)], Prim::Bool);
 
         let mut direct = Dag::new();
+        let direct_decl = direct.declare("test");
         let x = direct.add_node(
+            direct_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             int_ty.clone(),
             None,
         );
-        let abs = direct.add_node(RiscOp::Abs, vec![x], int_ty.clone(), None);
+        let abs = direct.add_node(direct_decl, RiscOp::Abs, vec![x], int_ty.clone(), None);
         assert_eq!(first_integer_abs_node(&direct), Some(abs));
 
         let mut fused = Dag::new();
+        let fused_decl = fused.declare("test");
         let x = fused.add_node(
+            fused_decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             int_ty.clone(),
             None,
         );
-        let y = fused.add_node(RiscOp::Load { name: "y".into() }, vec![], int_ty, None);
-        let fused_abs_then_compare = fused.add_node(
+        let y = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            int_ty,
+            None,
+        );
+        let fused_abs_then_add = fused.add_node(
+            fused_decl,
             RiscOp::FusedElem {
                 ops: vec![
                     FusedStep {
@@ -296,19 +302,19 @@ mod tests {
                         input_indices: vec![FusedInput::External(0)],
                     },
                     FusedStep {
-                        op: FusedStepOp::CmpLt,
+                        op: FusedStepOp::Add,
                         input_indices: vec![FusedInput::PreviousStep(0), FusedInput::External(1)],
                     },
                 ],
             },
             vec![x, y],
-            bool_ty,
+            tensor(vec![DimInfo::Lit(1)], Prim::Int64),
             None,
         );
-        assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_compare));
+        assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_add));
         assert_eq!(
             first_fused_integer_abs_node(&fused),
-            Some(fused_abs_then_compare)
+            Some(fused_abs_then_add)
         );
         assert_eq!(first_fused_integer_abs_node(&direct), None);
     }
@@ -317,24 +323,33 @@ mod tests {
     fn integer_abs_analysis_does_not_reject_float_abs() {
         let float_ty = tensor(vec![DimInfo::Lit(1)], Prim::F32);
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             float_ty.clone(),
             None,
         );
-        dag.add_node(RiscOp::Abs, vec![x], float_ty, None);
+        dag.add_node(decl, RiscOp::Abs, vec![x], float_ty, None);
         assert_eq!(first_integer_abs_node(&dag), None);
     }
 
     #[test]
     fn counts_only_copy_nodes_and_sums_concrete_bytes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32);
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let copy = dag.add_node(RiscOp::Copy, vec![x], ty.clone(), None);
-        let out = dag.add_node(RiscOp::Neg, vec![copy], ty.clone(), None);
-        dag.add_node(RiscOp::Drop, vec![x], ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let copy = dag.add_node(decl, RiscOp::Copy, vec![x], ty.clone(), None);
+        let out = dag.add_node(decl, RiscOp::Neg, vec![copy], ty.clone(), None);
+        dag.add_node(decl, RiscOp::Drop, vec![x], ty, None);
         dag.add_root(out);
 
         let summary = analyze_copy_costs(&dag, &[("main".to_string(), out)]);
@@ -357,12 +372,19 @@ mod tests {
     #[test]
     fn omits_bytes_when_copy_shape_has_symbolic_dimension() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = tensor(
             vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(4)],
             Prim::F32,
         );
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let out = dag.add_node(RiscOp::Copy, vec![x], ty, None);
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = dag.add_node(decl, RiscOp::Copy, vec![x], ty, None);
         dag.add_root(out);
 
         let summary = analyze_copy_costs(&dag, &[("main".to_string(), out)]);

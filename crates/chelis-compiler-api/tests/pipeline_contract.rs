@@ -33,7 +33,7 @@ fn root_name_text<'a>(names: impl Iterator<Item = &'a IrName>) -> Vec<&'a str> {
 #[test]
 fn type_analysis_goal_returns_fitness_and_one_checked_product() {
     let outcome = run_source(request(
-        "def answer() -> int32 = 42\n",
+        "def answer() -> i32 = 42\n",
         PipelineGoal::TypeAnalysis,
     ))
     .expect("valid source must prepare");
@@ -49,7 +49,7 @@ fn type_analysis_goal_returns_fitness_and_one_checked_product() {
 #[test]
 fn full_check_goal_returns_a_fully_checked_state() {
     let outcome = run_source(request(
-        "def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n",
+        "def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n",
         PipelineGoal::FullCheck,
     ))
     .expect("valid source must pass all semantic stages");
@@ -66,7 +66,8 @@ fn full_check_goal_returns_a_fully_checked_state() {
 
 #[test]
 fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
-    let source = "def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)\n";
+    let source =
+        "def pair[n](x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)\n";
     let outcome = run_source(request(source, PipelineGoal::Lower(LoweringMode::Strict)))
         .expect("valid tuple source must lower");
 
@@ -88,9 +89,56 @@ fn lower_goal_returns_checked_state_dag_and_canonical_tuple_roots() {
 }
 
 #[test]
+fn destructured_entry_keeps_its_own_result_in_the_public_lowering() {
+    use chelis_compiler_api::schema::LowerRequest;
+
+    for source in [
+        "def sample(t: tensor[2, f32]) -> tensor[2, f32] = {\n  (a, b) = (copy(t), t)\n  add(a, b)\n}\n",
+        "def pair(t: tensor[2, f32]) -> (tensor[2, f32], tensor[2, f32]) = (copy(t), t)\n\
+         def sample(t: tensor[2, f32]) -> tensor[2, f32] = {\n  (a, b) = pair(t)\n  add(a, b)\n}\n",
+    ] {
+        let lowered = chelis_compiler_api::compiler::lower(LowerRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            entry: Some("sample".into()),
+        })
+        .expect("a checked destructuring entry must lower");
+        let sample = *lowered
+            .named_roots
+            .get("sample")
+            .expect("the selected entry must have a named root");
+        assert!(lowered.dag.roots.contains(&sample), "{lowered:?}");
+        let root = &lowered.dag.nodes[sample as usize];
+        assert!(
+            matches!(&root.op, chelis_compiler_api::schema::WireRiscOp::Add),
+            "the root must be sample's addition, not an empty or callee graph: {lowered:?}"
+        );
+    }
+}
+
+#[test]
+fn destructured_components_still_obey_consuming_fanout() {
+    let source =
+        "def sample(k: key) -> (key, key) = {\n  (a, unused) = split_key(k)\n  (a, a)\n}\n";
+    let rejected = run_source(request(source, PipelineGoal::FullCheck))
+        .expect_err("a projected key cannot be consumed twice");
+    assert!(
+        matches!(
+            &rejected,
+            PipelineRejection::Linearity { errors }
+                if errors.iter().any(|error| matches!(
+                    &error.kind,
+                    chelis_types::errors::CheckErrorKind::KeyReuse
+                ))
+        ),
+        "the rejection must be key affinity: {rejected:?}"
+    );
+}
+
+#[test]
 fn declared_roots_and_forward_load_aliases_have_distinct_lookups() {
     let outcome = run_source(request(
-        "def out(input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",
+        "def out[n](input: tensor[n, f32]) -> tensor[n, f32] = relu(input)\n",
         PipelineGoal::Lower(LoweringMode::Strict),
     ))
     .expect("valid source must lower");
@@ -135,7 +183,7 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
     let _guard = chelis_types::install_cancel_token(token);
 
     let rejection = run_source(request(
-        "def answer() -> int32 = 42\n",
+        "def answer() -> i32 = 42\n",
         PipelineGoal::FullCheck,
     ))
     .expect_err("a pre-cancelled pipeline must not start parsing");
@@ -149,12 +197,12 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
 #[test]
 fn direct_lower_functions_keep_the_lower_cancellation_stage() {
     let checked = complete_checks(
-        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        accepted_analysis("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
         SemanticContext::Isolated,
     )
     .expect("the fixture must pass semantic checks");
     let library = check_prepared_library(
-        prepare_source(SourceKind::Surf, "def library_value() -> int32 = 1\n", None)
+        prepare_source(SourceKind::Surf, "def library_value() -> i32 = 1\n", None)
             .expect("the library source must prepare"),
     )
     .expect("the library fixture must pass semantic checks");
@@ -188,7 +236,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
     .map(|goal| {
         (
             goal,
-            prepare_source(SourceKind::Surf, "def answer() -> int32 = 42\n", None)
+            prepare_source(SourceKind::Surf, "def answer() -> i32 = 42\n", None)
                 .expect("the fixture source must prepare"),
         )
     });
@@ -209,7 +257,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
 #[test]
 fn type_rejection_has_no_checked_or_lowered_product() {
     let rejection = run_source(request(
-        "def broken() -> int32 = missing\n",
+        "def broken() -> i32 = missing\n",
         PipelineGoal::Lower(LoweringMode::Strict),
     ))
     .expect_err("an unbound name must reject type analysis");
@@ -222,7 +270,7 @@ fn type_rejection_has_no_checked_or_lowered_product() {
 #[test]
 fn complete_checks_returns_a_clean_checked_product() {
     let checked = complete_checks(
-        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        accepted_analysis("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
         SemanticContext::Isolated,
     )
     .expect("clean semantics must return the checked product");
@@ -231,9 +279,9 @@ fn complete_checks_returns_a_clean_checked_product() {
 
 #[test]
 fn effect_rejection_uses_the_narrow_semantic_error() {
-    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n";
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = debug(x)\n";
     let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
-        .expect_err("a pure declaration cannot perform Random");
+        .expect_err("a pure declaration cannot perform IO");
     assert!(matches!(rejection, SemanticRejection::Effects { .. }));
 
     let full_rejection = run_source(request(source, PipelineGoal::FullCheck))

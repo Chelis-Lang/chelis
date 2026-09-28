@@ -10,6 +10,9 @@
 //! numel invariant with a clean error. One compiled binary handles every
 //! input length.
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -21,13 +24,13 @@ use tempfile::{TempDir, tempdir};
 /// at 0, reshaped to `[1, m]`. For `x = [1, 2, ..., n]` the window keeps
 /// `[1, 3, 5, ...]` (`m` odd values).
 const WINDOW_BODY: &str = "\
-  m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
-  reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])";
+  m = add(floor_div(sub(cast(shape(x, cast(0, i32)), i64), cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+  extent = cast(add(mul(sub(m, cast(1, i64)), cast(2, i64)), cast(1, i64)), i64)\n\
+  reshape(stride(shrink(x, [[cast(0, i64), extent]]), cast(2, i64)), [cast(1, i64), m])";
 
 fn window_source(out_line: &str) -> String {
     format!(
-        "module Repro.RtWindow\nsig window: tensor[n, f32] -> tensor[1, m, f32]\ndef window(x) = {{\n{WINDOW_BODY}\n}}\n{out_line}\n"
+        "module Repro.RtWindow\nsig window[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef window(x) = {{\n{WINDOW_BODY}\n}}\n{out_line}\n"
     )
 }
 
@@ -189,9 +192,10 @@ fn issue_616_runtime_reshape_window_forward_eval_matches_c() {
 #[test]
 fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
     let source = format!(
-        "module Repro.RtWindowBare\nsig out: tensor[n, f32] -> tensor[1, m, f32]\ndef out(x) = {{\n{WINDOW_BODY}\n}}\n"
+        "module Repro.RtWindowBare\nsig out[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef out(x) = {{\n{WINDOW_BODY}\n}}\n"
     );
     let (_dir, build_dir) = build_c(&source, "rtwindowbare");
+    let out_symbol = authored_c_symbol("out");
 
     let lengths = [4usize, 6, 9];
     let runs = lengths
@@ -201,7 +205,7 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
                 "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
                  chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
                  for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
-                 chelis_tensor* w = out(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
+                 chelis_tensor* w = {out_symbol}(x); chelis_read_view w_view = chelis_tensor_read_view(w); \
                  for (int64_t i = 0; i < w_view.count; i++) printf(\"%.6f\\n\", ((const float *)w_view.data)[i]); \
                  printf(\"---\\n\"); chelis_tensor_release(w); chelis_tensor_release(x); }}"
             )
@@ -212,7 +216,8 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
         r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* {out_symbol}(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) {{ chelis_tensor_retain(arg0); return arg0; }}
 int main(void) {{
 {runs}
     return 0;
@@ -253,10 +258,10 @@ int main(void) {{
 #[test]
 fn issue_616_runtime_window_grad_eval_matches_c() {
     let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
-  m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
-  w = reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])\n\
-  sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  m = add(floor_div(sub(cast(shape(x, cast(0, i32)), i64), cast(2, i64)), cast(2, i64)), cast(1, i64))\n\
+  extent = cast(add(mul(sub(m, cast(1, i64)), cast(2, i64)), cast(1, i64)), i64)\n\
+  w = reshape(stride(shrink(x, [[cast(0, i64), extent]]), cast(2, i64)), [cast(1, i64), m])\n\
+  sum(sum(w, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
 }\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 
     let eval_out = run_eval(source, "rtwindowgrad");
@@ -289,11 +294,11 @@ fn issue_616_runtime_window_grad_eval_matches_c() {
 fn issue_616_runtime_reshape_negative_extent_errs_in_both_lanes() {
     // m = n - 10 < 0 for the 4-element input.
     let body = "\
-  m = sub(cast(shape(x, cast(0, int32)), int64), cast(10, int64))\n\
-  reshape(x, [cast(1, int64), m])";
+  m = sub(cast(shape(x, cast(0, i32)), i64), cast(10, i64))\n\
+  reshape(x, [cast(1, i64), m])";
     let input = f32_literal(&[1.0, 2.0, 3.0, 4.0]);
     let source = format!(
-        "module Repro.RtNegDim\nsig f: tensor[n, f32] -> tensor[1, m, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
+        "module Repro.RtNegDim\nsig f[n, m]: tensor[n, f32] -> tensor[1, m, f32]\ndef f(x) = {{\n{body}\n}}\nout = f(to_tensor([{input}]))\n"
     );
 
     let eval_out = run_eval(&source, "rtnegdim");

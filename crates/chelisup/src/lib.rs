@@ -41,17 +41,25 @@
 //! executable named `chelisup-<slug>` (slug in `darwin-arm64`,
 //! `darwin-x86_64`, `linux-x86_64`): no version in the name and no
 //! tarball, distinct from the toolchain tarball
-//! `chelis-v<ver>-<slug>.tar.gz` that `install` downloads.
+//! `chelis-v<ver>-<build>.tar.gz` that `install` downloads (on Linux the
+//! glibc-2.31 build, see [`install::release_build`]).
 
 pub mod cli;
 pub mod install;
 pub mod paths;
 pub mod resolve;
+pub mod runtime_check;
 pub mod shim;
 pub mod version;
 
 use std::ffi::OsString;
 use std::path::Path;
+
+/// How to get the latest chelisup while it cannot update itself. `chelisup
+/// update` prints it, and so does the refusal of a release newer than the
+/// running chelisup.
+pub(crate) const UPGRADE_ADVICE: &str =
+    "re-run the bootstrap installer (the published `chelisup` one-liner)";
 
 /// Inspect `argv[0]` and route to the shim or the installer CLI.
 ///

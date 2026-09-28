@@ -8,11 +8,39 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents).expect("write file");
+}
+
+/// Makes `path` unreadable, restoring it on drop. Returns `None` when the
+/// current user can still read mode-000 directories, because that host cannot
+/// produce the walk failure this guard needs.
+#[cfg(unix)]
+struct Unreadable(PathBuf);
+
+#[cfg(unix)]
+impl Unreadable {
+    fn new(path: &Path) -> Option<Self> {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let guard = Self(path.to_path_buf());
+        if fs::read_dir(path).is_ok() {
+            eprintln!("skipped: permissions are not enforced for this user");
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// Create a bare reef package with a `tests/` directory and return
@@ -26,7 +54,9 @@ fn make_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf) {
     write_file(
         &pkg.join("reef.toml"),
         &format!(
-            r#"[package]
+            r#"schema = "1"
+
+[package]
 name = "{dir_name}"
 version = "0.1.0"
 compiler = "={ver}"
@@ -57,33 +87,33 @@ fn make_shared_name_reef_package(dir_name: &str) -> (tempfile::TempDir, PathBuf)
         &pkg.join("src/helpers.ch"),
         "module Smoke.Helpers\n\
          export (same)\n\
-         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+         def same(a: i64, b: i64) -> bool = eq(a, b)\n",
     );
     write_file(
         &pkg.join("src/other.ch"),
         "module Smoke.Other\n\
          export (same)\n\
-         def same(a: int64, b: int64) -> bool = eq(a, b)\n",
+         def same(a: i64, b: i64) -> bool = eq(a, b)\n",
     );
     (dir, pkg)
 }
 
 /// chelis#1261's two test files: `a_import.ch` imports the package's `same`
-/// over `int64`, `b_local.ch` declares an unrelated local `same` over lists.
+/// over `i64`, `b_local.ch` declares an unrelated local `same` over lists.
 fn write_import_collision_files(pkg: &Path) {
     write_file(
         &pkg.join("tests/a_import.ch"),
         "module Smoke.Tests.UsesImport\n\
          import Smoke.Helpers (same)\n\
          def test_uses_import() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"1 == 1\")\n",
     );
     write_file(
         &pkg.join("tests/b_local.ch"),
         "module Smoke.Tests.LocalSame\n\
-         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def same(xs: List[i64], ys: List[i64]) -> bool = eq(len(xs), len(ys))\n\
          def test_local_same() -> unit = \
-         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+         test_assert(same([cast(1, i64)], [cast(2, i64)]), \"same length\")\n",
     );
 }
 
@@ -223,15 +253,19 @@ def test_gamma() -> unit = test_assert(true, "c")
         .stdout(predicate::str::contains("test_beta").not())
         .stdout(predicate::str::contains("test_gamma").not());
 
-    // Filter that matches nothing → no counts, runner exits 0 with "0 passed, 0 failed".
+    // [04-TEST-1]: a filter that matches nothing is a runner error, not a
+    // successful empty summary.
     Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .args(["test", "--filter", "nonexistent_xyz", "tests/"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("0 passed, 0 failed"));
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no tests matched filter"))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
 }
 
 #[test]
@@ -593,7 +627,7 @@ def test_second() -> unit = test_assert(true, "second")
 
 /// The chelis#1261 reproducer: `tests/b_local.ch` declares a local `same` over
 /// lists while `tests/a_import.ch` explicitly imports the package's `same` over
-/// `int64`. Under `--batch-mode auto` the two files used to be merged into one
+/// `i64`. Under `--batch-mode auto` the two files used to be merged into one
 /// compilation unit, where B's declaration captured A's import, so the batch
 /// failed to compile and the whole suite silently degraded to per-file.
 #[test]
@@ -641,16 +675,16 @@ fn chelis_test_auto_batch_local_def_before_sibling_import_demotes_the_importer()
     write_file(
         &pkg.join("tests/a_local.ch"),
         "module Smoke.Tests.LocalFirst\n\
-         def same(xs: List[int64], ys: List[int64]) -> bool = eq(len(xs), len(ys))\n\
+         def same(xs: List[i64], ys: List[i64]) -> bool = eq(len(xs), len(ys))\n\
          def test_local_same() -> unit = \
-         test_assert(same([cast(1, int64)], [cast(2, int64)]), \"same length\")\n",
+         test_assert(same([cast(1, i64)], [cast(2, i64)]), \"same length\")\n",
     );
     write_file(
         &pkg.join("tests/b_import.ch"),
         "module Smoke.Tests.ImportSecond\n\
          import Smoke.Helpers (same)\n\
          def test_uses_import() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"1 == 1\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"1 == 1\")\n",
     );
 
     let output = Command::cargo_bin("chelis")
@@ -734,13 +768,13 @@ fn chelis_test_auto_batch_shared_property_name_uses_file_isolation() {
     write_file(
         &pkg.join("tests/a_first.ch"),
         "module Smoke.Tests.PropertyFirst\n\
-         @property shared_bound forall(x: int32) where x > 0:\n  x > 0\n\
+         @property shared_bound forall(x: i32) where x > 0:\n  x > 0\n\
          def test_first() -> unit = test_assert(true, \"first\")\n",
     );
     write_file(
         &pkg.join("tests/b_second.ch"),
         "module Smoke.Tests.PropertySecond\n\
-         @property shared_bound forall(y: int32) where y > 1:\n  y > 0\n\
+         @property shared_bound forall(y: i32) where y > 1:\n  y > 0\n\
          def test_second() -> unit = test_assert(true, \"second\")\n",
     );
 
@@ -884,13 +918,13 @@ fn chelis_test_auto_batch_shared_import_of_one_module_stays_batched() {
         &pkg.join("tests/a_one.ch"),
         "module Smoke.Tests.One\n\
          import Smoke.Helpers (same)\n\
-         def test_one() -> unit = test_assert(same(cast(1, int64), cast(1, int64)), \"one\")\n",
+         def test_one() -> unit = test_assert(same(cast(1, i64), cast(1, i64)), \"one\")\n",
     );
     write_file(
         &pkg.join("tests/b_two.ch"),
         "module Smoke.Tests.Two\n\
          import Smoke.Helpers (same)\n\
-         def test_two() -> unit = test_assert(same(cast(2, int64), cast(2, int64)), \"two\")\n",
+         def test_two() -> unit = test_assert(same(cast(2, i64), cast(2, i64)), \"two\")\n",
     );
 
     let stderr = forced_batch_abort_stderr(&pkg);
@@ -910,14 +944,14 @@ fn chelis_test_auto_batch_same_name_from_two_modules_uses_file_isolation() {
         "module Smoke.Tests.FromHelpers\n\
          import Smoke.Helpers (same)\n\
          def test_from_helpers() -> unit = \
-         test_assert(same(cast(1, int64), cast(1, int64)), \"helpers\")\n",
+         test_assert(same(cast(1, i64), cast(1, i64)), \"helpers\")\n",
     );
     write_file(
         &pkg.join("tests/b_other.ch"),
         "module Smoke.Tests.FromOther\n\
          import Smoke.Other (same)\n\
          def test_from_other() -> unit = \
-         test_assert(same(cast(2, int64), cast(2, int64)), \"other\")\n",
+         test_assert(same(cast(2, i64), cast(2, i64)), \"other\")\n",
     );
 
     Command::cargo_bin("chelis")
@@ -956,7 +990,7 @@ fn chelis_test_auto_batch_wildcard_import_uses_file_isolation() {
         "module Smoke.Tests.Wildcard\n\
          import Smoke.Helpers (..)\n\
          def test_wildcard() -> unit = \
-         test_assert(same(cast(3, int64), cast(3, int64)), \"wildcard\")\n",
+         test_assert(same(cast(3, i64), cast(3, i64)), \"wildcard\")\n",
     );
 
     Command::cargo_bin("chelis")
@@ -989,9 +1023,9 @@ fn chelis_test_auto_batch_sig_beside_its_def_stays_batched() {
     write_file(
         &pkg.join("tests/a_sig.ch"),
         "module Smoke.Tests.SigAndDef\n\
-         sig helper: int64 -> bool\n\
-         def helper(x: int64) -> bool = eq(x, x)\n\
-         def test_helper() -> unit = test_assert(helper(cast(1, int64)), \"helper\")\n",
+         sig helper: i64 -> bool\n\
+         def helper(x: i64) -> bool = eq(x, x)\n\
+         def test_helper() -> unit = test_assert(helper(cast(1, i64)), \"helper\")\n",
     );
     write_file(
         &pkg.join("tests/b_plain.ch"),
@@ -1191,10 +1225,9 @@ fn chelis_test_non_reef_context_exits_two() {
 // === RT3 regression tests ===
 
 #[test]
-fn chelis_test_empty_tests_dir_exits_zero_with_zero_zero_summary() {
-    // RT3 H5: empty `tests/` must exit 0 with "0 passed, 0 failed", not
-    // exit 2. Matches `cargo test` and `pytest` ergonomics — a fresh
-    // package with no tests yet is a legitimate state, not a runner error.
+fn chelis_test_empty_tests_dir_is_an_exit_two_error() {
+    // [04-TEST-1..2]: a completed walk that selects no source is one
+    // diagnostic, never a successful 0/0 summary.
     let (_dir, pkg) = make_reef_package("phase3t-smoke-empty");
     // tests/ exists but has no .ch files. Ensure it is truly empty.
     Command::cargo_bin("chelis")
@@ -1203,9 +1236,198 @@ fn chelis_test_empty_tests_dir_exits_zero_with_zero_zero_summary() {
         .current_dir(&pkg)
         .args(["test", "tests/"])
         .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no .ch test files under"))
+        .stderr(predicate::str::contains("0 excluded"))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
+}
+
+#[test]
+fn chelis_test_empty_tests_dir_json_is_one_exact_diagnostic_record() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-json");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines: Vec<&str> = std::str::from_utf8(&output)
+        .expect("utf-8")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 1, "one diagnostic record: {lines:?}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("JSON diagnostic");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "no .ch test files under b\"tests/\": 0 excluded under dot-prefixed entries or `target` directories",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_files_without_runnable_tests_are_an_error_in_text_and_json() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-testless");
+    write_file(
+        &pkg.join("tests/helper.ch"),
+        "module Smoke.Tests.Helper\n\ndef helper() -> unit = ()\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("found 1 .ch file under"))
+        .stderr(predicate::str::contains(
+            "but no runnable `test_*` functions",
+        ))
+        .stderr(predicate::str::contains("0 passed, 0 failed").not());
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let record: serde_json::Value =
+        serde_json::from_slice(&output).expect("one JSON diagnostic record");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "found 1 .ch file under b\"tests/\" but no runnable `test_*` functions",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_filter_no_match_json_is_an_error_without_a_summary() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-filter-empty-json");
+    write_file(
+        &pkg.join("tests/one.ch"),
+        "module Smoke.Tests.One\n\ndef test_one() -> unit = test_assert(true, \"one\")\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "--filter", "missing", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let record: serde_json::Value =
+        serde_json::from_slice(&output).expect("one JSON diagnostic record");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "errors": [{
+                "kind": "empty_test_selection",
+                "message": "no tests matched filter \"missing\" under b\"tests/\": 1 runnable test was available before filtering",
+                "severity": 1.0
+            }]
+        })
+    );
+    assert!(record.get("summary").is_none());
+}
+
+#[test]
+fn chelis_test_empty_subdirectory_does_not_poison_a_populated_selection() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-subdir");
+    fs::create_dir_all(pkg.join("tests/empty/deeper")).expect("mkdir empty subtree");
+    write_file(
+        &pkg.join("tests/pass.ch"),
+        "module Smoke.Tests.Pass\n\ndef test_pass() -> unit = test_assert(true, \"pass\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
         .success()
-        .code(0)
-        .stdout(predicate::str::contains("0 passed, 0 failed"));
+        .stdout(predicate::str::contains("1 passed, 0 failed"))
+        .stderr(predicate::str::contains("empty_test_selection").not());
+}
+
+#[test]
+fn chelis_test_empty_source_message_counts_excluded_ch_files() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-empty-excluded");
+    fs::create_dir_all(pkg.join("tests/target")).expect("mkdir excluded target");
+    write_file(
+        &pkg.join("tests/.hidden.ch"),
+        "def test_hidden() -> unit = test_assert(false, \"hidden\")\n",
+    );
+    write_file(
+        &pkg.join("tests/target/hidden.ch"),
+        "def test_target() -> unit = test_assert(false, \"target\")\n",
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("2 excluded"));
+}
+
+#[cfg(unix)]
+#[test]
+fn chelis_test_walk_failure_is_not_also_an_empty_selection_error() {
+    let (_dir, pkg) = make_reef_package("phase3t-smoke-unreadable-walk");
+    fs::create_dir_all(pkg.join("tests/locked")).expect("mkdir locked subtree");
+    write_file(
+        &pkg.join("tests/locked/test.ch"),
+        "def test_hidden() -> unit = test_assert(true, \"hidden\")\n",
+    );
+    let Some(_guard) = Unreadable::new(&pkg.join("tests/locked")) else {
+        return;
+    };
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--json", "tests/"])
+        .assert()
+        .failure()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("failed to walk"))
+        .stderr(predicate::str::contains("empty_test_selection").not());
 }
 
 #[test]
@@ -1431,7 +1653,7 @@ fn chelis_test_infinite_recursion_times_out_and_suite_continues() {
 -- recursion with no base case overflows the 32 MB test-worker stack
 -- before the timeout deadline fires). 10_000_000 iterations consistently
 -- exceeds the --timeout 2 budget used below.
-def test_infinite() -> unit = test_assert(eq(fold(fn (acc: int64, x: int64) -> add(acc, x), cast(0, int64), range(cast(0, int64), cast(10000000, int64))), cast(0, int64)), "never")
+def test_infinite() -> unit = test_assert(eq(fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), range(cast(0, i64), cast(10000000, i64))), cast(0, i64)), "never")
 
 def test_quick() -> unit = test_assert(true, "quick")
 "#,
@@ -1686,4 +1908,78 @@ fn chelis_test_legit_opaque_package_test_still_passes() {
         .success()
         .stdout(predicate::str::contains("test_round_trip"))
         .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+fn assert_batched_opaque_diagnostic_is_source_facing(json: bool) {
+    let (_dir, pkg) = make_opaque_reef_package(if json {
+        "batch-diag-json"
+    } else {
+        "batch-diag-plain"
+    });
+    write_file(
+        &pkg.join("tests/forge.ch"),
+        "module Smoke.Tests.Forge\n\
+         import Smoke.Types (prob_value)\n\
+         def bad__forge(x: f32) -> f32 = {\n\
+         \x20 p = Probability { value: x }\n\
+         \x20 prob_value(p)\n\
+         }\n\
+         def test_forge() -> unit = \
+         test_assert(bad__forge(0.5) >= 0.0, \"forge\")\n",
+    );
+
+    let mut command = Command::cargo_bin("chelis").expect("binary");
+    command
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .args(["test", "--batch-mode", "auto"]);
+    if json {
+        command.arg("--json");
+    }
+    let output = command.arg("tests/").output().expect("run");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    let combined = format!("{stdout}\n{stderr}");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the opaque construction must fail; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        combined.contains("in def `bad__forge`"),
+        "the diagnostic lost the authored source name; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !combined.contains("__ChelisTestBatch"),
+        "the diagnostic leaked a synthetic batch module; stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !combined.contains("__Eval"),
+        "the diagnostic leaked a synthetic eval module; stdout={stdout}\nstderr={stderr}"
+    );
+
+    if json {
+        let rows = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("NDJSON row"))
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty(), "JSON failure emitted no rows");
+        assert!(
+            rows.iter()
+                .any(|row| row.to_string().contains("bad__forge")),
+            "machine-facing rows omitted the source diagnostic: {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn chelis_test_auto_batch_plain_diagnostic_demangles_synthetic_module() {
+    assert_batched_opaque_diagnostic_is_source_facing(false);
+}
+
+#[test]
+fn chelis_test_auto_batch_json_diagnostic_demangles_synthetic_module() {
+    assert_batched_opaque_diagnostic_is_source_facing(true);
 }

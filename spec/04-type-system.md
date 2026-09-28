@@ -26,33 +26,54 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 
 ### 1.1 Primitive Types
 
-The active primitive set is exactly ten names:
+The active primitive set is exactly eleven names:
 
 ```scheme
 (t-prim {} f32)       ;; 32-bit float
 (t-prim {} f64)       ;; 64-bit float
 (t-prim {} bf16)      ;; bfloat16
 (t-prim {} f16)       ;; 16-bit float (IEEE 754 binary16)
-(t-prim {} int8)      ;; 8-bit signed integer
-(t-prim {} int16)     ;; 16-bit signed integer
-(t-prim {} int32)     ;; 32-bit signed integer
-(t-prim {} int64)     ;; 64-bit signed integer
+(t-prim {} i8)        ;; 8-bit signed integer
+(t-prim {} i16)       ;; 16-bit signed integer
+(t-prim {} i32)       ;; 32-bit signed integer
+(t-prim {} i64)       ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
 (t-prim {} string)    ;; UTF-8 string
+(t-prim {} key)       ;; random key
 ```
 
 These closed subsets are used throughout the specs:
 
 - the **eight active numeric dtypes** are the four floats (`f16`, `bf16`,
-  `f32`, `f64`) and four signed integers (`int8`, `int16`, `int32`, `int64`);
-- the **nine active tensor element dtypes** are those eight numeric dtypes plus
-  `bool`; and
+  `f32`, `f64`) and four signed integers (`i8`, `i16`, `i32`, `i64`);
+- the **ten active tensor element dtypes** are those eight numeric dtypes,
+  `bool`, and `key`;
+- the **nine active data element dtypes** are the active tensor element dtypes
+  other than `key`: the eight numeric dtypes plus `bool`; and
 - `string` is an active host primitive, but is neither a numeric dtype nor a
   tensor element dtype.
+
+A `key` is a 64-bit random key ([05-RNG-2]). It is not numeric, and it has
+no arithmetic, comparison, cast, literal, or default value. [05-OP-69] creates
+keys, [05-OP-70] through [05-OP-72] derive them, and a draw keyed by a key
+reads it under [05-RNG-2]. An operation admits `key` elements only where its
+own atom names `key`: a domain written as every active tensor element dtype
+admits exactly the nine active data element dtypes. Keys are affine
+([04-LIN-9]), and no function's type parameter stands for a key-carrying
+type ([04-LIN-10]).
 
 Code, tests, examples, and stdlib signatures referenced from any active spec
 section must use these set names with exactly those meanings. The reserved
 spellings in §1.1.1 are rejected.
+
+The retired v0.18 spellings `int8`, `int16`, `int32`, and `int64` are not
+primitive names. Normal Surf and Deep ingress reject them and direct the
+author to the corresponding versioned migration command. They remain the
+stable ecosystem spellings of existing JSON, WireDag, cache, and ABI-facing
+interchange contracts; that external vocabulary does not make them source or
+Deep type names. Retired spellings are not available to implicit or explicit
+type-variable binding. This exclusion does not depend on classifying them as
+future-reserved primitive names.
 
 #### 1.1.1 Reserved And Rejected Numeric Names
 
@@ -146,24 +167,25 @@ matching numpy and Arrow. All of these spellings are rejected under
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
 The active primitive set in §1.1 is the **language-level** dtype contract: a
-program that mentions one of the ten active primitives is well-typed in
+program that mentions one of the eleven active primitives is well-typed in
 every Chelis pass that does not select a backend (parser, type checker, IR
 evaluator). Backend code generation is a separate surface; not every backend
 admits every active dtype. This sub-section is the authoritative per-backend
 matrix. Any "Metal supports X" or "C backend supports Y" claim elsewhere in
 the spec or in user-facing docs must resolve to a cell in this table.
 
-| dtype  | C backend                                                                                                         | HIP backend                                          | Metal backend                                | Evaluator |
-|--------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|----------------------------------------------|-----------|
-| f32    | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| f64    | admitted                                                                                                          | admitted                                             | **rejected (hardware)**                      | admitted  |
-| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted on Apple7+ (M3 or later)            | admitted  |
-| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | admitted (matmul + load/store via `hipblasGemmEx`)   | admitted                                     | admitted  |
-| int8   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int16  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int32  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| int64  | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
-| bool   | admitted                                                                                                          | admitted                                             | admitted                                     | admitted  |
+| dtype  | C backend                                                                                                         | HIP backend                                                                                                                                                                                              | Metal backend                                | Evaluator |
+|--------|-------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|-----------|
+| f32    | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| f64    | admitted                                                                                                          | admitted                                                                                                                                                                                                 | **rejected (hardware)**                      | admitted  |
+| bf16   | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, [05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to each operation's own restrictions | admitted on Apple7+ (M3 or later)            | admitted  |
+| f16    | admitted (storage as `uint16_t`; arithmetic via convert-to-f32; matmul via convert-then-`cblas_sgemm` per §5.7.1) | **operation-limited**: tensor load/store, exact-bit `Realize`, [05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`, dedicated [05-OP-43] `Relu`/`ReluAdjoint`, and `BlasMatmul` via `hipblasGemmEx` subject to each operation's own restrictions | admitted                                     | admitted  |
+| i8   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i16  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i32  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| i64  | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| bool   | admitted                                                                                                          | admitted                                                                                                                                                                                                 | admitted                                     | admitted  |
+| key    | admitted                                                                                                          | **operation-limited**: no operation                                                                                                                                                                      | **operation-limited**: no operation          | admitted  |
 
 **Arithmetic width is not a cell of this table.** It is a target-independent
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
@@ -186,6 +208,12 @@ Cell semantics:
   (e.g. matmul accumulator dispatch per §5.7.1, transcendental ops are
   float-only per §5.4) apply uniformly across backends and are not encoded
   in this matrix.
+- **operation-limited** — the backend accepts the dtype only on the operation
+  identities named in that cell, subject to each named operation's own
+  restrictions. Every unlisted operation that is otherwise valid for the dtype
+  rejects before emission. The backend SHALL NOT route an unlisted operation
+  through another dtype, operation identity, fallback kernel, or software
+  substitution.
 - **rejected (hardware)** — the backend rejects the dtype at codegen with a
   diagnostic naming the hardware constraint and does not substitute a dtype
   or software emulation (see the f64-on-Metal entry below).
@@ -444,11 +472,12 @@ reannotation, and linearity annotation.
 
 The type checker verifies that `match` expressions cover all variants. Missing variants are a type error, not a warning.
 
-A top-level irrefutable arm covers the match: a bare variable pattern
-(`| x =>`) or an as-pattern whose inner pattern is irrefutable
-(`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm level
-only; a variable pattern NESTED inside a constructor or record pattern
-does not cover the other variants.
+A top-level irrefutable arm without a guard covers the match: a bare
+variable pattern (`| x =>`) or an as-pattern whose inner pattern is
+irrefutable (`| q @ x =>`, `| q @ _ =>`). The coverage applies at the arm
+level only; a variable pattern NESTED inside a constructor or record pattern
+does not cover the other variants. A guarded arm covers nothing
+([04-PAT-2]).
 
 Coverage is a separate question from whether a pattern is admissible at the
 scrutinee type at all.
@@ -462,11 +491,10 @@ scrutinee type at all.
 > primitive, requires `lit` metadata that a `pat-lit` cannot carry and therefore
 > does not arise in pattern position. A literal pattern SHALL NOT be admitted
 > against a non-primitive scrutinee: a tensor, nominal, tuple, record, or
-> function scrutinee admits no literal pattern. A numeric literal pattern whose
-> value lies outside the range of the scrutinee's primitive type SHALL be
-> rejected, under the same range rule §5.3 and §5.6 apply to a literal bound at
-> that type; a float primitive has no such range, because finalization at a
-> float width is total under [04-NUM-1]. Each violation SHALL be a
+> function scrutinee admits no literal pattern. A numeric literal pattern binds
+> at the scrutinee's primitive type under [04-LIT-2] and SHALL be rejected when
+> its value there is out of range or non-finite, as a literal bound at that
+> type in expression position is. Each violation SHALL be a
 > `TypeMismatch` located at the offending pattern, at every checker ingress and
 > before any evaluation or lowering lane runs; an implementation SHALL NOT admit
 > the arm as merely unreachable, drop it, or defer the diagnostic to a lane. A
@@ -476,6 +504,27 @@ scrutinee type at all.
 > unsuffixed integer pattern is admissible against every integer primitive and
 > an unsuffixed float pattern against every float primitive, and §5.3's literal
 > default does not apply in pattern position.
+
+> **[04-PAT-2]** A `match` evaluates its scrutinee once and tries its arms in
+> declaration order. An arm is selected when its pattern matches the scrutinee
+> and its guard, if it has one, evaluates to `true`; the `match` evaluates to
+> the selected arm's body, evaluated in that arm's scope. A guard is evaluated
+> only after its arm's pattern has matched, in the arm's scope: every name the
+> pattern binds is visible to it, bound to the part of the scrutinee it matched,
+> as is every name visible at the `match`. A guard has type `bool`, under the
+> same obligation as an `if` condition (§3.2). When a guard evaluates to
+> `false`, its arm is not selected, the bindings its pattern introduced are
+> discarded, and matching continues with the next arm. No guard is evaluated for
+> an arm whose pattern did not match or for any arm after the selected one, and
+> a guard whose evaluation traps makes the `match` trap rather than reading as
+> `false`. Because a guard can be `false`, a guarded arm contributes nothing to
+> the coverage §2.4 requires: a top-level irrefutable arm covers the match only
+> when it has no guard, and a variant is covered only by an arm without a guard.
+> An arm without a guard carries `()` in the Deep guard slot
+> (`spec/03-deep-syntax.md` §2.3) and is selected whenever its pattern matches.
+> Every execution lane SHALL implement this rule: a lane that cannot lower a
+> guarded arm SHALL reject the program with a diagnostic, and SHALL NOT drop the
+> guard, drop the arm, or select an arm whose guard is `false`.
 
 ### 2.5 Opaque Types
 
@@ -639,9 +688,12 @@ inference. `chelis check` stays solver-free: the optional declared
 invariant (RFC D-WF and later workstreams) is never evaluated by the
 checker.
 
-**Gating.** `chelis check` is a scorer-with-exit-code: it always reports a
-fitness score and the full error list, and its exit code mirrors that list
-(`0` iff empty, non-zero otherwise; Issue #207). A declaration error such
+**Gating.** `chelis check` is a scorer-with-exit-code: for a file target it
+always reports a fitness score and the full error list, and its exit code
+mirrors that list (`0` iff empty, non-zero otherwise; Issue #207). A directory
+target reports one score per checked file inside the envelope of §6.4
+§ Directory mode, and [04-FIT-25] states its exit rule in the same terms.
+A declaration error such
 as `OpaqueTypeViolation` is therefore visible on `check` (a non-zero exit
 with the error listed), never a silent score-1 pass. The front-end
 surfaces that consume a program -- `chelis build`, `chelis eval --file`,
@@ -747,10 +799,26 @@ Standard Algorithm W with extensions for tensor types. The flow:
 > dimensions remain distinct, and they unify only when an ordinary body
 > constraint requires equality.
 
+For a literal pattern against an unresolved flexible scrutinee, [04-PAT-1]
+is such an obligation. The lambda stays monomorphic until its first application
+determines the scrutinee type, and the pattern is then checked at that type.
+If no application determines it within the declaration, the declaration is a
+type error rather than a generalized literal-pattern function. An authored
+type binder is governed by [04-INF-6] and is checked at every admissible
+instantiation.
+
+An operation restriction on an inferred scalar-or-tensor operand constrains
+its numeric dtype; it does not turn a dtype-family bound into a family of
+tensor types. An authored `p: Float`, for example, still admits only float
+primitive types, never `tensor[..., f32]`. Restrictions transported by
+function values retain that distinction. A failing transported restriction
+is a `PrecisionMismatch` naming the required family and offending type under
+[04-DTYPE-2], rather than requiring the original operation's body or name.
+
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
 one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
-`layer_norm`, `conv2d`, or `scatter_elements` reached through a bare lambda
+`layer_norm`, `conv`, or `scatter_elements` reached through a bare lambda
 parameter is
 checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications
@@ -813,9 +881,9 @@ A signature's type expression can carry two kinds of variable. A wildcard,
 `(t-var {} _)` or its dimension and rank spellings, is an inference hole
 (`spec/03-deep-syntax.md` §2.5); the desugarer synthesizes one for every
 omitted parameter or result annotation of a `def` that carries at least one
-annotation (`spec/02-surf-syntax.md` §5.2). A named type variable is a
-binder: it is listed in the declaration's binder list, or §5.8.1 quantifies
-it implicitly. The two are different objects and the checker treats them
+annotation (`spec/02-surf-syntax.md` §5.2). A named type, dimension, or
+rank variable is a binder only when listed in the declaration's explicit
+binder list. The two are different objects and the checker treats them
 differently.
 
 > **[04-INF-5]** A wildcard slot in a declaration's signature, whether
@@ -834,19 +902,45 @@ differently.
 > reference is typed at the member's provisional monomorphic type, as
 > [04-INF-2] provides for a recursive call.
 
-> **[04-INF-6]** An authored type variable of a declaration's signature,
-> whether listed in its binder list or introduced by §5.8.1's implicit
-> quantification, is a universally quantified binder and is rigid within the
-> declaration's body: the body SHALL type-check for every admissible
-> instantiation of the binder. A body constraint that identifies an authored
-> binder with a concrete type, with another authored binder of the same
-> signature, or with a type containing either is a type error reported at
-> the declaration, and the declaration's scheme is its declared signature,
-> never a narrowing of it. A wildcard slot that the body resolves to an
-> authored binder takes that binder's type. A dtype-family bound
+> **[04-INF-6]** An authored type, dimension, or rank variable listed in a
+> declaration's binder list has one scope throughout that declaration's body.
+> Every type-position occurrence of that name within the body SHALL resolve to
+> the same binder, including a tensor precision slot in a lambda parameter,
+> expression ascription, block binding, nested ADT argument, property
+> quantifier type, precondition, predicate body, or expression-valued option.
+> A name not declared by an enclosing explicit binder remains subject to
+> §5.8.1's closed primitive and undeclared-name rules; no occurrence introduces
+> a binder.
+>
+> A name-resolution rejection in those declaration-owned type positions has
+> one diagnostic owner per lexical module, declaration, offending spelling,
+> and diagnostic class. A standalone `sig` and its matching definition's
+> inline annotations and body type positions share that owner. Repeating the
+> same rejected primitive or undeclared type, dimension, or rank spelling
+> within that owner SHALL reuse the first diagnostic witness rather than emit
+> one diagnostic per occurrence. Different declarations, lexical modules,
+> spellings, or diagnostic classes retain different diagnostics in
+> deterministic declaration order. This ownership does not extend to an
+> independent expression or runtime/type-use failure merely because it names
+> the same spelling.
+>
+> Except for the sole role-sensitive exception below, each such binder is
+> universally quantified and rigid: the body SHALL type-check for every
+> admissible instantiation. A body constraint that identifies an authored
+> binder with a concrete type or shape, with another authored binder of the
+> same signature, or with a type or shape containing either is a type error
+> reported at the declaration, and the declaration's scheme is its declared
+> signature, never a narrowing of it. A wildcard slot that the body resolves
+> to an authored binder takes that binder's type. A dtype-family bound
 > ([04-DTYPE-2]) restricts the admissible instantiations without making the
-> binder concrete. The dimension parameter rule of §4.4 is this rule for
-> dimension binders.
+> binder concrete.
+>
+> The sole role-sensitive exception is §4.4.1: a dimension binder appearing
+> only in a function result remains output-inferred. The body may leave it
+> unbound or resolve it to a body-internal output, but SHALL NOT pin it to a
+> dimension from a declared input or collapse it with an input-position
+> dimension binder. A non-function declaration has no function-result position
+> and receives no such exception.
 
 An unsuffixed literal binds at its default primitive type
 (`spec/02-surf-syntax.md` §P10), so `lt(x, 0.0)` with `x: p` identifies the
@@ -896,6 +990,62 @@ an argument instead of reading the top-level binding.
 > are available before the current unit and do not participate in this
 > source-position comparison.
 
+#### 3.1.5 Explicit generic operation contracts
+
+An operation's static admission requirements determine which operand types it
+accepts and any required relationship between its operand and result types.
+They include dtype-family restrictions and collection-constructor requirements.
+They are distinct from value-dependent conditions for which the operation's
+specification requires a runtime check.
+
+> **[04-INF-9]** A newly authored generic function SHALL declare a type
+> contract sufficient for every operation in its body. The body SHALL be
+> checked for every instantiation admitted by that contract, using each
+> operation's ordinary typing rule. A requirement not entailed by the
+> declared contract is a declaration error, not an inferred restriction that
+> silently strengthens the contract. Omitting a signature or using signature
+> holes SHALL NOT authorize generalizing unresolved operation-admission
+> requirements into an implicit constrained generic contract. This rule
+> applies to named functions and anonymous function abstractions, including
+> local functions and functions that escape through results or higher-order
+> values. Ordinary local inference and monomorphic obligation replay remain
+> governed by [04-INF-1] and [04-INF-5]; unconstrained polymorphism remains
+> admissible. An authored named binder remains rigid under [04-INF-6], even
+> when a local call supplies a concrete argument.
+>
+> An already-checked function value retains its contract when aliased,
+> instantiated, generalized, passed or returned, placed in an aggregate,
+> imported, or serialized and restored as checked metadata. These operations
+> SHALL NOT erase its restrictions or require its body to be available for
+> validation. A newly authored wrapper SHALL itself meet this rule; merely
+> aliasing an existing function does not require redeclaring its contract.
+> A builtin function value carries the contract of its governing operation
+> specification. Calls SHALL satisfy the callee's checked contract, including
+> in recursive and indirect calls, without reconstructing admission
+> requirements by inspecting the callee's body.
+
+For example, a generic function applying `mean` to `tensor[3, p]` requires
+`p:Float`; a bare `p` or `p:Numeric` admits types that the operation rejects.
+A generic length function accepting `List[a]` can leave `a` unconstrained:
+the `List` constructor supplies the admission information that `len` needs.
+In contrast, `def size(x) = len(x)` cannot become an implicitly constrained
+generic function; a later top-level call with a list does not repair the
+declaration. Neither does a signature promising `a -> i64` for arbitrary
+`a`. An unannotated local lambda applying `len` may still bind monomorphically
+to a list at its first application within the enclosing declaration under
+[04-INF-1]. The identity function needs no operation-admission restriction
+and may generalize without an annotation.
+
+Insufficient dtype-family admission is a `PrecisionMismatch`. Other
+insufficient static operation-admission contracts retain the diagnostic kind
+required by the operation's specification, or use `TypeMismatch` when that
+specification assigns no more specific kind.
+The declaration diagnostic identifies the function or anonymous abstraction,
+the insufficient operand type or binder, and the required restriction.
+These declaration checks do not replace the runtime checks required by an
+operation's value-dependent extent or value semantics.
+
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."
@@ -921,6 +1071,13 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     ─────────────────────────────────────
     Γ ⊢ (app {} f a₁ a₂ ... aₙ) : τᵣ
 ```
+
+A dimension variable minted by an application's instantiation that unifies
+with a runtime extent `*` and that no argument of that application binds to a
+literal or named dimension denotes that runtime extent and is `*` in the
+application's result; a literal or name another argument of the same
+application binds to it is a claim on the runtime extent, checked by a §4.7
+guard.
 
 **Lambda:**
 ```
@@ -948,9 +1105,10 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
 **Match:**
 ```
     Γ ⊢ e : τₛ
-    For each (arm {} pᵢ () bᵢ):
+    For each (arm {} pᵢ gᵢ bᵢ):
+        Γ, bindings(pᵢ, τₛ) ⊢ gᵢ : bool      when gᵢ is not ()
         Γ, bindings(pᵢ, τₛ) ⊢ bᵢ : τᵣ
-    patterns {pᵢ} are exhaustive over τₛ
+    patterns {pᵢ | gᵢ is ()} are exhaustive over τₛ
     ──────────────────────────────────────
     Γ ⊢ (match {} e arm₁ ... armₙ) : τᵣ
 ```
@@ -958,7 +1116,9 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
 `bindings(p, τₛ)` is defined only when `p` is admissible at the scrutinee type
 `τₛ`. An inadmissible pattern is a type error at its own arm, not an arm that
 contributes no bindings. A `pat-lit` binds nothing and contributes exactly one
-constraint on `τₛ`, which [04-PAT-1] states.
+constraint on `τₛ`, which [04-PAT-1] states. A guard `gᵢ` carries the
+obligation an `if` condition does, discharged by unifying its type with
+`bool`; [04-PAT-2] states what it does at run time.
 
 **Pipe:**
 ```
@@ -992,6 +1152,29 @@ The gradient payload shape is:
 - explicit `wrt` on a non-differentiable parameter => type error
 
 The forward value is not bundled into the `grad(...)` result.
+
+#### Operand decisions on an unresolved operand
+
+An operation's operand type is not always known where the operation is
+checked. When the operand is still an unresolved type variable — a lambda
+parameter awaiting its argument, a signature hole, or a binding that takes its
+type from one of those — the operation has not been shown to be ill-typed,
+only to be undecided. In that case the decision is **deferred**: it is settled
+when the variable is bound, and reaches the verdict the operation would have
+reached had the operand carried that type when the operation was first
+checked. An operand whose outer type constructor is already known is not such
+a case, and is decided immediately whatever remains unresolved inside it; a
+tensor with unresolved dimension variables is decided at once.
+
+The deferral is sound only because a variable that is never bound is still
+rejected. After a function body's inference completes, every deferred operand
+decision that has not settled is rejected with the same diagnostic as an
+operand of a concretely inadmissible type. Deferral never admits an operand
+the operation would otherwise reject, and the verdict never depends on the
+order in which inference reaches the operand.
+
+(A small number of operations do not implement this yet; they are tracked on
+[#1489](https://github.com/Chelis-Lang/chelis/issues/1489).)
 
 ---
 
@@ -1035,11 +1218,11 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 | `neg`, `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil`, `round` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved; each operation's dtype domain remains as specified in spec/05 |
 | `is_nan`, `is_finite`, `is_infinite` | `tensor[D, p_float]` | `tensor[D, bool]` | Dimensions preserved |
 | `sum(x, axis=k, accumulator=a)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, sum_result(p,a)]` | Remove dimension at axis k; `sum_result` is §5.7.1's result-precision rule |
-| `count(x, axis=k)` | `tensor[d₁,...,dₙ, bool]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k; the named multi-axis form removes every selected axis |
+| `count(x, axis=k)` | `tensor[d₁,...,dₙ, bool]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, i64]` | Remove dimension at axis k; the named multi-axis form removes every selected axis |
 | `mean`, `max_reduce`, `min_reduce`, `prod_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k; `mean` additionally requires float `p` |
-| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k |
+| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, i64]` | Remove dimension at axis k |
 | `cumsum(x, axis=k)` | `tensor[D, p]` | `tensor[D, sum_result(p,default(p))]` | Dimensions preserved; every prefix uses §5.7.1's default sum accumulator |
-| `sort(x, axis=k)` | `tensor[D, p]` | `(tensor[D, p], tensor[D, int64])` | Values and stable source indices preserve the input dimensions |
+| `sort(x, axis=k)` | `tensor[D, p]` | `(tensor[D, p], tensor[D, i64])` | Values and stable source indices preserve the input dimensions |
 | `where(cond, yes, no)` | `tensor[D, bool]`, `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | All three dimension lists match exactly |
 | `clamp(x, lower, upper)` | `tensor[D, p]` plus rank-zero or `tensor[D, p]` bounds | `tensor[D, p]` | Bounds are explicitly rank-zero or shape-equal; no broadcasting rule is inferred |
 | `diagonal(x, axis1, axis2)` | `tensor[D, p]` | `tensor[D_diagonal, p]` | Remove axis2 and replace axis1 by the smaller selected extent as [05-OP-33] specifies |
@@ -1060,7 +1243,7 @@ Functions can be generic over dimensions using dimension variables:
 ;; In Surf:
 ;; def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32]
 
-(defsig {} transpose
+(defsig {} transpose (a b)
   (t-fn {}
     (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
     (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
@@ -1107,7 +1290,7 @@ legitimate:
   unknown), or
 - the body resolves it to a **body-internal** concrete dimension; the
   registered scheme then resolves to the produced dim. This is the
-  `examples/hello_tensor.ch` shape: `def main() -> tensor[n, f32]`
+  `examples/hello_tensor.ch` shape: `def main[n]() -> tensor[n, f32]`
   whose body builds a `tensor[3, f32]`.
 
 What the body must **not** do is couple the promised-independent output
@@ -1130,7 +1313,7 @@ dimension to the caller-visible input world. Both of the following are
 ;; TYPE ERROR: the return-only dim parameter m collapses with the
 ;; param-position dim parameter n.
 
-;; def make() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; def make[n]() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
 ;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
@@ -1139,13 +1322,13 @@ Three deliberate boundaries of this rule:
 
 - a body-internal concrete pin whose literal does *not* occur in any
   declared parameter position is tolerated even when the def has
-  parameters (`def f(x: tensor[2, f32]) -> tensor[k, f32] =
+  parameters (`def f[k](x: tensor[2, f32]) -> tensor[k, f32] =
   to_tensor([1.0, 2.0, 3.0])` is accepted with `k := 3`) — the guard
   compares resolved dimensions, not provenance, so a body-internal
   literal that happens to *equal* a parameter dim is conservatively
   rejected, and one that differs is conservatively accepted;
 - coupling through a *named* symbolic dim
-  (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
+  (`def f[m](x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
   `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
   design and no declared dim parameter participates.
   (When a param-position declared dim parameter *also* resolves to the
@@ -1172,6 +1355,11 @@ Three deliberate boundaries of this rule:
 - Results of control flow where branches have different known dimensions
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
+
+The spelling `*` does not declare a dimension binder. Distinct wildcard
+occurrences impose no equality on their runtime extents, including across
+axes or parameters of one function; genuine repeated names still impose
+their declared equality obligations (§4.7).
 
 #### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
 
@@ -1212,7 +1400,7 @@ rank-uniform-list guarantee above is unaffected.
 
 ```chelis
 ;; WRONG: rank-1 and rank-2 elements in the same List[tensor[k, f32]]
-;; def make_mixed() -> List[tensor[k, f32]] = {
+;; def make_mixed[k]() -> List[tensor[k, f32]] = {
 ;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 ;;   b = to_tensor([[cast(1.0, f32), cast(2.0, f32)],
 ;;                  [cast(3.0, f32), cast(4.0, f32)]])
@@ -1220,12 +1408,12 @@ rank-uniform-list guarantee above is unaffected.
 ;; }
 
 ;; CORRECT: flatten the rank-2 element to rank-1 first
-;; def make_uniform() -> List[tensor[k, f32]] = {
+;; def make_uniform[k]() -> List[tensor[k, f32]] = {
 ;;   a = to_tensor([cast(1.0, f32), cast(2.0, f32)])
 ;;   b_flat = reshape(
 ;;     to_tensor([[cast(1.0, f32), cast(2.0, f32)],
 ;;                [cast(3.0, f32), cast(4.0, f32)]]),
-;;     [cast(4, int64)])
+;;     [cast(4, i64)])
 ;;   [a, b_flat]
 ;; }
 ```
@@ -1320,14 +1508,14 @@ symbolically.
 
 ```chelis
 ;; reduce the named `seq` axis, keep everything else by name:
-;; def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+;; def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ;;   tensor[batch, seq, hidden] -> tensor[batch, hidden]
 ;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
 ```
 
 Multiple axes may be reduced in one call. A rank-polymorphic operand uses
 unique named axes — `sum(x, seq, head)` or `count(mask, seq, head)`. A
-concrete-rank operand may instead use one or more compile-time int32 positional
+concrete-rank operand may instead use one or more compile-time i32 positional
 axes — `sum(x, 1i32, 3i32)` or `count(mask, -1i32, 0i32)`. Each positional
 axis applies §4.7's one-step negative normalization against the original rank;
 every normalized axis must be in range and unique. Named and positional axes
@@ -1344,7 +1532,7 @@ vector rather than the source order. The variadic form is defined for the value
 reductions `sum`, `mean`, `max_reduce`, `min_reduce`, and `prod_reduce`.
 `count` instead resolves the complete unique axis set and executes the
 single dedicated multi-axis reduction of [05-OP-29]; it cannot compose
-single-axis `count` operations because the first result has dtype `int64`.
+single-axis `count` operations because the first result has dtype `i64`.
 The variadic form is **not** defined for the
 index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
 axis is not composable with a second reduction, so a variadic call on those is
@@ -1377,9 +1565,9 @@ dimension name rather than an integer. Two call forms are admitted:
 
 ```chelis
 ;; insert a trailing named axis (the new axis goes after every existing axis):
-;; def add_axis(x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
+;; def add_axis[rest](x: &tensor[..rest, f32]) -> tensor[..rest, one, f32] = insert(x, one, 1)
 ;; insert immediately BEFORE an existing named anchor (4-arg form):
-;; def widen(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
+;; def widen[pre, post, c](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, c, seq, ..post, f32]
 ;;   = insert(x, c, 5, seq)
 ```
 
@@ -1418,10 +1606,10 @@ Hard errors (`DimensionMismatch`, never a guessed placement):
 The inserted axis is a *named* dim: declared result types refer to it by name
 (`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
 dimension name only when it is **not bound in the value environment**: a bound
-`int32` variable is a runtime value and keeps the static-axis rule:
-`insert(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
+`i32` variable is a runtime value and keeps the static-axis rule:
+`insert(x, ax, 4i64)` with `ax: i32` is an error, never a trailing insert
 of an axis named `ax`. The `size` argument is any expression of exactly type
-`int64`. A static negative value is a type error; a runtime negative value
+`i64`. A static negative value is a type error; a runtime negative value
 traps `Domain`. The inserted named dimension carries the executed extent. A
 literal or named extent claimed by a surrounding result type is either proven
 equal statically or protected by an execution-time equality guard under
@@ -1433,7 +1621,11 @@ anchored → the anchor's index), mirroring named-axis reduction.
 sequences — never unordered "rows"); the reduced axis is a retained name; and a
 rank-poly def body is restricted by the §4.2 Body-Discipline check to
 *name-trackable* operations only — shape-identity (elementwise) ops,
-named-axis reductions, and named-axis insert. A *positional* shape-rewriter
+named-axis reductions, named-axis insert, and the key derivations
+[05-OP-69]–[05-OP-72]. Each tensor result of a key derivation preserves
+the complete operand shape as an ordered prefix; only `split_keys` appends
+an axis, at the trailing end, with the count extent. No derivation reorders
+or removes an axis, including inside an opaque spread. A *positional* shape-rewriter
 (`permute`, `reshape`, `matmul`, positional `gather`) is rejected inside a
 `..r` body: its output shape is not name-trackable at symbolic rank, so it
 could hide an untracked transposition. For the name-tracked ops the procedural
@@ -1492,8 +1684,16 @@ type is `bool`. Every binder must have an explicit type. The `where`
 preconditions must type-check as `bool` expressions in the binder scope; the
 predicate body must type-check as `bool`.
 
-Desugaring emits a `defsig` with the binder types and `bool` result, plus an
-ordinary `def` carrying the property metadata specified in
+An optional `[..]` list after the property name is the declaration's complete
+explicit type, dimension, and rank binder list under [04-INF-6] and §5.8.1.
+Those binders are rigid and scope the property quantifier types, preconditions,
+predicate body, and expression-valued options. Duplicate, forbidden, unlisted,
+and dtype-family-bounded names follow the same rules as a function
+declaration. That same binder scope applies to tensor precision slots
+throughout those property positions.
+
+Desugaring emits a `defsig` with that explicit binder list, the quantifier
+types, and `bool` result, plus an ordinary `def` carrying the property metadata specified in
 `spec/design/chelis_property_spec.md`. Type checking trusts neither the metadata
 nor the property annotation; it checks the resulting Deep function against the
 signature like any other definition.
@@ -1506,37 +1706,42 @@ returned by a function, or derived by integer arithmetic. The relevant
 built-ins are:
 
 - `shape(x, axis)`: returns the size of `x`'s `axis`-th dimension as an
-  `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
-  expression of exactly type `int32`. The result is a runtime scalar, not a
+  `i64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
+  expression of exactly type `i32`. The result is a runtime scalar, not a
   symbolic dim reference.
 - `expand(x, axis, size)`: set the size-1 dimension at position `axis` to
-  width `size`, where `size` is any expression of exactly type `int64`. The
+  width `size`, where `size` is any expression of exactly type `i64`. The
   rank is unchanged.
 - `insert(x, axis, size)`: add a new dimension of width `size` at position
-  `axis`, where `size` is any expression of exactly type `int64`. When `axis`
+  `axis`, where `size` is any expression of exactly type `i64`. When `axis`
   is a dimension *name* instead of an integer, the call is the named-axis
   insert form (§4.5.3): it adds a new named axis at the trailing end, or —
   with a fourth `anchor` argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
-  `shape_list`, a `List<int64>`; every element may be computed at runtime.
-- `reduce_window_*`: consume runtime `List[int64]` window and stride values
+  `shape_list`, a `List<i64>`; every element may be computed at runtime.
+- `reduce_window_*`: consume runtime `List[i64]` window and stride values
   under [05-RWIN-1..2]. Their values and list lengths are validated at
   execution when not statically known.
 
 Static knowledge improves diagnostics and symbolic dimension propagation; it
 does not define a smaller executable language. A violation proven from
-literals is a type error. A constraint that depends on runtime values is
-checked before allocation or element access and traps `Domain` or `Overflow`
-under the owning operation. Every execution mode observes the same values and
-traps.
+literals is a type error. Literals that become visible only when a call is
+inlined prove it just the same when the lowered graph fixes the claimed axis
+to a different extent: the program is rejected before any execution, on every
+lane, and the equality guard §4.7.3 imposes on that axis is decided then rather
+than emitted. An axis the lowered graph does not fix keeps its run-time guard.
+A constraint that depends on runtime values is checked before allocation or
+element access and traps `Domain` or `Overflow` under the owning operation.
+Every execution mode observes the same values and traps.
 
 A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime
 extent is non-negative. Each guard is evaluated exactly once, after every
 value it compares is available and before the first allocation or element
-access whose shape depends on the guarded extent. A guard whose operands are
-all interface values (an input tensor's axis, a scalar parameter, or a
-literal) is evaluated at function entry, in declared signature order, before
+access whose shape depends on the guarded extent. An interface guard enforces
+a declared signature claim on an input tensor's axis or scalar parameter and
+compares only interface values (including literals). It is evaluated at
+function entry, in declared signature order, before
 any other operation of the function runs. An entry that declares no signature
 orders those guards by its ABI input-slot order instead: the order in which
 the caller supplies that entry's inputs. Whatever rule assigns the slots, the
@@ -1547,6 +1752,14 @@ extent an operation computes) is evaluated after its producers and takes the
 source position of the operation that introduces the guarded extent: an
 independent effect or trap that precedes that operation in source order is
 observed first, and one that follows it is observed only if the guard passes.
+A declared-result guard on an axis produced by a body operation belongs to
+that operation, even when the axis's size can be calculated entirely from
+interface values before the operation executes. Entry placement applies to
+claims on the interface witnesses themselves; the ability to calculate a
+later result's extent early does not turn its result claim into an entry
+guard. For `insert(x, axis, shape(y, k))` returned under an independent
+declared extent, an earlier independent body trap occurs before the result
+guard, and a failing result guard names `insert`.
 A `cast` takes the placement of the value it casts. Guards ready at the same
 source position are evaluated in declaration order. These constraints are the
 complete observable contract; a guard and an operation related by neither data
@@ -1557,13 +1770,23 @@ A runtime extent guard is a typed operation-precondition guard under
 [04-NUM-9] and is therefore itself the trap-producing primitive. A failing
 equality guard and a failing non-negativity guard both raise a `Domain` trap.
 Its `<op>` slot is the canonical name of the operation that introduces the
-guarded extent: for a guard whose operands are all interface values, the
+guarded extent: for an interface guard, the
 `load` primitive of the later witness in signature order
 (spec/05-risc-primitives.md §2.5); for a non-negativity guard, the owning
-movement operation. Its `<prim>` slot is `int64`, because the result this
+movement operation; for a declared-result guard, the primitive that produced
+the returned value, whether the return expression names it directly or reaches
+it through a block tail, a binding, or a callee. A tensor that a builtin
+returns, directly or held at any depth in the aggregate it returns, has that
+builtin as the producing primitive named by [04-NUM-9]'s `<op>` slot,
+whichever operand, element, callback result, seed or iteration supplied it.
+The exceptions are [05-OP-54]'s List selections `index`, `take` and `skip`,
+which return one contiguous part of their List input selected by an `i64`
+index or count: like a pattern, they project, and a tensor they return or hold
+keeps its producer. A runtime extent guard's `<prim>` slot is `i64`, because
+the result this
 guard finalizes is an extent ([05-DIM-1]) and not a tensor element. The
 complete user-facing line is therefore
-`numeric trap: domain in <op> at int64`, and [04-NUM-9] permits it no prefix
+`numeric trap: domain in <op> at i64`, and [04-NUM-9] permits it no prefix
 and no suffix. Every lane SHALL also convey, on separate lines accompanying
 that trap, the names of the disagreeing sources, the axis, and the value
 observed for each; that requirement binds the information conveyed and not
@@ -1584,13 +1807,13 @@ extents.
 
 #### 4.7.1 `shape` axis form
 
-Every form below produces an `int64` value ([05-DIM-2]):
+Every form below produces an `i64` value ([05-DIM-2]):
 
 ```text
 shape(x, 0)
-shape(x, cast(0, int32))
+shape(x, cast(0, i32))
 shape(x, -1)
-shape(x, cast(-1, int32))
+shape(x, cast(-1, i32))
 shape(x, axis_parameter)
 shape(x, computed_int32_axis)
 ```
@@ -1600,13 +1823,13 @@ axis first adds the input rank exactly once when negative, so `-1` names the
 last axis. A statically known normalized value outside `0..rank` is a type
 error (`DimensionMismatch`). A computed normalized value outside that range
 traps `Domain` as operation `shape` before reading metadata. An axis whose
-type is not exactly `int32` is a type error; no width is inferred or coerced.
+type is not exactly `i32` is a type error; no width is inferred or coerced.
 The zero-cotangent and target-independent execution rules are [05-OP-7] and
 [05-SHAPE-1].
 
 #### 4.7.2 `expand` and `insert` with a runtime size
 
-`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `int64`
+`expand(x, axis, size)` and `insert(x, axis, size)` each accept any `i64`
 `size`. A literal produces a literal result extent; an in-scope symbolic
 dimension may preserve its name; and every other expression produces a fresh
 runtime extent. A static negative size is a type error. A runtime negative
@@ -1633,9 +1856,9 @@ extent because of its provenance or default it to one.
 
 #### 4.7.3 `reshape` with runtime sizes
 
-`reshape` accepts a `List[int64]` whose arity is statically known, because
+`reshape` accepts a `List[i64]` whose arity is statically known, because
 tensor rank is part of the static type. Every element may be an arbitrary
-runtime int64 expression. A literal extent becomes a literal result dim. A
+runtime i64 expression. A literal extent becomes a literal result dim. A
 direct shape read may preserve an input dimension identity only when ordinary
 type reasoning proves that identity; an arithmetic expression, a cross-tensor
 read without a proof of equality, or any other computed value produces a
@@ -1662,7 +1885,7 @@ one, infer provenance to narrow the language, or substitute a guessed extent.
 > typed extent expressions. An implementation MAY conservatively decline to
 > prove two capacities equal, but it SHALL NOT wrap, saturate, truncate, or
 > substitute an overflow sentinel that can make unequal mathematical counts
-> equal. Projection from the exact count into `int64`, `usize`, or a target
+> equal. Projection from the exact count into `i64`, `usize`, or a target
 > allocation-size domain SHALL be checked and SHALL fail before planning,
 > allocation, or element access when the value is outside that domain. This
 > rule applies to compiler analyses as well as runtime allocation paths; a
@@ -1670,28 +1893,28 @@ one, infer provenance to narrow the language, or substitute a guessed extent.
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
-`reshape`'s shape list is `List<int64>`: its elements are extent-domain
+`reshape`'s shape list is `List<i64>`: its elements are extent-domain
 quantities under `spec/05-risc-primitives.md` [05-DIM-1]. The list must be
-homogeneous, and its element precision must be `int64`. Those are two
+homogeneous, and its element precision must be `i64`. Those are two
 separate requirements and either can fail alone.
 
 No §5.6 position reaches a list literal, so a literal element states
-`int64` itself, with a suffix or an explicit `cast`; the §5.3 `int32`
+`i64` itself, with a suffix or an explicit `cast`; the §5.3 `i32`
 default never satisfies this slot. A non-literal element needs no
-annotation when its producer is already `int64`, which [05-DIM-2] makes
+annotation when its producer is already `i64`, which [05-DIM-2] makes
 true of `shape()`:
 
 ```text
 reshape(x, [2i64, 2i64])                               ;; OK - explicit suffix
-reshape(x, [shape(x, 0), 4i64])                        ;; OK - shape() is int64; the literal states it
-reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK - explicit cast
-reshape(x, [2, 2])                                     ;; TYPE ERROR: int32 literals in a List<int64> slot
+reshape(x, [shape(x, 0), 4i64])                        ;; OK - shape() is i64; the literal states it
+reshape(x, [cast(shape(x, 0), i64), cast(4, i64)]) ;; OK - explicit cast
+reshape(x, [2, 2])                                     ;; TYPE ERROR: i32 literals in a List<i64> slot
 reshape(x, [2i64, 2i32])                               ;; TYPE ERROR: mixed element precision
 ```
 
 The suffix requirement is deliberate, not a §5.6 gap; §5.6 records why
 list literals do not adopt. The two error lines want different
-diagnostics. The all-`int32` list is a slot mismatch, and its message
+diagnostics. The all-`i32` list is a slot mismatch, and its message
 should name the fix (write `2i64`) rather than only the mismatch. The
 mixed list is an intra-list disagreement that no defaulting rule can
 resolve, and its message should name the disagreeing element rather than
@@ -1729,7 +1952,7 @@ add(tensor[D, f32], tensor[D, bf16])  →  TYPE ERROR
 
 ```
 cast(x: tensor[D, f32], bf16) : tensor[D, bf16]
-cast(x: tensor[D, int32], f32) : tensor[D, f32]
+cast(x: tensor[D, i32], f32) : tensor[D, f32]
 ```
 
 Cast is always explicit. The compiler never inserts implicit casts.
@@ -1745,8 +1968,8 @@ on scalar and tensor surfaces. Per direction:
 - float source -> integer target: the value must be finite, integral, and
   in range. A fractional value or NaN/±inf traps `domain`; an integral
   value outside the target width traps `overflow`. The default cast never
-  chooses a rounding rule; write `cast(floor(x), int32)` or
-  `cast(round(x), int32)` to state one explicitly.
+  chooses a rounding rule; write `cast(floor(x), i32)` or
+  `cast(round(x), i32)` to state one explicitly.
 - any source -> bool target: strict {0, 1} membership; exactly 0/1
   encodes false/true, anything else traps `domain` ([04-NUM-4]).
 
@@ -1765,7 +1988,7 @@ write `cast(round(x), target)` when that composition is intended.
 
 ### 5.3 Literal Types
 
-Integer literals default to `int32`. Float literals default to `f32`. These
+Integer literals default to `i32`. Float literals default to `f32`. These
 defaults can be overridden in three ways:
 
 1. an explicit literal suffix (§5.5) attached to the literal token
@@ -1773,17 +1996,14 @@ defaults can be overridden in three ways:
 3. an explicit `cast` around the literal expression
 
 There is **no implicit precision promotion** from these defaults to any other
-type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, int32]`, not
-`tensor[3, int64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
+type. A bare `[1, 2, 3]` in an unannotated position is `tensor[3, i32]`, not
+`tensor[3, i64]`. A bare `[1.0, 2.0, 3.0]` in an unannotated position is
 `tensor[3, f32]`, not `tensor[3, f64]`. Programs that need a wider literal
 type must say so via suffix, declared element type, or `cast`.
 
-The default is the **user-facing contract**. The lexer parses an unsuffixed
-integer or float literal token at i64/f64 precision so that out-of-range
-literals can be diagnosed before defaulting; the desugarer/type-check
-narrows the literal to `int32` (for integer tokens) or `f32` (for float
-tokens) before Deep is materialized. The narrowing is mechanical and
-non-overridable except by the three mechanisms above.
+The default is the **user-facing contract** and is non-overridable except by
+the three mechanisms above. Whichever dtype they select, the literal binds
+there under [04-LIT-2].
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
 > declared primitive family: integer atoms denote only integer primitives,
@@ -1797,16 +2017,29 @@ non-overridable except by the three mechanisms above.
 > consumer SHALL reject an unmarked contradiction or a malformed marker.
 > `spec/03-deep-syntax.md` §6.4 defines the canonical Deep forms.
 
+> **[04-LIT-2]** A numeric literal SHALL bind at its dtype by one
+> finalization of its value there. Its dtype is its suffix (§5.5), the §5.3
+> default, the element type of a §5.6 adopting position, each admissible
+> instantiation of a dtype binder it adopts under §5.6, or, for a literal
+> pattern, the scrutinee's primitive ([04-PAT-1]). An integer dtype admits
+> the value exactly or rejects the literal, and a float dtype rounds it per
+> [04-NUM-2]. A literal whose value at any of its dtypes is out of range or
+> non-finite SHALL be rejected at every ingress before any evaluation or
+> lowering lane runs. Rounding a nonzero value to zero or to a subnormal is
+> ordinary rounding, not a rejection. An explicit `cast` of an already-bound
+> value is an operation under [04-NUM-14], not a literal, and may produce an
+> infinity.
+
 ### 5.4 Precision Compatibility Table
 
 Operations accept same-precision operands only. The table of valid combinations:
 
 | Operation type | Valid precisions |
 |---|---|
-| Arithmetic (add, mul, sub) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
+| Arithmetic (add, mul, sub) | f32, f64, bf16, f16, i8, i16, i32, i64 (all same) |
 | Float division (div) | f32, f64, bf16, f16 only (not integer; integer operands cite `spec/05-risc-primitives.md` §2.1 and point at `floor_div` / `trunc_div`) |
-| Floor division (floor_div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
-| Truncating division (trunc_div) | int8, int16, int32, int64 only (integer-only; float operands are a type error) |
+| Floor division (floor_div) | f32, f64, bf16, f16, i8, i16, i32, i64 (all same) |
+| Truncating division (trunc_div) | i8, i16, i32, i64 only (integer-only; float operands are a type error) |
 | Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
 | Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
@@ -1836,15 +2069,23 @@ narrowing. The closed suffix set is:
 | `f64` | `(t-prim {} f64)` | `1.0f64` |
 | `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
 | `f16` | `(t-prim {} f16)` | `1.0f16` |
-| `i8` | `(t-prim {} int8)` | `42i8` |
-| `i16` | `(t-prim {} int16)` | `42i16` |
-| `i32` | `(t-prim {} int32)` | `42i32` |
-| `i64` | `(t-prim {} int64)` | `42i64` |
+| `i8` | `(t-prim {} i8)` | `42i8` |
+| `i16` | `(t-prim {} i16)` | `42i16` |
+| `i32` | `(t-prim {} i32)` | `42i32` |
+| `i64` | `(t-prim {} i64)` | `42i64` |
 
-Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) bind the decoded float at
-that type. Canonical Surf requires the canonical float body (`42.0f32`, not
-`42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
-attach to integer literal tokens only; `1.0i8` is a parse error.
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) accept a float body or a
+decimal integer body, and the two bind differently. `42.0f32` binds the decoded
+float at that type. `42f32` binds the exact integer directly at that width and
+is [04-LIT-1]'s suffix-bound cross-family form, an exact Int atom marked
+`literal_source: integer`; it SHALL NOT be finalized through `f64`. Both are
+canonical Surf, and `chelis fmt` preserves the body it was given rather than
+converting between them; Deep-to-Surf output follows
+`spec/03-deep-syntax.md` §6.3.2 instead. A body, integer or decimal, whose
+value rounds to infinity at the declared width is not a literal of that type
+([04-LIT-2]).
+Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer literal
+tokens only; `1.0i8` is a parse error.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -1853,12 +2094,13 @@ float followed by an identifier) and binds at the literal default per §5.3,
 which is then subject to the surrounding-position rules in the type checker.
 
 The normal Surf parser accepts value-preserving hexadecimal/binary integer
-spellings, digit separators strictly between digits, and equivalent finite
-exponent spellings. Integer radix forms may carry an integer suffix; they may
-not carry a float suffix. These lexical choices do not change the exact suffix
-binding rule, and the canonical printer emits the decoded decimal token.
-Canonical decimal float literals carry float suffixes without ambiguity
-(`1.0f32`, `1000.0f32`).
+spellings, digit separators strictly between digits, and every finite decimal
+float body that decodes to the literal's value, including equivalent exponent
+spellings and bodies with digits past the shortest round-trippable spelling.
+Integer radix forms may carry an integer suffix; they may not carry a float
+suffix. These lexical choices do not change the exact suffix binding rule, and
+the canonical printer emits the decoded token. Canonical decimal float literals
+carry float suffixes without ambiguity (`1.0f32`, `1000.0f32`).
 
 Rejected suffixes:
 
@@ -1891,16 +2133,23 @@ exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is a tensor literal
 4. the first argument of a `cast(literal, p)` expression, where `p` is a
-   precision type literal — the literal body adopts `p`
+   precision type literal or a dtype-family-bounded type binder
+   ([04-DTYPE-2]) — the literal body adopts `p`
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
 tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
 at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
 `f32` default and then widen (which would yield the f32-truncation value
-`1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal
-at `int64`, which is what makes the §5.3 out-of-int32-range escape hatch
-work. The adoption re-binds the literal at `p` and the §5.6 range checks
-apply at `p`: `cast(2147483648, int32)` is still a range error. Adoption
+`1.100000023841858`). Likewise `cast(3000000000, i64)` binds the literal
+at `i64`, which is what makes the §5.3 out-of-i32-range escape hatch
+work. The adoption re-binds the literal at `p`, and [04-LIT-2]'s range and
+finiteness checks apply at `p`: `cast(2147483648, i32)` is still a range
+error, and `cast(70000.0, f16)` is rejected because 70000 rounds to infinity
+at `f16`, whereas `cast(70000.0f32, f16)` casts a finite `f32` value and
+yields infinity under [04-NUM-14]. For a binder `p`, the literal binds at
+each admissible instantiation ([04-INF-6]), so those checks apply at every
+member of `p`'s family: `cast(300, p)` under `p: Int` and
+`cast(70000.0, p)` under `p: Float` are rejected at the declaration. Adoption
 is limited to unsuffixed numeric literals with a numeric `p` of matching
 kind: a suffixed literal binds at its suffix (§5.5; `cast(1.1f32, f64)`
 widens the f32 value), and a float literal under an integer `p` keeps the
@@ -1914,7 +2163,7 @@ stated once in its type, and the body is bulk data — a per-element suffix
 on a thousand-element weights literal is noise that buries the one
 element that differs. Position 4 adopts a **bare scalar**, but its target
 dtype is spelled at the site and the position exists for
-**expressibility**, not convenience: without it `cast(3000000000, int64)`
+**expressibility**, not convenience: without it `cast(3000000000, i64)`
 cannot be written at all, and `cast(1.1, f64)` would round through the
 `f32` default. What no position does is adopt a **list literal, or a
 scalar against a remote callee signature** — position 2 reaches through a
@@ -1922,17 +2171,15 @@ signature, but only into a tensor body — and none should be added for
 ergonomics alone. A structural argument — a shape list, a bounds pair, a
 stride step — is program rather than payload, and under
 `spec/05-risc-primitives.md` [05-DIM-1] its dtype states which KIND of
-quantity it is: an extent is `int64` and an axis is `int32`, so a
+quantity it is: an extent is `i64` and an axis is `i32`, so a
 context-inferred `[2, 2]` would hide exactly the distinction the dtype
 exists to carry. Chelis programs are written and, more often, audited by
 agents; a suffix states the kind at the site, the write-side cost is one
 edit under a diagnostic that names the fix, and the read-side cost of
-context-dependent literals is paid on every audit. This is the trade
-`with seed(...)` already records (§7.1): its seed demands `int64` and the
-literal states it (`with seed(42i64)`), with no adoption carve-out.
+context-dependent literals is paid on every audit.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
-§5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
+§5.3 literal defaults: integer literals to `i32`, float literals to `f32`.
 
 A tensor literal with mixed-suffix entries is well-formed only if every
 suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
@@ -1940,7 +2187,7 @@ suffix matches the inferred element type. `[1.0, 2.0f64, 3.0]` in an
 explicit dtype that disagrees with the surrounding `f32` element type.
 
 A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
-`tensor[3, int32]`, not `tensor[3, int64]`. The fallback to the §5.3
+`tensor[3, i32]`, not `tensor[3, i64]`. The fallback to the §5.3
 default is the spec contract; no stage may silently widen it.
 
 ### 5.7 Mixed-Precision Accumulator Parameter
@@ -1980,21 +2227,21 @@ For operands of precision `p`, the default accumulator precision is:
 | `f16` | `f32` | `f32` | operand precision (`f16`) |
 | `f32` | `f32` | `f32` | operand precision (`f32`) |
 | `f64` | `f64` | `f64` | operand precision (`f64`) |
-| `int8` | (matmul not defined for int8 — see §5.7.2) | `int32` | `int32` |
-| `int16` | (matmul not defined for int16 — see §5.7.2) | `int32` | `int32` |
-| `int32` | (matmul not defined for int32 — see §5.7.2) | `int32` | `int32` |
-| `int64` | (matmul not defined for int64 — see §5.7.2) | `int64` | `int64` |
+| `i8` | (matmul not defined for i8 — see §5.7.2) | `i32` | `i32` |
+| `i16` | (matmul not defined for i16 — see §5.7.2) | `i32` | `i32` |
+| `i32` | (matmul not defined for i32 — see §5.7.2) | `i32` | `i32` |
+| `i64` | (matmul not defined for i64 — see §5.7.2) | `i64` | `i64` |
 
 Rationale for the bf16/f16 → f32 default: numerical stability of long
 inner-product reductions in low-precision arithmetic. PyTorch and JAX use the
 same wider-accumulator default for bf16/f16 matmul.
 
 Rationale for the i8/i16 → i32 default: overflow safety. Summing 200
-non-trivial `int8` values overflows `int8` but fits comfortably in `int32`.
+non-trivial `i8` values overflows `i8` but fits comfortably in `i32`.
 The same instinct exists ecosystem-wide, but the details differ: PyTorch's
 `torch.sum` promotes ALL integral inputs to `int64`, and NumPy accumulates at
 the platform default integer. Chelis deliberately widens one step instead of
-jumping to `int64`; the §5.7 accumulator parameter is the authored route to a
+jumping to `i64`; the §5.7 accumulator parameter is the authored route to a
 wider accumulator when a reduction genuinely needs one.
 
 An accumulator has the same numeric kind as its operands: a signed-integer
@@ -2003,7 +2250,7 @@ float accumulator. Cross-kind accumulation is a type error. Within that kind,
 the accumulator parameter is permitted only when it is at least as wide as
 the operand precision and is not narrower than the documented default. A
 program that explicitly requests a narrower accumulator (e.g.
-`reduce_sum(x: tensor[N, int8], accumulator=int8)`) is a type error with a
+`reduce_sum(x: tensor[N, i8], accumulator=i8)`) is a type error with a
 diagnostic suggesting either omitting the parameter (which yields the i32
 default) or accepting the wider default explicitly.
 
@@ -2015,10 +2262,10 @@ The permitted accumulator and result pairs are total and exact:
 | `f16` | `f32`, `f64` | `f16` |
 | `f32` | `f32`, `f64` | accumulator dtype `a` |
 | `f64` | `f64` | `f64` |
-| `int8` | `int32`, `int64` | accumulator dtype `a` |
-| `int16` | `int32`, `int64` | accumulator dtype `a` |
-| `int32` | `int32`, `int64` | accumulator dtype `a` |
-| `int64` | `int64` | `int64` |
+| `i8` | `i32`, `i64` | accumulator dtype `a` |
+| `i16` | `i32`, `i64` | accumulator dtype `a` |
+| `i32` | `i32`, `i64` | accumulator dtype `a` |
+| `i64` | `i64` | `i64` |
 
 Equivalently, `sum_result(p, a) = p` exactly when `p` is `bf16` or `f16`;
 otherwise `sum_result(p, a) = a`. A pair absent from this table is a type
@@ -2038,8 +2285,8 @@ the explicit accumulator or `default(p)` when the argument is omitted.
 
 #### 5.7.2 Integer matmul
 
-The matmul signature rejects integer operand precisions (`int8`, `int16`,
-`int32`, `int64`). Integer `sum` is admitted per §5.7.1.
+The matmul signature rejects integer operand precisions (`i8`, `i16`,
+`i32`, `i64`). Integer `sum` is admitted per §5.7.1.
 
 ### 5.8 Stdlib Generalization Shape
 
@@ -2052,7 +2299,7 @@ A typical generalized signature has the shape:
 
 ```scheme
 ;; Std.Tensor.add : forall p. tensor[D, p] -> tensor[D, p] -> tensor[D, p]
-(defsig {} add
+(defsig {} add (d p)
   (t-fn {}
     (t-tensor {} (d-var {} d) (t-var {} p))
     (t-tensor {} (d-var {} d) (t-var {} p))
@@ -2075,35 +2322,45 @@ coverage: every public tensor op must be usable at every dtype in §1.1 that
 its §5.4 row admits. A stdlib op that fails for a §5.4-admissible dtype is a
 spec compliance bug, not a documentation bug.
 
-#### 5.8.1 Contextual Precision Desugar (WS-A5)
+#### 5.8.1 Explicit Signature Binders
 
-The Surf surface admits precision polymorphism in user-written sigs by
-treating identifiers in the precision slot of a `tensor[...]` type
-contextually:
+The Surf surface admits precision polymorphism in user-written signatures
+through the declaration's explicit `[..]` binder list:
 
 > In a sig with quantified type variables, names appearing in the
 > precision slot of a `tensor[...]` type that match the sig's quantifier
 > list become `(t-var {} <name>)`, not `(t-prim {} <name>)`. Names
 > matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
-> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. The four short
-> integer names stay as `t-prim` BY MAPPING to their §1.1 primitives
-> (`i8` to `int8`, and likewise for `i16`, `i32` and `i64`), so
-> canonical Deep carries one spelling per primitive; they are accepted
-> Surf input spellings, not Deep ones. Outside a sig
+> `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`, so canonical
+> Surf and Deep carry one spelling per primitive. The retired spellings
+> `int8`, `int16`, `int32`, and `int64` are rejected and offered only to
+> the explicit v0.18 migrations; they never become `t-var`. Outside a sig
 > (e.g., in a value-position type annotation), no quantifier exists,
 > so the existing rule applies.
 
-Quantifiers in a sig are **implicit**: any lowercase, non-primitive,
-non-`spec/04-type-system.md` §1.1.2-unsigned identifier that appears in
-the sig's type expression is treated as a `forall`-quantified type
-variable. The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`,
-`uint8`, `uint16`, `uint32`, `uint64`) are explicitly excluded so they
-reach the type-checker's §1.1.2 rejection path with a precise
-diagnostic, not silently absorbed as quantifiers. A dtype spelling that
-[04-DTYPE-1] rejects names no type variable in any type position: an
-explicit quantifier list does not rebind it, and it reaches that
-rejection wherever it appears, on the Deep carrier as well as the Surf
-one.
+An enclosing explicit declaration binder has one scope throughout that
+declaration's body. Every type-position occurrence of its name resolves to the
+same binder, including tensor precision slots in lambda parameters, expression
+ascriptions, block bindings, nested ADT arguments, property quantifier types,
+preconditions, predicate bodies, and expression-valued options. With no
+enclosing explicit binder for the name, a body-local occurrence remains a
+value-position request and follows the closed primitive or undeclared-name
+rule below; it does not introduce a binder.
+
+No occurrence introduces a binder. Every `t-var`, `d-var`, and `d-rank`
+name in a signature appears in its explicit list. An unlisted lowercase
+name in a scalar or precision type position remains a primitive-name
+request and is rejected as unknown, with a nearest-active-dtype
+suggestion; an unlisted dimension or rank variable is rejected as
+undeclared. This is a structural rule, not a dtype-shaped-name heuristic.
+The §1.1.2 unsigned aliases (`u8`, `u16`, `u32`, `u64`, `uint8`,
+`uint16`, `uint32`, `uint64`) and every other spelling [04-DTYPE-1]
+rejects name no type variable in any type position: a binder list does
+not rebind one, and the same rejection applies on Surf and Deep.
+An unbounded name may be listed without occurring in the signature; it is a
+vacuous universal quantifier and canonical round-tripping preserves it. A
+dtype-family-bounded binder must occur in the declared type (§5.9), so bounds
+cannot be used as inert metadata.
 
 The internal type representation carries this through `TensorPrec`:
 
@@ -2128,9 +2385,10 @@ is a monomorphization bug, not user error.
 
 Every polymorphic call supplies a concrete precision before the backend
 boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
-calls and to a polymorphic call's instantiation. An inadmissible
-instantiation is a `PrecisionMismatch` at the call site with a citation to
-the governing section.
+calls and to generic definitions under [04-INF-9]. A polymorphic call's
+instantiation satisfies the checked contract, including its dtype-family
+bounds under [04-DTYPE-2]. An inadmissible instantiation is a
+`PrecisionMismatch` at the call site with a citation to the governing section.
 
 ### 5.9 Dtype-Family Bounds
 
@@ -2172,6 +2430,11 @@ signature declares a name, that signature's binder list carries the bounds for
 that declaration, and a bound written in the same declaration's `def` binder
 list is a declaration error. A `def` with no standalone signature carries its
 bounds in its own binder list.
+
+[04-INF-9] requires a generic body's necessary dtype-family restriction to
+follow from this declared contract. Applying a float-only operation does not
+infer a `Float` bound on an otherwise unbounded or more broadly bounded
+authored binder, nor publish such a bound from an unannotated abstraction.
 
 A public stdlib signature whose `[05-OP-35]` registry domain is exactly one of
 these families declares that family as a bound. That registry writes its domains
@@ -2236,7 +2499,9 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ### 6.4 Fitness Report Format
 
-`chelis check` emits one JSON document per checked input. It is a
+`chelis check` emits one JSON document per invocation: the report below
+for a file target, or the directory envelope (§ Directory mode) for a
+directory target. It is a
 machine-facing contract rather than an illustration: reward surfaces,
 conformance corpora, and downstream tooling consume it, so a change to its
 shape is a change to a published interface.
@@ -2254,8 +2519,6 @@ shape is a change to a published interface.
 > conforming: a consumer cannot distinguish "no diagnostics" from
 > "the diagnostics were not transported".
 
-(Not fully implemented; tracked by chelis#886.)
-
 #### Document fields
 
 | field | type | presence |
@@ -2267,6 +2530,23 @@ shape is a change to a published interface.
 | `errors` | array of diagnostic | always, possibly empty |
 | `typed_ast` | annotated Deep carrying a type on every node | always |
 | `inferred_signatures` | structured signature tree | only when the caller requests inferred signatures |
+
+> **[04-FIT-18]** `score`, `components.parse`, `components.structure`,
+> `components.names`, `components.types`, and diagnostic `severity` SHALL be
+> finite `f64` values in `[0, 1]`. Signed zero is admitted and preserved.
+> `severity` orders the producer's assessment from least to most severe;
+> it neither changes diagnostic presence nor replaces the error-list exit rule.
+> Score components and the weighted total retain §6.1's measurements and
+> weights. Checked-node counters SHALL be exact nonnegative `i64`, with
+> `typed_nodes <= total_nodes` and
+> `untyped_nodes = total_nodes - typed_nodes`. Their provenance remains
+> [04-FIT-1]. Counter overflow or an inconsistent report is an error, never
+> a wrapped counter or a repaired total. The fixed-dtype number codecs in
+> spec/10 §3.5 preserve the JSON number/integer field shapes above through
+> canonical sealed numeric carriers. NaN, infinity, an out-of-domain value,
+> or a missing required field is rejected, never rounded, clamped or defaulted.
+
+(The fixed-dtype report carrier requirement is not fully implemented; see chelis#1288.)
 
 > **[04-FIT-13]** `typed_ast` and, when requested, `inferred_signatures`
 > SHALL be carried in the same typed value as the rest of the report.
@@ -2363,6 +2643,105 @@ Illustrative of the shape only; the atoms above are normative.
 > name-resolution wire field: these invariants govern the existing
 > `components.names`, `errors`, and `unresolved_names` fields.
 
+#### Directory mode
+
+`chelis check <dir>` checks every source file under a directory and emits
+one document for the whole invocation, the directory envelope. The envelope
+carries the per-file reports defined above; it is not a second report
+format.
+
+| field | type | presence |
+|---|---|---|
+| `files` | array of entry | always, possibly empty |
+| `errors` | array of diagnostic (§ Diagnostic fields) | always, possibly empty |
+
+Each entry carries:
+
+| field | type | presence |
+|---|---|---|
+| `file` | string | always |
+| `report` | the report above | always |
+
+> **[04-FIT-19]** The directory envelope SHALL be produced by serializing
+> one typed value that holds every per-file report as a member, under
+> [04-FIT-11]. An envelope assembled from separately rendered report
+> documents is not conforming. `files` and `errors` are both present in
+> every envelope, including an empty one.
+
+> **[04-FIT-20]** The corpus of a directory target is every checkable file
+> the walk reaches from it. The walk follows symbolic links wherever they
+> resolve, including to directories and to locations outside the target.
+> Below the target, it excludes every entry whose name begins with `.` and
+> every directory named `target`; the target itself is never excluded. The
+> dot-prefix test applies to the entry's own name before anything about the
+> entry is resolved, so a dot-prefixed link contributes nothing, whatever it
+> resolves to or fails to resolve to. The `target` exclusion is a rule about
+> directories, so it applies once the entry resolves to one. A checkable
+> file is a regular file, reached directly or through links, whose name ends
+> in `.ch` or `.dp`.
+>
+> The walk visits each file and each directory at most once, identified by
+> its canonical path, and the first path in walk order ([04-FIT-22]) names
+> it. A file reached by several paths is therefore one entry, and a link
+> cycle or a link back to a visited directory adds nothing.
+>
+> An entry the walk cannot resolve is a checkable file when its own name is
+> one: it is an entry, and its report carries the failure that naming it
+> directly would. Otherwise it contributes nothing when its referent does
+> not exist, and is a walk failure under [04-FIT-23] when it cannot be
+> resolved for any other reason.
+
+> **[04-FIT-21]** Each entry's `file` is the file's path relative to the
+> target, its components joined by `/` on every host, and its `report` is
+> that file's report. Every entry SHALL carry a report: a file that cannot be
+> read, formatted, parsed, or checked is an entry whose report carries the
+> failure under [04-FIT-12], never an entry carrying a message in place of a
+> report. A relative path that is not valid UTF-8 cannot be written as
+> `file`, and no replacement character or other substitution may stand in
+> for it: such a file is not an entry, and the walk reports it under
+> [04-FIT-23].
+
+> **[04-FIT-22]** `files` is in walk order: a depth-first pre-order
+> traversal that visits the entries of each directory in ascending order of
+> the byte sequence of the name the host reports, the order [05-HOST-4]
+> fixes for `list_dir`. That order is not a sort of the relative paths: a
+> directory `a` and everything under it precede a sibling file `a.ch`,
+> although the path `a.ch` sorts before `a/b.ch`.
+
+> **[04-FIT-23]** A failure that belongs to no single file SHALL be reported
+> as a diagnostic in the envelope's `errors`. In directory mode, [04-FIT-12]
+> is met by an entry's report for a failure of that file, and by the
+> envelope's `errors` for a failure of the walk; neither is replaced by an
+> empty or truncated document or by a display string. A directory the walk
+> cannot read, whether the target or a directory below it, reached directly
+> or through links, contributes one `directory_walk_error` diagnostic naming
+> that directory. So does each entry [04-FIT-20] makes a walk failure, and
+> each path [04-FIT-21] cannot represent. The walk continues past every one
+> of them: each checkable file it can still reach is an entry. An unreadable
+> target therefore yields an envelope with no entries and one diagnostic.
+> `errors` is in the walk order of [04-FIT-22], as `files` is, so a second
+> run over an unchanged tree emits the same document. A path inside one of
+> these messages is rendered as [05-HOST-4] renders one: reversible escaped
+> host bytes. A message that names a path SHALL NOT substitute for bytes it
+> cannot represent, or two paths the walk rejected become one message a
+> reader cannot tell apart. The reports of the readable files are additional
+> information, not a partial success; the envelope still fails under
+> [04-FIT-25].
+
+> **[04-FIT-24]** An empty corpus is a failure. When the walk completes
+> without a [04-FIT-23] diagnostic and the corpus is empty, `errors` SHALL
+> carry one `empty_corpus` diagnostic, whose message names the target and
+> reports the checkable files that [04-FIT-20]'s exclusions removed.
+> Emptiness is judged once, over the whole walk: an empty directory below a
+> non-empty corpus contributes nothing. When a [04-FIT-23] diagnostic is
+> present, that diagnostic accounts for the result and no `empty_corpus`
+> diagnostic is added, because the walk has not established that the corpus
+> is empty.
+
+> **[04-FIT-25]** Directory mode SHALL exit `0` if and only if the
+> envelope's `errors` and every entry's report `errors` are all empty, and
+> otherwise `2`. Directory mode has no other exit status.
+
 ### 6.5 Source Identity In Diagnostics
 
 A diagnostic names the entities the user wrote. The checker's internal
@@ -2391,6 +2770,28 @@ that holds a spelling and declines to thread it through is not covered by it.
 (The borrow and cast diagnostics do not yet satisfy [04-FIT-9]; chelis#260
 owns that gap.)
 
+### 6.6 Textual Rendering Of Check Diagnostics
+
+A command that stops on a check rejection and reports it as text rather
+than as the §6.4 document -- `chelis build`, for example -- still reports
+the same diagnostics.
+
+> **[04-FIT-26]** A textual rendering of a check rejection -- type, effect,
+> or linearity diagnostics alike, the stages [04-FIT-15] names -- SHALL render
+> each diagnostic from the projection §6.4's `errors` elements carry: its
+> `kind` vocabulary member, its `message`, and its location as
+> [04-FIT-16] and [04-FIT-17] admit it. Each diagnostic SHALL occupy its
+> own line, in the order the checker reported it, so a rejection carrying
+> `N` diagnostics renders `N` lines. A debug rendering of a
+> producer-internal value is not a conforming rendering: it publishes
+> field names, absent-value markers, and variant spellings that
+> [04-FIT-14] keeps off the published interface. A diagnostic that cannot
+> be projected is a failure reported as such, never a debug rendering in
+> its place.
+
+(The effect and linearity renderings and `chelis reef build` do not yet
+satisfy [04-FIT-26]; chelis#2130 owns that gap.)
+
 ---
 
 ## 7. Effects
@@ -2399,7 +2800,6 @@ owns that gap.)
 
 Built-in effect vocabulary in the type layer:
 
-- `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
 - `IO` -- host-side effects such as `print` and `debug`,
   the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
@@ -2408,15 +2808,27 @@ Built-in effect vocabulary in the type layer:
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
 `Diff` is a compiler capability marker, not a user-handled boundary effect.
-`Accum` is internal-only and users do not handle it directly. `Random` and
-`Resource(Device)` are the two user-handler boundaries. `IO` may remain
+`Accum` is internal-only and users do not handle it directly.
+`Resource(Device)` is the one user-handler boundary. `IO` may remain
 unhandled at the program boundary. `Test` is consumed by `chelis test`; other
 execution boundaries reject an unhandled `Test` effect.
 
-> **[04-EFF-1]** A `handle-effect` form SHALL name one of the two user
-> handler boundaries, `random` or `resource`. Any other handler kind is a
-> type error; lowering SHALL NOT erase its handler or execute the body as if
-> no handler were present.
+Randomness is not an effect. A random primitive ([05-OP-8], [05-OP-37]) is a
+pure function of the explicit key it is given ([05-RNG-1]), and a function
+that draws takes a `key` parameter and needs no effect annotation.
+
+> **[04-EFF-1]** A `handle-effect` form SHALL name the one user handler
+> boundary, `resource`. Any other handler kind is a type error; lowering
+> SHALL NOT erase its handler or execute the body as if no handler were
+> present.
+
+> **[04-EFF-2]** Before emitting a host-C artifact, the build boundary SHALL
+> reject every reachable `resource` handler whose device designator is not
+> exactly `cpu`. The rejection SHALL be a `BuildTargetMismatch` diagnostic and
+> SHALL occur before any artifact or emission observation is produced. This
+> rule applies independently to every nested resource region. It defines the
+> host-C admission boundary only; it does not define device-label vocabulary,
+> placement, transfer, or accelerator-target semantics.
 
 Inference and checking obey these rules:
 
@@ -2424,40 +2836,66 @@ Inference and checking obey these rules:
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are
-  `Random` sources; stdlib random helpers such as
-  `normal_like` and Kaiming/Xavier initializers inherit that effect through
-  calls
+- random primitives, the key operations [05-OP-69] through [05-OP-72], and
+  stdlib random helpers such as `normal_like` and the Kaiming/Xavier
+  initializers contribute no effect; [04-LIN-9] makes each key single-use
 - `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
   `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
   Compiled host execution preserves these effects and their order under
   spec/05-risc-primitives.md [05-HOST-1..2]
-- `with seed(seed) { ... }` handles `Random` across direct operations and calls made
-  inside the handled region; the C host backend preserves this with generated
-  handler-scoped RNG state for nested stdlib/user functions. The seed is
-  semantically int64, and a seed written as an integer literal SHALL carry the
-  `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
-  unsuffixed literal is a type error naming the required suffix. The body is
-  checked in the enclosing context and its type is returned, so the enclosing
-  signature is enforced. `spec/05-risc-primitives.md` [05-RNG-1] governs the
-  seeded stream in every lane
 - `with device(device) { ... }` marks a resource region that is validated against the
-  chosen build target
+  chosen build target; [04-EFF-2] defines the host-C admission boundary
 - declared `Resource("...")` annotations on `t-fn` expressions constrain the
   inferred resource set, and checked `fn` metadata records every unhandled
   `Resource(Device)` effect
-- unhandled top-level `Random` is a check error with repair guidance
 - top-level `IO` is permitted
 - assertion operations introduce `Test`; only the test runner handles it
 
-### 7.2 Type Representation
+### 7.2 Native Test Selection
+
+`chelis test` discovers ordinary tests as nullary definitions named
+`test_*` whose result type is `unit`. A path may name one `.ch` file or a
+directory tree; a substring filter narrows the discovered definitions by
+their `<file>::<name>` identity.
+
+> **[04-TEST-1]** A completed ordinary `chelis test` invocation SHALL run at
+> least one selected test. Zero selected tests is a runner error in each of
+> these cases: the completed directory walk found no `.ch` files; `.ch` files
+> were found but none declared a runnable `test_*`; or `--filter` excluded
+> every runnable test. The condition is judged once over the complete target,
+> so an empty subdirectory inside a target with a selected test contributes
+> nothing. The runner SHALL exit `2` for this error and SHALL NOT emit a
+> passing `0 passed, 0 failed` summary.
+
+> **[04-TEST-2]** The zero-selection diagnostic SHALL name the target and
+> distinguish the three cases in [04-TEST-1]. When no `.ch` file was found,
+> it SHALL also report the `.ch` files excluded under dot-prefixed entries or
+> directories named `target`, using an exact count when that excluded walk
+> completes and a lower bound otherwise. Text mode SHALL render the diagnostic
+> as an error. JSON mode SHALL emit one record with a top-level `errors` array
+> containing exactly one diagnostic with kind `empty_test_selection`, its
+> message, and severity `1.0`; it SHALL emit no test row and no summary record.
+
+> **[04-TEST-3]** Only completed discovery establishes zero selection. A
+> failure while walking the target SHALL retain its walk-error result and SHALL
+> NOT also emit `empty_test_selection`. Likewise, a file that cannot be read or
+> parsed continues through the ordinary file-failure path rather than being
+> counted as evidence that the selected set is empty.
+
+`--expect neg|blocked` is a file-probe mode rather than an ordinary test
+selection. Each discovered `.ch` file remains one probe even when it declares
+no `test_*`, because its compile or check diagnostic may be the expected
+outcome. Its existing non-empty-suite requirement is therefore based on
+discovered probe files, not on [04-TEST-1]'s runnable-test count.
+
+### 7.3 Type Representation
 
 Declared function types with effects use `eff` metadata on `t-fn`:
 
 ```scheme
-;; f : tensor[D, f32] -> tensor[D, f32] ! {Random, Resource("gpu:0")}
-(t-fn {eff: (effects {} random (resource {} "gpu:0"))}
+;; f : tensor[D, f32] -> tensor[D, f32] ! {IO, Resource("gpu:0")}
+(t-fn {eff: (effects {} io (resource {} "gpu:0"))}
   (t-tensor {} (d-var {} d) (t-prim {} f32))
   (t-tensor {} (d-var {} d) (t-prim {} f32)))
 ```
@@ -2465,7 +2903,7 @@ Declared function types with effects use `eff` metadata on `t-fn`:
 Checked function bodies may also carry inferred effect metadata:
 
 ```scheme
-(fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
+(fn {type: (t-fn {} ...), effects: (effects {} io)} (params {} x) body)
 ```
 
 The `effects` metadata records the complete inferred, unhandled effect set.
@@ -2473,7 +2911,13 @@ Resource regions are also enforced at the handler and build boundary. Effect
 annotations are optional in Surf and Deep; when present, the inferred set must
 fit the declared upper bound.
 
-### 7.3 Metadata Contract
+Build APIs enforce Resource compatibility before exposing an emitted artifact.
+An entry-scoped build includes the entry's reachable source helpers, including
+imported helpers; unused library definitions do not constrain that entry's
+target. A whole-program build checks the whole emitted program. Target checking
+does not change the authored input or output ABI.
+
+### 7.4 Metadata Contract
 
 The `eff` metadata key on `t-fn` nodes carries a declared effect upper bound;
 the `effects` key on checked `fn` nodes carries the inferred unhandled set.
@@ -2490,6 +2934,10 @@ arguments. A consuming use makes the binding dead; a borrow leaves the owned bin
 live. For an unconsumed local owner, the compiler inserts `Drop` at the earliest
 post-dominating point after its last use, as [04-LIN-8] requires. Lexical scope
 exit is the fallback only when no earlier valid terminal point can be proved.
+
+Random keys are the exception to copying. A key-carrying value (§8.4.1) is
+affine: it is used at most once, never copied or borrowed, and may be dropped
+unused ([04-LIN-9]). A second key comes from deriving one, never from a copy.
 
 ### 8.2 Type Representation
 
@@ -2572,7 +3020,17 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   at closure creation time; a capture whose body uses are all borrow-reads borrows the
   outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
   subject below.
-- Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
+- A top-level function declaration ([04-INF-7]) is not a closure creation, and checking
+  it never changes top-level ownership state. Because a declaration may be called after
+  every top-level initializer, including from another module, its body is checked
+  against the ownership state that holds once every top-level initializer has run: a
+  free reference to a top-level value that no initializer consumes does not consume it,
+  and one to a value that an initializer consumes is rejected whatever the textual
+  order. A consuming use of such a reference yields each call's owned result through a
+  copy, per [04-LIN-4], so a declaration cannot use a key-carrying top-level value,
+  whose copy [04-LIN-9] refuses.
+- Ordinary consuming fan-out is handled by inserted copies, except on a
+  key-carrying value, which [04-LIN-9] makes affine. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases for which a unique terminal path cannot be proven.
 - **Destructured components are excepted from copy insertion.** A binding introduced by
@@ -2616,6 +3074,12 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > accepted. The sole forwarding is a consuming capture of a destructured
 > component (or of an alias of one), which consumes the component's
 > carrier binding.
+
+These binding identities also govern runtime lookup: a named declaration's
+free references are not rebound by a caller's same-named local or parameter.
+An anonymous closure retains its actual lexical captures even when a declaration
+has the same name. Reusing an initialized declaration does not introduce a new
+lexical binding, change which callable is selected, or memoize function results.
 
 > **[04-LIN-3]** Evaluating an expression of an owned linear type SHALL
 > produce exactly one logical owner. Binding another name to that value does
@@ -2672,6 +3136,66 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > An implementation may reclaim later only when an explicitly live owner or
 > view requires the storage; recursion depth alone is not such a reason.
 
+> **[04-LIN-9]** A key-carrying value (§8.4.1) is affine: it SHALL have
+> at most one consuming use on every control-flow path, and it needs none,
+> so an unused one is dropped. No explicit or compiler-inserted `copy`
+> applies to it, so the copies that [04-LIN-3], [04-LIN-5] and [04-LIN-6]
+> allow for another owned value are refused for it. It SHALL NOT be
+> borrowed, copied, captured by a closure, or read by any operation that
+> leaves it live, and no signature SHALL declare a borrowed key-carrying
+> parameter. Binding it to another name moves it. A key-carrying value
+> reaches only the operations this rule admits: a key derivation
+> ([05-OP-70] to [05-OP-72]) or a draw ([05-OP-8], [05-OP-37]) at its key
+> operand; `drop` ([05-OP-67]); a runtime branch's join; the construction
+> and destructuring of tuples, records and data values; a binding, or a
+> block's, a handler region's or a function's result; a builtin operation
+> whose atom routes each value of a type parameter to exactly one consumer;
+> and a call through a
+> parameter whose declared type carries a key, whether direct or through
+> `grad`, `vmap` or `jit`. Every other operation refuses it, `realize`,
+> `cast` and `copy` included, and a builtin passed as a function value
+> admits it only where a call to that builtin would. Every call consumes a
+> key-carrying argument, including the otherwise observational arguments of
+> a `grad(f)(...)` or `vmap(f)(...)` call. A key inside a key-carrying
+> value is reached only by consuming that value: a destructuring `let` or
+> `match` pattern; a tuple projection, which takes each key-carrying
+> component at most once and leaves the tuple unusable as a whole; a field
+> access, which consumes the whole value; or `vmap` over a key axis, which
+> gives each row to one application. Reading a consumed key's bits again in
+> a backward pass or a checkpoint recomputation is not a use. A key tensor's
+> extent is not key material, so `shape`, `numel` and a call's extent check
+> admit a key tensor and read its extent without a use, leaving the key live,
+> and like any read such a read precedes the key's consuming use. A violation
+> is a type error whose suggested repair derives fresh keys with
+> `split_key` or `split_keys` ([05-OP-70], [05-OP-71]), never `copy`.
+
+> **[04-LIN-10]** A function's type parameter SHALL NOT be instantiated at a
+> key-carrying type (§8.4.1), because a generic body may use a value of its
+> parameter type more than once. Every type variable that a definition's or
+> a generalized `let` binding's type scheme quantifies is such a parameter,
+> authored or inferred: an authored type binder, including one that names a
+> tensor element dtype with or without a dtype-family bound, and a variable
+> that inference leaves free in the binding's type, whatever the bound value
+> is, since a tuple or a data value can hold a closure over it. A `let`
+> binding without an ascription is generalized: `e = Nil` followed by
+> `Cons(k, e)` instantiates `e`'s type parameter at `key` and is refused,
+> while the ascribed `e: List[key] = Nil` and the value written where it is
+> used, `Cons(k, Nil)`, quantify nothing. The rule holds
+> however the generic is reached: called directly, bound to another name,
+> stored in a tuple or a data value, returned from a function, or passed as
+> an argument to another function, a builtin operation included. A key
+> reaches a function only through a parameter whose declared type carries a
+> key without a type parameter, such as `key`, `tensor[n, key]`, or a data
+> type with a key field. A data type's own type parameters are not function
+> type parameters: `List[key]`, `Option[key]`, and a data type instantiated
+> at a key are key-carrying types that construction, matching, and the
+> builtin operations handle under [04-LIN-9]. A violation is a type error
+> that names the generic, and the type parameter when the program spells
+> one. Its suggested repair passes the key through such a parameter or, when
+> the generic is a value binding rather than a function, ascribes the
+> binding a type with no type parameter or writes its value where it is
+> used.
+
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the
 faulting use — never a compiler-synthesized intermediate.
@@ -2708,6 +3232,25 @@ visible at check time. When the linearity checker runs against composed
 contexts (library + new code), both halves are resolved in one pass so a
 new-code `Outer` whose carrier classification depends on a library `Inner` is
 recognized correctly.
+
+#### 8.4.1 Key-carrying types
+
+A type **carries a key** iff it is in the least relation satisfying:
+
+- `key` carries a key, and so does `tensor[..., key]`.
+- `(t1, t2, ...)` carries a key iff some `ti` does.
+- `&U` carries a key iff `U` does.
+- `U[arg1, arg2, ...]` carries a key iff `U` is key-carrying, **or** some
+  `argi` carries a key.
+- Function types `t-fn` carry no key, even when their parameters or return
+  do. A closure never captures a key ([04-LIN-9]).
+
+An ADT is **key-carrying** iff one of its variant fields has a type that
+carries a key. The relation is resolved as the §8.4 carrier set is: a least
+fixed point over every `deftype` visible at check time, library and new code
+together. A value that carries both a tensor and a key follows §8.4 and
+[04-LIN-9] at once, and [04-LIN-9] refuses the borrows and copies that §8.3
+would otherwise allow it.
 
 ### 8.5 Type-Name Uniqueness
 
@@ -2813,8 +3356,8 @@ Scope:
 > RNGs, checksums); the wrap prohibited by [04-NUM-3] is the *implicit*
 > overflow behavior of the ordinary arithmetic ops, not these named
 > ops, whose result is in-range by construction. Named modular
-> operations are defined ONLY on the integer dtypes (`int8`, `int16`,
-> `int32`, `int64`); they SHALL NOT be defined on `bool` or any float
+> operations are defined ONLY on the integer dtypes (`i8`, `i16`,
+> `i32`, `i64`); they SHALL NOT be defined on `bool` or any float
 > dtype (floats overflow to infinity per [04-NUM-2] and have no modular
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
@@ -2831,15 +3374,16 @@ Scope:
 > | `f32` | IEEE-754 binary32 | 32 | f32 |
 > | `f16` | IEEE-754 binary16 | 16 | f32 |
 > | `bf16` | bfloat16 | 16 | f32 |
-> | `int64` | signed two's-complement 64-bit integer | 64 | exact int64 |
-> | `int32` | signed two's-complement 32-bit integer | 32 | exact int32 |
-> | `int16` | signed two's-complement 16-bit integer | 16 | exact int16 |
-> | `int8` | signed two's-complement 8-bit integer | 8 | exact int8 |
+> | `i64` | signed two's-complement 64-bit integer | 64 | exact i64 |
+> | `i32` | signed two's-complement 32-bit integer | 32 | exact i32 |
+> | `i16` | signed two's-complement 16-bit integer | 16 | exact i16 |
+> | `i8` | signed two's-complement 8-bit integer | 8 | exact i8 |
 > | `bool` | canonical Bool8 (`0x00` false, `0x01` true) | 8 | not an arithmetic dtype ([04-NUM-4]) |
+> | `key` | opaque 64-bit word, every bit pattern a key ([05-RNG-2]) | 64 | not an arithmetic dtype (§1.1) |
 >
 > Stored representation, storage width, and arithmetic width are separate
 > facts. Equal storage widths do not make two representations interchangeable:
-> for example, `f32` and `int32` are both 32 bits, and `bool` and `int8` are
+> for example, `f32` and `i32` are both 32 bits, and `bool` and `i8` are
 > both 8 bits, but neither pair may share a typed load, store, carrier, or
 > kernel element spelling. Every boundary and lane SHALL match the exact
 > representation identity, not only its byte width. No implementation may
@@ -2896,7 +3440,7 @@ conversions per op, no tensor-core path); for transcendentals and for
 multi-step reductions it also changes the answer, which is what would
 otherwise force a cross-lane tolerance table between two lanes that
 should agree exactly. The same argument applies to routing exact integer
-arithmetic through f64, which additionally destroys int64 exactness above
+arithmetic through f64, which additionally destroys i64 exactness above
 2^53.
 
 **Why reduced precision is opt-in only.** The prohibition on narrowing is
@@ -2951,7 +3495,7 @@ refuses the default.
 
 **The availability trade, stated.** Trapping converts silent data
 corruption into loud termination, by design: a long-running job that
-overflows an `int64` counter DIES where wrapping arithmetic would have
+overflows an `i64` counter DIES where wrapping arithmetic would have
 carried a silently wrong value to completion. That operational cost is
 deliberate, and this record carries it alongside the benefit: the
 alternative outcome is not a successful run but a plausible wrong result,
@@ -2961,20 +3505,26 @@ which is the strictly worse failure mode. Code that WANTS mod-2^width semantics 
 named operations if introduced. Behaviors are named operations, never modes.
 
 > **[04-NUM-11]** A value SHALL survive storage, transport, and every
-> boundary crossing at its declared dtype without collapse. An `int64`
+> boundary crossing at its declared dtype without collapse. An `i64`
 > value above 2^53 that is exact when produced SHALL still be exact after
 > being stored in a tensor, serialized onto the execution wire, returned
 > through a language binding, and read back. A representation that cannot
 > carry a dtype's full value set is not a conforming representation for
 > that dtype, and no stage SHALL substitute a wider or narrower one to
-> compensate. A language binding or device descriptor SHALL preserve rank as int32
-> and each extent, stride, element count, and byte capacity as int64, matching
+> compensate. A language binding or device descriptor SHALL preserve rank as i32
+> and each extent, stride, element count, and byte capacity as i64, matching
 > the domains of [05-DIM-1], [05-DIM-2], and [05-OP-31]. It SHALL carry the
 > exact dtype tag and dynamic rank; a fixed-rank carrier, a narrower metadata
 > field, or an element pointer not coupled to the exact tag in the same
 > validated descriptor is not a conforming substitute. A
 > boundary MAY reject a value outside the declared domain before crossing, but
 > it SHALL NOT narrow, clamp, wrap, or fabricate metadata to make it fit.
+> A compiled public entry SHALL compare the dtype tag of every tensor supplied
+> to it, including a tensor nested in a supplied value, with the declared dtype
+> before it reads that tensor's elements. A mismatch is a `Domain` trap in
+> `load` at the declared dtype under [04-NUM-9], accompanied by the input's
+> name and both dtypes; the supplied storage is never read at the declared
+> dtype. (Not fully implemented for the HIP and Metal entries, chelis#2510.)
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
@@ -3073,8 +3623,8 @@ i64.
 | `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | arithmetic/conversion NaN -> `0x7fc00000`; ±inf and -0.0 preserved |
 | `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | arithmetic/conversion NaN -> `0x7e00`; ±inf and -0.0 preserved |
 | `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | arithmetic/conversion NaN -> `0x7fc0`; ±inf and -0.0 preserved |
-| `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
-| `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
+| `i64` | integers in [-2^63, 2^63-1] | exact i64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
+| `i32` / `i16` / `i8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
 | `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
 | reserved names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
 
@@ -3088,7 +3638,7 @@ Reading notes:
   accumulation order).
 - The **f64 row's identity finalize** is why [04-NUM-6] holds:
   `f64 add(2^53, 1) == 2^53` is the correctly rounded answer and stays. The
-  same two numbers at `int64` are exact or trap, never silently collapsed -
+  same two numbers at `i64` are exact or trap, never silently collapsed -
   same inputs, opposite verdicts, by design.
 - The **bool row has no arithmetic width** because arithmetic on `bool` is
   rejected rather than performed ([04-NUM-4]). `and` / `or` / `not` are the
@@ -3132,6 +3682,8 @@ Reading notes:
 > the same defects; a check that one admitted representation receives SHALL be
 > applied to every other admitted representation of the same program. A
 > representation the checker admits but a check cannot read is a silent
-> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped.
-
-(Not fully implemented; see chelis#1125.)
+> exemption under [04-TOT-1] and SHALL be diagnosed rather than skipped. A
+> check applied at one entry and not another SHALL be resolved by deciding the
+> check, never by narrowing the entry that applies it: either every entry
+> applies it, or no entry does and the rejection it performed moves to the
+> stage whose capability it describes.

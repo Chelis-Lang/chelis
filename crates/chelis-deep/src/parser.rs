@@ -2,19 +2,6 @@ use crate::ast::Expr;
 use crate::lexer::{self, Token, TokenKind};
 use thiserror::Error;
 
-/// Returns true when `b` is a forbidden ASCII byte in a `span` metadata
-/// value per `spec/03-deep-syntax.md` §1.1.1: U+0000..=U+001F (except
-/// U+0020 space) or U+007F (DEL).
-///
-/// Mirrored in `chelis_ir::span_sanitize::is_forbidden_byte`. The two
-/// definitions are kept in sync via the spec — any change to the
-/// forbidden set must update both `spec/03-deep-syntax.md` §1.1.1 and
-/// both implementations together.
-#[inline]
-fn is_forbidden_span_byte(b: u8) -> bool {
-    b <= 0x1F || b == 0x7F
-}
-
 /// Render a forbidden byte for diagnostic messages, using a printable
 /// canonical form. `\n`, `\r`, `\t`, `\0` get their backslash form;
 /// other forbidden bytes (other C0 controls and U+007F) are shown as
@@ -29,28 +16,10 @@ fn forbidden_byte_repr(b: u8) -> String {
     }
 }
 
-fn validate_surf_metadata_key(key: &str, offset: usize) -> Result<(), ParseError> {
-    if key.starts_with("surf_")
-        && !matches!(
-            key,
-            "surf_path"
-                | "surf_dim_group_size"
-                | "surf_pipe_stage"
-                | "surf_literal_style"
-                | "surf_binding_type"
-        )
-    {
-        return Err(ParseError::Expected {
-            expected: "a key in the closed Surf metadata namespace (`surf_path`, `surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, or `surf_binding_type`)".to_string(),
-            found: key.to_string(),
-            offset,
-        });
-    }
-    Ok(())
-}
-
 #[derive(Debug, Error)]
 pub enum ParseError {
+    #[error("{0}")]
+    Metadata(crate::metadata::MetadataError),
     #[error("lex error: {0}")]
     Lex(#[from] lexer::LexError),
 
@@ -66,6 +35,17 @@ pub enum ParseError {
 
     #[error("empty list at byte {offset}")]
     EmptyList { offset: usize },
+
+    /// The input nests deeper than the parser's stack segment holds
+    /// (chelis#2425, [`crate::nesting`]). The parser is recursive descent, so
+    /// it refuses the next level while less than
+    /// [`crate::nesting::STACK_RED_ZONE_BYTES`] of its segment remains instead
+    /// of overflowing, and names the byte where it stopped.
+    #[error(
+        "Deep input nests deeper than the parser supports at byte {offset}; \
+         reduce the nesting depth of this expression"
+    )]
+    NestingTooDeep { offset: usize },
 
     /// A `span` metadata value contains a forbidden character per
     /// `spec/03-deep-syntax.md` §1.1.1. Span IDs must not contain ASCII
@@ -98,11 +78,39 @@ use crate::raw::{RawAtom, RawExpr};
 struct RawParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    source: Option<&'a str>,
+    preserved: bool,
 }
 
 impl<'a> RawParser<'a> {
     fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            source: None,
+            preserved: false,
+        }
+    }
+
+    fn with_source(tokens: &'a [Token], source: Option<&'a str>) -> Self {
+        Self {
+            source,
+            ..Self::new(tokens)
+        }
+    }
+
+    fn parse_metadata_value(&mut self, key: &str) -> Result<RawExpr, ParseError> {
+        if !self.preserved && crate::annotations::MetadataKey::decode(key).is_none() {
+            let (data, consumed) =
+                crate::ExtensionData::from_tokens(&self.tokens[self.pos..], self.source)?;
+            self.pos += consumed;
+            return Ok(RawExpr::ExtensionData(data));
+        }
+        let prior = self.preserved;
+        self.preserved |= matches!(key, "source" | "dtype_bounds");
+        let value = self.parse_expr();
+        self.preserved = prior;
+        value
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -156,7 +164,18 @@ impl<'a> RawParser<'a> {
         Ok(exprs)
     }
 
+    /// Every recursive descent of the parser passes through here, so this is
+    /// the one place the nesting guard needs to stand.
     fn parse_expr(&mut self) -> Result<RawExpr, ParseError> {
+        let Some(_descent) = crate::nesting::Descent::enter() else {
+            return Err(ParseError::NestingTooDeep {
+                offset: self.current_offset(),
+            });
+        };
+        self.parse_expr_unguarded()
+    }
+
+    fn parse_expr_unguarded(&mut self) -> Result<RawExpr, ParseError> {
         let tok = self.peek().ok_or(ParseError::UnexpectedEof {
             offset: self.current_offset(),
         })?;
@@ -292,27 +311,8 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
-            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
-            let value = self.parse_expr()?;
-
-            // Span-charset enforcement (spec §1.1.1)
-            if key == "span"
-                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
-                && let Some((idx, b)) = s
-                    .as_bytes()
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .find(|(_, b)| is_forbidden_span_byte(*b))
-            {
-                return Err(ParseError::ForbiddenSpanChar {
-                    value_offset: value_span.offset,
-                    byte_in_value: idx,
-                    code_point: u32::from(b),
-                    repr: forbidden_byte_repr(b),
-                });
-            }
+            let value = self.parse_metadata_value(&key)?;
 
             entries.push((key, value));
         }
@@ -365,7 +365,6 @@ impl<'a> RawParser<'a> {
                     });
                 }
             };
-            validate_surf_metadata_key(&key, key_tok.span.offset)?;
 
             let colon_tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
@@ -383,25 +382,7 @@ impl<'a> RawParser<'a> {
                 }
             }
 
-            let value = self.parse_expr()?;
-
-            // Span-charset enforcement (spec §1.1.1)
-            if key == "span"
-                && let RawExpr::Atom(RawAtom::Str(s), value_span) = &value
-                && let Some((idx, b)) = s
-                    .as_bytes()
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .find(|(_, b)| is_forbidden_span_byte(*b))
-            {
-                return Err(ParseError::ForbiddenSpanChar {
-                    value_offset: value_span.offset,
-                    byte_in_value: idx,
-                    code_point: u32::from(b),
-                    repr: forbidden_byte_repr(b),
-                });
-            }
+            let value = self.parse_metadata_value(&key)?;
 
             entries.push((key, value));
 
@@ -499,7 +480,11 @@ fn normalize_typed_literal_wrapper(
 /// goes through `RawParser` → `stamp_to_typed`, which produces `Expr::Node`,
 /// `Expr::BareList`, and `Expr::UnknownForm`.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
-    let raw_exprs = parse_raw(tokens)?;
+    parse_with_source(tokens, None)
+}
+
+fn parse_with_source(tokens: &[Token], source: Option<&str>) -> Result<Vec<Expr>, ParseError> {
+    let raw_exprs = parse_raw_with_source(tokens, source)?;
     let typed = crate::stamp_to_typed::stamp_exprs_lenient(raw_exprs).map_err(|e| {
         ParseError::Expected {
             expected: "valid Deep structure".to_string(),
@@ -510,57 +495,43 @@ pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
     Ok(typed)
 }
 
-/// Decode-once stamping for hand-built `Expr::List` trees in tests.
-///
-/// **DEPRECATED**: Only needed by test code that manually constructs
-/// `Expr::List`. New test code should use `Expr::node()` or parse via
-/// `parse_str()` instead.
-pub fn stamp_tags(exprs: &mut [Expr]) {
-    use crate::ast::Atom;
-    fn stamp(expr: &mut Expr) {
-        match expr {
-            Expr::List(list, _) => {
-                if let Some(Expr::Atom(atom, _)) = list.elements.first_mut()
-                    && let Atom::Name(symbol) = &*atom
-                    && let Some(tag) = crate::tag::DeepTag::parse(symbol)
-                {
-                    *atom = Atom::Tag(tag);
-                }
-                for child in list.elements.iter_mut() {
-                    stamp(child);
-                }
-            }
-            Expr::Map(map, _) => {
-                for (_, value) in map.entries.iter_mut() {
-                    stamp(value);
-                }
-            }
-            Expr::MetaExpr(meta, _) => {
-                stamp(&mut meta.expr);
-                for (_, value) in meta.entries.iter_mut() {
-                    stamp(value);
-                }
-            }
-            Expr::Atom(_, _) => {}
-            Expr::Node(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
-        }
-    }
-    for expr in exprs.iter_mut() {
-        stamp(expr);
-    }
-}
-
 /// The raw parser mirrors the typed parser but constructs `RawExpr`/`RawAtom`
 /// instead of `Expr`/`Atom`. No tag stamping, no typed-literal collapse.
+///
+/// It runs on the parser's own stack segment, so its nesting limit does not
+/// depend on the caller's stack (chelis#2425, [`crate::nesting`]).
+fn parse_raw_syntax(tokens: &[Token], source: Option<&str>) -> Result<Vec<RawExpr>, ParseError> {
+    crate::nesting::on_parse_segment(|| RawParser::with_source(tokens, source).parse_exprs())
+}
+
 pub fn parse_raw(tokens: &[Token]) -> Result<Vec<RawExpr>, ParseError> {
-    let mut parser = RawParser::new(tokens);
-    parser.parse_exprs()
+    parse_raw_with_source(tokens, None)
+}
+
+fn parse_raw_with_source(
+    tokens: &[Token],
+    source: Option<&str>,
+) -> Result<Vec<RawExpr>, ParseError> {
+    let exprs = parse_raw_syntax(tokens, source)?;
+    crate::metadata::validate_raw(&exprs).map_err(|error| {
+        if let Some((byte_in_value, code_point)) = error.forbidden_span_char {
+            ParseError::ForbiddenSpanChar {
+                value_offset: error.span.offset,
+                byte_in_value,
+                code_point: u32::from(code_point),
+                repr: forbidden_byte_repr(code_point),
+            }
+        } else {
+            ParseError::Metadata(error)
+        }
+    })?;
+    Ok(exprs)
 }
 
 /// Parse a source string into raw expressions (lex + parse_raw).
 pub fn parse_raw_str(source: &str) -> Result<Vec<RawExpr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    parse_raw(&tokens)
+    parse_raw_with_source(&tokens, Some(source))
 }
 
 /// Error from `parse_and_stamp` — wraps both parse errors and stamp errors.
@@ -603,7 +574,8 @@ impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
 /// `(module ...)` wrapper is also admissible.
 pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_to_typed(raw_exprs)?;
     Ok(typed)
 }
@@ -613,7 +585,8 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 /// declarations.
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_syntax(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
         // [03-PROG-3] puts the zero-form rejection at the position where a
         // top-level form was required, the end of the input.
@@ -639,7 +612,8 @@ pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError
 /// re-diagnose an untyped `Atom::Name`.
 pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
     Ok(typed)
 }
@@ -651,7 +625,8 @@ pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrP
 /// rejected rather than retained as an untyped bare list.
 pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let mut raw_exprs = parse_raw(&tokens)?;
+    let mut raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     if raw_exprs.len() != 1 {
         return Err(ParseError::Expected {
             expected: "exactly one type expression".to_string(),
@@ -675,7 +650,8 @@ pub fn parse_and_stamp_tagged(
     expected: crate::tag::DeepTag,
 ) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
-    let raw_exprs = parse_raw(&tokens)?;
+    let raw_exprs = parse_raw_with_source(&tokens, Some(source))?;
+    crate::migration::reject_retired_integer_names(&raw_exprs)?;
     let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
     Ok(typed)
 }
@@ -695,7 +671,7 @@ pub fn parse_and_stamp_tagged(
 /// in-crate fixtures that build a fragment in no particular role.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse(&tokens)?;
+    let exprs = parse_with_source(&tokens, Some(source))?;
     Ok(exprs)
 }
 
@@ -710,7 +686,7 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 /// stamped result.
 pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
-    let exprs = parse(&tokens)?;
+    let exprs = parse_with_source(&tokens, Some(source))?;
     let warnings = crate::validate::validate(&exprs);
     if let Some(w) = warnings.first() {
         return Err(ParseError::Expected {
@@ -764,11 +740,8 @@ mod tests {
                     node.children_slice()[0],
                     Expr::Atom(Atom::Int(7), _)
                 ));
-                assert!(node.meta().entries.iter().any(|(key, _)| key == "type"));
-                assert!(node.meta().entries.iter().any(|(key, value)| {
-                    key == "literal_source"
-                        && matches!(value, Expr::Atom(Atom::Name(name), _) if name == "integer")
-                }));
+                assert!(node.meta().ty().is_some());
+                assert!(node.meta().literal_source().is_some());
             }
             other => panic!("expected lit Node, got {other:?}"),
         }
@@ -883,7 +856,7 @@ mod tests {
         match &exprs[0] {
             Expr::Node(node, _) => {
                 assert_eq!(node.tag(), crate::tag::DeepTag::Def);
-                assert!(node.meta().entries.is_empty());
+                assert!(node.meta().is_empty());
                 // Def has 2 children: the name binder and the (fn ...) node
                 assert_eq!(node.child_count(), 2);
                 match &node.children_slice()[0] {
@@ -905,15 +878,14 @@ mod tests {
 
     #[test]
     fn parse_metadata() {
-        let exprs = p("^{:type f32} x");
+        let exprs = p("^{:type (t-prim {} f32)} x");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 1);
-                assert_eq!(meta.entries[0].0, "type");
-                match &meta.entries[0].1 {
-                    Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "f32"),
-                    other => panic!("expected Symbol(f32), got {:?}", other),
+                assert_eq!(meta.metadata.values().count(), 1);
+                match meta.metadata.ty().unwrap().expression() {
+                    Expr::Node(node, _) => assert_eq!(node.tag(), crate::DeepTag::TPrim),
+                    other => panic!("expected type node, got {:?}", other),
                 }
                 match meta.expr.as_ref() {
                     Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "x"),
@@ -926,13 +898,16 @@ mod tests {
 
     #[test]
     fn parse_metadata_multiple_entries() {
-        let exprs = p("^{:type f32 :pure true} (add x y)");
+        let exprs = p("^{:type (t-prim {} f32) :pure true} (add x y)");
         assert_eq!(exprs.len(), 1);
         match &exprs[0] {
             Expr::MetaExpr(meta, _) => {
-                assert_eq!(meta.entries.len(), 2);
-                assert_eq!(meta.entries[0].0, "type");
-                assert_eq!(meta.entries[1].0, "pure");
+                assert!(meta.metadata.ty().is_some());
+                assert_eq!(meta.metadata.extensions().iter().count(), 1);
+                assert!(matches!(
+                    meta.metadata.extensions().get("pure"),
+                    Some(data) if data.syntax() == "true"
+                ));
                 match meta.expr.as_ref() {
                     Expr::BareList(elems, _) => match &elems[0] {
                         Expr::Atom(Atom::Name(s), _) => assert_eq!(s, "add"),
@@ -1047,11 +1022,11 @@ mod tests {
 
     #[test]
     fn span_covers_meta_expr() {
-        let exprs = p("^{:type f32} x");
+        let exprs = p("^{:type (t-prim {} f32)} x");
         let span = exprs[0].span();
-        // '^' at 0, 'x' at 13 with len 1 → end 14
+        // The metadata wrapper span includes its complete type node and body.
         assert_eq!(span.offset, 0);
-        assert_eq!(span.end(), 14);
+        assert_eq!(span.end(), "^{:type (t-prim {} f32)} x".len());
     }
 
     // ── Empty input ────────────────────────────────────────────
@@ -1060,5 +1035,32 @@ mod tests {
     fn parse_empty_input() {
         let exprs = p("");
         assert!(exprs.is_empty());
+    }
+
+    /// chelis#2425: input nested deeper than the parser's segment is a
+    /// located `NestingTooDeep`, not a stack overflow, and the byte it names
+    /// does not depend on the stack of the thread that calls the parser.
+    #[test]
+    fn nesting_beyond_the_parser_segment_is_located_and_caller_independent() {
+        const DEPTH: usize = 1_000_000;
+        let source = format!("{}x{}", "(a ".repeat(DEPTH), ")".repeat(DEPTH));
+        let offset_on = |stack_bytes: usize| {
+            let source = source.clone();
+            std::thread::Builder::new()
+                .stack_size(stack_bytes)
+                .spawn(move || match parse_raw_str(&source) {
+                    Err(ParseError::NestingTooDeep { offset }) => offset,
+                    other => panic!("expected NestingTooDeep, got {:?}", other.map(|v| v.len())),
+                })
+                .expect("spawn parser thread")
+                .join()
+                .expect("parser thread")
+        };
+        let small_stack = offset_on(256 * 1024);
+        let large_stack = offset_on(64 * 1024 * 1024);
+        assert_eq!(small_stack, large_stack);
+        assert!(small_stack > 0 && small_stack < 3 * DEPTH);
+        // The offset names the token at which the parser declined to descend.
+        assert!(matches!(source.as_bytes()[small_stack], b'(' | b'a'));
     }
 }

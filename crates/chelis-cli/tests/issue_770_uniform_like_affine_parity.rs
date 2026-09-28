@@ -31,14 +31,19 @@
 //!
 //! * `[2, 5)` — the primary fix case. Pre-fix, host elem[4] cast to f32 was
 //!   `0x404215a9` while C was `0x404215aa` (measured on origin/main before
-//!   the fix); this asserts they now agree bit-for-bit at every element.
+//!   the fix, under the retired pre-[05-RNG-1] mixing); this asserts they now
+//!   agree bit-for-bit at every element. Under explicit keys (chelis#2413)
+//!   the draw keyed by `key_from_seed(30)` has an element, elem[6], where
+//!   both an f64 affine and a two-rounding f32 affine land 1 ULP below the
+//!   single-rounding FMA (`0x4095f8ce` against `0x4095f8cf`, from
+//!   `common::key_ref`'s [05-OP-8] transcription and `key_ref.py`).
 //! * `[0, 1)` — also a FIXED case, not a control: per this PR's Finding B the
 //!   pre-fix host lane held the raw f64 `unit` while C held `(float)unit`, so
 //!   the raw-f64 values differed; they only ever agreed at the f32-bit level
 //!   (the #735 comparator's level), which this fix now makes the guaranteed
 //!   invariant. Asserted with the same f32-bit oracle.
-//! * Sanity control = different seeds produce different draws
-//!   (`different_seeds_produce_different_draws`), so the oracle is not
+//! * Sanity control = different keys produce different draws
+//!   (`different_keys_produce_different_draws`), so the oracle is not
 //!   trivially always-equal.
 //!
 //! A negative range (`[-3, -1)`) is covered at the unit level in the two eval
@@ -60,15 +65,15 @@ mod common;
 
 use common::{gcc_available, link_generated, parse_tensor_data, write_file};
 
-/// An 8-element f32 template plus a `with seed(seed)` uniform draw over
-/// `[low, high)`. Bare numeric literals (not `cast(...)`) so the compiled
+/// An 8-element f32 template plus a uniform draw keyed by `key_from_seed(seed)`
+/// over `[low, high)`. Bare numeric literals (not `cast(...)`) so the compiled
 /// lane's IR lowering plumbs the range through to the sampler (see the
 /// module doc and chelis#776 for why the cast form is avoided).
-fn program(low: &str, high: &str, seed: u64) -> String {
+fn program(low: &str, high: &str, seed: i64) -> String {
     format!(
         "template = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), \
          cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])\n\
-         sampled = with seed({seed}i64) {{ uniform_like(copy(template), {low}, {high}) }}\n"
+         sampled = uniform_like(key_from_seed({seed}i64), copy(template), {low}, {high})\n"
     )
 }
 
@@ -161,7 +166,7 @@ fn c_sampled_no_fp_contract(program: &str, name: &str) -> Vec<f64> {
     cmd.arg("-ffp-contract=off");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(&source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", name]);
     let status = cmd.status().expect("host compiler should run");
@@ -210,32 +215,42 @@ fn uniform_like_affine_parity_positive_range() {
         eprintln!("skipping: no host C compiler");
         return;
     }
-    let src = program("2.0", "5.0", 42);
+    let src = program("2.0", "5.0", 30);
     let eval = eval_sampled(&src);
     let c = c_sampled(&src, "affine_2_5");
-    // Pre-fix this failed at elem[4] (eval f32 0x404215a9 vs C 0x404215aa).
     assert_f32_bit_parity(&eval, &c, "[2,5)");
-    // Nail the specific element the #735 sweep flagged.
+    // Nail the element where an f64 affine and a two-rounding f32 affine
+    // both round to the adjacent f32 (0x4095f8ce). The bits are the
+    // [05-RNG-2]/[05-OP-8] value for `key_from_seed(30)`, from
+    // `common::key_ref` (and `key_ref.py`/`slice2_ref.py`).
+    let reference = common::key_ref::uniform_f32(common::key_ref::key_from_seed(30), 8, 2.0, 5.0);
+    assert_eq!(reference[6].to_bits(), 0x4095f8cf);
     assert_eq!(
-        (eval[4] as f32).to_bits(),
-        0x404215aa,
-        "elem[4] must be the C f32 sampler value after the fix",
+        (eval[6] as f32).to_bits(),
+        0x4095f8cf,
+        "elem[6] must be the single-rounding f32 FMA value",
+    );
+    assert_f32_bit_parity(
+        &reference.into_iter().map(f64::from).collect::<Vec<_>>(),
+        &c,
+        "reference vs C, [2,5)",
     );
 }
 
 /// Flag-independence / RNG-determinism lock: with the C sampler's explicit
 /// `fmaf`, the compiled [2,5) output is bit-identical to eval even when FP
-/// contraction is disabled. Pre-fix, `-ffp-contract=off` diverged at elem[6]
-/// (0x408f5274 vs the contracted 0x408f5273) — i.e. the same source produced
-/// different "random" bytes under different compile flags. This asserts that
-/// hole is closed.
+/// contraction is disabled. Pre-fix, `-ffp-contract=off` diverged at one
+/// element; under explicit keys, `key_from_seed(30)`'s elem[6] is such an
+/// element (a two-rounding affine gives 0x4095f8ce where the FMA gives
+/// 0x4095f8cf), i.e. the same source would produce different "random" bytes
+/// under different compile flags. This asserts that hole is closed.
 #[test]
 fn uniform_like_affine_parity_positive_range_no_fp_contract() {
     if !gcc_available() {
         eprintln!("skipping: no host C compiler");
         return;
     }
-    let src = program("2.0", "5.0", 42);
+    let src = program("2.0", "5.0", 30);
     let eval = eval_sampled(&src);
     let c = c_sampled_no_fp_contract(&src, "affine_2_5_noc");
     assert_f32_bit_parity(&eval, &c, "[2,5) -ffp-contract=off");
@@ -266,12 +281,12 @@ fn uniform_like_affine_parity_unit_range() {
 }
 
 /// Sanity control so the f32-bit oracle is not trivially always-equal: two
-/// different seeds must produce different draws. Pure host lane (no C
+/// different keys must produce different draws. Pure host lane (no C
 /// compiler needed), so it also runs where the codegen tests skip.
 #[test]
-fn different_seeds_produce_different_draws() {
+fn different_keys_produce_different_draws() {
     let a = eval_sampled(&program("2.0", "5.0", 42));
     let b = eval_sampled(&program("2.0", "5.0", 43));
-    assert_eq!(a.len(), b.len(), "same shape for both seeds");
-    assert_ne!(a, b, "distinct seeds must yield distinct uniform draws");
+    assert_eq!(a.len(), b.len(), "same shape for both keys");
+    assert_ne!(a, b, "distinct keys must yield distinct uniform draws");
 }

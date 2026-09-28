@@ -44,6 +44,21 @@ fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn published_header_sources() -> String {
+    [
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_runtime_views.h",
+    ]
+    .into_iter()
+    .map(|name| {
+        fs::read_to_string(include_dir().join(name))
+            .unwrap_or_else(|error| panic!("read published header {name}: {error}"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 #[test]
 fn concurrent_probe_directories_have_distinct_live_paths() {
     let handles = (0..4)
@@ -68,11 +83,10 @@ fn concurrent_probe_directories_have_distinct_live_paths() {
 
 #[test]
 fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
-    let mut header = fs::read_to_string(include_dir().join("chelis_runtime.h")).expect("header");
-    header.push_str(
-        &fs::read_to_string(include_dir().join("chelis_runtime_dtype.h"))
-            .expect("generated dtype header"),
-    );
+    let header = published_header_sources()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for required in [
         "typedef uint8_t chelis_dtype;",
         "typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;",
@@ -90,6 +104,12 @@ fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
         "chelis_write_view chelis_tensor_write_view(const chelis_tensor_write *guard);",
         "void chelis_tensor_end_write(chelis_tensor_write *guard);",
         "void chelis_fill_scalar(chelis_tensor_write *guard, chelis_scalar value);",
+        // spec/08 section 2 and [05-OP-69]: the published scalar key carrier
+        // and its one constructor.
+        "typedef struct { uint64_t bits; } chelis_key;",
+        "chelis_key chelis_key_from_seed(int64_t seed);",
+        // [05-OBS-2]: a key's printed form, which has no scalar carrier.
+        "chelis_string chelis_string_from_key(chelis_key key);",
     ] {
         assert!(header.contains(required), "missing exact declaration: {required}");
     }
@@ -154,6 +174,9 @@ _Static_assert(sizeof(chelis_write_view) == 24, "write view size");
 _Static_assert(offsetof(chelis_write_view, data) == 0, "write view data offset");
 _Static_assert(offsetof(chelis_write_view, count) == 8, "write view count offset");
 _Static_assert(offsetof(chelis_write_view, dtype) == 16, "write view dtype offset");
+_Static_assert(sizeof(chelis_key) == 8, "key size");
+_Static_assert(offsetof(chelis_key, bits) == 0, "key bits offset");
+_Static_assert(sizeof(((chelis_key *)0)->bits) == 8, "key bits width");
 
 int main(void) {
     chelis_tensor *tensor = NULL;
@@ -205,6 +228,88 @@ fn repository_runtime_consumer_compiles_against_the_published_header() {
         compile.status.success(),
         "{} did not compile against the published runtime headers:\n{}",
         source.display(),
+        String::from_utf8_lossy(&compile.stderr)
+    );
+}
+
+#[test]
+fn published_runtime_header_compiles_as_c11_and_cxx17() {
+    let temp = TempDir::new();
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    for (extension, compiler, standard) in
+        [("c", "cc", "-std=c11"), ("cpp", cxx.as_str(), "-std=c++17")]
+    {
+        let source = temp.0.join(format!("runtime-header.{extension}"));
+        fs::write(
+            &source,
+            "#include \"chelis_runtime.h\"\nvoid probe(void) {}\n",
+        )
+        .expect("write dual-language runtime-header probe");
+        let compile = Command::new(compiler)
+            .arg(standard)
+            .arg("-Wall")
+            .arg("-Wextra")
+            .arg("-Werror")
+            .arg("-pedantic-errors")
+            // The Nix compiler wrapper injects linker flags that
+            // `-fsyntax-only` never consumes; clang reports them as unused.
+            .arg("-Wno-unused-command-line-argument")
+            .arg("-I")
+            .arg(include_dir())
+            .arg("-fsyntax-only")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {compiler} for {standard}: {error}"));
+        assert!(
+            compile.status.success(),
+            "published runtime header failed under {standard}:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+    }
+}
+
+#[test]
+fn cxx_header_probe_rejects_the_c_only_noreturn_spelling() {
+    let temp = TempDir::new();
+    for name in [
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_runtime_views.h",
+        "chelis_simd.h",
+    ] {
+        let source = include_dir().join(name);
+        let contents = fs::read_to_string(&source)
+            .unwrap_or_else(|error| panic!("read published header {}: {error}", source.display()));
+        let mutated = if name == "chelis_runtime.h" {
+            let inline = contents.replace(
+                "static inline void chelis_flush_and_abort(void)",
+                "static inline _Noreturn void chelis_flush_and_abort(void)",
+            );
+            let mutated = inline.replace(
+                "void chelis_fail(chelis_string message);",
+                "_Noreturn void chelis_fail(chelis_string message);",
+            );
+            assert_ne!(mutated, contents, "runtime header mutation did not fire");
+            mutated
+        } else {
+            contents
+        };
+        fs::write(temp.0.join(name), mutated)
+            .unwrap_or_else(|error| panic!("write mutated published header {name}: {error}"));
+    }
+    let source = temp.0.join("c-only-noreturn.cpp");
+    fs::write(&source, "#include \"chelis_runtime.h\"\n")
+        .expect("write C++ negative-control probe");
+    let compiler = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let compile = Command::new(&compiler)
+        .args(["-std=c++17", "-pedantic-errors", "-fsyntax-only", "-I"])
+        .arg(&temp.0)
+        .arg(&source)
+        .output()
+        .unwrap_or_else(|error| panic!("start {compiler} for negative control: {error}"));
+    assert!(
+        !compile.status.success() && String::from_utf8_lossy(&compile.stderr).contains("_Noreturn"),
+        "the C-only spelling must fail for its own reason under C++17:\n{}",
         String::from_utf8_lossy(&compile.stderr)
     );
 }

@@ -261,7 +261,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
         chelis_tide::schema::ApiEnvelope::Success(success) => {
             let result = success.result;
             (
-                Some(result.score),
+                Some(result.score.get()),
                 false,
                 diagnostics_from_api(text, &result.errors, first_decl_range(text, &decls)),
             )
@@ -273,9 +273,9 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
         ),
     };
 
-    let deep_view = Some(chelis_deep::printer::print_canonical(
-        &chelis_surf::desugar::desugar_program(&decls),
-    ));
+    let deep_view = chelis_surf::desugar::desugar_program(&decls)
+        .ok()
+        .map(|deep| chelis_deep::printer::print_canonical(&deep));
 
     DocumentAnalysis {
         source_kind: SourceKind::Surf,
@@ -428,14 +428,23 @@ fn build_top_level_index_decl(text: &str, decl: &Decl, index: &mut TopLevelIndex
             }
         }
         Decl::Property {
-            name, params, span, ..
+            name,
+            type_binders,
+            params,
+            span,
+            ..
         } => {
             index.defs.insert(
                 name.clone(),
                 TopLevelSymbol {
                     name: name.clone(),
                     range: range_for_span(text, *span),
-                    hover: format!("@property {} forall({})", name, format_params(params)),
+                    hover: format!(
+                        "@property {}{} forall({})",
+                        name,
+                        format_type_binders(type_binders),
+                        format_params(params)
+                    ),
                     kind: CompletionItemKind::FUNCTION,
                 },
             );
@@ -769,26 +778,6 @@ fn collect_expr_symbols(
             collect_expr_symbols(
                 text,
                 base,
-                top_level,
-                locals,
-                references,
-                definitions,
-                completions,
-            );
-        }
-        Expr::WithSeed(body, seed, _) => {
-            collect_expr_symbols(
-                text,
-                body,
-                top_level,
-                locals,
-                references,
-                definitions,
-                completions,
-            );
-            collect_expr_symbols(
-                text,
-                seed,
                 top_level,
                 locals,
                 references,
@@ -1178,15 +1167,19 @@ fn diagnostics_from_api(
                 // what "the producer knew where, not how wide" means to an
                 // editor. The document stays honest and the editor still
                 // points at the right character.
-                .map(|span| {
-                    range_for_span(
-                        text,
-                        DeepSpan::new(span.offset(), span.extent().unwrap_or(0)),
-                    )
+                .and_then(|span| {
+                    let measured = chelis_tide::schema::Span {
+                        offset: span.offset(),
+                        len: span.extent().unwrap_or(0),
+                    };
+                    measured.slice(text).ok()?;
+                    let offset = usize::try_from(measured.offset).ok()?;
+                    let len = usize::try_from(measured.len).ok()?;
+                    Some(range_for_span(text, DeepSpan::new(offset, len)))
                 })
                 .or(fallback)
                 .unwrap_or_else(|| full_document_range(text)),
-            severity: Some(severity(diagnostic.severity)),
+            severity: Some(severity(diagnostic.severity.get())),
             message: diagnostic.message.clone(),
             source: Some("chelis".to_string()),
             ..Diagnostic::default()
@@ -1362,6 +1355,7 @@ fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usiz
         | chelis_surf::parser::ParseError::SemicolonBlockSeparator { offset }
         | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
         | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::RetiredRandomness { offset, .. }
         | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
             offset, ..
         } => *offset,
@@ -1387,8 +1381,10 @@ fn parse_error_offset_deep(err: &chelis_deep::parser::ParseError) -> usize {
         }
         chelis_deep::parser::ParseError::UnexpectedEof { offset }
         | chelis_deep::parser::ParseError::Expected { offset, .. }
-        | chelis_deep::parser::ParseError::EmptyList { offset } => *offset,
+        | chelis_deep::parser::ParseError::EmptyList { offset }
+        | chelis_deep::parser::ParseError::NestingTooDeep { offset } => *offset,
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
+        chelis_deep::parser::ParseError::Metadata(error) => error.span.offset,
     }
 }
 
@@ -1426,7 +1422,6 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
         | Expr::Borrow(_, span)
-        | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Do(_, span)
@@ -1545,6 +1540,21 @@ fn format_type_params(params: &[String]) -> String {
     }
 }
 
+fn format_type_binders(binders: &[chelis_surf::ast::TypeBinder]) -> String {
+    if binders.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            binders
+                .iter()
+                .map(chelis_surf::ast::TypeBinder::render)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) => name.clone(),
@@ -1553,7 +1563,7 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             let inner = items
                 .iter()
                 .map(format_type_expr)
-                .chain([precision.clone()])
+                .chain([precision.to_string()])
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("tensor[{inner}]")
@@ -1617,6 +1627,55 @@ mod tests {
 
     fn deep_uri() -> Url {
         Url::parse("file:///tmp/test.dp").expect("uri")
+    }
+
+    #[test]
+    fn foreign_diagnostic_locations_require_local_bounds_and_utf8_admission() {
+        use chelis_tide::schema::{DiagnosticSpan, ParseRequest, SourceKind};
+        let text = "aλz";
+        let mut errors = compiler::parse(ParseRequest {
+            source_kind: SourceKind::Surf,
+            source: "def (".into(),
+        })
+        .expect_err("fixture parse error")
+        .errors;
+        let fallback = full_document_range(text);
+        for (span, expected) in [
+            (
+                DiagnosticSpan::Point { offset: 1 },
+                Range::new(Position::new(0, 1), Position::new(0, 1)),
+            ),
+            (
+                DiagnosticSpan::Range { offset: 1, len: 2 },
+                Range::new(Position::new(0, 1), Position::new(0, 2)),
+            ),
+            (
+                DiagnosticSpan::Range { offset: 4, len: 0 },
+                Range::new(Position::new(0, 3), Position::new(0, 3)),
+            ),
+        ] {
+            errors[0].span = Some(span);
+            assert_eq!(
+                diagnostics_from_api(text, &errors, Some(fallback))[0].range,
+                expected
+            );
+        }
+        for span in [
+            DiagnosticSpan::Point { offset: u64::MAX },
+            DiagnosticSpan::Range {
+                offset: 1,
+                len: u64::MAX,
+            },
+            DiagnosticSpan::Range { offset: 1, len: 1 },
+            DiagnosticSpan::Point { offset: 2 },
+            DiagnosticSpan::Point { offset: 5 },
+        ] {
+            errors[0].span = Some(span);
+            assert_eq!(
+                diagnostics_from_api(text, &errors, Some(fallback))[0].range,
+                fallback
+            );
+        }
     }
 
     /// chelis#1395: a CHECK diagnostic carrying a point renders as a

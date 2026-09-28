@@ -75,7 +75,9 @@ SMT smoke lane. It installs the cvc5 build prerequisites, runs
 `cargo build -p chelis-cli --features smt`, verifies the built binary discharges
 a real obligation through cvc5 with `.github/scripts/verify_release_smt.py`, and
 runs a narrow cvc5 engine smoke (`cargo test -p chelis-prove --features smt
---lib cvc5_engine_`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
+--lib cvc5_engine_`) and the integration worker controls (`cargo test -p
+chelis-prove --features smt --test integration_solver_isolation`). It is a
+non-gate job (rule-id GATE-SCOPE-SMT in
 `scripts/test_gate.py`): out of `scripts/gate.py` scope by design, like the
 sanitizer job, because cvc5 builds from source and is not a per-PR
 developer-loop prerequisite.
@@ -100,11 +102,19 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
+The required `smt-build` job realizes the `ci-smt` Devenv profile only on the
+self-hosted runner, which substitutes it from the private Nix cache:
+`nix/ci-cvc5.nix` builds the locked CVC5 1.3.1, GMP, CaDiCaL and LibPoly
+archive/header tree, and Cargo consumes its `CVC5_DIR` without rebuilding it.
+The job's Devenv-prefixed Cargo namespace keeps those outputs apart from the
+native full-prove lane. GitHub-hosted runs of the same job keep main's toolchain and link the
+prebuilt cvc5 stores described next, exactly as before.
+
 ### Durable prebuilt cvc5 (chelis#583 + follow-up)
 
 Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
 never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
-the `smt-build-glibc231` and `smt-build-darwin-arm64` prove-in-CI lanes, and
+the Linux `smt-build-glibc231` and nightly `smt-build-darwin-arm64` lanes, and
 `smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
 prebuilt tree is held in TWO stores, tried in order, driven by
 `scripts/ci_cvc5_cache.py`:
@@ -160,8 +170,8 @@ ever changes shape (it rotates the store key AND the asset filename, and the
 
 A cvc5-sys bump is the ONLY event that legitimately puts a cold from-source
 cvc5 build back on the per-PR path, because the new version's Release asset
-does not exist until `build-cvc5.yml` republishes it (which happens on push to
-`main`, i.e. after merge). To keep the bump PR itself warm, publish the new
+does not exist until `build-cvc5.yml` republishes it (Linux on relevant main
+pushes; Darwin nightly or on manual dispatch). To keep the bump PR itself warm, publish the new
 assets first:
 
 1. On the bump branch, run `build-cvc5.yml` via **workflow_dispatch** (it must
@@ -207,13 +217,23 @@ immutable `20260901T000000Z` Debian and Debian Security snapshots before
 installing build dependencies. Python 3.11 also lets cvc5 use `tomllib`
 without a separate moving PyPI bootstrap.
 
+### Darwin validation cadence
+
+`macos-nightly.yml` owns `smt-build-darwin-arm64`: daily at 04:17 UTC and
+manual dispatch on a chosen branch, with a 60-minute timeout for cold cvc5 builds.
+Ordinary PRs and main pushes run no Darwin builds. The prebuilt producer's daily
+01:17 UTC run fills missing Darwin assets before validation; manual dispatch can
+force a rebuild. Relevant main pushes can produce Linux assets only. Release
+validation still builds and checks its own Darwin shipping artifact in `release.yml`.
+
 ## Release builds (chelis#422)
 
 `release.yml` builds all three release artifacts (linux-x86_64,
 linux-x86_64-glibc2.31, darwin-arm64) with `cargo build --release -p
-chelis-cli --features smt`, so the shipped `chelis` binary discharges
-property obligations through cvc5 instead of degrading to the
-solver-free fuzz path. Each release job:
+chelis-cli --features smt,sealed-runtime`, so the shipped `chelis` binary
+discharges property obligations through cvc5 instead of degrading to the
+solver-free fuzz path, and carries a sealed runtime whose export the tarball
+ships (`spec/08-backends.md` §2.1). Each release job:
 
 - installs the cvc5 build prerequisites for its platform (the glibc 2.31 job
   uses the pinned Python 3.11 Bullseye container and immutable Debian snapshot

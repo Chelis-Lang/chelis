@@ -33,7 +33,7 @@ Acceptance is exit 0 with the final line ``CONFIGURATION CLOSURE: PASS``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -42,6 +42,8 @@ import sys
 import tomllib
 from typing import Iterable, Sequence
 
+from capacity_census_cache_publication import COMPILE_CASES as CACHE_COMPILE_CASES
+from capacity_census_wire_calls import DRIVER as WIRE_CALL_DRIVER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,17 +59,13 @@ class ClippyRun:
     label: str
     command: tuple[str, ...]
     owner: str
-    #: Hosts the owner runs this on. For `scripts/gate.py` that means the
-    #: developer's host under `--local`, which `AGENTS.md` makes mandatory
-    #: once per pull request before ready-for-review. No continuous job runs
-    #: Clippy on macOS, so macOS coverage is gate-local; the design document
-    #: records that residual. A gate-owned row therefore lists macOS only
-    #: when `--local` runs it: `no-default-features` is CI-only, because
-    #: `--local` keeps only the two rows leg 3 needs on a fresh target
-    #: (`scripts/test_check_configuration_closure.py` locks the pairing).
-    #: "linux" on that row means the hosted `lint-and-unit` job lints it on
-    #: Linux for every pull request; a developer running `--local` on Linux
-    #: skips it too and is covered by the same job.
+    #: Hosts covered at the registered cadence. The gate owns the canonical
+    #: per-pull-request commands; CI's `lint-and-unit` job runs all three on
+    #: Linux, and `macos-workspace-shard` runs default and solver-free Clippy
+    #: on macOS nightly. `no-default-features` has Linux coverage only.
+    #: `scripts/test_check_configuration_closure.py` checks the macOS command
+    #: pairing; `scripts/test_hosted_validation.py` guards its nightly
+    #: routing. Optional `--validation` execution is supporting evidence.
     hosts: tuple[str, ...]
     cadence: str
 
@@ -101,6 +99,9 @@ class UncompiledException:
     directory: str
     reason: str
     owning_gate: str
+    #: Exact repository paths when the owner drives individual Rust fixtures.
+    #: None retains the older standalone-Cargo-directory exceptions.
+    sources: tuple[str, ...] | None = None
 
 
 PER_PULL_REQUEST = "per-pull-request"
@@ -127,7 +128,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "warnings",
         ),
         owner="scripts/gate.py",
-        hosts=("linux", "macos"),
+        hosts=("linux",),
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
@@ -139,18 +140,23 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--all-targets",
             "--features",
             "chelis-backend-c/sleef,"
+            "chelis-cli/ownership-ledger,"
+            "chelis-compiler-api/compilation-trace,"
+            "chelis-compiler-api/ownership-ledger,"
             "chelis-e2e/hip-local-gpu,"
+            "chelis-ir/lowering-trace,"
             "chelis-prove/clarabel,"
             "chelis-python/extension-module,"
             "chelis-runtime/ownership-ledger,"
             "chelis-types/checkpoint-compile-probe,"
-            "chelis-types/generalize-sweep-oracle",
+            "chelis-types/generalize-sweep-oracle,"
+            "chelis-prove/ci-openblas-system",
             "--",
             "-D",
             "warnings",
         ),
         owner="scripts/gate.py",
-        hosts=("linux", "macos"),
+        hosts=("linux",),
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
@@ -203,44 +209,77 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=NIGHTLY,
     ),
 )
+# The same configurations cover target_os=macos at a daily cadence. Separate
+# rows prevent Linux PR execution from being reported as Mac PR coverage.
+CLIPPY_MATRIX += tuple(
+    replace(
+        run,
+        label=f"{run.label}-macos",
+        # Darwin retains its Accelerate-backed provider; only Linux Nix CI
+        # selects the static LP64 OpenBLAS package.
+        command=tuple(
+            argument.removesuffix(",chelis-prove/ci-openblas-system")
+            for argument in run.command
+        ),
+        owner=".github/workflows/macos-nightly.yml",
+        hosts=("macos",),
+        cadence=NIGHTLY,
+    )
+    for run in CLIPPY_MATRIX
+    if run.label in {"default-features", "solver-free-features"}
+)
+
 
 @dataclass(frozen=True)
 class NightlyOnlySource:
     """A source whose only Clippy coverage is a nightly matrix row."""
 
     path: str
-    feature: str
     row: str
 
 
 # The exact residual. These sources sit behind solver features whose external
 # toolchains the repository does not provision per pull request, so the only
-# row that compiles them is nightly. The list is self-pruning: a file that a
-# per-pull-request row does compile is reported as stale, and `--require-complete`
-# (run by the nightly job) drops the allowance entirely, so a new uncovered file
-# cannot hide behind it.
+# row that compiles them is nightly. Source-to-feature attribution is reviewed
+# manually: accumulated dep-info cannot prove which registered row compiled a
+# source. `--require-complete` (run by the nightly job) drops the allowance
+# entirely, so a new uncovered file cannot hide behind it.
 NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
     NightlyOnlySource(
         path="crates/chelis-prove/src/z3_engine.rs",
-        feature="chelis-prove/z3",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_erf_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
     NightlyOnlySource(
         path="crates/chelis-prove/src/bin/certify_special_fn_envelope.rs",
-        feature="chelis-prove/arb",
         row="all-features",
     ),
 )
 
 # Directories holding `.rs` sources that the workspace build deliberately does
-# not compile. Each is a standalone Cargo project driven by its own named gate,
-# which compiles it and asserts the expected rejection.
+# not compile. Each holds standalone compiler fixtures driven by its own named
+# gate, which checks their expected rejection or generated typed artifacts.
 UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
+    UncompiledException(
+        directory=Path(WIRE_CALL_DRIVER).parent.as_posix(),
+        reason="standalone compiler driver built under the pinned Clippy policy by the wire verifier",
+        owning_gate="scripts/capacity_census_wire_calls.py",
+        sources=(WIRE_CALL_DRIVER,),
+    ),
+    UncompiledException(
+        directory="crates/chelis-compiler-api/tests/fixtures/cache_publication",
+        reason="exact positive and rejection fixtures compiled by the cache publication verifier",
+        owning_gate="scripts/capacity_census_cache_publication.py",
+        sources=tuple(case.fixture for case in CACHE_COMPILE_CASES),
+    ),
+    UncompiledException(
+        directory="scripts/fixtures/capacity_graph",
+        reason="standalone rustdoc fixtures; the owning suite compiles their typed artifacts",
+        owning_gate="scripts/test_capacity_census_graph.py",
+    ),
     UncompiledException(
         directory="crates/chelis-unord/tests/compile_fail",
         reason="standalone rejection fixtures; compiling them is the test",
@@ -255,6 +294,20 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         directory="crates/chelis-compiler-api/tests/compile_fail",
         reason="standalone rejection fixtures; compiling them is the test",
         owning_gate="scripts/check_pipeline_core_compile_fail.py",
+    ),
+    UncompiledException(
+        directory="crates/chelis-types/tests/fixtures/runtime_extent_manifest",
+        reason=(
+            "parsed rather than compiled: the runtime-extent target manifest "
+            "tripwire reads these as source text to exercise its own rejection "
+            "cases, so no configuration ever builds them"
+        ),
+        owning_gate="crates/chelis-types/tests/runtime_extent_target_manifest.rs",
+        sources=(
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/conditional_fixture.rs",
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/included_fixture.rs",
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
+        ),
     ),
 )
 
@@ -502,10 +555,8 @@ def compiled_rust_sources(
     Dep-info accumulates, and every cargo invocation writes it, not only a
     registered matrix row. A worktree where an unregistered configuration was
     once built therefore carries dep-info for it, and this reconciliation will
-    count those files as covered. The authoritative run is consequently the CI
-    one, where the cache prunes workspace-member artifacts before saving and
-    only the registered rows execute; locally this leg can be too generous,
-    never too strict.
+    count those files as covered. This union is completeness evidence only; it
+    carries no provenance that can prove which registered row compiled a file.
     """
     repo_root = repo_root.resolve()
     compiled: set[str] = set()
@@ -549,7 +600,13 @@ def check_every_source_is_compiled(
     nightly_only: Sequence[NightlyOnlySource] = NIGHTLY_ONLY_SOURCES,
     require_complete: bool = False,
 ) -> None:
-    """Leg 3: reconcile repository sources against rustc's own dep-info."""
+    """Leg 3: reconcile repository sources against rustc's own dep-info.
+
+    ``target_directories`` may contain accumulated artifacts from any Cargo
+    invocation, so those sources establish completeness but not row
+    provenance. Nightly-only source attribution is therefore not inferred
+    automatically from this union.
+    """
     labels = {run.label: run for run in CLIPPY_MATRIX}
     for source in nightly_only:
         if not (repo_root / source.path).is_file():
@@ -572,6 +629,25 @@ def check_every_source_is_compiled(
                 f"uncompiled-source exception {exception.directory} names a missing "
                 f"owning gate: {exception.owning_gate}"
             )
+        if exception.sources is not None:
+            expected = set(exception.sources)
+            actual = {
+                path.relative_to(repo_root).as_posix()
+                for path in (repo_root / exception.directory).rglob("*.rs")
+            }
+            if (
+                len(expected) != len(exception.sources)
+                or expected != actual
+                or any(
+                    not source.startswith(exception.directory + "/")
+                    or not (repo_root / source).is_file()
+                    or (repo_root / source).is_symlink()
+                    for source in expected
+                )
+            ):
+                raise ConfigurationClosureFailure(
+                    f"exact fixture inventory differs from its owning gate: {exception.directory}"
+                )
 
     compiled = compiled_rust_sources(target_directories, repo_root)
     if not compiled:
@@ -584,20 +660,15 @@ def check_every_source_is_compiled(
     allowed_nightly = (
         set() if require_complete else {source.path for source in nightly_only}
     )
-    if not require_complete:
-        stale = sorted(path for path in allowed_nightly if path in compiled)
-        if stale:
-            raise ConfigurationClosureFailure(
-                "these sources are recorded as nightly-only but a registered run "
-                "compiled them here: "
-                + ", ".join(stale)
-                + ". Delete their NIGHTLY_ONLY_SOURCES entries; the residual has shrunk."
-            )
-
-    excepted = tuple(f"{exception.directory}/" for exception in exceptions)
+    excepted = tuple(
+        f"{exception.directory}/" for exception in exceptions if exception.sources is None
+    )
+    owned_fixtures = {
+        source for exception in exceptions for source in (exception.sources or ())
+    }
     uncompiled = sorted(
         source
-        for source in repository_rust_sources(repo_root) - compiled - allowed_nightly
+        for source in repository_rust_sources(repo_root) - compiled - allowed_nightly - owned_fixtures
         if not source.startswith(excepted)
     )
     if uncompiled:

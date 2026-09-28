@@ -15,7 +15,7 @@
 // whose definition (transitively) carries a tensor field. The
 // `t-adt` arm of `type_expr_contains_tensor` consults this set so
 // `&BatchNormParams { weight: tensor[..], ... }` is accepted as a
-// borrow. Tensorless ADTs (`Counter { value: int64 }`) are still
+// borrow. Tensorless ADTs (`Counter { value: i64 }`) are still
 // rejected with the same `InvalidBorrow` error.
 
 use assert_cmd::Command;
@@ -79,7 +79,7 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
         "module BatchNormShape\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig borrow_params: &BatchNormParams[n] -> bool\n\
+         sig borrow_params[n]: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
          def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
@@ -87,7 +87,7 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a tensor-carrying record ADT must produce no errors; got {kinds:?}"
@@ -105,7 +105,7 @@ fn borrow_tensorless_adt_is_still_rejected() {
         &fixture,
         "module TensorlessShape\n\
          type Counter =\n\
-           | Counter { value: int64 }\n\
+           | Counter { value: i64 }\n\
          sig borrow_counter: &Counter -> bool\n\
          def borrow_counter(c) = true\n\
          def consume_counter(c: Counter) -> bool = borrow_counter(&c)\n",
@@ -189,7 +189,7 @@ fn destructured_generic_adt_field_borrow_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a destructured tensor field of a generic ADT must produce no errors; got {kinds:?}"
@@ -212,7 +212,7 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
            | Inner { value: a }\n\
          type Outer[a] =\n\
            | Outer { inner: Inner[a] }\n\
-         sig borrow_inner: &Inner[tensor[n, f32]] -> bool\n\
+         sig borrow_inner[n]: &Inner[tensor[n, f32]] -> bool\n\
          def borrow_inner(i) = true\n\
          def use_outer[n](o: Outer[tensor[n, f32]]) -> bool = match o with {\n\
            | Outer { inner } => borrow_inner(&inner)\n\
@@ -222,7 +222,7 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a destructured nested ADT field must produce no errors; got {kinds:?}"
@@ -237,10 +237,10 @@ fn destructured_generic_adt_nontensor_field_borrow_is_rejected() {
     // `a` to a non-tensor primitive. Without this guard, a future refactor that
     // broadens the destructured-field type lookup (e.g., defaulting to tensor
     // when ADT resolution loses the instantiation) could silently start
-    // accepting borrows of `int64` fields.
+    // accepting borrows of `i64` fields.
     //
     // Expected behavior: type-check produces a TypeMismatch (or InvalidBorrow)
-    // mentioning `int64` since `&int64` is not a valid borrow target.
+    // mentioning `i64` since `&i64` is not a valid borrow target.
     let dir = tempdir().expect("tempdir");
     let fixture = dir.path().join("destructured_nontensor_borrow.ch");
     write_file(
@@ -248,7 +248,7 @@ fn destructured_generic_adt_nontensor_field_borrow_is_rejected() {
         "module DestructuredNontensorShape\n\
          type FooState[a] =\n\
            | FooState { x: a, y: a }\n\
-         def use_foo(state: FooState[int64]) -> int64 = match state with {\n\
+         def use_foo(state: FooState[i64]) -> i64 = match state with {\n\
              | FooState { x, y } => {\n\
                _ = copy(&x)\n\
                y\n\
@@ -273,8 +273,8 @@ fn destructured_generic_adt_nontensor_field_borrow_is_rejected() {
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("int64")),
-        "rejection diagnostic should mention `int64`; got {messages:?}"
+        messages.iter().any(|m| m.contains("i64")),
+        "rejection diagnostic should mention `i64`; got {messages:?}"
     );
 }
 
@@ -292,7 +292,7 @@ fn borrow_nested_tensor_carrying_adt_is_accepted() {
            | Inner { values: tensor[n, f32] }\n\
          type Outer[n] =\n\
            | Outer { inner: Inner[n] }\n\
-         sig borrow_outer: &Outer[n] -> bool\n\
+         sig borrow_outer[n]: &Outer[n] -> bool\n\
          def borrow_outer(o) = true\n\
          def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)\n",
     );

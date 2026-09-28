@@ -11,7 +11,7 @@
 //! - [`skills`] — the shared agent-skill set, embedded for `conform sync` to
 //!   materialize and `conform audit` to fork-check.
 //!
-//! Later phases add the audit engine, the pointer managed-block mechanism, the
+//! Later phases add the audit engine, the stamped managed-block mechanism, the
 //! `conform sync`/`init` scaffolding, and the `conform bump`/`bump-check`
 //! version-propagation surface. The `chelis reef conform` CLI verbs dispatch
 //! into this crate.

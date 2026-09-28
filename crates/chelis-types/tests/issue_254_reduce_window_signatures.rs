@@ -5,7 +5,7 @@
 //! - Output rank equals input rank.
 //! - Trailing windowed-axis extent is
 //!   `floor((input - window) / stride) + 1` under Valid padding.
-//! - `window_shape` and `strides` must be int64 lists of equal
+//! - `window_shape` and `strides` must be i64 lists of equal
 //!   non-empty length; entries must be positive.
 //! - Window arity may not exceed input rank.
 //! - `window > input_dim` is rejected as a `DimensionMismatch`.
@@ -20,7 +20,7 @@ use chelis_types::check_ir_program;
 fn check_surf(source: &str) -> Result<Vec<String>, Vec<String>> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")

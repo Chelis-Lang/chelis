@@ -54,7 +54,7 @@ const WELL_TYPED_CH: &str = "def negate(x: f32) -> f32 = neg(x)\n";
 const ILL_TYPED_DP: &str = "(def {}\n  \
     bad\n  \
     (app {} (var {} add)\n      \
-        (lit {precision: int32} 1)\n      \
+        (lit {precision: i32} 1)\n      \
         (lit {precision: bool} true)))\n";
 
 /// Helper: write `src` to `<dir>/<name>` and return the path.
@@ -141,14 +141,17 @@ fn check_ill_typed_dp_reports_type_mismatch_and_exits_two() {
         !errors.is_empty(),
         "ill-typed .dp must produce a non-empty errors array; stdout={stdout}"
     );
+    // [04-INF-9]: the numeric admission check rejects bool before ordinary
+    // operand unification. Deep ingestion must preserve that diagnostic.
     let has_type_error = errors.iter().any(|e| {
-        let kind = e["kind"].as_str().unwrap_or("");
-        let message = e["message"].as_str().unwrap_or("");
-        kind == "TypeMismatch" || message.to_lowercase().contains("mismatch")
+        e["kind"] == "PrecisionMismatch"
+            && e["message"].as_str().is_some_and(|message| {
+                message.contains("add on bool operands") && message.contains("04-NUM-4")
+            })
     });
     assert!(
         has_type_error,
-        "ill-typed .dp must name a type mismatch (kind or message); stdout={stdout}"
+        "ill-typed .dp must preserve the numeric admission error; stdout={stdout}"
     );
     assert!(
         report["score"].as_f64().unwrap_or(1.0) < 1.0,
@@ -399,7 +402,7 @@ fn check_dp_inherits_issue_207_exit_code_invariant() {
 fn eval_dp_json_emits_structured_eval_result() {
     let dir = tempdir().expect("tempdir");
     // A standalone .dp whose root is an evaluable scalar value.
-    let src = "(def {} answer (lit {precision: int32} 42))\n";
+    let src = "(def {} answer (lit {precision: i32} 42))\n";
     let path = write_fixture(dir.path(), "answer.dp", src);
 
     let output = Command::cargo_bin("chelis")
@@ -438,7 +441,7 @@ fn eval_dp_human_matches_equivalent_ch_output() {
     // a genuine cross-surface output comparison is meaningful. The `.dp`
     // is derived from the `.ch` via `chelis deep` so the two are
     // by-construction the same program.
-    let ch_src = "answer = cast(42, int32)\n";
+    let ch_src = "answer = cast(42, i32)\n";
     let ch_path = write_fixture(dir.path(), "answer.ch", ch_src);
     let deep_out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -504,11 +507,11 @@ fn eval_ill_typed_dp_fails_with_type_error() {
     );
 }
 
-// ── EFFECT SOUNDNESS: module-wrapped .dp rejects declared-pure-does-Random ─
+// ── EFFECT SOUNDNESS: module-wrapped .dp rejects declared-pure-does-IO ─────
 
 #[test]
-fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
-    // A `.dp` MODULE whose declared-pure (`! { }`) `entry` calls a Random-
+fn check_module_wrapped_dp_rejects_declared_pure_body_doing_io() {
+    // A `.dp` MODULE whose declared-pure (`! { }`) `entry` calls an IO-
     // performing sibling must be REJECTED by `chelis check <module>.dp`. The
     // whole-program effect validators descend into the `(module ...)` wrapper,
     // so the module-wrapped check agrees with the flattened build/eval path.
@@ -516,7 +519,7 @@ fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
     // `chelis deep` so the wrapper is genuinely present.
     let dir = tempdir().expect("tempdir");
     let ch_src = "module Frag.Effect\nexport (entry)\n\
-        def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n\
+        def noisy(x: tensor[8, f32]) -> tensor[8, f32] = { _ = print(x)\n x }\n\
         def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)\n";
     let ch_path = write_fixture(dir.path(), "effect.ch", ch_src);
     let deep_out = Command::cargo_bin("chelis")
@@ -546,10 +549,10 @@ fn check_module_wrapped_dp_rejects_declared_pure_body_doing_random() {
     assert!(
         errors.iter().any(|e| {
             let message = e["message"].as_str().unwrap_or("");
-            message.contains("entry") && message.contains("Random")
+            message.contains("entry") && message.contains("IO")
         }),
-        "module-wrapped declared-pure body performing Random must be rejected with an \
-         effect error naming entry and Random; stdout={stdout}"
+        "module-wrapped declared-pure body performing IO must be rejected with an \
+         effect error naming entry and IO; stdout={stdout}"
     );
     assert_eq!(
         code,

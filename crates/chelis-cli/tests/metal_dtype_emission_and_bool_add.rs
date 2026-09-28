@@ -3,13 +3,13 @@
 //!
 //! Metal came out of the sweep as the best-behaved backend, and this file
 //! locks that: rank-1 kernels are HONESTLY TYPED per dtype (`long*` for
-//! int64, `int*` for int32, `bool*` for bool, `half`/`bfloat` for f16/bf16;
+//! i64, `int*` for i32, `bool*` for bool, `half`/`bfloat` for f16/bf16;
 //! the narrow-float rows live in narrow_dtype_matrix.rs), f64 is rejected
 //! with a specific diagnostic, and unsupported rank-2+ lowering fails through
 //! the typed codegen channel. No F32 substitution anywhere (contrast
 //! chelis#689).
 //!
-//! The #699 Metal symptom is also settled here: an int64 `abs` no longer
+//! The #699 Metal symptom is also settled here: an i64 `abs` no longer
 //! lowers to a pre-planted `Const 0`. Until Phase 3 supplies a typed,
 //! trapping Metal kernel, emission returns the branded typed unsupported
 //! reason without writing an artifact.
@@ -99,23 +99,23 @@ fn eval_first_line(program: &str) -> Result<String, String> {
 #[test]
 fn metal_kernels_are_honestly_typed_per_dtype() {
     let (ok, stderr, emitted) = build_metal(
-        "def f(a: tensor[4, int64], b: tensor[4, int64]) -> tensor[4, int64] = add(a, b)\n",
+        "def f(a: tensor[4, i64], b: tensor[4, i64]) -> tensor[4, i64] = add(a, b)\n",
         "metal_i64",
     );
     assert!(ok, "{stderr}");
     assert!(
         emitted.contains("device const long*") && emitted.contains("device long*"),
-        "int64 kernels must be long-typed"
+        "i64 kernels must be long-typed"
     );
 
     let (ok, stderr, emitted) = build_metal(
-        "def f(a: tensor[4, int32], b: tensor[4, int32]) -> tensor[4, int32] = add(a, b)\n",
+        "def f(a: tensor[4, i32], b: tensor[4, i32]) -> tensor[4, i32] = add(a, b)\n",
         "metal_i32",
     );
     assert!(ok, "{stderr}");
     assert!(
         emitted.contains("device const int*"),
-        "int32 kernels must be int-typed"
+        "i32 kernels must be int-typed"
     );
 }
 
@@ -160,35 +160,19 @@ fn metal_rank2_is_a_typed_error_without_an_artifact() {
     );
 }
 
-/// The #699 Metal symptom, REPLACED at chelis#730 Phase 1: the int64
-/// `abs` def used to arrive with a pre-planted `Const 0` node from
-/// `lower_transcendental` and Metal emitted a zero-filled buffer. Phase 2
-/// now preserves a typed integer `Abs` node. Metal's public DAG emitter
-/// rejects that node through the typed error channel without materializing
-/// an abort artifact. Replace this with a
-/// correctness row when the chelis#699 Phase 3 kernel lands.
+/// [05-OP-46]: integer abs reaches its checked integer kernel and never
+/// substitutes a zero or routes integer storage through fabs.
 #[test]
-fn metal_int64_abs_is_a_typed_error_not_pre_planted_zero() {
+fn metal_int64_abs_emits_exact_checked_kernel() {
     let (ok, stderr, emitted) = build_metal(
-        "def f(a: tensor[4, int64]) -> tensor[4, int64] = abs(a)\n",
+        "def f(a: tensor[4, i64]) -> tensor[4, i64] = abs(a)\n",
         "metal_i64_abs",
     );
-    assert!(!ok, "the Metal build must reject integer abs");
-    assert!(
-        !emitted.contains("node 0 = Const 0"),
-        "no pre-planted zero emission may be left behind"
-    );
-    assert!(
-        stderr.contains("unsupported:")
-            && stderr.contains(
-                "integer abs code generation waits for the typed, trapping Phase 3 kernel"
-            ),
-        "integer abs must return its branded typed reason; got:\n{stderr}"
-    );
-    assert!(
-        emitted.is_empty(),
-        "a rejected build wrote an artifact: {emitted}"
-    );
+    assert!(ok, "integer abs must build: {stderr}");
+    assert!(emitted.contains("numeric trap: overflow in abs at i64"));
+    assert!(emitted.contains("device const long* a"));
+    assert!(!emitted.contains("fabs("));
+    assert!(!emitted.contains("node 0 = Const 0"));
 }
 
 // ===========================================================================
@@ -235,7 +219,7 @@ fn bool_logic_and_counting_idiom_are_correct() {
 
     let line = eval_first_line(
         "module M.Main\n\
-         def f(x: tensor[3, bool]) -> tensor[int64] = sum(cast(x, int64), 0)\n\
+         def f(x: tensor[3, bool]) -> tensor[i64] = sum(cast(x, i64), 0)\n\
          out = print(f(to_tensor([true, false, true])))\n",
     )
     .expect("eval");

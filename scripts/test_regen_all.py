@@ -140,6 +140,7 @@ class LegManifestTests(unittest.TestCase):
             [
                 f"{PYTHON} scripts/generate_rejection_registries.py --write",
                 f"{PYTHON} scripts/regenerate_conformance_assets.py",
+                f"{PYTHON} scripts/generate_reviewed_unsupported_wording_snapshot.py",
                 f"{PYTHON} tests/corpus/opaque_invariants/generate_corpus.py",
                 f"{PYTHON} scripts/regenerate_chelis_std_bundle.py --debug",
             ],
@@ -154,7 +155,7 @@ class LegManifestTests(unittest.TestCase):
             recorder = _Recorder()
             code, output = _run(["--tier", "0"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 0, output)
-        self.assertEqual(len(recorder.calls), 3)
+        self.assertEqual(len(recorder.calls), 4)
         for argv, _env in recorder.calls:
             self.assertEqual(argv[0], PYTHON)
             self.assertNotEqual(argv[0], "cargo")
@@ -167,13 +168,12 @@ class LegManifestTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         rendered = recorder.rendered()
         self.assertEqual(
-            rendered[4:],
+            rendered[5:],
             [
                 "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
                 f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0 --regenerate",
                 "cargo nextest run -p chelis-runtime --test runtime_dtype_generated_header",
-                "cargo nextest run -p chelis-compiler-api --test capacity_census_wire "
-                "-p chelis-python --test capacity_census_bindings",
+                "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
             ],
         )
         self.assertIn("(no writer)", output)
@@ -219,20 +219,24 @@ class CheckModeTests(unittest.TestCase):
         self.assertEqual(
             rendered[1], f"{PYTHON} scripts/regenerate_conformance_assets.py --check"
         )
+        self.assertEqual(
+            rendered[2],
+            f"{PYTHON} scripts/generate_reviewed_unsupported_wording_snapshot.py --check",
+        )
         self.assertTrue(
-            rendered[2].startswith(
+            rendered[3].startswith(
                 f"{PYTHON} tests/corpus/opaque_invariants/generate_corpus.py --out-dir "
             ),
-            rendered[2],
+            rendered[3],
         )
         self.assertEqual(
-            rendered[3], f"{PYTHON} scripts/regenerate_chelis_std_bundle.py --debug --check"
+            rendered[4], f"{PYTHON} scripts/regenerate_chelis_std_bundle.py --debug --check"
         )
         self.assertEqual(
-            rendered[4], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
+            rendered[5], "cargo nextest run -p chelis-cli --test capacity_census_tripwire"
         )
         self.assertEqual(
-            rendered[5], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
+            rendered[6], f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0"
         )
         for line in rendered:
             self.assertNotIn("--write", line)
@@ -252,7 +256,7 @@ class CheckModeTests(unittest.TestCase):
             code, output = _run(["--check"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 1)
         # Every leg still ran (no fail-fast in check mode).
-        self.assertEqual(len(recorder.calls), 4)
+        self.assertEqual(len(recorder.calls), 5)
         self.assertTrue(
             output.rstrip().endswith("REGEN ALL: STALE (rejection-registry, std-bundle)"),
             output,
@@ -300,7 +304,11 @@ class CensusEnvTests(unittest.TestCase):
         # An ambient leftover from a manual census write must not turn the
         # check-mode tripwire into a writer that then compares against what
         # it just wrote.
-        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1", "KEEP": "yes"}
+        ambient = {
+            "PATH": "/usr/bin",
+            regen_all.CENSUS_WRITE_ENV: "1",
+            "KEEP": "yes",
+        }
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
@@ -312,23 +320,34 @@ class CensusEnvTests(unittest.TestCase):
             self.assertEqual(env.get("KEEP"), "yes")
 
     def test_write_mode_scrubs_the_seam_from_every_leg_but_its_owner(self):
-        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1"}
+        ambient = {
+            "PATH": "/usr/bin",
+            regen_all.CENSUS_WRITE_ENV: "1",
+        }
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             writer = _Recorder()
             code, _out = _run(["--full"], repo_root=root, recorder=writer, environ=ambient)
         self.assertEqual(code, 0)
-        carriers = [
+        census_carriers = [
             argv for argv, env in writer.calls if regen_all.CENSUS_WRITE_ENV in env
         ]
-        self.assertEqual(len(carriers), 1)
-        self.assertIn("capacity_census_tripwire", carriers[0])
-        self.assertNotIn("--check", carriers[0])
+        self.assertEqual(len(census_carriers), 1)
+        self.assertIn("capacity_census_tripwire", census_carriers[0])
 
     def test_scrub_environment_is_keyed_on_every_leg_declaration(self):
         keys = regen_all.leg_env_keys(regen_all.regen_legs(PYTHON))
-        self.assertEqual(keys, frozenset({regen_all.CENSUS_WRITE_ENV}))
-        scrubbed = regen_all.scrub_environment({"A": "1", regen_all.CENSUS_WRITE_ENV: "1"}, keys)
+        self.assertEqual(
+            keys,
+            frozenset({regen_all.CENSUS_WRITE_ENV}),
+        )
+        scrubbed = regen_all.scrub_environment(
+            {
+                "A": "1",
+                regen_all.CENSUS_WRITE_ENV: "1",
+            },
+            keys,
+        )
         self.assertEqual(scrubbed, {"A": "1"})
 
     def test_write_env_is_printed_on_the_leg_line(self):
@@ -340,6 +359,7 @@ class CensusEnvTests(unittest.TestCase):
             "capacity-census (cargo): CHELIS_CAPACITY_CENSUS_WRITE=1 cargo nextest run",
             output,
         )
+        self.assertNotIn("capacity-census-bindings", output)
 
 
 class ManualActionTests(unittest.TestCase):
@@ -402,15 +422,17 @@ class ManualActionTests(unittest.TestCase):
         self.assertIsNotNone(message)
         self.assertIn("FREEZE_SHA256", message)
 
-    def test_check_only_legs_report_the_manual_action_in_write_mode(self):
+    def test_wire_check_only_leg_reports_the_manual_action_in_write_mode(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder(returncodes={"capacity_census_wire": 101})
             code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 2)
-        self.assertIn(regen_all.CENSUS_SIBLINGS_MANUAL, output)
+        self.assertIn(regen_all.CENSUS_WIRE_MANUAL, output)
         self.assertTrue(
-            output.rstrip().endswith("REGEN ALL: MANUAL ACTION REQUIRED (census-siblings)"),
+            output.rstrip().endswith(
+                "REGEN ALL: MANUAL ACTION REQUIRED (capacity-census-wire)"
+            ),
             output,
         )
 
@@ -448,7 +470,8 @@ class LaunchFailureTests(unittest.TestCase):
         # cargo legs are stale for the launch reason.
         self.assertTrue(
             output.rstrip().endswith(
-                "REGEN ALL: STALE (capacity-census, dtype-c-header, census-siblings)"
+                "REGEN ALL: STALE (capacity-census, dtype-c-header, "
+                "capacity-census-wire)"
             ),
             output,
         )
@@ -462,7 +485,8 @@ class LaunchFailureTests(unittest.TestCase):
         self.assertIn(f"could not launch {PYTHON}", output)
         self.assertTrue(
             output.rstrip().endswith(
-                "REGEN ALL: STALE (rejection-registry, conformance-assets, opaque-corpus)"
+                "REGEN ALL: STALE (rejection-registry, conformance-assets, "
+                "reviewed-unsupported-wording, opaque-corpus)"
             ),
             output,
         )
@@ -540,6 +564,18 @@ class OpaqueCorpusCheckTests(unittest.TestCase):
 
 
 class WriteModeTests(unittest.TestCase):
+    def test_tier_zero_owns_the_reviewed_unsupported_wording_snapshot(self):
+        legs = regen_all.regen_legs(PYTHON)
+        wording = next(
+            leg for leg in legs if leg.name == "reviewed-unsupported-wording"
+        )
+        self.assertEqual(wording.tier, 0)
+        self.assertIn(
+            "scripts/generate_reviewed_unsupported_wording_snapshot.py",
+            wording.write_argv,
+        )
+        self.assertIn("--check", wording.check_argv)
+
     def test_write_mode_stops_at_first_failure_and_names_the_leg(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
@@ -552,19 +588,23 @@ class WriteModeTests(unittest.TestCase):
         self.assertTrue(
             output.rstrip().endswith("REGEN ALL: FAIL (conformance-assets, exit 1)"), output
         )
-        self.assertIn("2 later leg(s) not run", output)
+        self.assertIn("3 later leg(s) not run", output)
 
     def test_leg_lines_name_tier_position_and_owned_paths(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder()
             _code, output = _run([], repo_root=root, recorder=recorder)
-        self.assertIn("[tier 0 1/4] rejection-registry (python):", output)
-        self.assertIn("[tier 1 4/4] std-bundle (cargo):", output)
         self.assertIn(
-            "owns: crates/chelis-types/src/rejection_registry_generated.rs", output
+            "[tier 0 1/5] rejection-registry (cargo + python):", output
         )
-        self.assertIn("regen_all: write mode, tiers 0, 1, 4 leg(s)", output)
+        self.assertIn("[tier 1 5/5] std-bundle (cargo):", output)
+        self.assertIn(
+            "owns: spec/design/loud_unsupported_issue_manifest.json, "
+            "crates/chelis-types/src/rejection_registry_generated.rs",
+            output,
+        )
+        self.assertIn("regen_all: write mode, tiers 0, 1, 5 leg(s)", output)
 
 
 class NeverWritesFrozenArtifactsTests(unittest.TestCase):
@@ -575,8 +615,8 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
         "runtime_extent_oracle_baseline",
         "copy_drop_fixture_fitness_baseline",
         "test_timing_baseline",
-        "capacity_census_wire.json",
         "capacity_census_bindings.json",
+        "capacity_census_wire.json",
         "chelis_runtime_dtype.h",
         "tree-sitter generate",
     )
@@ -597,20 +637,22 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
             self.assertNotIn("--regenerate", leg.check_argv or ())
         # The artifacts with no writer are check-only legs, never write legs.
         no_writer = {leg.name for leg in legs if leg.write_argv is None}
-        self.assertEqual(no_writer, {"dtype-c-header", "census-siblings", "tree-sitter"})
+        self.assertEqual(
+            no_writer, {"dtype-c-header", "capacity-census-wire", "tree-sitter"}
+        )
 
     def test_docstring_names_every_hand_maintained_artifact(self):
         doc = regen_all.__doc__ or ""
         for name in (
-            "FROZEN_ATOM_DIGESTS",
-            "FROZEN_REGION_DIGESTS",
+            "REQUIRED_ATOMS",
+            "REQUIRED_REGIONS",
             "FREEZE_SHA256",
             "loud_unsupported_tripwire.rs",
             "runtime_extent_oracle_baseline.json",
             "copy_drop_fixture_fitness_baseline.json",
             "test_timing_baseline.json",
-            "capacity_census_wire.json",
             "capacity_census_bindings.json",
+            "capacity_census_wire.json",
             "chelis_runtime_dtype.h",
             "grammars/",
         ):

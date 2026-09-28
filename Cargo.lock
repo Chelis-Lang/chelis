@@ -115,8 +115,7 @@ dependencies = [
 [[package]]
 name = "arb-sys"
 version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01e94dbcd294bbde22903b17f30bd7c5c732a0625db037919dde3a26ad890db"
+source = "git+https://github.com/Chelis-Lang/arb-sys?rev=691abe3e533f48c5c0f3e672c556d79493a651d1#691abe3e533f48c5c0f3e672c556d79493a651d1"
 dependencies = [
  "derivative",
  "flint-sys",
@@ -451,12 +450,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chelis-backend-c"
-version = "0.18.6"
+name = "chelis-abi"
+version = "0.18.11"
 dependencies = [
+ "chelis-vocab",
+]
+
+[[package]]
+name = "chelis-backend-c"
+version = "0.18.11"
+dependencies = [
+ "chelis-deep",
  "chelis-effects",
  "chelis-ir",
- "chelis-runtime",
+ "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
@@ -464,15 +471,21 @@ dependencies = [
  "half",
  "pkg-config",
  "serde_json",
+ "sha2",
  "tempfile",
+ "tree-sitter",
+ "tree-sitter-c",
 ]
 
 [[package]]
 name = "chelis-backend-hip"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
+ "chelis-backend-c",
+ "chelis-effects",
  "chelis-ir",
- "chelis-runtime",
+ "chelis-runtime-bundle",
+ "chelis-surf",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -483,10 +496,13 @@ dependencies = [
 
 [[package]]
 name = "chelis-backend-metal"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
+ "chelis-backend-c",
+ "chelis-effects",
  "chelis-ir",
- "chelis-runtime",
+ "chelis-runtime-bundle",
+ "chelis-surf",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -497,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-cli"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "assert_cmd",
  "cargo-husky",
@@ -516,6 +532,7 @@ dependencies = [
  "chelis-prove",
  "chelis-reef",
  "chelis-runtime",
+ "chelis-runtime-bundle",
  "chelis-shell",
  "chelis-std-bundle",
  "chelis-surf",
@@ -533,6 +550,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.117",
  "tar",
  "tempfile",
  "tokio",
@@ -545,9 +563,10 @@ dependencies = [
 
 [[package]]
 name = "chelis-compiler-api"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-backend-c",
  "chelis-backend-hip",
  "chelis-deep",
@@ -557,6 +576,8 @@ dependencies = [
  "chelis-macros",
  "chelis-pipeline-core",
  "chelis-reef",
+ "chelis-runtime",
+ "chelis-runtime-bundle",
  "chelis-std-bundle",
  "chelis-surf",
  "chelis-types",
@@ -575,9 +596,10 @@ dependencies = [
 
 [[package]]
 name = "chelis-conformance"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-version",
+ "pulldown-cmark",
  "sha2",
  "tempfile",
  "toml",
@@ -585,10 +607,11 @@ dependencies = [
 
 [[package]]
 name = "chelis-cove"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "anyhow",
  "chelis-tide",
+ "chelis-types",
  "crossterm",
  "ratatui",
  "tempfile",
@@ -598,19 +621,21 @@ dependencies = [
 
 [[package]]
 name = "chelis-deep"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
+ "bincode",
  "chelis-vocab",
  "miette",
  "proptest",
  "serde",
  "serde_json",
+ "stacker",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "chelis-e2e"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "assert_cmd",
  "chelis-backend-c",
@@ -621,6 +646,7 @@ dependencies = [
  "chelis-ir",
  "chelis-macros",
  "chelis-runtime",
+ "chelis-runtime-bundle",
  "chelis-surf",
  "chelis-types",
  "chelis-unord",
@@ -632,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-effects"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
@@ -644,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-image-id"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "libc",
  "object",
@@ -654,9 +680,10 @@ dependencies = [
 
 [[package]]
 name = "chelis-ir"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "bincode",
+ "chelis-abi",
  "chelis-deep",
  "chelis-effects",
  "chelis-macros",
@@ -668,12 +695,13 @@ dependencies = [
  "serde",
  "serde_json",
  "stacker",
+ "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "chelis-lint"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "assert_cmd",
  "chelis-deep",
@@ -689,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-lsp"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-surf",
@@ -705,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-macros"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-effects",
@@ -718,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pipeline-core"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-effects",
@@ -729,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-pred"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "thiserror 2.0.18",
@@ -737,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-prove"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "arb-sys",
  "base64 0.22.1",
@@ -754,9 +782,11 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
+ "openblas-src",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.117",
  "tempfile",
  "thiserror 2.0.18",
  "wait-timeout",
@@ -765,24 +795,31 @@ dependencies = [
 
 [[package]]
 name = "chelis-python"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "assert_cmd",
+ "chelis-abi",
  "chelis-backend-c",
  "chelis-compiler-api",
+ "chelis-reef",
+ "chelis-runtime-bundle",
  "chelis-vocab",
  "libc",
  "libloading",
+ "proc-macro2",
  "pyo3",
+ "pyo3-build-config",
+ "quote",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.117",
  "tempfile",
 ]
 
 [[package]]
 name = "chelis-reef"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "bincode",
  "chelis-deep",
@@ -798,13 +835,20 @@ dependencies = [
  "flate2",
  "reqwest",
  "rustix",
+ "schemars",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "spdx",
  "tar",
  "tempfile",
  "tokio",
  "toml",
+ "toml_edit",
+ "unicode-general-category",
+ "unicode-normalization",
+ "url",
  "walkdir",
  "wiremock",
  "zstd",
@@ -812,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-repr-inventory"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -824,8 +868,9 @@ dependencies = [
 
 [[package]]
 name = "chelis-runtime"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
+ "chelis-abi",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -833,11 +878,31 @@ dependencies = [
  "libc",
  "memmap2",
  "num-bigint",
+ "sha2",
+]
+
+[[package]]
+name = "chelis-runtime-bundle"
+version = "0.18.11"
+dependencies = [
+ "chelis-runtime",
+ "chelis-runtime-bundle-macro",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "chelis-runtime-bundle-macro"
+version = "0.18.11"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
 name = "chelis-shell"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "bincode",
  "chelis-deep",
@@ -847,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-std-bundle"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-shell",
  "sha2",
@@ -858,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-surf"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-pred",
@@ -868,13 +933,14 @@ dependencies = [
  "proptest",
  "ryu",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "chelis-tide"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "assert_cmd",
  "axum",
@@ -893,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-types"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "bincode",
  "chelis-deep",
@@ -903,8 +969,11 @@ dependencies = [
  "chelis-unord",
  "chelis-vocab",
  "half",
+ "proc-macro2",
  "quote",
+ "schemars",
  "serde",
+ "serde_json",
  "sha2",
  "stacker",
  "syn 2.0.117",
@@ -913,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-unord"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -922,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "chelis-validate"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-deep",
  "chelis-macros",
@@ -936,21 +1005,22 @@ dependencies = [
 
 [[package]]
 name = "chelis-version"
-version = "0.18.6"
+version = "0.18.11"
 
 [[package]]
 name = "chelis-vocab"
-version = "0.18.6"
+version = "0.18.11"
 
 [[package]]
 name = "chelisup"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "chelis-version",
  "clap",
  "flate2",
  "reqwest",
  "serde_json",
+ "sha2",
  "tar",
  "tempfile",
  "toml",
@@ -2787,6 +2857,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.11.1",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pyo3"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3271,6 +3352,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -3463,6 +3548,15 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spdx"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e17e880bafaeb362a7b751ec46bdc5b61445a188f80e0606e68167cd540fa3"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]
@@ -3750,6 +3844,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
 name = "tokio"
 version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3962,8 +4062,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-c"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9b2eb57a55fed6b00812912e730b7a275cf4fe98bfd6a5d76263d4438371728"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-chelis"
-version = "0.18.6"
+version = "0.18.11"
 dependencies = [
  "cc",
  "chelis-surf",
@@ -4003,6 +4113,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4013,6 +4135,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

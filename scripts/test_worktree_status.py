@@ -167,7 +167,7 @@ class _RealLease:
         os.close(self._fd)
 
 
-def _holder(worktree=PROBED, pid=41277, mode="local"):
+def _holder(worktree=PROBED, pid=41277, mode="validation"):
     return {
         "schema_version": 1,
         "pid": pid,
@@ -304,7 +304,7 @@ class LeaseTests(unittest.TestCase):
         )
 
     def test_sidecar_naming_no_worktree_is_unknown(self):
-        lease = _RealLease(self.tmp, {"pid": 5, "mode": "local"})
+        lease = _RealLease(self.tmp, {"pid": 5, "mode": "validation"})
         self.addCleanup(lease.close)
         state = _collect(environ=self.environ)
         self.assertEqual(state["verdict"], status.VERDICT_UNKNOWN)
@@ -415,22 +415,22 @@ class LsFilesDebugParserTests(unittest.TestCase):
 
 class ProcessMatchingTests(unittest.TestCase):
     def test_gate_process_matched_by_absolute_path(self):
-        procs = [_proc(31, 1, f"/usr/bin/python3 {PROBED}/scripts/gate.py --local")]
+        procs = [_proc(31, 1, f"/usr/bin/python3 {PROBED}/scripts/gate.py --validation")]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual([p.pid for p in found], [31])
 
     def test_gate_process_in_another_worktree_is_not_matched(self):
-        procs = [_proc(31, 1, f"/usr/bin/python3 {OTHER}/scripts/gate.py --local")]
+        procs = [_proc(31, 1, f"/usr/bin/python3 {OTHER}/scripts/gate.py --validation")]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual(found, [])
 
     def test_relative_gate_invocation_matched_by_cwd(self):
-        procs = [_proc(32, 1, "python3 scripts/gate.py --local")]
+        procs = [_proc(32, 1, "python3 scripts/gate.py --validation")]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), lambda pid: PROBED)
         self.assertEqual([p.pid for p in found], [32])
 
     def test_relative_gate_invocation_elsewhere_is_not_matched(self):
-        procs = [_proc(32, 1, "python3 scripts/gate.py --local")]
+        procs = [_proc(32, 1, "python3 scripts/gate.py --validation")]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), lambda pid: OTHER)
         self.assertEqual(found, [])
 
@@ -452,7 +452,7 @@ class ProcessMatchingTests(unittest.TestCase):
         spelled several ways and each is still a gate run."""
         for argv0 in ("python", "python3", "python3.11", f"{PROBED}/.venv/bin/python3"):
             with self.subTest(argv0=argv0):
-                procs = [_proc(80, 1, f"{argv0} {PROBED}/scripts/gate.py --local")]
+                procs = [_proc(80, 1, f"{argv0} {PROBED}/scripts/gate.py --validation")]
                 found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
                 self.assertEqual([p.pid for p in found], [80])
 
@@ -460,8 +460,8 @@ class ProcessMatchingTests(unittest.TestCase):
         """A real gate run has both a shell and an interpreter naming the
         script. Reporting both was noise; the interpreter is the run."""
         procs = [
-            _proc(90, 1, f"/bin/bash -c cd {PROBED} && python3 scripts/gate.py --local"),
-            _proc(91, 90, f"python3 {PROBED}/scripts/gate.py --local"),
+            _proc(90, 1, f"/bin/bash -c cd {PROBED} && python3 scripts/gate.py --validation"),
+            _proc(91, 90, f"python3 {PROBED}/scripts/gate.py --validation"),
         ]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual([p.pid for p in found], [91])
@@ -469,13 +469,13 @@ class ProcessMatchingTests(unittest.TestCase):
     def test_sibling_checkout_never_matches(self):
         """`<repo>-165` contains `<repo>`; the boundary matcher reused from
         reap_orphans is what stops it matching."""
-        procs = [_proc(33, 1, f"python3 {PROBED}-165/scripts/gate.py --local")]
+        procs = [_proc(33, 1, f"python3 {PROBED}-165/scripts/gate.py --validation")]
         found, _undecided = status.match_gate_processes(procs, Path(PROBED), _no_cwd)
         self.assertEqual(found, [])
 
     def test_a_gate_process_makes_the_worktree_busy(self):
         state = _collect(
-            snapshot=lambda: [_proc(31, 1, f"python3 {PROBED}/scripts/gate.py --local")]
+            snapshot=lambda: [_proc(31, 1, f"python3 {PROBED}/scripts/gate.py --validation")]
         )
         self.assertEqual(state["verdict"], status.VERDICT_BUSY)
         self.assertEqual(
@@ -574,7 +574,7 @@ class RootAnchoringTests(unittest.TestCase):
             worktree=Path(f"{PROBED}/scripts"),
             query=FakeGit(rev_parse=_rev_parse_output(worktree=PROBED)),
             snapshot=lambda: [
-                _proc(31, 1, f"python3 {PROBED}/scripts/gate.py --local")
+                _proc(31, 1, f"python3 {PROBED}/scripts/gate.py --validation")
             ],
         )
         self.assertEqual(state["verdict"], status.VERDICT_BUSY)
@@ -613,7 +613,7 @@ class LastGateReportTests(unittest.TestCase):
         self.assertIn("no gate report", status.render_human(state))
 
     def test_newest_report_wins_and_is_labelled_history(self):
-        self._write("20260905T010000.0Z-1-local.json", {"mode": "local", "exit_code": 1})
+        self._write("20260905T010000.0Z-1-validation.json", {"mode": "validation", "exit_code": 1})
         self._write(
             "20260905T020000.0Z-2-fast.json",
             {
@@ -633,8 +633,8 @@ class LastGateReportTests(unittest.TestCase):
         """`gate.py` writes its summary from `main`'s `finally`, so a report
         is proof a run ENDED. It must never read as a run in flight."""
         self._write(
-            "20260905T020000.0Z-2-local.json",
-            {"mode": "local", "termination": "pass", "exit_code": 0},
+            "20260905T020000.0Z-2-validation.json",
+            {"mode": "validation", "termination": "pass", "exit_code": 0},
         )
         state = _collect(environ=self.environ)
         self.assertEqual(state["verdict"], status.VERDICT_FREE)
@@ -643,7 +643,7 @@ class LastGateReportTests(unittest.TestCase):
         """A SIGKILLed gate can leave a truncated summary behind and nothing
         cleans it up, so history that cannot be read must not pin the verdict
         at UNKNOWN for as long as the file exists."""
-        (self.tmp / "20260905T020000.0Z-2-local.json").write_text(
+        (self.tmp / "20260905T020000.0Z-2-validation.json").write_text(
             "{ truncated", encoding="utf-8"
         )
         state = _collect(environ=self.environ)
@@ -1159,7 +1159,7 @@ NEAR_MISS_TABLE = {
     status.SIGNAL_GATE_PROCESS: {
         "positive": [
             ("an absolute invocation",
-             lambda: _running(f"python3 {PROBED}/scripts/gate.py --local")),
+             lambda: _running(f"python3 {PROBED}/scripts/gate.py --validation")),
             ("a relative invocation resolved by cwd",
              lambda: _running("python3 scripts/gate.py --fast", cwd=PROBED)),
             ("an option before the script",
@@ -1176,11 +1176,11 @@ NEAR_MISS_TABLE = {
             ("a linter run through -m",
              lambda: _running(f"python3 -m ruff check {PROBED}/scripts/gate.py")),
             ("a prefix-matching sibling checkout",
-             lambda: _running(f"python3 {PROBED}-165/scripts/gate.py --local")),
+             lambda: _running(f"python3 {PROBED}-165/scripts/gate.py --validation")),
             ("another worktree's gate, absolute",
-             lambda: _running(f"python3 {OTHER}/scripts/gate.py --local")),
+             lambda: _running(f"python3 {OTHER}/scripts/gate.py --validation")),
             ("another worktree's gate, relative, resolved elsewhere",
-             lambda: _running("python3 scripts/gate.py --local", cwd=OTHER)),
+             lambda: _running("python3 scripts/gate.py --validation", cwd=OTHER)),
         ],
         "hard": [
             # Grammar rows: spellings of the OPTIONS.
@@ -1193,12 +1193,12 @@ NEAR_MISS_TABLE = {
             (NEVER_FREE, "several short options combined",
              lambda: _running(f"python3 -EsuB {PROBED}/scripts/gate.py")),
             (NEVER_FREE, "isolated mode",
-             lambda: _running(f"python3 -I {PROBED}/scripts/gate.py --local")),
+             lambda: _running(f"python3 -I {PROBED}/scripts/gate.py --validation")),
             (NEVER_FREE, "a checkout path containing a space",
              lambda: _running(f"python3 {SPACED}/scripts/gate.py", worktree=SPACED)),
             (NEVER_FREE, "the uv re-exec child shape",
              lambda: _running(
-                 f"{PROBED}/.venv/bin/python3 {PROBED}/scripts/gate.py --local")),
+                 f"{PROBED}/.venv/bin/python3 {PROBED}/scripts/gate.py --validation")),
             # Spelling row: the COMMAND LINE's own path. This is the only
             # input whose spelling the program does not control, and it was
             # the axis with no coverage at all: every other path compared here
@@ -1206,7 +1206,7 @@ NEAR_MISS_TABLE = {
             # --absolute-git-dir, or an already-resolved root.
             (KNOWN_GAP_FREE, "a gate named through a non-canonical path",
              lambda: _running(
-                 f"python3 /var/wt/my checkout/scripts/gate.py --local",
+                 f"python3 /var/wt/my checkout/scripts/gate.py --validation",
                  worktree="/private/var/wt/my checkout")),
         ],
     },
@@ -1384,10 +1384,10 @@ class ScriptArgumentTests(unittest.TestCase):
 
     def test_the_script_is_the_first_non_option_token(self):
         for command, expected in [
-            ("python3 scripts/gate.py --local", "scripts/gate.py"),
+            ("python3 scripts/gate.py --validation", "scripts/gate.py"),
             ("/venv/bin/python3.11 /a/scripts/gate.py --fast", "/a/scripts/gate.py"),
             ("python -X faulthandler scripts/gate.py", "scripts/gate.py"),
-            ("python -W ignore -X dev scripts/gate.py --local", "scripts/gate.py"),
+            ("python -W ignore -X dev scripts/gate.py --validation", "scripts/gate.py"),
             ("python -O scripts/gate.py", "scripts/gate.py"),
         ]:
             with self.subTest(command=command):

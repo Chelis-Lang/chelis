@@ -19,11 +19,21 @@ use super::*;
 /// diagnostic. [`reject_inadmissible_operand_dtypes`] calls it again after
 /// successful unification so unresolved polymorphic calls still participate
 /// in the checked-route accounting and float-only propagation rules.
+///
+/// Only the second of those two calls carries a suspension. chelis#1512's
+/// deferral belongs to the call that DECIDES, and the pre-unification one is a
+/// diagnostic-quality pass whose operands unification has not constrained yet;
+/// suspending from there would register a call the second one goes on to
+/// decide anyway.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
-    list: &deep::List,
+    node: &DeepNode,
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     let actual = arg_tys.first().map(|ty| type_for_readonly_check(ty, subst));
     let tensor_prim = match actual {
@@ -33,8 +43,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                 errors,
                 CheckError::new(
                     CheckErrorKind::PrecisionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "test_assert_close_tensor expects tensors at one active float dtype, got `{}`",
                             prim.name()
@@ -44,17 +54,30 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                 ),
             );
         }
-        Some(Type::Tensor(_, TensorPrec::Var(_)))
-        | Some(Type::Var(_))
-        | Some(Type::Error(_))
-        | None => None,
+        // chelis#1512: the operand is not a tensor at a known dtype YET.
+        Some(Type::Var(_)) => {
+            if let Some(site) = suspension {
+                site.register(arg_tys, result_ty, subst, product);
+            }
+            None
+        }
+        // chelis#1805 measured this arm safe rather than repairing it. The
+        // builtin's signature shares ONE `Float`-bounded precision variable
+        // across both tensors and the tolerance, so unification propagates that
+        // bound onto a caller's own binder and rejects every integer
+        // instantiation at the call site, with the [04-DTYPE-2] family
+        // diagnostic rather than this one. Admitting the variable here
+        // therefore skips no decision;
+        // `a_signature_bounded_callee_is_caught_at_the_call_site` is the
+        // witness.
+        Some(Type::Tensor(_, TensorPrec::Var(_))) | Some(Type::Error(_)) | None => None,
         Some(other) => {
             return reject(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("test_assert_close_tensor expects tensor arguments, got {other}"),
                     ),
                     vec![],
@@ -73,8 +96,8 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "test_assert_close_tensor tolerance dtype `{}` must equal tensor dtype `{}`",
                                     tolerance_prim.name(),
@@ -86,14 +109,20 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                     );
                 }
             }
-            Type::Var(_) | Type::Error(_) => {}
+            // chelis#1512: the tolerance has no dtype YET.
+            Type::Var(_) => {
+                if let Some(site) = suspension {
+                    site.register(arg_tys, result_ty, subst, product);
+                }
+            }
+            Type::Error(_) => {}
             other => {
                 return reject(
                     errors,
                     CheckError::new(
                         CheckErrorKind::PrecisionMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!(
                                 "test_assert_close_tensor tolerance must have the tensor's active float dtype, got {other}"
                             ),
@@ -113,22 +142,24 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
 /// inference rule, exactly as the inline checks did.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reject_inadmissible_operand_dtypes(
-    list: &deep::List,
-    kids: &[deep::Expr],
+    node: &DeepNode,
     func_name: Option<&str>,
     arg_tys: &[Type],
     env: &Env,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     checked_route_observed: &mut bool,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     if let Some(fname) = func_name
         && fname == "test_assert_close_tensor"
     {
         *checked_route_observed = true;
-        if let Some(rejected) =
-            reject_test_assert_close_tensor_operand_dtypes(list, arg_tys, subst, errors)
-        {
+        if let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
+            node, arg_tys, subst, errors, suspension, result_ty, product,
+        ) {
             return Some(rejected);
         }
     }
@@ -137,7 +168,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         && fname == "uniform_like"
     {
         *checked_route_observed = true;
-        if let Some(first_arg) = arg_tys.first() {
+        // [05-OP-8]: operand 0 is the key; the template is operand 1.
+        if let Some(first_arg) = arg_tys.get(1) {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
                 Type::Tensor(_, prim)
@@ -149,8 +181,8 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "uniform_like expects a float tensor template, got {}",
                                     resolved
@@ -160,14 +192,23 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         ),
                     );
                 }
-                Type::Var(_) | Type::Error(_) => {}
+                // chelis#1512: `uniform_like`'s template parameter is a bare
+                // type variable in the builtin scheme, so signature
+                // unification does not bind it and an operand really does
+                // reach this arm unresolved.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "uniform_like expects tensor template input, got {}",
                                     resolved
@@ -180,19 +221,26 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
-        for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
+        for arg_ty in arg_tys.iter().skip(2).take(2) {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
+                Type::Prim(Prim::F32) => {}
+                // chelis#1512: the bound has no dtype YET.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
-                                    "uniform_like expects f32 bounds for args 2-3, got {}",
+                                    "uniform_like expects f32 bounds for args 3-4, got {}",
                                     resolved
                                 ),
                             ),
@@ -201,25 +249,6 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                     );
                 }
             }
-
-            if let Some(expr) = kids.get(index + 1)
-                && !is_static_numeric_bound(expr)
-            {
-                return reject(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            "uniform_like currently requires literal low/high bounds \
-                         (a numeric literal, optionally negated or cast to a float \
-                         type); a runtime-computed bound is not supported"
-                                .to_string(),
-                        ),
-                        vec![],
-                    ),
-                );
-            }
         }
     }
 
@@ -227,18 +256,41 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         && fname == "dropout"
     {
         *checked_route_observed = true;
-        if let Some(first_arg) = arg_tys.first() {
+        // [05-OP-37]: operand 0 is the key; the input is operand 1 and the
+        // rate operand 2.
+        let tensor_prim = arg_tys
+            .get(1)
+            .and_then(|ty| match type_for_readonly_check(ty, subst) {
+                Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                _ => None,
+            });
+        if let Some(first_arg) = arg_tys.get(1) {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
-                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
+                Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => {}
+                // chelis#1512: not a tensor at a known dtype YET.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                // chelis#1805: safe for the same reason as
+                // `test_assert_close_tensor` above. `dropout`'s signature binds
+                // its tensor and its rate to one `Float`-bounded precision
+                // variable, so an integer instantiation is rejected where the
+                // caller supplies it.
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects tensor input, got {}", resolved),
+                            with_node_provenance(
+                                node,
+                                format!(
+                                    "dropout expects a tensor at an active float dtype, got {}",
+                                    resolved
+                                ),
                             ),
                             vec![],
                         ),
@@ -247,72 +299,33 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             }
         }
 
-        if let Some(rate_arg) = arg_tys.get(1) {
+        if let Some(rate_arg) = arg_tys.get(2) {
             let resolved = subst.apply(rate_arg);
             match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
+                Type::Prim(prim)
+                    if prim.is_float() && tensor_prim.is_none_or(|input| input == *prim) => {}
+                // chelis#1512: the rate has no dtype YET.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects f32 rate, got {}", resolved),
+                            with_node_provenance(
+                                node,
+                                format!(
+                                    "dropout rate must have the input tensor's active float dtype, got {}",
+                                    resolved
+                                ),
                             ),
                             vec![],
                         ),
                     );
-                }
-            }
-        }
-    }
-
-    if let Some(fname) = func_name
-        && fname == "conv2d"
-    {
-        *checked_route_observed = true;
-        for (index, arg_ty) in arg_tys.iter().enumerate() {
-            let resolved = type_for_readonly_check(arg_ty, subst);
-            if index < 2 {
-                match &resolved {
-                    Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return reject(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects tensor inputs for args 1-2, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            } else {
-                match &resolved {
-                    Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return reject(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects int32 stride/padding, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
                 }
             }
         }

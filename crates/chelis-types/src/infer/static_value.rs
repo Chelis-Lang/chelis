@@ -22,14 +22,10 @@ pub(super) struct StaticTensor {
     int_values: Option<Vec<i64>>,
 }
 
-pub(super) fn bind_fn_params_unknown(
-    fn_list: &deep::List,
-    env: &mut UnordMap<String, StaticValue>,
-) {
-    let Some(params_expr) = children(fn_list).first() else {
+pub(super) fn bind_fn_params_unknown(fn_node: &DeepNode, env: &mut UnordMap<String, StaticValue>) {
+    let Some(params_expr) = fn_node.children_slice().first() else {
         return;
     };
-    // chelis#1107 amendment: carrier-preserving read.
     let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
         return;
     };
@@ -38,8 +34,9 @@ pub(super) fn bind_fn_params_unknown(
             deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 env.insert(name.clone(), StaticValue::Unknown);
             }
-            deep::Expr::List(param_list, _) => {
-                if let Some(name) = param_list.elements.first().and_then(symbol_name) {
+            // An inline-annotated param `(x {type: T})` is a structural list.
+            deep::Expr::BareList(elements, _) => {
+                if let Some(name) = elements.first().and_then(symbol_name) {
                     env.insert(name.to_string(), StaticValue::Unknown);
                 }
             }
@@ -54,7 +51,8 @@ pub(super) fn literal_static_value(expr: &deep::Expr) -> StaticValue {
         deep::Expr::Atom(deep::Atom::Float(value), _) => StaticValue::Float(*value),
         deep::Expr::Atom(deep::Atom::Bool(value), _) => StaticValue::Bool(*value),
         deep::Expr::Atom(deep::Atom::Str(value), _) => StaticValue::String(value.clone()),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => children(list)
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Lit => node
+            .children_slice()
             .first()
             .map(literal_static_value)
             .unwrap_or(StaticValue::Unknown),
@@ -472,12 +470,12 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
     (0..rank).contains(&axis).then_some(axis as usize)
 }
 
-/// Reject an axis argument whose resolved type is not `int32`.
+/// Reject an axis argument whose resolved type is not `i32`.
 ///
-/// An axis names a rank position and is int32 in every enforced surface
+/// An axis names a rank position and is i32 in every enforced surface
 /// (`sum`, `permute`, `shape`). chelis#1113 owns the numbered-atom
 /// classification; until it lands this keeps the acceptance closed so
-/// no axis-taking builtin silently admits an int64 axis while `sum`
+/// no axis-taking builtin silently admits an i64 axis while `sum`
 /// rejects one. `Var` and `Error` pass through: an axis that is still
 /// unresolved carries no dtype to judge, and one that already failed
 /// must not produce a second diagnostic for the same cause.
@@ -488,22 +486,33 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
 pub(super) fn reject_non_int32_axis(
     op: &str,
     axis_ty: &Type,
-    list: &deep::List,
+    node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
-    match axis_ty {
-        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => Ok(()),
-        other => Err(report(
+    let rejection = |other: &Type, errors: &mut DiagnosticSink<'_>| {
+        report(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!("{op} expects int32 axis, got {other}"),
-                ),
+                with_node_provenance(node, format!("{op} expects i32 axis, got {other}")),
                 vec![],
             ),
-        )),
+        )
+    };
+    match subst.apply(axis_ty) {
+        Type::Prim(Prim::Int32) | Type::Error(_) => Ok(()),
+        // chelis#2523, [05-DIM-3]: an axis-domain argument IS `i32`, so an
+        // axis whose type is still a variable is constrained to `i32` rather
+        // than admitted. Admitting it skipped the gate for good: an authored
+        // binder never binds, and a lambda parameter bound to `i64` later was
+        // never revisited. The constraint pins an authored binder, which its
+        // declaration's rigidity check reports ([04-INF-6]).
+        Type::Var(var) => match unify(&Type::Var(var), &Type::Prim(Prim::Int32), subst) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(rejection(&Type::Var(var), errors)),
+        },
+        other => Err(rejection(&other, errors)),
     }
 }
 
@@ -514,7 +523,8 @@ pub(super) fn reject_non_int32_axis(
 pub(super) fn enforce_registered_axis_dtypes(
     op: &str,
     arg_tys: &[Type],
-    list: &deep::List,
+    node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<(), Type> {
     let Some(layout) = builtins::axis_argument_layout(op) else {
@@ -525,13 +535,13 @@ pub(super) fn enforce_registered_axis_dtypes(
         builtins::AxisArgumentLayout::Fixed(slots) => {
             for &slot in slots {
                 if let Some(axis_ty) = arg_tys.get(slot) {
-                    reject_non_int32_axis(op, axis_ty, list, errors)?;
+                    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
                 }
             }
         }
         builtins::AxisArgumentLayout::VariadicFrom(first) => {
             for axis_ty in arg_tys.iter().skip(first) {
-                reject_non_int32_axis(op, axis_ty, list, errors)?;
+                reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
             }
         }
     }
@@ -552,17 +562,19 @@ pub(super) fn enforce_registered_axis_dtypes(
 /// extracts to `None` and silently becomes `default`, so
 /// `diagonal(m, 9.0, 0)` reported "axes 0 and 0" for an axis the
 /// caller never wrote, and a string axis checked clean.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_axis_pair_member(
     op: &str,
     axis_expr: Option<&deep::Expr>,
     axis_ty: &Type,
     tensor_ty: &Type,
     default: usize,
-    list: &deep::List,
+    node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
-    reject_non_int32_axis(op, axis_ty, list, errors)?;
-    // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
+    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
+    // Issue #216: use the cast-aware extractor so `cast(N, i32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
     // chelis#731 §C3: the out-of-bounds `Err` now carries the
@@ -575,8 +587,8 @@ pub(super) fn resolve_axis_pair_member(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
+                        with_node_provenance(
+                            node,
                             format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                         ),
                         vec![],
@@ -611,17 +623,18 @@ pub(super) fn resolve_axis_pair_member(
 ///
 /// `axis_ty` is the axis argument's resolved (subst-applied) type,
 /// screened by [`reject_non_int32_axis`] before extraction so no caller
-/// silently admits an int64 axis the way `cumsum`/`concat` once did
+/// silently admits an i64 axis the way `cumsum`/`concat` once did
 /// while `sum` rejected one.
 pub(super) fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
     axis_ty: &Type,
     tensor_ty: &Type,
-    list: &deep::List,
+    node: &DeepNode,
+    subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
-    reject_non_int32_axis(op, axis_ty, list, errors)?;
+    reject_non_int32_axis(op, axis_ty, node, subst, errors)?;
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
@@ -631,8 +644,8 @@ pub(super) fn resolve_builtin_axis(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("{op} axis {raw} out of bounds for rank {}", dims.len()),
                     ),
                     vec![],

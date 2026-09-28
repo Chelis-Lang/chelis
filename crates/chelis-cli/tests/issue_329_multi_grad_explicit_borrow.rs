@@ -66,19 +66,19 @@ fn reef_toml() -> String {
 /// explicit `&tensor` parameter, dim- and precision-polymorphic.
 const LIB: &str = "module Repro.Lib\n\
      export (nb)\n\
-     sig nb: &tensor[a, p] -> tensor[a, p]\n\
+     sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
      def nb(x) = relu(x)\n";
 
 /// grad #1 — explicitly borrows the differentiation target (`nb(&v)`).
 const DA: &str = "module Repro.Da\n\
      import Repro.Lib (nb)\n\
-     def shim_a(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, int32)))\n\
+     def shim_a(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, i32)))\n\
      def trig_a(v: tensor[3, f32]) -> tensor[3, f32] = grad(shim_a)(v)\n";
 
 /// grad #2 — structurally distinct, also explicitly borrows.
 const DB: &str = "module Repro.Db\n\
      import Repro.Lib (nb)\n\
-     def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, int32)))\n\
+     def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, i32)))\n\
      def trig_b(v: tensor[3, f32]) -> tensor[3, f32] = grad(shim_b)(v)\n";
 
 /// Run `chelis check <dir>` over a reef package and parse the
@@ -113,7 +113,7 @@ fn file_entry<'a>(json: &'a Value, suffix: &str) -> &'a Value {
 fn assert_file_clean(json: &Value, suffix: &str) {
     let entry = file_entry(json, suffix);
     assert_eq!(
-        entry["report"]["score"], 1,
+        entry["report"]["score"], 1.0,
         "{suffix} must check clean (score 1): {entry}"
     );
     let errors = entry["report"]["errors"]
@@ -173,11 +173,11 @@ fn issue_329_same_module_two_explicit_borrow_grads_check_clean() {
     write_file(
         &root.join("src/all.ch"),
         "module Repro.All\n\
-         sig nb: &tensor[a, p] -> tensor[a, p]\n\
+         sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
          def nb(x) = relu(x)\n\
-         def shim_a(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, int32)))\n\
+         def shim_a(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, i32)))\n\
          def trig_a(v: tensor[3, f32]) -> tensor[3, f32] = grad(shim_a)(v)\n\
-         def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, int32)))\n\
+         def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, i32)))\n\
          def trig_b(v: tensor[3, f32]) -> tensor[3, f32] = grad(shim_b)(v)\n",
     );
 
@@ -252,7 +252,7 @@ fn issue_329_owned_param_verb_grads_check_clean() {
         &root.join("src/lib.ch"),
         "module Repro.Lib\n\
          export (nb)\n\
-         sig nb: tensor[a, p] -> tensor[a, p]\n\
+         sig nb[a, p: Float]: tensor[a, p] -> tensor[a, p]\n\
          def nb(x) = relu(x)\n",
     );
     write_file(&root.join("src/da.ch"), &DA.replace("nb(&v)", "nb(v)"));
@@ -299,10 +299,10 @@ fn issue_329_explicit_and_auto_borrow_check_parity() {
 ///   d/dv sum(relu(v))        at [2, -1]    = [1, 0]
 ///   d/dv sum(relu(v)^2)      at [1, -2, 3] = 2·relu(v)·step(v) = [2, 0, 6]
 const EVAL_EXPLICIT: &str = "module Repro.Issue329Eval\n\
-     sig nb: &tensor[a, p] -> tensor[a, p]\n\
+     sig nb[a, p: Float]: &tensor[a, p] -> tensor[a, p]\n\
      def nb(x) = relu(x)\n\
-     def shim_a(v: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, int32)))\n\
-     def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, int32)))\n\
+     def shim_a(v: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(nb(&v), cast(0, i32)))\n\
+     def shim_b(v: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(nb(&v), nb(&v)), cast(0, i32)))\n\
      out_a = grad(shim_a)(to_tensor([cast(2.0, f32), cast(-1.0, f32)]))\n\
      out_b = grad(shim_b)(to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32)]))\n";
 
@@ -396,7 +396,7 @@ fn issue_329_genuine_invalid_borrow_still_fails_with_real_site() {
         &root.join("src/bad.ch"),
         "module Repro.Bad\n\
          type Counter =\n\
-           | Counter { value: int64 }\n\
+           | Counter { value: i64 }\n\
          sig peek: &Counter -> bool\n\
          def peek(c) = true\n\
          def trip(c: Counter) -> bool = peek(&c)\n",

@@ -1,4 +1,6 @@
 use super::*;
+use crate::wire_values;
+use chelis_deep::Metadata;
 use chelis_pred::PredAmenability;
 
 fn f32_value(value: f64) -> ScalarValue {
@@ -8,7 +10,7 @@ fn f32_value(value: f64) -> ScalarValue {
 /// Desugar a Surf module string to Deep for collection tests.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 const PROB: &str = "module Stats.Prob
@@ -18,6 +20,70 @@ type Probability =
   | Probability { value: f32 }
 def probability(x: f32) -> Probability = Probability { value: x }
 ";
+
+fn decoded_node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+    let span = chelis_deep::Span::new(0, 0);
+    Expr::node(tag, Metadata::default(), children, span)
+}
+
+#[test]
+fn unknown_forms_expose_no_opaque_children_or_annotations() {
+    let span = chelis_deep::Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future".into(),
+        meta: Metadata::default(),
+        children: vec![child],
+        span,
+    }));
+
+    assert!(children(&unknown).is_empty());
+    assert!(annotations(&unknown).is_none());
+}
+
+#[test]
+fn typed_predicate_binder_rejects_unknown_form_but_reads_a_structural_param() {
+    let span = chelis_deep::Span::new(0, 0);
+    let structural_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("p".into()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    let unknown_param = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "p".into(),
+        meta: Metadata::default(),
+        children: Vec::new(),
+        span,
+    }));
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("p".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
+        span,
+    );
+    let predicate = |param| {
+        decoded_node(
+            DeepTag::Fn,
+            vec![
+                decoded_node(DeepTag::Params, vec![param]),
+                Expr::Atom(Atom::Bool(true), span),
+            ],
+        )
+    };
+
+    assert_eq!(
+        predicate_binder(&predicate(structural_param)),
+        Some("p".into())
+    );
+    assert_eq!(predicate_binder(&predicate(unknown_param)), None);
+    assert_eq!(
+        predicate_binder(&predicate(malformed_param)),
+        Some("p".into())
+    );
+}
 
 #[test]
 fn collects_opaque_invariant_with_record_field() {
@@ -41,8 +107,8 @@ fn skips_opaque_without_invariant() {
     let surf = "module M.Plain
 @opaque
 type Token =
-  | Token { id: int32 }
-def make(i: int32) -> Token = Token { id: i }
+  | Token { id: i32 }
+def make(i: i32) -> Token = Token { id: i }
 ";
     let exprs = deep_of(surf);
     assert!(collect_opaque_invariants(&exprs).is_empty());
@@ -143,8 +209,8 @@ fn u2_int_field_constant_in_precondition_lowers_int_not_real() {
 @opaque
 @invariant(c) c.n >= lo
 type Counter =
-  | Counter { n: int32 }
-def make(x: int32) -> Counter = Counter { n: x }
+  | Counter { n: i32 }
+def make(x: i32) -> Counter = Counter { n: x }
 ";
     let exprs = deep_of(surf);
     let inv = &collect_opaque_invariants(&exprs)[0];
@@ -246,15 +312,15 @@ def make(x: f32) -> Probability = Probability { value: x }
 }
 
 // Review-4 follow-up: the int-width sampling decision is single-source
-// (`int_sample_bounds`), and an int8/int16 field samples within its
+// (`int_sample_bounds`), and an i8/i16 field samples within its
 // representable range instead of an out-of-range value or a float that
 // would yield a spurious counterexample.
 #[test]
 fn int_sample_bounds_clamps_to_each_widths_representable_range() {
-    assert_eq!(super::int_sample_bounds("int8"), Some((-128, 127)));
-    assert_eq!(super::int_sample_bounds("int16"), Some((-1000, 1000)));
-    assert_eq!(super::int_sample_bounds("int32"), Some((-1000, 1000)));
-    assert_eq!(super::int_sample_bounds("int64"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i8"), Some((-128, 127)));
+    assert_eq!(super::int_sample_bounds("i16"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i32"), Some((-1000, 1000)));
+    assert_eq!(super::int_sample_bounds("i64"), Some((-1000, 1000)));
     assert_eq!(super::int_sample_bounds("f32"), None);
     assert_eq!(super::int_sample_bounds("bool"), None);
 }
@@ -263,22 +329,22 @@ fn int_sample_bounds_clamps_to_each_widths_representable_range() {
 fn int8_field_samples_are_integers_within_int8_range() {
     use super::{FieldType, GenRng, sample_field_into};
     let mut rng = GenRng::new(0);
-    let fty = FieldType::Scalar("int8".to_string());
+    let fty = FieldType::Scalar("i8".to_string());
     for _ in 0..200 {
         let mut env = std::collections::BTreeMap::new();
         sample_field_into("x", &fty, &mut rng, &mut env);
-        let v = env["x"].as_i64_exact().expect("int8 sample stays integer");
+        let v = env["x"].as_i64_exact().expect("i8 sample stays integer");
         assert!(
             (-128..=127).contains(&v),
-            "int8 sample must be in [-128, 127], got {v}"
+            "i8 sample must be in [-128, 127], got {v}"
         );
     }
 }
 
 #[test]
 fn int64_wire_element_enters_the_prover_without_crossing_f64() {
-    let elements = chelis_compiler_api::schema::TensorElements::Int64(vec![9_007_199_254_740_993]);
-    let value = tensor_element_scalar(&elements, 0).expect("int64 wire element");
+    let elements = wire_values::storage_i64(vec![9_007_199_254_740_993]);
+    let value = tensor_element_scalar(&elements, 0).expect("i64 wire element");
     assert_eq!(value.prim(), Prim::Int64);
     assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_993));
 }
@@ -288,10 +354,29 @@ fn typed_generated_env_renders_plain_exact_integer_json() {
     let mut env = BTreeMap::new();
     env.insert(
         "p.id".to_string(),
-        scalar_from_i64("prove-test", Prim::Int64, 9_007_199_254_740_993).expect("valid int64"),
+        scalar_from_i64("prove-test", Prim::Int64, 9_007_199_254_740_993).expect("valid i64"),
     );
     assert_eq!(
         generated_env_json(&env)["p.id"].as_i64(),
         Some(9_007_199_254_740_993)
     );
+}
+
+#[test]
+fn sealed_wire_elements_preserve_nan_payloads_and_reject_out_of_bounds() {
+    for (dtype, bits) in [
+        ("f16", "7c01"),
+        ("bf16", "ff81"),
+        ("f32", "7f800001"),
+        ("f64", "fff0000000000001"),
+    ] {
+        let json = serde_json::json!({"dtype": dtype, "bits": [bits]});
+        let storage = serde_json::from_value(json).unwrap();
+        let scalar = tensor_element_scalar(&storage, 0).expect("stored element");
+        assert_eq!(
+            serde_json::to_value(scalar).unwrap(),
+            serde_json::json!({"dtype": dtype, "bits": bits})
+        );
+        assert!(tensor_element_scalar(&storage, 1).is_none());
+    }
 }

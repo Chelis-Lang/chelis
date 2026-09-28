@@ -6,7 +6,12 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Explicit in-memory observations of production lowering; no default capture.
+lowering-trace = []
+
 [dependencies]
+chelis-abi.workspace = true
 chelis-unord.workspace = true
 chelis-deep.workspace = true
 chelis-effects.workspace = true
@@ -18,10 +23,15 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+syn.workspace = true
 chelis-surf.workspace = true
 chelis-macros.workspace = true
 bincode = "1"
 serde_json = "1"
+
+[[test]]
+name = "helper_lowering_trace"
+required-features = ["lowering-trace"]
 
 [lints]
 workspace = true

@@ -58,7 +58,7 @@ pub fn analyze(source: &str) -> LiveAnalysis {
             } else {
                 LiveStage::Check
             },
-            fitness: Some(result.score),
+            fitness: Some(result.score.get()),
             diagnostics: result.errors,
             deep_text: Some(deep_text),
         },
@@ -171,15 +171,12 @@ fn render_execution_value(value: &ExecutionValue) -> String {
         ExecutionValue::Tensor { value } => {
             format!("shape={:?} data={:?}", value.shape, value.data)
         }
-        ExecutionValue::Int8 { value } => value.to_string(),
-        ExecutionValue::Int16 { value } => value.to_string(),
-        ExecutionValue::Int32 { value } => value.to_string(),
-        ExecutionValue::Int64 { value } => value.to_string(),
-        ExecutionValue::Float16 { value } => value.to_string(),
-        ExecutionValue::Bfloat16 { value } => value.to_string(),
-        ExecutionValue::Float32 { value } => value.to_string(),
-        ExecutionValue::Float64 { value } => value.to_string(),
+        ExecutionValue::Scalar { value } => {
+            let scalar = value.get();
+            chelis_types::format_element(scalar.prim(), scalar.element_ref())
+        }
         ExecutionValue::Bool { value } => value.to_string(),
+        ExecutionValue::Key { bits } => chelis_types::format_key(bits.key()),
         ExecutionValue::String { value } => value.clone(),
         ExecutionValue::List { value: items } => format!(
             "[{}]",
@@ -248,10 +245,10 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
         let mut shape = Vec::new();
         for dim in node.output_type.dims {
             match dim {
-                WireDimInfo::Lit { size } => shape.push(size),
+                WireDimInfo::Lit { size } => shape.push(size.get()),
                 WireDimInfo::Named {
                     size: Some(size), ..
-                } => shape.push(size),
+                } => shape.push(size.get()),
                 WireDimInfo::Named { name, size: None } => {
                     return Err(format!(
                         "eval failed\n- cannot auto-evaluate unresolved named dimension `{name}`"
@@ -259,7 +256,17 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
                 }
             }
         }
-        let len = shape.iter().product();
+        let len = if shape.contains(&0) {
+            0
+        } else {
+            shape.iter().try_fold(1_usize, |count, extent| {
+                let extent =
+                    usize::try_from(*extent).map_err(|_| "eval failed: invalid tensor extent")?;
+                count
+                    .checked_mul(extent)
+                    .ok_or("eval failed: tensor element count exceeds host capacity")
+            })?
+        };
         bindings.insert(
             name,
             TensorValue {
@@ -273,20 +280,26 @@ fn zero_bindings(source: &str) -> Result<BTreeMap<String, TensorValue>, String> 
 }
 
 fn zero_elements(precision: &str, len: usize) -> Result<TensorElements, String> {
-    match precision {
-        "f64" => Ok(TensorElements::F64(vec![0.0; len])),
-        "f32" => Ok(TensorElements::F32(vec![0.0; len])),
-        "f16" => Ok(TensorElements::F16(vec![0.0; len])),
-        "bf16" => Ok(TensorElements::Bf16(vec![0.0; len])),
-        "int64" => Ok(TensorElements::Int64(vec![0; len])),
-        "int32" => Ok(TensorElements::Int32(vec![0; len])),
-        "int16" => Ok(TensorElements::Int16(vec![0; len])),
-        "int8" => Ok(TensorElements::Int8(vec![0; len])),
-        "bool" => Ok(TensorElements::Bool(vec![false; len])),
-        other => Err(format!(
-            "eval failed\n- cannot auto-evaluate non-runtime dtype `{other}`"
-        )),
+    use chelis_types::{RawTensor, finalize_tensor, types::Prim};
+    let prim = Prim::parse_interchange_name(precision)
+        .filter(|prim| prim.runtime_dtype().is_ok())
+        .ok_or_else(|| {
+            format!("eval failed\n- cannot auto-evaluate non-runtime dtype `{precision}`")
+        })?;
+    // spec/04 §1.1: a key has no default value, so no zero binds one.
+    if !prim.is_data_element_dtype() {
+        return Err(format!(
+            "eval failed\n- cannot auto-evaluate dtype `{precision}`: a key has no zero value"
+        ));
     }
+    let mut zeroes = Vec::new();
+    zeroes
+        .try_reserve_exact(len)
+        .map_err(|error| format!("eval failed: zero binding allocation: {error}"))?;
+    zeroes.resize(len, 0);
+    // Integer zero is exact in every runtime dtype, including bool and halves.
+    finalize_tensor("cove-zero-binding", prim, RawTensor::Int(zeroes))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -295,7 +308,7 @@ mod tests {
 
     #[test]
     fn valid_program_reports_fitness_and_deep() {
-        let analysis = analyze("def f(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        let analysis = analyze("def f[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert_eq!(analysis.stage, LiveStage::Ready);
         assert_eq!(analysis.fitness, Some(1.0));
         assert!(
@@ -332,19 +345,48 @@ mod tests {
     }
 
     #[test]
+    fn scalar_display_preserves_large_integer_and_own_width_text() {
+        use chelis_types::{scalar_from_f64, scalar_from_i64, types::Prim};
+        for (value, text) in [
+            (
+                scalar_from_i64("display-test", Prim::Int64, 9_007_199_254_740_993).unwrap(),
+                "9007199254740993",
+            ),
+            (
+                scalar_from_f64("display-test", Prim::F32, -0.0).unwrap(),
+                "-0.0",
+            ),
+        ] {
+            assert_eq!(
+                render_execution_value(&ExecutionValue::Scalar {
+                    value: value.try_into().unwrap()
+                }),
+                text
+            );
+        }
+        assert!(zero_elements("f32", usize::MAX).is_err());
+    }
+
+    #[test]
     fn zero_bindings_keep_the_declared_wire_dtype() {
-        assert!(matches!(
-            zero_elements("f32", 2).expect("f32 zeros"),
-            TensorElements::F32(values) if values == vec![0.0, 0.0]
-        ));
-        assert!(matches!(
-            zero_elements("int64", 2).expect("int64 zeros"),
-            TensorElements::Int64(values) if values == vec![0, 0]
-        ));
+        for name in [
+            "f64", "f32", "f16", "bf16", "int64", "int32", "int16", "int8", "bool",
+        ] {
+            let storage = zero_elements(name, 2).expect("declared zeros");
+            assert_eq!(storage.prim().interchange_name(), name);
+            assert_eq!(storage.len(), 2);
+            assert_eq!(storage.to_f64_lossy_vec(), vec![0.0, 0.0]);
+        }
         assert!(
             zero_elements("f8e4m3", 1)
                 .expect_err("unsupported runtime dtype must fail loudly")
                 .contains("non-runtime dtype `f8e4m3`")
+        );
+        // A key tensor is a runtime dtype with no zero value to bind.
+        assert!(
+            zero_elements("key", 1)
+                .expect_err("a key input must fail loudly")
+                .contains("a key has no zero value")
         );
     }
 }

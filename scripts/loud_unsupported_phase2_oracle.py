@@ -120,17 +120,12 @@ def mutate_effect_kind(source: str) -> str:
 
     replacements = (
         (
-            "pub enum EffectKind {\n    Random,\n    Resource,\n}",
-            "pub enum EffectKind {\n    Random,\n    Resource,\n"
-            "    Phase2OracleMutation,\n}",
+            "pub enum EffectKind {\n    Resource,\n}",
+            "pub enum EffectKind {\n    Resource,\n    Phase2OracleMutation,\n}",
         ),
         (
-            "pub const ALL: [Self; 2] = [Self::Random, Self::Resource];",
-            "pub const ALL: [Self; 3] = [\n"
-            "        Self::Random,\n"
-            "        Self::Resource,\n"
-            "        Self::Phase2OracleMutation,\n"
-            "    ];",
+            "pub const ALL: [Self; 1] = [Self::Resource];",
+            "pub const ALL: [Self; 2] = [Self::Resource, Self::Phase2OracleMutation];",
         ),
         (
             '            Self::Resource => "resource",\n',
@@ -163,6 +158,9 @@ def mutate_runtime_dtype(source: str) -> str:
             "    F16 = 6,\n"
             "    I8 = 7,\n"
             "    I16 = 8,\n"
+            "    /// A random key ([05-RNG-2]): structurally non-numeric, with no\n"
+            "    /// arithmetic representation.\n"
+            "    Key = 9,\n"
             "}",
             "pub enum RuntimeDType {\n"
             "    F32 = 0,\n"
@@ -174,36 +172,39 @@ def mutate_runtime_dtype(source: str) -> str:
             "    F16 = 6,\n"
             "    I8 = 7,\n"
             "    I16 = 8,\n"
-            "    Phase2OracleDType = 9,\n"
+            "    /// A random key ([05-RNG-2]): structurally non-numeric, with no\n"
+            "    /// arithmetic representation.\n"
+            "    Key = 9,\n"
+            "    Phase2OracleDType = 10,\n"
             "}",
         ),
         (
-            "    pub const ALL: [Self; 9] = [\n        Self::F32,\n",
             "    pub const ALL: [Self; 10] = [\n        Self::F32,\n",
+            "    pub const ALL: [Self; 11] = [\n        Self::F32,\n",
         ),
         (
-            "        Self::I16,\n    ];",
-            "        Self::I16,\n        Self::Phase2OracleDType,\n    ];",
+            "        Self::Key,\n    ];",
+            "        Self::Key,\n        Self::Phase2OracleDType,\n    ];",
         ),
         (
-            '            Self::I16 => "int16",\n',
-            '            Self::I16 => "int16",\n'
+            '            Self::Key => "key",\n',
+            '            Self::Key => "key",\n'
             '            Self::Phase2OracleDType => "phase2-oracle-dtype",\n',
         ),
         (
-            '            Self::I16 => "CHELIS_DTYPE_I16",\n',
-            '            Self::I16 => "CHELIS_DTYPE_I16",\n'
+            '            Self::Key => "CHELIS_DTYPE_KEY",\n',
+            '            Self::Key => "CHELIS_DTYPE_KEY",\n'
             '            Self::Phase2OracleDType => "CHELIS_DTYPE_PHASE2_ORACLE",\n',
         ),
         (
-            "            Self::I16 => (Repr::TwosComplement16, Some(A::ExactTwosComplement16)),\n",
-            "            Self::I16 => (Repr::TwosComplement16, Some(A::ExactTwosComplement16)),\n"
+            "            Self::Key => (Repr::Word64, None),\n",
+            "            Self::Key => (Repr::Word64, None),\n"
             "            Self::Phase2OracleDType => (Repr::Ieee754Binary32, Some(A::Ieee754Binary32)),\n",
         ),
         (
-            "            8 => Ok(Self::I16),\n",
-            "            8 => Ok(Self::I16),\n"
-            "            9 => Ok(Self::Phase2OracleDType),\n",
+            "            9 => Ok(Self::Key),\n",
+            "            9 => Ok(Self::Key),\n"
+            "            10 => Ok(Self::Phase2OracleDType),\n",
         ),
     )
     return apply_anchored_replacements(source, replacements, "RuntimeDType")
@@ -315,7 +316,7 @@ def run_vocab_mutation(env: dict[str, str]) -> None:
         required_evidence = (
             "non-exhaustive patterns",
             # EffectKind: the two independently-checkable consumer roots.
-            "crates/chelis-surf/src/decompile.rs",
+            "crates/chelis-surf/src/resugar.rs",
             "crates/chelis-types/src/infer/expr.rs",
             # RuntimeDType: every runtime FFI dtype boundary matches
             # exhaustively; an added dtype must go red there before any

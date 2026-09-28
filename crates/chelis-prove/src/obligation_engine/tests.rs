@@ -33,7 +33,8 @@ fn run(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
 
 fn run_deep(surf: &str, tier: &str) -> Vec<ObligationOutcome> {
     let declarations = chelis_surf::parser::parse_str(surf).expect("parse Surf fixture");
-    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let expressions =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let source = chelis_deep::printer::print_canonical(&expressions);
     match run_deep_source_obligations(&source, &options(tier)).expect("engine run") {
         ObligationRunResult::Ran(outcomes) => outcomes,
@@ -247,7 +248,7 @@ fn u1_chokepoint_signature_is_stable() {
 
 // ===================================================================
 // Review 5: int-width consistency on the SAMPLING axis. Every integer
-// width (int8/int16/int32/int64) samples as a width-clamped INTEGER at
+// width (i8/i16/i32/i64) samples as a width-clamped INTEGER at
 // Tier C (not a float), via the single-source `int_sample_bounds`, so an
 // int-field/param obligation runs and passes at the fuzz tier.
 // ===================================================================
@@ -256,11 +257,11 @@ fn u1_chokepoint_signature_is_stable() {
 /// (fuzz-only, no SMT) with integer-valued samples and PASSES, looped over
 /// every integer width. The producer guards `x >= 0` so the constructed
 /// value satisfies `c.n >= 0` for every accepted sample; a float-sampled
-/// int param (the pre-fix bug for int8/int16) would mis-type the producer
+/// int param (the pre-fix bug for i8/i16) would mis-type the producer
 /// call and error rather than pass cleanly.
 #[test]
 fn w5_int_width_field_param_samples_as_integer_at_tier_c() {
-    for width in ["int8", "int16", "int32", "int64"] {
+    for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (make)
@@ -315,31 +316,25 @@ def make(x: f32) -> Option[Probability] =
     );
 }
 
-/// The fuzz-sampling bounds are single-source and width-clamped: an int8
-/// samples in [-128, 127], an int16 in [-1000, 1000] (the convenience
+/// The fuzz-sampling bounds are single-source and width-clamped: an i8
+/// samples in [-128, 127], an i16 in [-1000, 1000] (the convenience
 /// window, since [-32768, 32767] exceeds it), etc. -- proving the sampling
 /// axis routes through `int_sample_bounds` / `Prim::integer_fuzz_bounds`,
 /// not an independent [-1000, 1000] for every width.
 #[test]
 fn w5_int_sample_bounds_are_width_clamped_single_source() {
     assert_eq!(
-        crate::opaque::int_sample_bounds("int8"),
+        crate::opaque::int_sample_bounds("i8"),
         Some((-128, 127)),
-        "int8 sampling is clamped to its representable range"
+        "i8 sampling is clamped to its representable range"
     );
     assert_eq!(
-        crate::opaque::int_sample_bounds("int16"),
+        crate::opaque::int_sample_bounds("i16"),
         Some((-1000, 1000)),
-        "int16 keeps the convenience window (within its range)"
+        "i16 keeps the convenience window (within its range)"
     );
-    assert_eq!(
-        crate::opaque::int_sample_bounds("int32"),
-        Some((-1000, 1000))
-    );
-    assert_eq!(
-        crate::opaque::int_sample_bounds("int64"),
-        Some((-1000, 1000))
-    );
+    assert_eq!(crate::opaque::int_sample_bounds("i32"), Some((-1000, 1000)));
+    assert_eq!(crate::opaque::int_sample_bounds("i64"), Some((-1000, 1000)));
     assert_eq!(
         crate::opaque::int_sample_bounds("f32"),
         None,
@@ -350,18 +345,18 @@ fn w5_int_sample_bounds_are_width_clamped_single_source() {
 #[test]
 fn tier_c_tensor_argument_preserves_int64_payload_and_dtype() {
     let exact = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
-        .expect("value is representable as int64");
-    let arg = obligation_tensor_arg("xs", &[1], "int64", &[exact]);
+        .expect("value is representable as i64");
+    let arg = obligation_tensor_arg("xs", &[1], "i64", &[exact]);
 
     assert_eq!(arg.json[0].as_i64(), Some(9_007_199_254_740_993));
     let deep = chelis_deep::printer::print_canonical(&[arg.expr]);
-    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(deep.contains("(t-prim {} i64)"), "{deep}");
     assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
 }
 
 #[test]
 fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
-    for width in ["int8", "int16", "int32", "int64"] {
+    for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (make)
@@ -380,4 +375,86 @@ def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
             "integer tensor argument must be sampled at `{width}`: {outcome:?}"
         );
     }
+}
+
+#[test]
+fn zero_arg_constant_discovery_reads_the_stamped_module() {
+    let source = r#"(module {} M
+        (def {} value (lit {} 1))
+        (def {} zero (fn {} (params {}) (lit {} 2)))
+        (def {} unary (fn {} (params {} x) (lit {} 3))))"#;
+    let stamped =
+        chelis_deep::parse_and_stamp_file(source).expect("constant-discovery fixture stamps");
+
+    let expected = vec!["value".to_string(), "zero".to_string()];
+    assert_eq!(module_zero_arg_scalar_defs(&stamped), expected);
+}
+
+#[test]
+fn unknown_forms_expose_no_engine_children_or_binder() {
+    let span = Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let structural = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("binder".into()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "binder".into(),
+        meta: Metadata::default(),
+        children: vec![child],
+        span,
+    }));
+
+    assert_eq!(binder_name(&structural), Some("binder"));
+    assert_eq!(binder_name(&unknown), None);
+    assert!(node_children(&unknown).is_empty());
+}
+
+#[test]
+fn producer_param_discovery_keeps_a_malformed_structural_binder() {
+    let span = Span::new(0, 0);
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
+        span,
+    );
+    let params = deep_node("params", vec![malformed_param]);
+    let function = deep_node(
+        "fn",
+        vec![
+            params,
+            deep_node("lit", vec![Expr::Atom(Atom::Int(1), span)]),
+        ],
+    );
+    let def = deep_node("def", vec![deep_sym("make"), function]);
+    let module = deep_node("module", vec![deep_sym("M"), def]);
+
+    assert_eq!(producer_param_names(&[module], "make"), ["x"]);
+}
+
+/// chelis#1125: the injection matched only the deleted list spelling of a
+/// module, so a stamped module never received the obligation defs and they
+/// landed at top level, outside the module that makes the opaque type's
+/// field access legal.
+#[test]
+fn defining_module_injection_appends_to_the_module_node() {
+    let span = Span::new(0, 0);
+    let deftype = deep_node(
+        "deftype",
+        vec![deep_sym("Token"), Expr::BareList(vec![], span)],
+    );
+    let module = deep_node("module", vec![deep_sym("M"), deftype]);
+    let marker = deep_node("def", vec![deep_sym("marker"), deep_var("Token")]);
+
+    let injected = inject_into_defining_module(&[module], "Token", vec![marker.clone()]);
+    assert_eq!(injected.len(), 1, "the defs join the defining module");
+    let Expr::Node(module, _) = &injected[0] else {
+        panic!("the module node is preserved")
+    };
+    assert_eq!(module.children_slice().last(), Some(&marker));
 }

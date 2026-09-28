@@ -93,6 +93,34 @@ pub struct AdtRegistry {
     pub(crate) resolution_env: TypeResolutionEnv,
 }
 
+/// Spec/04 section 8.4.1: whether `ty` carries a key, given the data types
+/// already known to carry one. A type variable carries none here: it is a
+/// field of a generic data type, and what it is instantiated at decides.
+fn type_carries_key(ty: &Type, carriers: &UnordSet<String>) -> bool {
+    match ty {
+        Type::Prim(prim) => *prim == Prim::Key,
+        Type::Tensor(_, precision) => precision.as_concrete() == Some(Prim::Key),
+        Type::Ref(inner) => type_carries_key(inner, carriers),
+        Type::Tuple(elements) => elements
+            .iter()
+            .any(|element| type_carries_key(element, carriers)),
+        Type::Adt(name, arguments) => {
+            carriers.contains(name)
+                || arguments
+                    .iter()
+                    .any(|argument| type_carries_key(argument, carriers))
+        }
+        Type::KindedAdt(name, arguments) => {
+            carriers.contains(name)
+                || arguments.iter().any(|argument| match argument {
+                    NominalArg::Type(argument) => type_carries_key(argument, carriers),
+                    NominalArg::Dimension(_) => false,
+                })
+        }
+        Type::Fn(_, _) | Type::Var(_) | Type::Unit | Type::Error(_) => false,
+    }
+}
+
 impl Default for AdtRegistry {
     fn default() -> Self {
         Self::new()
@@ -111,6 +139,35 @@ impl AdtRegistry {
 
     pub(crate) fn resolution_env(&self) -> &TypeResolutionEnv {
         &self.resolution_env
+    }
+
+    /// Spec/04 section 8.4.1: the registered data types one of whose variant
+    /// fields carries a key, as the least fixed point over every registered
+    /// definition, so a data type that holds another key-carrying data type
+    /// is found whatever order they were declared in.
+    pub(crate) fn key_carrying_adts(&self) -> UnordSet<String> {
+        let mut carriers = UnordSet::new();
+        loop {
+            let mut grew = false;
+            for (name, def) in &self.defs {
+                if carriers.contains(name) {
+                    continue;
+                }
+                let carries = def.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, field)| type_carries_key(field, &carriers))
+                });
+                if carries {
+                    carriers.insert(name.clone());
+                    grew = true;
+                }
+            }
+            if !grew {
+                return carriers;
+            }
+        }
     }
 
     pub(crate) fn install_resolution_env(&mut self, resolution_env: TypeResolutionEnv) {
@@ -149,31 +206,6 @@ impl AdtRegistry {
         let variant_start;
         if children.len() > 1 {
             match &children[1] {
-                deep::Expr::List(list, _) => {
-                    // Could be (a b) or (variant ...) -- check if first elem is a variant tag
-                    if let Some(tag) = list.tag() {
-                        if tag == DeepTag::Variant || tag == DeepTag::Field {
-                            // No type params, this is already a variant
-                            variant_start = 1;
-                        } else {
-                            // Type params list: elements are symbols
-                            for el in &list.elements {
-                                if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
-                                    type_params.push(s.clone());
-                                }
-                            }
-                            variant_start = 2;
-                        }
-                    } else {
-                        // Elements might be bare symbols for type params
-                        for el in &list.elements {
-                            if let deep::Expr::Atom(deep::Atom::Name(s), _) = el {
-                                type_params.push(s.clone());
-                            }
-                        }
-                        variant_start = 2;
-                    }
-                }
                 deep::Expr::Node(node, _)
                     if matches!(node.tag(), DeepTag::Variant | DeepTag::Field) =>
                 {
@@ -221,51 +253,62 @@ impl AdtRegistry {
         };
 
         for variant_expr in variant_children {
-            if let Some((DeepTag::Variant, vchildren)) = stamped_parts(variant_expr) {
-                if vchildren.is_empty() {
-                    continue;
-                }
+            let vchildren = match variant_expr.carrier() {
+                deep::ExprCarrier::DecodedNode(DeepTag::Variant, _, children) => children,
+                deep::ExprCarrier::DecodedNode(_, _, _)
+                | deep::ExprCarrier::StructuralList(_)
+                | deep::ExprCarrier::UndecodableHead(_, _, _)
+                | deep::ExprCarrier::Atom(_)
+                | deep::ExprCarrier::MetadataMap(_)
+                | deep::ExprCarrier::MetadataExpression(_) => continue,
+            };
+            if vchildren.is_empty() {
+                continue;
+            }
 
-                let vname = match &vchildren[0] {
-                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
-                    _ => continue,
-                };
+            let vname = match &vchildren[0] {
+                deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
+                _ => continue,
+            };
 
-                // Remaining children are either field definitions or positional type args.
-                // Field types are expanded through the alias registry so a field declared
-                // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
-                // unified as its expansion. Any alias the field references must already be
-                // registered; `collect_declarations` registers all `typealias` decls before
-                // any `deftype` so forward references (alias declared after the deftype that
-                // uses it) resolve too.
-                let mut fields: Vec<(Option<String>, Type)> = Vec::new();
-                for field_expr in &vchildren[1..] {
-                    match stamped_parts(field_expr) {
-                        Some((DeepTag::Field, fchildren)) => {
-                            if fchildren.len() >= 2 {
-                                let fname = match &fchildren[0] {
-                                    deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
-                                    _ => continue,
-                                };
-                                let ftype = self
-                                    .expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
-                                fields.push((Some(fname), ftype));
-                            }
-                        }
-                        _ => {
-                            // Positional type argument
+            // Remaining children are either field definitions or positional type args.
+            // Field types are expanded through the alias registry so a field declared
+            // with a transparent alias (`type EffectRow = List[Effect]`) is stored and
+            // unified as its expansion. Any alias the field references must already be
+            // registered; `collect_declarations` registers all `typealias` decls before
+            // any `deftype` so forward references (alias declared after the deftype that
+            // uses it) resolve too.
+            let mut fields: Vec<(Option<String>, Type)> = Vec::new();
+            for field_expr in &vchildren[1..] {
+                match field_expr.carrier() {
+                    deep::ExprCarrier::DecodedNode(DeepTag::Field, _, fchildren) => {
+                        if fchildren.len() >= 2 {
+                            let fname = match &fchildren[0] {
+                                deep::Expr::Atom(deep::Atom::Name(s), _) => s.clone(),
+                                _ => continue,
+                            };
                             let ftype =
-                                self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
-                            fields.push((None, ftype));
+                                self.expand_aliases(&resolver.resolve(&fchildren[1])?.into_type());
+                            fields.push((Some(fname), ftype));
                         }
                     }
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::StructuralList(_)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_) => {
+                        // Positional type argument
+                        let ftype = self.expand_aliases(&resolver.resolve(field_expr)?.into_type());
+                        fields.push((None, ftype));
+                    }
                 }
-
-                variants.push(VariantInfo {
-                    name: vname,
-                    fields,
-                });
             }
+
+            variants.push(VariantInfo {
+                name: vname,
+                fields,
+            });
         }
 
         let all_tvars = resolver.type_vars();
@@ -326,6 +369,7 @@ impl AdtRegistry {
                 (
                     variant.name.clone(),
                     Scheme {
+                        constraints: vec![],
                         tvars: all_tvars.clone(),
                         tvar_restrictions: vec![],
                         dvars: all_dvars.clone(),
@@ -592,19 +636,6 @@ impl AdtRegistry {
     }
 }
 
-/// Helper: get tag string from a Deep List.
-fn get_tag(list: &deep::List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &[deep::Expr])> {
-    match expr {
-        deep::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        deep::Expr::List(list, _) => Some((get_tag(list)?, list_children(list))),
-        _ => None,
-    }
-}
-
 fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
@@ -614,15 +645,6 @@ fn terminal_name(name: &str) -> &str {
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
         .unwrap_or(name)
-}
-
-/// Helper: get children (elements after tag and metadata) from a Deep List.
-fn list_children(list: &deep::List) -> &[deep::Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
-    }
 }
 
 pub(crate) fn substitute_alias_type(ty: &Type, subst: &UnordMap<TypeVar, Type>) -> Type {

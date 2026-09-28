@@ -1,0 +1,1365 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "phase": "a",
+      "id": "ir",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_a.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "input_axis_eval_does_not_read_tensor_elements",
+        "input_axis_expand_verifies_and_evaluates_from_shape_metadata",
+        "input_axis_owner_and_slot_validation_fail_closed",
+        "input_axis_vmap_shifts_literal_axis",
+        "movement_ops_reject_unowned_runtime_extent_inputs",
+        "node_expand_verifies_and_evaluates_from_int64_scalar_input",
+        "vmap_keeps_shape_bound_shared_and_shifts_its_axis",
+        "vmap_rejects_element_derived_extent",
+        "vmap_shares_shape_extent_across_bound_and_ordinary_uses",
+        "zero_literal_expand_is_valid_and_empty"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "host_actualization",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "cli",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_slice_a.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_refuted_claim_under_a_runtime_extent_root_traps_on_both_lanes",
+        "a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes",
+        "a_runtime_extent_nullary_root_executes_identically_on_both_lanes",
+        "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
+        "insert_def_body_wrong_rank_names_the_callee",
+        "negative_extent_remains_a_static_type_error",
+        "runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes",
+        "shape_sourced_insert_rejects_wrong_rank_ascription",
+        "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
+        "vmap_accepts_shape_and_shared_scalar_extent_sources",
+        "vmap_rejects_element_derived_extent_at_public_checker",
+        "vmap_rejects_helper_result_derived_from_tensor_elements",
+        "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
+        "zero_extent_is_check_clean_and_evaluates_to_empty_tensor"
+      ],
+      "note": "`insert_def_body_wrong_rank_names_the_callee` is NOT a receipt for any phase-a row. The row it sits beside, `expand.rank_ascription`, asserts that a wrong-rank ascription is refused, which `shape_sourced_insert_rejects_wrong_rank_ascription` proves; the def-body test asserts something else, that on the route where a declared result reaches the call as an expected result the diagnostic names the callee, and it pins chelis#1277 S2a's own seed extension. It is listed only because this target runs the whole file and the receipt check requires the observed test set to EQUAL the expected one."
+    },
+    {
+      "phase": "a",
+      "id": "runtime_negative",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_616_runtime_reshape_c_parity.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_616_runtime_reshape_negative_extent_errs_in_both_lanes"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "rank_poly",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/rank_poly_tier3.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_383_vmap_two_stage_named_reduce_regression_matrix"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "symbolic_window",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_368_grad_concat_windows.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_368_runtime_symbolic_window_grad_is_half_everywhere"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "wire",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_dag_v7_runtime_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "v6_display_string_expand_payload_is_rejected_before_op_decode",
+        "v7_expand_rejects_forbidden_carriers_slots_and_cardinality",
+        "v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners",
+        "v7_input_axis_round_trips_as_typed_structure",
+        "v7_movement_ops_reject_unowned_runtime_extent_inputs",
+        "v7_node_extent_round_trips_only_from_rank_zero_int64",
+        "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "wire_capacity",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/capacity_census_wire.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "adding_or_removing_a_public_serialized_f64_field_changes_the_census",
+        "capacity_census_authority::tests::a_static_wire_descriptor_cannot_supply_verified_transport_authority",
+        "capacity_census_authority::tests::duplicate_numeric_registration_is_not_one_authority",
+        "capacity_census_authority::tests::each_exact_final_class_is_recognized",
+        "capacity_census_authority::tests::nonnumeric_registration_cannot_hide_numeric_flags",
+        "capacity_census_authority::tests::numeric_registration_requires_exact_normative_atom_and_anchor",
+        "capacity_census_authority::tests::tagged_transport_registration_is_exact_in_every_descriptor_field",
+        "capacity_census_authority::tests::zero_or_multiple_final_classes_fail",
+        "capacity_census_wire_verifier::tests::wire_baseline_rejects_exception_fields_and_nonfinal_classes",
+        "capacity_census_wire_verifier::tests::wire_rows_cannot_erase_capacity_or_duplicate_an_identity",
+        "managed_python::tests::absent_configuration_uses_checkout_venv",
+        "managed_python::tests::existing_non_python_configuration_is_rejected",
+        "managed_python::tests::external_configured_interpreter_wins",
+        "managed_python::tests::invalid_explicit_configuration_does_not_fall_back",
+        "managed_python::tests::missing_fallback_diagnostic_names_path_and_uv_setup",
+        "managed_python::tests::relative_configured_interpreter_resolves_from_workspace",
+        "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline",
+        "wire_schema_numeric_fields_match_the_reviewed_baseline"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_codegen",
+      "package": "chelis-backend-hip",
+      "kind": "test",
+      "file": "crates/chelis-backend-hip/tests/codegen_structure.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "s5_input_axis_expand_reads_witness_metadata"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_accept",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::hip_seam_accepts_input_axis_expand_extent"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_reject",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "metal_accept",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "metal_reject",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_manual_inventory",
+      "package": "chelis-backend-hip",
+      "kind": "test",
+      "file": "crates/chelis-backend-hip/tests/gpu_correctness.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "g5_"
+      },
+      "expected": [
+        "g5_expand_add_stride_zero",
+        "g5_input_axis_expand_executes_from_witness_metadata"
+      ],
+      "list_only": true,
+      "note": "The HIP hardware gate's inventory. `--ignored --list` names the two manual tests without running them, so every test this row selects must carry `#[ignore]`; the hardware command the oracle prints is what actually executes them."
+    },
+    {
+      "phase": "b",
+      "id": "ir_sources",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_sources.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_it",
+        "a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported",
+        "a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal",
+        "a_static_op_computed_extent_is_told_apart_from_a_runtime_one",
+        "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
+        "every_risc_op_yields_exactly_one_source_per_output_axis",
+        "expand_insert_maps_later_output_axes_to_input_minus_one",
+        "external_axis_names_the_exact_load_not_a_string_match",
+        "full_axis_symbolic_shrink_is_op_computed_not_pass_through",
+        "identity_stride_one_and_zero_pad_pass_the_input_axis_through",
+        "input_axis_and_scalar_input_sources_validate_their_slots",
+        "omitted_or_duplicated_output_axis_source_fails_before_emission",
+        "op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
+        "reduction_and_count_shift_kept_output_axes_back_to_their_input_axis",
+        "synthesized_dim_names_are_told_apart_from_user_spelled_ones",
+        "the_op_computed_origin_walk_stops_at_same_shape_and_set_axes",
+        "to_end_shrink_end_requires_a_literal_zero_start",
+        "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_1948_same_shape",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1948_same_shape_result_claim_sources.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "agreeing_named_result_claim_survives_fusion_and_dce",
+        "agreeing_named_result_claim_survives_specialization_and_dce",
+        "an_interior_named_result_claim_splits_the_fusion_chain",
+        "blas_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        "blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        "dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        "dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        "identical_members_deduplicate_but_distinct_paths_remain",
+        "malformed_same_shape_relations_are_verifier_errors",
+        "named_result_claim_traps_after_fusion_and_dce",
+        "named_result_claim_traps_after_specialization_and_dce",
+        "rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation",
+        "unclaimed_blas_region_still_specializes_and_executes",
+        "unclaimed_dense_gather_region_still_specializes_and_executes"
+      ],
+      "note": "The returned producer derives one complete positive-rank agreement relation: identical node identities deduplicate, distinct paths remain, rank-zero inputs are excluded, and an empty relation is a verifier error. Named and literal producer claims are shared rewrite barriers: failing and agreeing obligations survive identity cleanup, fusion and DCE, while complete claimed BLAS and dense-gather regions decline replacement and unclaimed controls still specialize."
+    },
+    {
+      "phase": "b",
+      "id": "ir_classes",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_classes.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "every_rebuild_pass_preserves_the_derived_classes"
+      ],
+      "note": "`runtime_extent_slice_b_classes.rs` locks the DERIVATION rather than any lane's output, and it is where C5 property 7's rebuild-survival property is expressible at all: the derivation is a `chelis-ir` entry point and `chelis-cli` has no `chelis-ir` dependency to call it before and after a pass. The row's receipt therefore carries an `ir_classes.` prefix. Named with `--exact` rather than run whole, for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and that file holds thirty-odd derivation tests this phase's oracle does not own."
+    },
+    {
+      "phase": "b",
+      "id": "literal_claim",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "literal_"
+      },
+      "expected": [
+        "literal_claim_transport_survives_nested_and_unused_calls",
+        "literal_extent_example_contract",
+        "literal_result_claim_contract"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_broadcast",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "singleton_broadcast_contract"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_claim_contract",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "claimed_extent_contract"
+      ],
+      "note": "The acceptance runner over all 55 preparation cells, registered when B2b-3 took its `#[ignore]` off. The file's other two rows select `literal_` and `singleton_broadcast_contract` exactly, so neither reaches this test: without this row the contract would run only in the nightly full-workspace job, which does not finish inside its timeout (chelis#1819), and on a schedule it would run nowhere. Named with `--exact` rather than run whole for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and this file holds twenty-eight tests this phase does not own."
+    },
+    {
+      "phase": "b",
+      "id": "cli_slice_b",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
+        "a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
+        "a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
+        "a_bare_runtime_scalar_expand_size_is_still_sourceless",
+        "a_binder_that_shadows_the_record_base_suppresses_the_hoist",
+        "a_caller_transported_result_label_survives_the_op_computed_stamp",
+        "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c",
+        "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval",
+        "a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_c",
+        "a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_eval",
+        "a_class_with_no_movement_bound_consumer_still_guards_on_c",
+        "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
+        "a_compile_time_record_projection_keeps_its_dag_route",
+        "a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c",
+        "a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval",
+        "a_container_nested_binder_is_unchecked_pending_the_container_walk",
+        "a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
+        "a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        "a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on_eval",
+        "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
+        "a_kept_axis_over_a_rank_raising_reshape_of_a_strided_input_builds_and_runs",
+        "a_kept_axis_over_a_runtime_bounded_shrink_builds_and_runs",
+        "a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent",
+        "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
+        "a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds",
+        "a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds",
+        "a_literal_claim_over_a_cross_tensor_read_traps_on_c",
+        "a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
+        "a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
+        "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
+        "a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        "a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes",
+        "a_local_unit_extent_claim_traps_at_its_operation_on_c",
+        "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
+        "a_local_unit_extent_claim_with_shrink_rejects_hip_host_fallback",
+        "a_multi_input_record_forward_sizes_its_broadcast_from_a_sibling_field",
+        "a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
+        "a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too",
+        "a_named_bystander_axis_keeps_its_size_extent_on_c",
+        "a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
+        "a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
+        "a_negative_computed_size_under_a_free_result_dim_diverges_by_lane",
+        "a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker",
+        "a_nested_helper_claim_sizes_a_root_on_c",
+        "a_nested_helper_claim_sizes_a_root_on_eval",
+        "a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
+        "a_nested_param_bound_result_claim_is_refused_by_the_checker",
+        "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
+        "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
+        "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
+        "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
+        "a_non_zero_pad_extent_is_guarded_on_both_lanes",
+        "a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs",
+        "a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
+        "a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
+        "a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
+        "a_piped_shape_read_of_a_non_tensor_is_still_sourceless",
+        "a_polymorphic_argument_claim_sizes_a_root_on_c",
+        "a_polymorphic_argument_claim_sizes_a_root_on_eval",
+        "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
+        "a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        "a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        "a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size",
+        "a_record_projection_becomes_the_tensor_helper_s_own_input",
+        "a_record_projection_is_an_admissible_expand_size",
+        "a_record_projection_nested_in_a_let_value_is_hoisted",
+        "a_record_projection_with_an_out_of_range_axis_is_still_rejected",
+        "a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes",
+        "a_repeated_free_result_name_declares_from_its_first_site",
+        "a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
+        "a_result_name_no_parameter_declares_is_not_stamped_as_a_claim",
+        "a_result_only_binder_claim_sizes_a_root_on_c",
+        "a_result_only_binder_claim_sizes_a_root_on_eval",
+        "a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        "a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
+        "a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
+        "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
+        "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
+        "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
+        "a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval",
+        "a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli",
+        "a_split_kernel_tuple_root_executes_when_its_repeated_binder_agrees",
+        "a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
+        "a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
+        "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
+        "a_synthesized_kernel_parameter_collision_emits_no_guard",
+        "a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c",
+        "a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
+        "a_typed_binder_beside_a_projection_does_not_stop_the_hoist",
+        "a_typed_binder_suppresses_only_the_base_it_rebinds",
+        "a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
+        "a_zero_positional_replacement_declares_an_empty_axis_on_c",
+        "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
+        "aliased_parameter_types_keep_the_entry_binder_guard",
+        "an_abi_promised_input_keeps_its_named_guard_before_result_claim",
+        "an_aggregate_typed_wrt_is_still_lane_divergent",
+        "an_earlier_trap_preempts_the_extent_guard_on_eval",
+        "an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c",
+        "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
+        "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
+        "an_effect_before_an_op_computed_guard_runs_when_the_guard_traps_on_c",
+        "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
+        "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
+        "an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule",
+        "an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786",
+        "an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs",
+        "an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
+        "an_independent_root_literal_claim_still_names_its_claimed_extent",
+        "an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer",
+        "an_op_computed_class_with_an_unbound_binder_agrees_across_lanes",
+        "an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
+        "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
+        "an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval",
+        "an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval",
+        "an_overshooting_shrink_span_reports_the_domain_error_on_c",
+        "an_overshooting_shrink_span_reports_the_domain_error_on_eval",
+        "an_unread_declaring_parameter_still_guards_its_named_result_claim",
+        "arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless",
+        "arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval",
+        "c_independent_trap_after_a_mismatch_loses",
+        "c_independent_trap_before_a_mismatch_wins",
+        "checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c",
+        "checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval",
+        "checked_arithmetic_operators_reach_the_same_guard_on_c",
+        "every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval",
+        "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
+        "grad_keeps_an_op_computed_local_guard_on_c",
+        "grad_keeps_an_op_computed_local_guard_on_eval",
+        "grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c",
+        "grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval",
+        "grad_over_a_disagreeing_named_claim_traps_on_c",
+        "grad_over_a_disagreeing_named_claim_traps_on_eval",
+        "grad_over_an_agreeing_named_claim_executes_on_c",
+        "grad_over_an_agreeing_named_claim_executes_on_eval",
+        "independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        "independent_grad_entry_claims_agree_on_eval_and_c",
+        "independent_grad_entry_failures_are_ordered_on_eval_and_c",
+        "issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
+        "issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+        "issue_1556_uniform_over_an_inlined_parameter_builds_and_runs",
+        "issue_1767_disconnected_gradient_preserves_false_declared_result_trap",
+        "issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_c",
+        "issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_eval",
+        "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_c",
+        "issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_eval",
+        "issue_1907_literal_non_positive_stride_steps_are_rejected_statically",
+        "issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        "issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
+        "issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
+        "issue_1931_positive_stride_controls_execute_exactly_on_both_lanes",
+        "issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",
+        "issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        "issue_2083_rank_raising_gradient_keeps_geometry_and_forward_trap",
+        "issue_597_positional_same_rank_replacement_executes_on_c",
+        "issue_665_expand_over_stride_builds_and_runs",
+        "literal_parameter_obligations_keep_the_existing_helper_order",
+        "load_and_op_output_members_share_one_guarded_class_on_eval",
+        "load_load_named_class_guards_every_non_canonical_member_on_eval",
+        "malformed_parameter_ranks_keep_the_existing_helper_diagnostic",
+        "no_environment_variable_disables_the_named_claim_guard",
+        "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+        "scalar_gradient_roots_keep_target_order_and_public_leaf_types",
+        "splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
+        "splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
+        "the_applied_spelling_of_the_same_expand_is_unchanged",
+        "the_applied_stage_at_the_same_call_site_is_unchanged",
+        "the_canonical_piped_shape_read_checks_evaluates_and_builds",
+        "the_checker_refuses_a_static_pad_extent_a_declaration_refutes",
+        "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+        "the_host_body_locator_reads_the_definition_and_not_a_look_alike",
+        "the_host_body_locator_refuses_a_forward_declaration_alone",
+        "the_host_path_concat_claim_still_names_concat_on_both_lanes",
+        "the_local_alias_spelling_emits_the_same_c_it_always_did",
+        "the_spellings_that_never_tripped_the_bystander_guard_stay_green",
+        "the_value_binding_form_of_a_polymorphic_binder_is_unchanged",
+        "two_classes_sharing_one_node_keep_separate_guards_on_c",
+        "two_classes_sharing_one_node_keep_separate_guards_on_eval",
+        "two_expands_over_one_operand_axis_share_one_guard",
+        "two_op_output_members_guard_against_the_canonical_member_on_c",
+        "two_op_output_members_guard_against_the_canonical_member_on_eval",
+        "two_record_paths_that_join_to_one_string_get_two_locals",
+        "unused_parameters_keep_their_entry_witnesses_until_after_the_guard",
+        "vmap_grad_keeps_its_batched_cotangent_and_local_guard_on_eval",
+        "vmap_ordinary_shape_preserves_the_nested_gradient_claim",
+        "vmap_ordinary_shape_root_transport_preserves_repeated_result_leaves",
+        "vmap_ordinary_shape_value_executes_on_both_lanes"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_issue_1948_same_shape",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1948_same_shape_result_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_statically_refuted_same_shape_result_is_a_dimension_mismatch",
+        "an_agreeing_same_shape_result_claim_executes_exactly",
+        "distinct_candidate_paths_do_not_create_source_order_attribution",
+        "no_claim_capable_operand_origin_does_not_drop_the_result_claim",
+        "repeated_paths_to_one_candidate_produce_one_add_claim",
+        "reversing_operands_does_not_rename_adds_result_claim",
+        "runtime_operand_disagreement_precedes_the_result_claim",
+        "the_operand_one_witness_is_guarded_by_add"
+      ],
+      "note": "Independent #1948 Eval and generated-C compile-link-run receipts for returned same-shape ownership, operand-order invariance, agreement precedence, no-origin retention, and static refutation."
+    },
+    {
+      "phase": "b",
+      "id": "cli_issue_2608_result_claims",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2608_declared_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_combinator_result_is_produced_by_its_combinator",
+        "declared_result_claims_are_checked_on_both_lanes"
+      ],
+      "note": "#2608/#1900/#2598 Eval and generated-C compile-link-run receipts: named host result claims resolved from the first tensor-parameter witness with binder and source in context (including into a tensor-kernel call), literal claims on an unwitnessed wildcard pass-through, builtin producer attribution under spec/04 section 4.7, untaken arms, and agreeing controls."
+    },
+    {
+      "phase": "b",
+      "id": "surf_issue_2110_local_ascription_provenance",
+      "package": "chelis-surf",
+      "kind": "test",
+      "file": "crates/chelis-surf/tests/issue_2110_local_ascription_provenance.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata"
+      ],
+      "note": "Surf preserves an authored local tensor annotation as explicit provenance while marking compiler-inferred type metadata separately."
+    },
+    {
+      "phase": "b",
+      "id": "types_issue_2110_local_ascription",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_2110_local_ascription_obligations.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "authored_ascriptions_inside_match_arms_reach_the_checked_program",
+        "authored_wildcard_is_preserved_without_manufacturing_a_claim",
+        "checked_library_composition_preserves_both_identity_domains",
+        "checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
+        "claimed_axes_remain_in_authored_axis_order",
+        "hand_authored_deep_static_mismatch_is_dimension_mismatch",
+        "hand_authored_deep_type_metadata_is_an_explicit_local_ascription",
+        "inferred_metadata_does_not_become_authored_ascription_provenance",
+        "runtime_dependent_local_ascription_retains_exact_authored_claim",
+        "static_agreement_discharges_and_static_disagreement_stays_dimension_mismatch"
+      ],
+      "note": "The checker retains exact authored provenance, identity, source spans and ordered outstanding claims through checked-program and library composition; inferred metadata creates no obligation and graph-fixed disagreement remains DimensionMismatch."
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_2110_local_ascription",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        "an_arms_local_claim_is_checked_under_its_carriers_owner_activation",
+        "an_untaken_else_arms_claimed_result_is_not_read_at_the_join",
+        "each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+        "grad_pruning_preserves_a_dead_except_for_trap_local_site",
+        "host_evaluation_kernel_carries_the_same_local_ascription_site",
+        "inferred_metadata_does_not_create_a_local_ascription_site",
+        "inserted_output_axis_and_observed_source_axis_are_independently_exact",
+        "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+        "malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        "ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
+        "rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        "selected_runtime_branch_executes_an_inlined_helpers_local_ascription_guard",
+        "selected_runtime_branch_executes_its_local_ascription_guard",
+        "staged_host_partition_retains_the_local_ascription_site",
+        "untaken_runtime_branch_does_not_execute_an_inlined_helpers_local_ascription_guard",
+        "untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
+        "vmap_shifts_the_local_claim_and_initializer_axis_together"
+      ],
+      "note": "Checker-owned local ascriptions lower to one producer-owned site per activation and survive aliases, host partitioning, vmap, liveness and graph rebuilds; inserted output axes remain distinct from their observed source axes, selected runtime branches enforce their site, untaken runtime branches do not, in either arm of the join, inferred metadata creates no site, and malformed roles fail closed."
+    },
+    {
+      "phase": "b",
+      "id": "cli_issue_2110_local_ascription",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2110_local_ascription_claim.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        "a_cross_let_alias_traps_at_the_producer_before_intervening_effects",
+        "a_disagreeing_nested_same_name_ascription_traps_at_its_initializer",
+        "a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        "a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        "a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        "a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        "a_named_local_claim_uses_its_declaring_runtime_extent",
+        "a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        "a_selected_static_branch_enforces_its_local_ascription_obligation",
+        "a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        "a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        "a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
+        "a_value_dead_except_for_the_obligation_still_traps",
+        "a_wildcard_host_alias_creates_no_guard_or_internal_error",
+        "a_wildcard_local_ascription_creates_no_extent_obligation",
+        "agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        "agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        "agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        "an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        "an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        "an_agreeing_literal_result_and_local_claim_execute_exactly",
+        "an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        "an_agreeing_nested_same_name_ascription_attaches_to_only_its_initializer",
+        "an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        "an_inferred_result_claim_does_not_replace_the_local_claim",
+        "an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        "an_inlined_callee_retains_its_local_ascription_obligation",
+        "an_invoked_local_closure_prepares_its_own_local_ascription",
+        "an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        "an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        "an_untaken_static_branch_creates_no_local_ascription_obligation",
+        "an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        "direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        "direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        "hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        "hand_authored_deep_cross_let_alias_traps_before_the_intervening_effect",
+        "hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        "hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
+        "inferred_metadata_does_not_create_a_local_runtime_claim",
+        "multiple_local_axis_claims_fail_in_authored_axis_order"
+      ],
+      "note": "Independent check, Eval and generated-C compile-link-run receipts for static rejection, exact success, runtime Domain traps, direct/alias/inlined/local-closure/dead/consumer paths, cross-let host alias attribution, single execution, nested shadowing and same-name positive/negative ownership, selected and untaken control-flow arms, host-effect placement, activation-scoped uninvoked closures, direct top-level grad/vmap transport, result-claim coexistence, wildcard and inferred controls, and authored axis order."
+    },
+    {
+      "phase": "b",
+      "id": "ir_issue_2110_staged_partition",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host/staged.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts"
+      ],
+      "note": "A local-ascription claim crossing a staged host cut remains a non-data token, is rematerialized beside its sole initializer owner, and is never exported or owned by a completion root."
+    },
+    {
+      "phase": "b",
+      "id": "api_issue_2110_local_ascription_cache",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_2110_local_ascription_cache.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
+        "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+        "stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
+      ],
+      "note": "Stdlib and dependency cache payloads retain the checked obligation, cached-library plus entry composition lowers it to an explicit site, and independently checked same-offset bindings select their activation-local identities."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_extent_witness.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_local_ascriptions_activation_travels_as_its_carriers_owner_activation",
+        "local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
+      ],
+      "note": "WireDag requires the exact local-ascription identity and carries the claim's runtime-branch activation as its carrier node's owner activation, an earlier bool node; missing, hybrid, empty or unknown representations, and a non-bool activation, reject."
+    },
+    {
+      "phase": "b",
+      "id": "wire_issue_2110_local_ascription_projection",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+        "compiler::tests::native_wire_projection_preserves_local_claim_runtime_branch_activation"
+      ],
+      "note": "Live checker and lowering output projects its exact local-ascription role and one scalar Bool runtime-branch activation into WireDag v15, then validates both on decode."
+    },
+    {
+      "phase": "b",
+      "id": "exec_c",
+      "package": "chelis-backend-c",
+      "kind": "test",
+      "file": "crates/chelis-backend-c/tests/exec_compile.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+        "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
+        "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+        "a_selected_runtime_branch_emits_its_local_ascription_guard_on_c",
+        "an_all_interface_class_runs_when_its_witnesses_agree",
+        "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+        "an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
+        "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "issue_1767_disconnected_actual_geometry_executes_on_eval_and_c",
+        "issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c",
+        "issue_1767_parameter_and_ordered_multiple_actuals_execute_on_eval_and_c",
+        "issue_1767_symbolic_actual_axes_are_read_for_each_execution",
+        "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
+        "issue_1788_two_scopes_in_one_function_share_one_declaration",
+        "issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        "issue_2512_an_agreeing_restamped_axis_runs",
+        "issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard",
+        "local_reshape_guards_follow_declaration_order",
+        "numeric_local_extent_claims_execute_exactly",
+        "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
+      ],
+      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement, runtime-branch activation and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+    },
+    {
+      "phase": "b",
+      "id": "ir_eval_guard",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_eval_guard.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_disagreeing_class_conveys_its_sources_axis_and_values",
+        "a_disagreeing_class_traps_with_the_numeric_trap_line",
+        "a_locally_placed_unit_claim_that_holds_broadcasts",
+        "a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it",
+        "a_non_unit_operand_extent_refutes_the_unit_claim_and_traps",
+        "a_unit_operand_extent_satisfies_the_claim_and_broadcasts",
+        "an_agreeing_class_evaluates",
+        "one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval",
+        "the_guard_precedes_the_allocation_it_protects",
+        "two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value",
+        "two_roots_spelling_one_binder_are_two_claims_not_one_class",
+        "two_signatures_spelling_one_binder_bind_independently_on_eval"
+      ],
+      "note": "The DAG evaluator's own guard and binding rows, with inputs bound at the API boundary. No corpus row cites them, because `chelis eval --file` supplies no input bindings and so cannot reach this evaluator for any fixture form; that is the reason the file exists, recorded in its header. Registering the target anyway makes the oracle execute them and makes a rename here fail the fast gate, which is what chelis#1742 added the manifest for."
+    },
+    {
+      "phase": "b",
+      "id": "types_unresolved_operand",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/unresolved_operand_matrix.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_bounded_precision_binder_is_decided_by_its_family_at_once",
+        "a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand",
+        "a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        "a_late_bound_tensor_precision_is_rejected_at_the_instantiation",
+        "a_local_binding_shadowing_a_top_level_one_is_read_from_the_local",
+        "a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee",
+        "a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee",
+        "a_precision_that_binds_one_application_later_is_decided_on_binding",
+        "a_record_field_sum_operand_is_tied_to_the_bound_target",
+        "a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        "a_signature_bounded_callee_is_caught_at_the_call_site",
+        "a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        "argument_precision_respects_sequential_and_top_level_binding_scopes",
+        "bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation",
+        "every_family_policy_route_rejects_an_inadmissible_instantiation",
+        "every_family_route_checks_concrete_helper_instantiations",
+        "restricted_body_precision_follows_lexical_bindings",
+        "the_spellings_the_argument_reader_does_not_resolve_remain_unreached"
+      ],
+      "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own. chelis#1805 adds the listed precision-policy receipts, signature-bound controls, lexical-scope and bool-arithmetic pairs, full family-instantiation matrix, and repaired indirect-call controls. All are checker verdicts with exact named test receipts."
+    },
+    {
+      "phase": "b",
+      "id": "cli_return_boundary",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_branchy_tail_checks_its_selected_producer",
+        "an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
+        "both_lanes_execute_exactly_on_an_agreeing_block_bodied_return",
+        "both_lanes_execute_exactly_on_an_agreeing_call_bodied_return",
+        "both_lanes_observe_the_following_effect_when_the_guard_passes",
+        "c_selected_if_result_claims",
+        "c_selected_match_result_claims",
+        "c_shared_callee_result_claims_are_invocation_scoped",
+        "eval_selected_if_result_claims",
+        "eval_selected_match_result_claims",
+        "eval_shared_callee_result_claims_are_invocation_scoped",
+        "eval_traps_before_an_effect_that_follows_the_producing_operation",
+        "eval_traps_on_a_block_bodied_return",
+        "eval_traps_on_a_call_bodied_return",
+        "the_c_lane_traps_before_an_effect_that_follows_the_producing_operation",
+        "the_c_lane_traps_on_a_block_bodied_return",
+        "the_c_lane_traps_on_a_call_bodied_return",
+        "the_census_reader_finds_the_guard_a_block_tail_moved",
+        "value_aliases_keep_the_guard_at_the_original_producer"
+      ],
+      "note": "chelis#1771 and chelis#1945: block/call/selected if/match returns, lexical aliases, producer attribution, invocation-local caller claims and effects before/after the producer. Matching and mismatching controls include untaken invalid arms and different callers of one shared callee. The selector preserves the earlier block/call and moved-guard census controls without selecting chelis#1739's separately owned direct-return and shipped-example census rows."
+    },
+    {
+      "phase": "b",
+      "id": "cli_result_callable_selection",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1771_callable_selected_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        "c_aggregate_origin_arena_is_fresh_for_repeated_public_calls",
+        "c_append_projection_is_attributed_to_append_not_index",
+        "c_combined_precision_rank_callback_claims_actualize_each_callsite",
+        "c_delayed_selection_guards_only_the_selected_value",
+        "c_direct_list_skip_retains_selected_tail_producer",
+        "c_direct_tail_list_projection_retains_selected_producer",
+        "c_global_shadow_keeps_local_producer",
+        "c_identity_callback_checks_claim_after_actual_preparation",
+        "c_inherited_callback_claim_waits_for_body_selection",
+        "c_inherited_claim_reaches_named_and_literal_callbacks",
+        "c_list_and_adt_projection_retains_selected_producer",
+        "c_nested_list_pattern_retains_selected_tail_producer",
+        "c_option_projection_distinguishes_local_and_formal_origins",
+        "c_polymorphic_identity_entry_precedes_body_and_result",
+        "c_polymorphic_identity_inherited_claim_prepares_all_actuals",
+        "c_polymorphic_identity_own_claim_preserves_formal_boundary",
+        "c_precision_only_callback_claims_are_callsite_local",
+        "c_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
+        "c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
+        "c_scalar_only_precision_evidence_specializes_each_callsite",
+        "c_selection_before_production_forwards_only_to_the_selected_arm",
+        "c_shared_callback_claims_are_invocation_local",
+        "c_tuple_projection_retains_only_the_selected_producer",
+        "eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        "eval_append_projection_is_attributed_to_append_not_index",
+        "eval_combined_precision_rank_callback_claims_actualize_each_callsite",
+        "eval_delayed_selection_guards_only_the_selected_value",
+        "eval_direct_list_skip_retains_selected_tail_producer",
+        "eval_direct_tail_list_projection_retains_selected_producer",
+        "eval_global_shadow_keeps_local_producer",
+        "eval_identity_callback_checks_claim_after_actual_preparation",
+        "eval_inherited_callback_claim_waits_for_body_selection",
+        "eval_inherited_claim_reaches_named_and_literal_callbacks",
+        "eval_list_and_adt_projection_retains_selected_producer",
+        "eval_nested_list_pattern_retains_selected_tail_producer",
+        "eval_option_projection_distinguishes_local_and_formal_origins",
+        "eval_polymorphic_identity_entry_precedes_body_and_result",
+        "eval_polymorphic_identity_inherited_claim_prepares_all_actuals",
+        "eval_polymorphic_identity_own_claim_preserves_formal_boundary",
+        "eval_precision_only_callback_claims_are_callsite_local",
+        "eval_rank_only_callback_claims_expand_empty_and_nonempty_spreads",
+        "eval_scalar_only_precision_evidence_specializes_each_callsite",
+        "eval_selection_before_production_forwards_only_to_the_selected_arm",
+        "eval_shared_callback_claims_are_invocation_local",
+        "eval_tuple_projection_retains_only_the_selected_producer",
+        "inadmissible_scalar_only_precision_evidence_is_rejected_by_checker",
+        "rank_zero_identity_without_a_result_claim_executes_both_lanes"
+      ],
+      "note": "chelis#1771 and chelis#1945 finite closure: inherited literal result claims cross supported named, literal and identity callback invocations; remain invocation-local; and retain selected producer provenance through aliases and delayed selection. Eval and C cover exact selected values and producer/interface attribution for supported tuple, list, record, Option and ADT construction/projection, including nested Cons tails on locally owned and captured Lists and direct immutable skip tails, true aggregate ingress, cached/global reload, local shadowing, missing-origin fail-close and repeated-invocation lifetime. Concrete tensor-carried and scalar-only precision, rank-only and combined callback instantiations preserve authored literal axes, eager actuals, entry/result independence and f64 values without importing inferred dimensions or defaulting precision; the scalar-only negative keeps the Float bound explicit. The existing cli_return_boundary, cli_result_pure_helper and callable-entry targets remain independent controls; append transport, named result claims and local callable aliases remain outside this receipt."
+    },
+    {
+      "phase": "b",
+      "id": "types_expand_size",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean",
+        "issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+        "issue1791_the_direct_spelling_keeps_its_exact_rendering",
+        "issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic"
+      ],
+      "note": "chelis#1791 half B and chelis#1923, at the checker. The verdict is the checker's, so these receipts are unit-level and no lane splits them; the CLI twin in cli_slice_b records what a user sees. Named with --exact rather than running the whole file because issue_530_expand_inline_size_gate.rs also holds chelis#530's eleven inline-size cells, which this phase does not own."
+    },
+    {
+      "phase": "b",
+      "id": "cli_pipe_fold_surface",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1923_pipe_fold_surface.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "lambda_pipe_stages_evaluate_the_input_before_the_body",
+        "lambda_pipe_stages_preserve_lexical_bindings",
+        "resugaring_the_deep_still_prints_the_pipe",
+        "the_annotated_deep_prints_the_application_the_pipe_denotes",
+        "the_unannotated_deep_still_carries_the_pipe"
+      ],
+      "note": "Pipe application semantics include lexical binding and eager input evaluation. Direct-call twins and trapping/agreeing inputs cover those obligations alongside the three printed surfaces."
+    },
+    {
+      "phase": "b",
+      "id": "cli_entry_boundary",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "no_shipped_example_gains_a_host_lane_guard",
+        "the_census_reader_finds_an_entry_guard_that_is_there",
+        "the_census_reader_ignores_diagnostics_without_executable_guards",
+        "the_census_reader_separates_mixed_entry_and_result_guards",
+        "the_census_signature_oracle_preserves_aliases_and_independent_scopes",
+        "the_census_signature_oracle_rejects_missing_duplicate_reordered_and_wrong_axis_guards"
+      ],
+      "note": "The example census independently derives ordered entry obligations from checked source signatures and compares each emitted owned function, including empty actual guard sets. Alias/scope positives and missing/duplicate/reordered/wrong-axis negatives protect the comparison. Result-guard and refusal enumeration controls remain."
+    },
+    {
+      "phase": "b",
+      "id": "types_declared_operation_bounds",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_deferred_cast_preserves_its_consumers_family_rejection",
+        "a_failed_family_application_does_not_also_claim_its_operand_was_never_bound",
+        "a_lexically_shadowed_window_builtin_keeps_its_function_contract",
+        "a_primitive_function_value_carries_its_admission_requirement",
+        "a_wrapper_cannot_silently_narrow_its_authored_contract",
+        "arithmetic_and_matmul_require_their_operand_families",
+        "bounded_function_values_keep_their_restriction",
+        "contract_transport_and_unconstrained_inference_remain_polymorphic",
+        "deferred_window_shape_diagnostics_precede_late_family_rejection_on_both_ingresses",
+        "each_family_operation_requires_a_sufficient_authored_bound",
+        "empty_literal_precision_cannot_evade_the_operation_contract",
+        "escaping_lambdas_need_sufficient_authored_admission",
+        "every_family_primitive_alias_preserves_its_requirement",
+        "inferred_family_lambdas_bind_monomorphically_within_the_declaration",
+        "inferred_family_requirements_intersect_without_narrowing_authored_contracts",
+        "inferred_local_operands_still_bind_before_the_declaration_boundary",
+        "later_callers_do_not_supply_an_omitted_generic_contract",
+        "local_lambda_and_aggregate_projection_check_the_declared_precision",
+        "numeric_and_integer_operation_contracts_cover_each_spec_family",
+        "omitted_signatures_do_not_publish_inferred_dtype_contracts",
+        "primitive_scalar_contracts_require_bounds_too",
+        "standalone_signatures_express_the_same_contract",
+        "unannotated_wrappers_do_not_acquire_their_callees_bounds",
+        "window_reduction_contracts_cover_each_spec_family_on_both_ingresses",
+        "window_shape_diagnostics_precede_family_admission_on_both_ingresses"
+      ],
+      "note": "Requires declared-family admission and restriction transport, with positive and negative cases for authored and inferred variables. [05-OP-39] window reductions cover specialized and ordinary alias paths on both checker ingresses while retaining shape-diagnostic precedence."
+    },
+    {
+      "phase": "b",
+      "id": "cli_declared_operation_bounds",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "bounded_function_value_chain_lambda_and_field_calls_execute_on_eval_and_c",
+        "deferred_window_shape_errors_precede_late_family_rejection",
+        "insufficient_authored_contracts_are_rejected_without_a_call_site",
+        "invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
+        "window_reduction_contracts_reject_invalid_public_calls"
+      ],
+      "note": "Requires the original invalid witnesses to stop at checking, five Float-bounded controls to execute with exact results on eval and compiled C, and all four window reductions to enforce their checked contracts through direct and aliased CLI calls."
+    },
+    {
+      "phase": "b",
+      "id": "api_declared_operation_bounds",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_1942_declared_operation_bounds.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "checked_library_round_trips_preserve_generic_and_primitive_function_values",
+        "checked_library_round_trips_preserve_window_reduction_contracts",
+        "insufficient_authored_contracts_cannot_be_published_as_checked_libraries"
+      ],
+      "note": "Checked stdlib and dependency contexts preserve authored, primitive-operation and window-reduction family restrictions through serialization, and refuse to publish insufficient authored contracts."
+    },
+    {
+      "phase": "b",
+      "id": "cli_mixed_callable_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1915_caller_actual_scope.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "existing_mixed_callable_parameters_keep_their_native_values"
+      ],
+      "note": "Retained #1947 interaction control: tensor and primitive-scalar callables in one signature preserve exact eval/native-C values [6,10]. Signature-entry failure and ordering counterparts remain in cli_signature_entry."
+    },
+    {
+      "id": "cli_signature_entry",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1788_entry_obligations.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        "beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        "beta_reduced_callbacks_preserve_signature_order",
+        "beta_reduced_callbacks_run_failing_actual_before_entry",
+        "direct_vmap_two_spread_entry_enforces_shared_witnesses",
+        "every_unused_repeated_witness_is_checked",
+        "higher_order_app_and_pipe_accept_agreeing_entry_claim",
+        "higher_order_app_and_pipe_preserve_actual_before_entry_failure",
+        "higher_order_entry_does_not_depend_on_shared_result_labels",
+        "higher_order_entry_is_after_arguments_and_before_following_effects",
+        "higher_order_invocation_accepts_agreeing_claim",
+        "higher_order_invocation_keeps_authored_entry_claim",
+        "indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        "indirect_callable_keeps_formal_literal_entry_boundary",
+        "indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        "indirect_grad_transform_keeps_formal_entry_boundary",
+        "inline_callback_entry_precedes_body_effects_on_every_invocation",
+        "local_indirect_grad_transform_keeps_formal_entry_boundary",
+        "mixed_helpers_accept_independent_binders",
+        "mixed_helpers_fail_in_signature_order",
+        "mixed_helpers_keep_unused_signature_witnesses",
+        "mixed_literal_and_binder_failures_follow_parameter_order",
+        "mixed_literal_checks_survive_when_the_repeated_binder_agrees",
+        "nonzero_axis_vmap_two_spread_entry_enforces_shared_witnesses",
+        "successive_higher_order_invocations_have_independent_signature_instances"
+      ],
+      "note": "Complete signature obligations across mixed helpers and higher-order/callback entry, with exact precedence, argument/body effects, unused witnesses and agreeing controls. Beta-reduced direct, local and passed lambdas retain eager actuals and independent ordered signature guards. Indirect and direct-vmap calls retain the authored formal contract across broader actuals, aliases, local callables, wrappers, transforms, rank spreads and repeated-binder signatures.",
+      "phase": "b"
+    },
+    {
+      "id": "ir_signature_entry_plan",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host/signature_entry.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "host::signature_entry::tests::"
+      },
+      "expected": [
+        "host::signature_entry::tests::independent_signatures_and_wildcards_create_no_equality",
+        "host::signature_entry::tests::internal_rank_axis_identity_has_a_printable_guard_label",
+        "host::signature_entry::tests::later_witnesses_and_literals_follow_parameter_axis_order"
+      ],
+      "phase": "b"
+    },
+    {
+      "id": "c_signature_entry_projection",
+      "package": "chelis-backend-c",
+      "kind": "lib",
+      "file": "crates/chelis-backend-c/src/host_emit/entry.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "host_emit::entry::tests::"
+      },
+      "expected": [
+        "host_emit::entry::tests::cloned_payload_keeps_each_calls_structural_identity",
+        "host_emit::entry::tests::dominating_signature_discharges_the_exact_helper_comparison",
+        "host_emit::entry::tests::every_helper_call_must_be_dominated_before_a_check_is_removed",
+        "host_emit::entry::tests::helper_projection_removes_only_discharged_checks_and_keeps_standalone_entry",
+        "host_emit::entry::tests::lowered_mixed_result_claim_keeps_rows_at_entry_and_literal_local",
+        "host_emit::entry::tests::shadowing_a_witness_keeps_the_helper_check",
+        "host_emit::entry::tests::unused_canonical_witness_discharges_other_pairs_transitively"
+      ],
+      "phase": "b"
+    },
+    {
+      "id": "ir_signature_entry_ownership",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/ownership_lowering.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "signature_entry_requires_tensor_observations_and_preserves_borrows"
+      ],
+      "phase": "b"
+    },
+    {
+      "phase": "b",
+      "id": "cli_higher_order_existing_control",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1801_wildcard_absorption.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently"
+      ],
+      "note": "Retain the original apply4 witness identity while requiring the authored p/load entry failure; the original false-k/shrink disposition is no longer accepted."
+    },
+    {
+      "phase": "b",
+      "id": "api_grad_extent_claims",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/issue_1821_gradient_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "aggregate_gradient_preserves_the_named_claim_for_every_leaf_layout",
+        "agreeing_multi_target_gradient_keeps_unused_zero_cotangent_slots",
+        "fixed_control_gradients_keep_the_same_authored_activation_claim",
+        "independent_gradient_activations_keep_declaring_extent_witnesses",
+        "independent_gradient_activations_preserve_computed_only_claims",
+        "independent_gradient_activations_reject_only_their_own_claims_in_source_order",
+        "multi_target_gradient_rejects_the_same_activation_as_the_forward_call",
+        "primitive_scalar_gradient_preserves_the_named_claim_for_single_and_multiple_targets",
+        "subexpression_context_does_not_replace_an_authored_binder_with_inferred_spelling"
+      ],
+      "note": "#1920/#1924 and #1934 evaluator half: authored signatures remain separate from inferred checked types in ordinary and fixed-control transform lowering. Negative controls require original entry witnesses and the load Domain trap; agreeing controls retain exact zero cotangent shapes and target order."
+    },
+    {
+      "phase": "b",
+      "id": "ir_result_claim_identity",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_checked_transport.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "an_entry_result_claim_keeps_its_later_declaring_witness",
+        "result_claim_admission_requires_its_declaring_observation_and_producing_axis",
+        "result_claim_witnesses_survive_rebuilds_without_joining_same_labels"
+      ],
+      "note": "Exact declaring witness and producer edges survive graph rebuilding; malformed relationships are rejected and entry diagnostics retain the declaring observation."
+    },
+    {
+      "phase": "b",
+      "id": "wire_result_claim_identity",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_extent_witness.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "literal_result_role_roundtrips_without_an_observing_input_and_rejects_malformed_roles",
+        "result_claim_role_roundtrips_exact_witness_identity_and_rejects_malformed_transport"
+      ],
+      "note": "Named and literal result-claim sites round-trip through versioned wire transport; malformed fields and relationships cannot enter a graph."
+    },
+    {
+      "phase": "b",
+      "id": "cli_result_pure_helper",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1771_pure_helper_result_claims.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_inherited_result_claim_enters_pure_helpers",
+        "c_literal_result_claim_survives_zero_and_unused_cotangents",
+        "c_literal_result_precondition_precedes_element_failure",
+        "eval_inherited_result_claim_enters_pure_helpers",
+        "eval_literal_result_claim_survives_zero_and_unused_cotangents",
+        "eval_literal_result_precondition_precedes_element_failure"
+      ],
+      "note": "Inherited literal claims cross pure helpers with exact producing primitives, helper-local claims and source effect order. Native receipts require a compiler and execute the generated binary. Callback and selected-alias continuations are separately enrolled when implemented."
+    },
+    {
+      "phase": "b",
+      "id": "ir_literal_result_claim",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1771_literal_result_tokens.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "administrative_copies_preserve_literal_producer_through_fusion",
+        "distinct_literal_tokens_keep_declaration_order_and_primitive_through_rebuilds",
+        "literal_role_rejects_observations_entry_claims_and_malformed_requirements"
+      ],
+      "note": "Literal declarations retain distinct token identities, inner-before-outer guard order and primitive attribution through rebuilds; malformed role payloads and observing inputs are refused."
+    },
+    {
+      "phase": "b",
+      "id": "cli_producer_guard_order",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2377_producer_guards.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "c_forwarded_insert_axis_keeps_result_ownership",
+        "c_insert_result_guard_owns_attribution_and_effect_order",
+        "c_result_axes_follow_declaration_order",
+        "eval_forwarded_insert_axis_keeps_result_ownership",
+        "eval_insert_result_guard_owns_attribution_and_effect_order",
+        "eval_result_axes_follow_declaration_order",
+        "input_axis_claim_still_precedes_body_on_both_lanes",
+        "mixed_named_entry_and_literal_result_keep_distinct_owners"
+      ],
+      "note": "Partial #2377: generic/monomorphic direct and carried insert result attribution, exact values and order against retained effects; distinct named input guards. Discarded eager traps remain unresolved."
+    },
+    {
+      "phase": "b",
+      "id": "ir_producer_guard_sites",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/producer_guard_sites.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "forwarded_axis_observation_and_physical_claim_keep_their_owners",
+        "interface_sized_insert_has_one_local_result_claim",
+        "malformed_administrative_producer_is_a_checked_error",
+        "missing_result_axis_is_a_checked_error"
+      ],
+      "note": "Token-only, physical-only and coalesced producer sites, forwarded-axis observations, independent requirements and malformed-axis rejection."
+    },
+    {
+      "phase": "b",
+      "id": "ir_disconnected_geometry",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/issue_1102_zero_gradient.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "disconnected_actual_still_checks_its_declared_input_extent",
+        "disconnected_top_level_actual_keeps_every_axis"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "gradient_mapping_verifier",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/lower.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "lower::tests::gradient_axis_mapping_rejects_missing_sources_before_publication"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "grad_capture_extents",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2378_grad_capture_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "captured_tensor_gradient_runs_in_the_native_test_runner",
+        "direct_tensor_arguments_remain_the_control",
+        "literal_tensor_capture_retains_its_axes",
+        "statically_wrong_capture_shape_is_rejected_by_check",
+        "symbolic_tensor_capture_retains_its_axes",
+        "tensor_capture_shape_disagreement_keeps_the_entry_guard"
+      ]
+    }
+  ]
+}

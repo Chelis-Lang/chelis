@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+lowering-trace = ["chelis-ir/lowering-trace"]
+
 [dependencies]
 chelis-unord.workspace = true
 chelis-deep.workspace = true

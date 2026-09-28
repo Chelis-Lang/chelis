@@ -6,28 +6,71 @@
 use super::shape_honesty::*;
 use super::*;
 
-pub(super) fn validate_ir_program(
+#[cfg(test)]
+thread_local! {
+    static CANCEL_BEFORE_DECLARATION_VALIDATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct DeclarationValidationCancellationHook;
+
+#[cfg(test)]
+impl Drop for DeclarationValidationCancellationHook {
+    fn drop(&mut self) {
+        CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| armed.set(false));
+    }
+}
+
+#[cfg(test)]
+fn cancel_before_declaration_validation_for_test() -> DeclarationValidationCancellationHook {
+    CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
+        assert!(
+            !armed.replace(true),
+            "the declaration-validation cancellation hook is already armed"
+        );
+    });
+    DeclarationValidationCancellationHook
+}
+
+#[cfg(test)]
+fn trip_declaration_validation_cancellation_for_test() {
+    CANCEL_BEFORE_DECLARATION_VALIDATION.with(|armed| {
+        if armed.replace(false) {
+            crate::cancel::current_cancel_token()
+                .expect("the declaration-validation hook requires an installed token")
+                .cancel();
+        }
+    });
+}
+
+/// The ordered semantic pass protocol shared by every public checker entry.
+///
+/// PP9 / [04-TOT-5] keeps language-required checks here and leaves backend
+/// capability refusals to their owning lowering stages. Callers supply the
+/// declaration-type view appropriate to their context; the program carrier is
+/// preserved and every reader in this protocol must consume it structurally.
+pub(super) fn validate_semantic_program(
     exprs: &[deep::Expr],
     type_env: &IrTypeEnv,
     top_level_references: &TopLevelReferenceGraph,
+    selector_context: &SelectorCallableContext,
     errors: &mut DiagnosticSink<'_>,
 ) {
     top_level_references.report_initialization_errors(errors);
-    detect_trivial_non_terminating_fns(exprs, errors);
+    validate_core_transform_fragment(exprs, errors);
+    validate_grad_selector_identity(exprs, selector_context, errors);
     validate_vmap_extent_dependencies(exprs, type_env, errors);
     let mut static_env = UnordMap::new();
     let shape_env = shape_type_env(type_env);
     let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
-    // Names of let-bindings whose RHS validation already emitted a
-    // diagnostic (so their derived output type is unknown). Downstream
-    // shape-sensitive calls that consume such a name emit a redundant
-    // cascade diagnostic; suppress it. See RT-205 round-2 F3.
-    let mut failed_let_names: UnordSet<String> = UnordSet::new();
     // chelis#930: per-top-level-declaration cancellation, same grain as
     // inference. Without it this validator is one uninterruptible step whose
     // cost grows with the program, and interrupt latency is bounded by the
     // longest such step. The caller's `cancellation_gate` rejects the
     // truncated walk.
+    #[cfg(test)]
+    trip_declaration_validation_cancellation_for_test();
     let cancel = crate::cancel::current_cancel_token();
     for expr in top_level_decl_items(exprs) {
         if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
@@ -37,294 +80,745 @@ pub(super) fn validate_ir_program(
             expr,
             &shape_env,
             &mut static_env,
-            &mut failed_let_names,
             &declared_signatures,
             errors,
         );
     }
 }
 
-/// Detect fn defs whose body is a direct self-call with no conditional
-/// guard — e.g. `def a(x) = a(x)`. These are guaranteed non-terminating
-/// when called and, because the DAG lowerer can't represent recursion,
-/// get silently elided to an identity in the generated C (source/object
-/// divergence). Flag at check time so the user sees a clear error
-/// instead of shipping a program that means something else than written.
+/// Launch-core transforms are deliberately a smaller acceptance surface than
+/// the timeless transform language contract. A named target must not alias an
+/// unshadowed top-level function declaration; local wrapper closures remain
+/// on their separately tested path. `grad` keeps its existing
+/// direct-inline-lambda path. `vmap` admits inline or locally bound lambdas
+/// only when every parameter has explicit structure on each path where the
+/// transform inserts an axis; an inference hole on such a path is still
+/// untyped. Otherwise the inference order can bind a parameter to the unsliced
+/// operand. This keeps the checker from certifying a program whose evaluator
+/// could select a different callable or whose vmap parameter could have the
+/// wrong rank (#1887, #1952, #1954, #2109).
 ///
-/// This only catches the most trivial shape — a body that is literally
-/// `(app (var name) ...)` with the def's own name as the callee. Real
-/// recursive fns with a base case inside `if`/`match` (e.g. `fact n = if
-/// n <= 1 then 1 else mul(n, fact(n-1))`) are NOT flagged.
-pub(super) fn detect_trivial_non_terminating_fns(
-    exprs: &[deep::Expr],
-    errors: &mut DiagnosticSink<'_>,
+/// The walk is lexical rather than type-directed.  A local `loss` with the
+/// same function type as a top-level `loss` is exactly the #1954 hazard, so
+/// looking only at `Type::Fn` would recreate the silent global fallback.  The
+/// module and local values retain only the structural provenance this fence
+/// needs through transparent `let`, block result, tuple, tuple-projection,
+/// match-pattern, and match-result flow. The target is classified by that same
+/// representation, and each binder replaces the previous value so lexical
+/// order and shadowing stay explicit. The normative transformation semantics
+/// remain in spec/06; the release supported-fragment document records this
+/// temporary admission fence.
+fn validate_core_transform_fragment(exprs: &[deep::Expr], errors: &mut DiagnosticSink<'_>) {
+    let mut module_items: UnordMap<Option<String>, Vec<&deep::Expr>> = UnordMap::new();
+    for (module, expr) in top_level_decl_items_with_modules(exprs) {
+        module_items.entry(module).or_default().push(expr);
+    }
+    for (_, items) in module_items.to_sorted() {
+        let top_level_functions = collect_top_level_function_names(items);
+        let module_values = collect_top_level_transform_values(items, &top_level_functions);
+        let lexical_scope = CoreTransformScope::default();
+        for expr in items {
+            walk_core_transform_targets(
+                expr,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+                errors,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct CoreTransformScope {
+    local_values: UnordMap<String, CoreTransformValue>,
+}
+
+impl CoreTransformScope {
+    fn bind_local(&mut self, name: String, value: CoreTransformValue) {
+        self.local_values.insert(name, value);
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum CoreTransformValue {
+    #[default]
+    Ordinary,
+    TopLevelFunctionAlias,
+    UntypedVmapLambda,
+    ConstrainedVmapLambda,
+    Tuple(Vec<CoreTransformValue>),
+}
+
+impl CoreTransformValue {
+    fn aliases_top_level_function(&self) -> bool {
+        matches!(self, Self::TopLevelFunctionAlias)
+    }
+
+    fn is_untyped_vmap_lambda(&self) -> bool {
+        matches!(self, Self::UntypedVmapLambda)
+    }
+
+    /// Conservative union for alternate result paths. `Ordinary` carries no
+    /// transform provenance and is the bottom value. A constrained lambda
+    /// proves that ordinary branch unification supplies explicit mapped
+    /// structure to an otherwise untyped lambda in the same result slot.
+    /// Top-level aliases remain hazardous, while equal tuple structures join
+    /// element by element so projection keeps sibling isolation.
+    fn join(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::TopLevelFunctionAlias, _) | (_, Self::TopLevelFunctionAlias) => {
+                Self::TopLevelFunctionAlias
+            }
+            (Self::ConstrainedVmapLambda, Self::UntypedVmapLambda)
+            | (Self::UntypedVmapLambda, Self::ConstrainedVmapLambda) => Self::ConstrainedVmapLambda,
+            (Self::UntypedVmapLambda, _) | (_, Self::UntypedVmapLambda) => Self::UntypedVmapLambda,
+            (Self::ConstrainedVmapLambda, _) | (_, Self::ConstrainedVmapLambda) => {
+                Self::ConstrainedVmapLambda
+            }
+            (Self::Ordinary, value) | (value, Self::Ordinary) => value.clone(),
+            (Self::Tuple(left), Self::Tuple(right)) if left.len() == right.len() => Self::Tuple(
+                left.iter()
+                    .zip(right)
+                    .map(|(left, right)| left.join(right))
+                    .collect(),
+            ),
+            (Self::Tuple(_), Self::Tuple(_)) => Self::Ordinary,
+        }
+    }
+}
+
+/// Bind the transform-relevant part of a known scrutinee value through one
+/// match pattern.
+///
+/// Direct and `as` binders receive the whole value. Tuple patterns transfer
+/// only through an exact structural correspondence, recursively, so one
+/// component cannot taint a sibling. Constructor and record structure is not
+/// represented by `CoreTransformValue`; their binders therefore shadow with
+/// `Ordinary`, as do malformed or otherwise non-matching shapes.
+fn bind_core_transform_pattern(
+    pattern: &deep::Expr,
+    value: &CoreTransformValue,
+    scope: &mut CoreTransformScope,
 ) {
-    // Collect each def's "terminal callees" — the top-level fn names
-    // reached at every tail position of the body. `Some(set)` means
-    // every tail is a call; the set is who's called. `None` means the
-    // body has at least one non-call tail (a base case exists).
-    let mut terminal_callees: UnordMap<String, Option<UnordSet<String>>> = UnordMap::new();
-    let mut def_order: Vec<String> = Vec::new();
-    for expr in top_level_decl_items(exprs) {
-        // chelis#1107 amendment: carrier-preserving read.
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(body) = kids.get(1) else { continue };
-        // Check params for a name that shadows the def — a body that
-        // terminal-calls a shadowed name is NOT self-recursion.
-        let mut shadows: UnordSet<String> = UnordSet::new();
-        if let deep::Expr::List(fn_list, _) = body
-            && get_tag(fn_list) == Some(DeepTag::Fn)
-            && let Some(deep::Expr::List(params, _)) = children(fn_list).first()
-            && get_tag(params) == Some(DeepTag::Params)
-        {
-            for param in children(params) {
-                if let Some(pname) = param_name_for_refs(param) {
-                    shadows.insert(pname);
-                }
-            }
-        }
-        let fn_body = match body {
-            deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => {
-                children(list).get(1)
-            }
-            _ => None,
-        };
-        let entry = if let Some(fn_body) = fn_body {
-            let mut callees: UnordSet<String> = UnordSet::new();
-            if collect_terminal_callees(fn_body, &shadows, &mut callees) {
-                Some(callees)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        def_order.push(name.to_string());
-        terminal_callees.insert(name.to_string(), entry);
+    stack_guard!("bind_core_transform_pattern", pattern);
+    if let deep::Expr::MetaExpr(meta, _) = pattern {
+        bind_core_transform_pattern(&meta.expr, value, scope);
+        return;
     }
-
-    // Greatest-fixed-point: start with ALL defs whose every tail is a
-    // call (no base case) and iteratively remove any def that calls out
-    // to a base-case def (outside the candidate set). What survives is
-    // a closed recursion group with no base case anywhere.
-    let mut non_terminating: UnordSet<String> = terminal_callees
-        .to_sorted()
-        .into_iter()
-        .filter_map(|(name, callees)| {
-            callees.as_ref().and_then(|set| {
-                if set.is_empty() {
-                    None
-                } else {
-                    Some(name.clone())
-                }
-            })
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        let snapshot: Vec<String> = non_terminating.to_sorted().into_iter().cloned().collect();
-        for name in &snapshot {
-            let Some(Some(callees)) = terminal_callees.get(name) else {
-                non_terminating.remove(name);
-                changed = true;
-                continue;
-            };
-            // Every callee must either be `name` itself OR remain in the
-            // non_terminating candidate set. If any callee has a known
-            // base case (isn't in non_terminating), this def has an
-            // escape route and isn't trivially non-terminating.
-            let ok = callees
-                .to_sorted()
-                .into_iter()
-                .all(|callee| callee == name || non_terminating.contains(callee));
-            if !ok {
-                non_terminating.remove(name);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for name in &def_order {
-        if non_terminating.contains(name) {
-            errors.push(CheckError::new(
-                CheckErrorKind::CycleDetected,
-                format!(
-                    "def `{name}` is trivially non-terminating. Every tail position \
-                     calls back into the same recursion group `{name}` with no base case; \
-                     add an `if`/`match` exit that returns without recursing"
-                ),
-                vec![
-                    "Trivial (self- or mutual-) recursion without a base case isn't \
-                     representable in the Phase 0 DAG lowering and would compile to \
-                     an infinite loop or silent identity."
-                        .to_string(),
-                ],
-            ));
-        }
-    }
-}
-
-/// Walk `expr` and, for every terminal (tail) position, record the name
-/// called (if the tail is `(app (var Y) ...)`). Returns `true` if EVERY
-/// terminal is a call (no base-case leaf); `false` if any terminal is a
-/// non-call (literal, var-read, tuple, etc.) — a base case exists.
-pub(super) fn collect_terminal_callees(
-    expr: &deep::Expr,
-    shadowed: &UnordSet<String>,
-    out: &mut UnordSet<String>,
-) -> bool {
-    stack_guard!("collect_terminal_callees", expr, false);
-    match expr {
-        deep::Expr::MetaExpr(meta, _) => collect_terminal_callees(&meta.expr, shadowed, out),
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                let Some(callee) = kids.first() else {
-                    return false;
-                };
-                // chelis#1107 amendment: carrier-preserving read.
-                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
-                    return false;
-                };
-                let Some(cname) = callee_kids.first().and_then(symbol_name) else {
-                    return false;
-                };
-                if shadowed.contains(cname) {
-                    return false;
-                }
-                out.insert(cname.to_string());
-                true
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                kids.get(1)
-                    .map(|body| collect_terminal_callees(body, shadowed, out))
-                    .unwrap_or(false)
-            }
-            Some(DeepTag::If) => {
-                let kids = children(list);
-                if kids.len() < 3 {
-                    return false;
-                }
-                let then_ok = collect_terminal_callees(&kids[1], shadowed, out);
-                let else_ok = collect_terminal_callees(&kids[2], shadowed, out);
-                then_ok && else_ok
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return false;
-                }
-                kids.iter().skip(1).all(|arm| {
-                    if let deep::Expr::List(arm_list, _) = arm
-                        && get_tag(arm_list) == Some(DeepTag::Arm)
-                    {
-                        children(arm_list)
-                            .get(2)
-                            .map(|body| collect_terminal_callees(body, shadowed, out))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                })
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-#[allow(dead_code)]
-pub(super) fn fn_body_is_direct_self_call(def_body: &deep::Expr, def_name: &str) -> bool {
-    let fn_list = match def_body {
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Fn) => list,
-        _ => return false,
+    let Some((tag, _, children)) = stamped_parts(pattern) else {
+        return;
     };
-    // If any fn param shadows the def name, the callee reference inside
-    // the body refers to the param (a callable HOF argument), not the def
-    // itself. This is a legitimate HOF call, not recursion.
-    if let Some(params_list) = children(fn_list).first()
-        && let deep::Expr::List(params, _) = params_list
-        && get_tag(params) == Some(DeepTag::Params)
-    {
-        for param in children(params) {
-            if param_name_for_refs(param).as_deref() == Some(def_name) {
-                return false;
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = children.first().and_then(symbol_name) {
+                scope.bind_local(name.to_string(), value.clone());
+            }
+        }
+        DeepTag::PatTuple => {
+            if let CoreTransformValue::Tuple(elements) = value
+                && elements.len() == children.len()
+            {
+                for (child, element) in children.iter().zip(elements) {
+                    bind_core_transform_pattern(child, element, scope);
+                }
+            } else {
+                for child in children {
+                    bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+                }
+            }
+        }
+        DeepTag::PatAs => {
+            let carried = children
+                .get(1)
+                .map_or(CoreTransformValue::Ordinary, |inner| {
+                    if core_transform_value_matches_pattern(value, inner) {
+                        value.clone()
+                    } else {
+                        CoreTransformValue::Ordinary
+                    }
+                });
+            if let Some(name) = children.first().and_then(symbol_name) {
+                scope.bind_local(name.to_string(), carried.clone());
+            }
+            if let Some(inner) = children.get(1) {
+                bind_core_transform_pattern(inner, &carried, scope);
+            }
+        }
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            for child in children.iter().skip(1) {
+                bind_core_transform_pattern(child, &CoreTransformValue::Ordinary, scope);
+            }
+        }
+        DeepTag::PatWild | DeepTag::PatLit => {}
+        _ => {
+            for name in pattern_names_for_signature(pattern).to_sorted() {
+                scope.bind_local(name.clone(), CoreTransformValue::Ordinary);
             }
         }
     }
-    let Some(body) = children(fn_list).get(1) else {
+}
+
+/// Whether an `as` pattern's inner structure can correspond to the represented
+/// value. `Ordinary` deliberately matches every pattern because it carries no
+/// transform provenance; the answer only matters for preventing a known
+/// callable or tuple from crossing incompatible pattern structure.
+fn core_transform_value_matches_pattern(value: &CoreTransformValue, pattern: &deep::Expr) -> bool {
+    stack_guard!("core_transform_value_matches_pattern", pattern, false);
+    if matches!(value, CoreTransformValue::Ordinary) {
+        return true;
+    }
+    if let deep::Expr::MetaExpr(meta, _) = pattern {
+        return core_transform_value_matches_pattern(value, &meta.expr);
+    }
+    let Some((tag, _, children)) = stamped_parts(pattern) else {
         return false;
     };
-    every_terminal_is_self_call(body, def_name)
-}
-
-/// True when every terminal (tail) position of `expr` is a direct call
-/// to `def_name`. Walks through `let` bodies, both arms of `if`, and
-/// every `match` arm body. Any non-self-call terminal (a literal, a
-/// different fn call, a non-self var) makes this false — that terminal
-/// is a potential base case and the recursion isn't trivial.
-#[allow(dead_code)]
-pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> bool {
-    stack_guard!("every_terminal_is_self_call", expr, false);
-    match expr {
-        deep::Expr::MetaExpr(meta, _) => every_terminal_is_self_call(&meta.expr, def_name),
-        deep::Expr::List(list, _) => match get_tag(list) {
-            Some(DeepTag::App) => {
-                let kids = children(list);
-                let Some(callee) = kids.first() else {
-                    return false;
-                };
-                // chelis#1107 amendment: carrier-preserving read.
-                let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee) else {
-                    return false;
-                };
-                callee_kids.first().and_then(symbol_name) == Some(def_name)
-            }
-            Some(DeepTag::Let) => {
-                let kids = children(list);
-                kids.get(1)
-                    .map(|body| every_terminal_is_self_call(body, def_name))
-                    .unwrap_or(false)
-            }
-            Some(DeepTag::If) => {
-                let kids = children(list);
-                if kids.len() < 3 {
-                    return false;
-                }
-                every_terminal_is_self_call(&kids[1], def_name)
-                    && every_terminal_is_self_call(&kids[2], def_name)
-            }
-            Some(DeepTag::Match) => {
-                let kids = children(list);
-                if kids.len() < 2 {
-                    return false;
-                }
-                kids.iter().skip(1).all(|arm| {
-                    if let deep::Expr::List(arm_list, _) = arm
-                        && get_tag(arm_list) == Some(DeepTag::Arm)
-                    {
-                        children(arm_list)
-                            .get(2)
-                            .map(|body| every_terminal_is_self_call(body, def_name))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                })
-            }
-            _ => false,
-        },
+    match tag {
+        DeepTag::PatVar | DeepTag::PatWild => true,
+        DeepTag::PatAs => children
+            .get(1)
+            .is_some_and(|inner| core_transform_value_matches_pattern(value, inner)),
+        DeepTag::PatTuple => {
+            let CoreTransformValue::Tuple(elements) = value else {
+                return false;
+            };
+            elements.len() == children.len()
+                && children
+                    .iter()
+                    .zip(elements)
+                    .all(|(child, element)| core_transform_value_matches_pattern(element, child))
+        }
+        DeepTag::PatLit | DeepTag::PatCtor | DeepTag::PatRecord => false,
         _ => false,
     }
+}
+
+fn collect_top_level_function_names(exprs: &[&deep::Expr]) -> UnordSet<String> {
+    let mut names = UnordSet::new();
+    for expr in exprs {
+        let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = children.first().and_then(symbol_name) else {
+            continue;
+        };
+        if children
+            .get(1)
+            .and_then(stamped_parts)
+            .is_some_and(|(tag, _, _)| tag == DeepTag::Fn)
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+fn collect_top_level_transform_values(
+    exprs: &[&deep::Expr],
+    top_level_functions: &UnordSet<String>,
+) -> UnordMap<String, CoreTransformValue> {
+    let mut module_values = UnordMap::new();
+    let lexical_scope = CoreTransformScope::default();
+    for expr in exprs {
+        let Some((DeepTag::Def, _, children)) = stamped_parts(expr) else {
+            continue;
+        };
+        let (Some(name), Some(value)) = (children.first().and_then(symbol_name), children.get(1))
+        else {
+            continue;
+        };
+        let value = classify_core_transform_value(
+            value,
+            top_level_functions,
+            &module_values,
+            &lexical_scope,
+        );
+        module_values.insert(name.to_string(), value);
+    }
+    module_values
+}
+
+fn walk_core_transform_targets(
+    expr: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
+    lexical_scope: &CoreTransformScope,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    stack_guard!("walk_core_transform_targets", expr);
+    if let deep::Expr::MetaExpr(meta, _) = expr {
+        walk_core_transform_targets(
+            &meta.expr,
+            top_level_functions,
+            module_values,
+            lexical_scope,
+            errors,
+        );
+        return;
+    }
+    let Some((tag, _, children)) = stamped_parts(expr) else {
+        return;
+    };
+    match tag {
+        DeepTag::Def => {
+            if let Some(body) = children.get(1) {
+                walk_core_transform_targets(
+                    body,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                    errors,
+                );
+            }
+        }
+        DeepTag::Fn => {
+            let mut scoped = lexical_scope.clone();
+            if let Some(params) = children.first()
+                && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
+            {
+                for param in params {
+                    if let Some(name) = param_name_for_refs(param) {
+                        scoped.bind_local(name, CoreTransformValue::Ordinary);
+                    }
+                }
+            }
+            if let Some(body) = children.get(1) {
+                walk_core_transform_targets(
+                    body,
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                    errors,
+                );
+            }
+        }
+        DeepTag::Let => {
+            let (Some(binding), Some(body)) = (children.first(), children.get(1)) else {
+                return;
+            };
+            let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(binding) else {
+                for child in children {
+                    walk_core_transform_targets(
+                        child,
+                        top_level_functions,
+                        module_values,
+                        lexical_scope,
+                        errors,
+                    );
+                }
+                return;
+            };
+            if !bind_children.len().is_multiple_of(2) {
+                for child in children {
+                    walk_core_transform_targets(
+                        child,
+                        top_level_functions,
+                        module_values,
+                        lexical_scope,
+                        errors,
+                    );
+                }
+                return;
+            }
+            let mut scoped = lexical_scope.clone();
+            for pair in bind_children.as_chunks::<2>().0 {
+                let value = &pair[1];
+                walk_core_transform_targets(
+                    value,
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                    errors,
+                );
+                if let Some(name) = symbol_name(&pair[0]) {
+                    let value = classify_core_transform_value(
+                        value,
+                        top_level_functions,
+                        module_values,
+                        &scoped,
+                    );
+                    scoped.bind_local(name.to_string(), value);
+                }
+            }
+            walk_core_transform_targets(body, top_level_functions, module_values, &scoped, errors);
+        }
+        DeepTag::Match => {
+            let scrutinee_value =
+                children
+                    .first()
+                    .map_or(CoreTransformValue::Ordinary, |scrutinee| {
+                        classify_core_transform_value(
+                            scrutinee,
+                            top_level_functions,
+                            module_values,
+                            lexical_scope,
+                        )
+                    });
+            if let Some(scrutinee) = children.first() {
+                walk_core_transform_targets(
+                    scrutinee,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                    errors,
+                );
+            }
+            for arm in children.iter().skip(1) {
+                let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
+                    walk_core_transform_targets(
+                        arm,
+                        top_level_functions,
+                        module_values,
+                        lexical_scope,
+                        errors,
+                    );
+                    continue;
+                };
+                let mut scoped = lexical_scope.clone();
+                if let Some(pattern) = arm_children.first() {
+                    bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
+                }
+                for child in arm_children.iter().skip(1) {
+                    walk_core_transform_targets(
+                        child,
+                        top_level_functions,
+                        module_values,
+                        &scoped,
+                        errors,
+                    );
+                }
+            }
+        }
+        DeepTag::Grad | DeepTag::Vmap => {
+            validate_core_transform_target(
+                tag,
+                children.first(),
+                top_level_functions,
+                module_values,
+                lexical_scope,
+                errors,
+            );
+            for child in children {
+                walk_core_transform_targets(
+                    child,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                    errors,
+                );
+            }
+        }
+        _ => {
+            for child in children {
+                walk_core_transform_targets(
+                    child,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                    errors,
+                );
+            }
+        }
+    }
+}
+
+/// Preserve the transform-relevant identity of a module, local, result, or
+/// direct-target value through the transparent forwarding forms admitted by
+/// the release fragment.
+///
+/// This deliberately is not general value inference: applications, branches,
+/// records, constructors, and arbitrary computation collapse to `Ordinary`.
+/// The fence only retains a callable already known to be unsupported while it
+/// flows through lexical aliases, blocks, match results, or statically selected
+/// tuple components.
+fn classify_core_transform_value(
+    value: &deep::Expr,
+    top_level_functions: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
+    lexical_scope: &CoreTransformScope,
+) -> CoreTransformValue {
+    stack_guard!(
+        "classify_core_transform_value",
+        value,
+        CoreTransformValue::Ordinary
+    );
+    if let deep::Expr::MetaExpr(meta, _) = value {
+        return classify_core_transform_value(
+            &meta.expr,
+            top_level_functions,
+            module_values,
+            lexical_scope,
+        );
+    }
+    let Some((tag, _, children)) = stamped_parts(value) else {
+        return CoreTransformValue::Ordinary;
+    };
+    match tag {
+        DeepTag::Fn => {
+            if vmap_lambda_has_untyped_parameter(Some(value)) {
+                CoreTransformValue::UntypedVmapLambda
+            } else {
+                CoreTransformValue::ConstrainedVmapLambda
+            }
+        }
+        DeepTag::Var => {
+            let Some(name) = children.first().and_then(symbol_name) else {
+                return CoreTransformValue::Ordinary;
+            };
+            lexical_scope
+                .local_values
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if top_level_functions.contains(name) {
+                        CoreTransformValue::TopLevelFunctionAlias
+                    } else {
+                        module_values.get(name).cloned().unwrap_or_default()
+                    }
+                })
+        }
+        DeepTag::Tuple => CoreTransformValue::Tuple(
+            children
+                .iter()
+                .map(|child| {
+                    classify_core_transform_value(
+                        child,
+                        top_level_functions,
+                        module_values,
+                        lexical_scope,
+                    )
+                })
+                .collect(),
+        ),
+        DeepTag::TupleGet => {
+            let (Some(tuple), Some(index)) =
+                (children.first(), children.get(1).and_then(tuple_get_index))
+            else {
+                return CoreTransformValue::Ordinary;
+            };
+            let CoreTransformValue::Tuple(elements) = classify_core_transform_value(
+                tuple,
+                top_level_functions,
+                module_values,
+                lexical_scope,
+            ) else {
+                return CoreTransformValue::Ordinary;
+            };
+            elements.get(index).cloned().unwrap_or_default()
+        }
+        DeepTag::Let => {
+            let (Some((DeepTag::Bind, _, bind_children)), Some(body)) =
+                (children.first().and_then(stamped_parts), children.get(1))
+            else {
+                return CoreTransformValue::Ordinary;
+            };
+            if !bind_children.len().is_multiple_of(2) {
+                return CoreTransformValue::Ordinary;
+            }
+            let mut scoped = lexical_scope.clone();
+            for pair in bind_children.as_chunks::<2>().0 {
+                let Some(name) = symbol_name(&pair[0]) else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let bound_value = classify_core_transform_value(
+                    &pair[1],
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                );
+                scoped.bind_local(name.to_string(), bound_value);
+            }
+            classify_core_transform_value(body, top_level_functions, module_values, &scoped)
+        }
+        DeepTag::Block => children
+            .last()
+            .map_or(CoreTransformValue::Ordinary, |result| {
+                classify_core_transform_value(
+                    result,
+                    top_level_functions,
+                    module_values,
+                    lexical_scope,
+                )
+            }),
+        DeepTag::Match => {
+            let Some(scrutinee) = children.first() else {
+                return CoreTransformValue::Ordinary;
+            };
+            let scrutinee_value = classify_core_transform_value(
+                scrutinee,
+                top_level_functions,
+                module_values,
+                lexical_scope,
+            );
+            let mut result: Option<CoreTransformValue> = None;
+            for arm in children.iter().skip(1) {
+                let Some((DeepTag::Arm, _, arm_children)) = stamped_parts(arm) else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let (Some(pattern), Some(body)) = (arm_children.first(), arm_children.get(2))
+                else {
+                    return CoreTransformValue::Ordinary;
+                };
+                let mut scoped = lexical_scope.clone();
+                bind_core_transform_pattern(pattern, &scrutinee_value, &mut scoped);
+                let arm_value = classify_core_transform_value(
+                    body,
+                    top_level_functions,
+                    module_values,
+                    &scoped,
+                );
+                result =
+                    Some(result.map_or_else(|| arm_value.clone(), |known| known.join(&arm_value)));
+            }
+            result.unwrap_or_default()
+        }
+        _ => CoreTransformValue::Ordinary,
+    }
+}
+
+/// Does a parameter annotation leave a type/rank hole on a path whose
+/// structure `vmap_transform_param_type` must rewrite?
+///
+/// This mirrors that transform's structural recursion: a whole inference
+/// hole, or one reached through a reference or tuple element, can still bind
+/// to the unsliced operand because `vmap` has no constructor at which to
+/// insert the batch axis. A rank inference hole has the same problem inside a
+/// tensor. Named type variables remain owned by the ordinary binder/resolver
+/// rules rather than receiving a duplicate fragment diagnostic.
+///
+/// Tensor dimension and precision holes are different. The tensor constructor
+/// and fixed number of dimension slots are already known, so `vmap` inserts
+/// the batch axis before those holes bind; dtype is preserved rather than
+/// transformed. Named rank binders remain owned by ordinary binder rules.
+/// Nominal and function types are shared, non-mapped values, so the transform
+/// does not recurse into their arguments.
+fn vmap_parameter_type_has_unmapped_hole(ty: &deep::Expr) -> bool {
+    stack_guard!("vmap_parameter_type_has_unmapped_hole", ty, true);
+    if let deep::Expr::MetaExpr(meta, _) = ty {
+        return vmap_parameter_type_has_unmapped_hole(&meta.expr);
+    }
+    let Some((tag, _, children)) = stamped_parts(ty) else {
+        return false;
+    };
+    match tag {
+        DeepTag::TVar => {
+            matches!(children, [name] if symbol_name(name) == Some("_"))
+        }
+        DeepTag::TRef => children
+            .first()
+            .is_some_and(vmap_parameter_type_has_unmapped_hole),
+        DeepTag::TTuple => children.iter().any(vmap_parameter_type_has_unmapped_hole),
+        DeepTag::TTensor => children.split_last().is_some_and(|(_, dimensions)| {
+            dimensions.iter().any(|dimension| {
+                matches!(
+                    stamped_parts(dimension),
+                    Some((DeepTag::DRank, _, rank_children))
+                        if matches!(rank_children, [name]
+                            if symbol_name(name) == Some("_"))
+                )
+            })
+        }),
+        _ => false,
+    }
+}
+
+/// An inline or locally bound `vmap` lambda is safe on the release fragment
+/// when every parameter has explicit transform-relevant type structure.
+/// `infer_vmap` can then insert the mapped axis before the eventual application
+/// unifies remaining dimension or precision variables with the operands.
+/// Without an annotation, or with an unmapped type/rank hole, the lambda can
+/// instead bind to the unsliced operand (#1887, #2109).
+fn vmap_lambda_has_untyped_parameter(target: Option<&deep::Expr>) -> bool {
+    let Some((DeepTag::Fn, _, children)) = target.and_then(stamped_parts) else {
+        return false;
+    };
+    let Some((DeepTag::Params, _, params)) = children.first().and_then(stamped_parts) else {
+        return false;
+    };
+    if let Some((effective_params, _)) = target
+        .and_then(|target| expr_type_expr(target, &IrTypeEnv::new()))
+        .as_ref()
+        .and_then(parse_t_fn_parts)
+        && effective_params.len() == params.len()
+    {
+        return effective_params
+            .iter()
+            .any(vmap_parameter_type_has_unmapped_hole);
+    }
+    params
+        .iter()
+        .any(|param| match param_name_and_inline_type(param) {
+            Some((_, Some(ty))) => vmap_parameter_type_has_unmapped_hole(&ty),
+            _ => true,
+        })
+}
+
+fn validate_core_transform_target(
+    tag: DeepTag,
+    target: Option<&deep::Expr>,
+    top_level_functions: &UnordSet<String>,
+    module_values: &UnordMap<String, CoreTransformValue>,
+    lexical_scope: &CoreTransformScope,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let target_parts = target.and_then(stamped_parts);
+    let name = target_parts.and_then(|(target_tag, _, children)| {
+        (target_tag == DeepTag::Var)
+            .then(|| children.first().and_then(symbol_name))
+            .flatten()
+    });
+    let shadows_top_level = name.is_some_and(|name| {
+        top_level_functions.contains(name) && lexical_scope.local_values.contains_key(name)
+    });
+    let direct_unshadowed_top_level = name.is_some_and(|name| {
+        top_level_functions.contains(name) && !lexical_scope.local_values.contains_key(name)
+    });
+    let target_value = target.map_or(CoreTransformValue::Ordinary, |target| {
+        classify_core_transform_value(target, top_level_functions, module_values, lexical_scope)
+    });
+    let aliases_top_level_function =
+        !direct_unshadowed_top_level && target_value.aliases_top_level_function();
+    let aliases_untyped_vmap_lambda = target_value.is_untyped_vmap_lambda();
+
+    let requires_fence = match tag {
+        // Existing `grad(fn (...) -> ...)` execution is a distinct, covered
+        // path. The P1 hazards are aliases and a local binder choosing a
+        // same-named global declaration, both represented as `var`.
+        DeepTag::Grad => shadows_top_level || aliases_top_level_function,
+        // #1887 is specifically an inline lambda whose parameter was inferred
+        // from the unsliced operand. Explicit parameter annotations provide
+        // the pre-transform function type, so they remain supported.
+        // Structurally forwarded aliases get the same fence as a direct alias.
+        DeepTag::Vmap => {
+            aliases_untyped_vmap_lambda || shadows_top_level || aliases_top_level_function
+        }
+        _ => unreachable!("only transform tags call this validator"),
+    };
+    if !requires_fence {
+        return;
+    }
+
+    let transform = match tag {
+        DeepTag::Grad => "grad",
+        DeepTag::Vmap => "vmap",
+        _ => unreachable!("only transform tags call this validator"),
+    };
+    errors.push(CheckError::new(
+        CheckErrorKind::TypeMismatch,
+        format!(
+            "the core transform fragment rejects this `{transform}` target: local aliases \
+             and shadowing bindings must be direct, unshadowed top-level function \
+             declarations, and inline or locally bound `vmap` parameters must be \
+             explicit on every mapped type path (chelis#1887, #1952, #1954, #2109)"
+        ),
+        vec![
+            format!("Define a top-level function and write `{transform}(that_function)`."),
+            "For an inline or locally bound `vmap` lambda, give every mapped parameter path an explicit type and rank."
+                .to_string(),
+            "The rejected callable form is outside the Chelis 0.19 core fragment.".to_string(),
+        ],
+    ));
 }
 
 /// Yield each top-level declaration, flattening through a `(module {} name ...)`
@@ -338,46 +832,206 @@ pub(super) fn every_terminal_is_self_call(expr: &deep::Expr, def_name: &str) -> 
 /// whose precision P is not supported by the Phase 0f tensor backend
 /// (currently: f16, bf16, f64, f8e4m3, string).
 ///
-/// This runs after HM inference so it catches user-written tensor type
-/// ascriptions, defsig tensor types, parameter type annotations, literal
-/// type metadata, and any cast target that produces a tensor with an
-/// unsupported element precision.
+/// This runs after HM inference so it catches value-position tensor type
+/// ascriptions, parameter type annotations, literal type metadata, and any
+/// cast target that produces a tensor with an unsupported element precision.
+/// `defsig` types are excluded because the shared Deep type resolver owns
+/// their primitive and binder diagnostics.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum TensorPrecisionOwnerKind {
+    Value,
+    Type,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionScope {
+    path: Option<String>,
+    occurrence: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TensorPrecisionOwner {
+    scope: TensorPrecisionScope,
+    kind: TensorPrecisionOwnerKind,
+    name: Option<String>,
+    occurrence: usize,
+}
+
+impl TensorPrecisionOwner {
+    fn declaration_diagnostic_owner(&self) -> Option<DeclarationDiagnosticOwner> {
+        (self.kind == TensorPrecisionOwnerKind::Value)
+            .then(|| {
+                self.name.as_deref().map(|name| {
+                    DeclarationDiagnosticOwner::new(
+                        self.scope.path.as_deref(),
+                        self.scope.occurrence,
+                        name,
+                        self.occurrence,
+                    )
+                })
+            })
+            .flatten()
+    }
+}
+
+struct TensorPrecisionItem<'a> {
+    scope: TensorPrecisionScope,
+    expr: &'a deep::Expr,
+}
+
+#[derive(Default)]
+struct TensorPrecisionValueOccurrences {
+    signatures: Vec<usize>,
+    definitions: Vec<usize>,
+}
+
+fn tensor_precision_items(exprs: &[deep::Expr]) -> Vec<TensorPrecisionItem<'_>> {
+    fn push<'a>(
+        expr: &'a deep::Expr,
+        scope: &TensorPrecisionScope,
+        next_scope_occurrence: &mut usize,
+        out: &mut Vec<TensorPrecisionItem<'a>>,
+    ) {
+        if let deep::ExprCarrier::DecodedNode(DeepTag::Module, _, children) = expr.carrier() {
+            let name = children.first().and_then(symbol_name);
+            let path = match (scope.path.as_deref(), name) {
+                (Some(prefix), Some(name)) => Some(format!("{prefix}.{name}")),
+                (None, Some(name)) => Some(name.to_string()),
+                (prefix, None) => prefix.map(str::to_string),
+            };
+            let module_scope = TensorPrecisionScope {
+                path,
+                occurrence: *next_scope_occurrence,
+            };
+            *next_scope_occurrence += 1;
+            for child in children.iter().skip(1) {
+                push(child, &module_scope, next_scope_occurrence, out);
+            }
+            return;
+        }
+        out.push(TensorPrecisionItem {
+            scope: scope.clone(),
+            expr,
+        });
+    }
+
+    let root = TensorPrecisionScope {
+        path: None,
+        occurrence: 0,
+    };
+    let mut next_scope_occurrence = 1;
+    let mut items = Vec::new();
+    for expr in exprs {
+        push(expr, &root, &mut next_scope_occurrence, &mut items);
+    }
+    items
+}
+
+fn tensor_precision_owner_plan(items: &[TensorPrecisionItem<'_>]) -> Vec<TensorPrecisionOwner> {
+    let mut owners = items
+        .iter()
+        .enumerate()
+        .map(|(occurrence, item)| TensorPrecisionOwner {
+            scope: item.scope.clone(),
+            kind: TensorPrecisionOwnerKind::Other,
+            name: None,
+            occurrence,
+        })
+        .collect::<Vec<_>>();
+    let mut value_occurrences: BTreeMap<
+        (TensorPrecisionScope, String),
+        TensorPrecisionValueOccurrences,
+    > = BTreeMap::new();
+    let mut type_occurrences: BTreeMap<(TensorPrecisionScope, String), usize> = BTreeMap::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let deep::ExprCarrier::DecodedNode(tag, _, children) = item.expr.carrier() else {
+            continue;
+        };
+        let Some(name) = children.first().and_then(symbol_name).map(str::to_string) else {
+            continue;
+        };
+        match tag {
+            DeepTag::Defsig => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .signatures
+                .push(index),
+            DeepTag::Def => value_occurrences
+                .entry((item.scope.clone(), name))
+                .or_default()
+                .definitions
+                .push(index),
+            DeepTag::Deftype | DeepTag::Typealias => {
+                let occurrence = type_occurrences
+                    .entry((item.scope.clone(), name.clone()))
+                    .or_default();
+                owners[index] = TensorPrecisionOwner {
+                    scope: item.scope.clone(),
+                    kind: TensorPrecisionOwnerKind::Type,
+                    name: Some(name),
+                    occurrence: *occurrence,
+                };
+                *occurrence += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // Pair the nth signature and nth definition for a value declaration
+    // independently of which kind appears first in source. Extra declarations
+    // retain their own occurrence owner. The lexical scope occurrence keeps
+    // reopened module blocks distinct even when their path spelling matches.
+    for ((scope, name), occurrences) in value_occurrences {
+        for (occurrence, index) in occurrences.signatures.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+        for (occurrence, index) in occurrences.definitions.into_iter().enumerate() {
+            owners[index] = TensorPrecisionOwner {
+                scope: scope.clone(),
+                kind: TensorPrecisionOwnerKind::Value,
+                name: Some(name.clone()),
+                occurrence,
+            };
+        }
+    }
+
+    owners
+}
+
+pub(super) fn declaration_diagnostic_owner_plan(
+    exprs: &[deep::Expr],
+) -> Vec<Option<DeclarationDiagnosticOwner>> {
+    let items = tensor_precision_items(exprs);
+    tensor_precision_owner_plan(&items)
+        .iter()
+        .map(TensorPrecisionOwner::declaration_diagnostic_owner)
+        .collect()
+}
+
 pub(super) fn validate_tensor_precisions_in_program(
     exprs: &[deep::Expr],
     errors: &mut impl DiagnosticOutput,
 ) {
-    let mut seen: UnordSet<(String, String)> = UnordSet::new();
-    // Descend through `(module {} name ...)` wrappers so per-def dedup
-    // keeps each def's tensor types in their own key space (otherwise
-    // every def lives under def_context="" and errors collapse).
-    for expr in top_level_decl_items(exprs) {
-        let def_name = match expr {
-            deep::Expr::List(list, _)
-                if matches!(
-                    get_tag(list),
-                    Some(DeepTag::Def)
-                        | Some(DeepTag::Defsig)
-                        | Some(DeepTag::Deftype)
-                        | Some(DeepTag::Typealias)
-                ) =>
-            {
-                children(list)
-                    .first()
-                    .and_then(symbol_name)
-                    .unwrap_or("")
-                    .to_string()
-            }
-            _ => String::new(),
-        };
-        walk_for_tensor_precision(expr, errors, &mut seen, &def_name);
+    let mut seen: UnordSet<(TensorPrecisionOwner, String)> = UnordSet::new();
+    let items = tensor_precision_items(exprs);
+    let owners = tensor_precision_owner_plan(&items);
+    for (item, owner) in items.into_iter().zip(owners) {
+        walk_for_tensor_precision(item.expr, errors, &mut seen, &owner);
     }
 }
 
-pub(super) fn walk_for_tensor_precision(
+fn walk_for_tensor_precision(
     expr: &deep::Expr,
     errors: &mut impl DiagnosticOutput,
-    seen: &mut UnordSet<(String, String)>,
-    def_context: &str,
+    seen: &mut UnordSet<(TensorPrecisionOwner, String)>,
+    owner: &TensorPrecisionOwner,
 ) {
     // Bail before this walker's own unbounded recursion exhausts the
     // native stack (gdb confirmed this is a real SIGSEGV site on deep `app`
@@ -389,87 +1043,57 @@ pub(super) fn walk_for_tensor_precision(
         "validate_tensor_precisions (walk_for_tensor_precision)",
         expr
     );
-    match expr {
-        deep::Expr::List(list, _span) => {
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(tag, metadata, kids) => {
+            // The shared Deep resolver is the sole owner for declaration
+            // signatures. Traversing one here would add the legacy
+            // value-position UnsupportedTensorPrecision diagnostic beside
+            // the resolver's unknown-primitive or undeclared-binder error.
+            if tag == DeepTag::Defsig {
+                return;
+            }
+
             // Check t-tensor nodes at this level.
-            if get_tag(list) == Some(DeepTag::TTensor) {
-                let kids = children(list);
+            if tag == DeepTag::TTensor {
                 // chelis#1125 PP7 / [04-TOT-5]: read the trailing `t-prim`
-                // through the carrier-preserving `stamped_parts`. The
-                // `Expr::Node` arm below bridges through `Node::to_list`, so
-                // this walker LOOKS carrier-complete to a grep for `Expr::Node`
-                // coverage -- but `to_list` copies children verbatim, so the
-                // rebuilt list's trailing precision child is still a `Node` and
-                // the old `Expr::List`-only destructure failed on it. The whole
-                // tensor-precision check was therefore skipped on the stamped
-                // ingress, by a walker with a `Node` arm (PP7 finding 3).
+                // through the shared carrier-total accessor. The former
+                // `Node::to_list` bridge copied children verbatim, so its
+                // trailing `t-prim` remained a `Node` and a List-only
+                // destructure silently skipped the check (PP7 finding 3).
                 if let Some(last) = kids.last()
                     && let Some((DeepTag::TPrim, _, prec_kids)) = stamped_parts(last)
                     && let Some(name) = prec_kids.first().and_then(symbol_name)
                 {
-                    let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-                    // A1 (WS-A0 RT-1 fixup): unsigned dtype names, plus
-                    // the other reserved-but-deferred names of
-                    // spec/04-type-system.md §1.1.1. Mirror the f8e4m3
-                    // §1.1.1 rejection contract — these names never
-                    // resolve through `Prim::parse_name`, so without
-                    // this guard `tensor[..., u8]` (or `tensor[...,
-                    // complex64]`) would silently fall through with no
-                    // §1.1.1-citing diagnostic.
-                    // The §1.1.1 reserved families used to be reported here
-                    // as well as by the resolver. `DeepTypeResolver` now names
-                    // them in every type position and on both carriers
-                    // (chelis#1593), so a branch here would be a second voice
-                    // saying the same sentence. The two `!is_*_dtype_name`
-                    // guards below stay: without them a reserved name falls
-                    // into the unrecognized-primitive arm and gets the wrong
-                    // message.
-                    if let Some(prim) = Prim::parse_name(name)
-                        && !prim.is_valid_tensor_precision()
-                        && seen.insert((def_context.to_string(), name.to_string()))
-                    {
-                        if matches!(prim, Prim::F8e4m3) {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::UnsupportedTensorPrecision,
-                                format!(
-                                    "tensor element precision `f8e4m3` is deferred per \
-                                     spec/04-type-system.md §1.1.1 and is not part of the active \
-                                     numeric primitive set ({active_set})",
-                                ),
-                                vec![format!(
-                                    "f8e4m3 has no active backend in this cycle; pick one of \
-                                     {active_set} or see spec/04-type-system.md §1.1.1 for the \
-                                     deferral rationale",
-                                )],
-                            ));
-                        } else {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::UnsupportedTensorPrecision,
-                                format!(
-                                    "tensor element precision `{name}` is not supported by the \
-                                     current backend set (supported: {active_set})",
-                                ),
-                                vec![format!(
-                                    "Use tensor[..., f32] and cast host scalars explicitly, or \
-                                     keep `{name}` as a host scalar",
-                                )],
-                            ));
-                        }
-                    } else if Prim::parse_name(name).is_none()
+                    // The shared Deep resolver owns every §1.1.1 reserved
+                    // spelling, including the internal `Prim::F8e4m3` row.
+                    // This legacy walker retains only its distinct job:
+                    // rejecting an otherwise unknown `t-prim` precision from
+                    // value-position metadata. The reserved-name exclusions
+                    // keep those spellings from acquiring a second owner.
+                    let resolved_by_type_boundary =
+                        TypeDiagnosticLocation::from_expr(last).is_some_and(|location| {
+                            errors.resolved_unknown_primitive_at(&location, name)
+                        }) || owner
+                            .declaration_diagnostic_owner()
+                            .is_some_and(|declaration| {
+                                errors.declaration_owns_unknown_primitive(&declaration, name)
+                            });
+                    if !resolved_by_type_boundary
+                        && Prim::parse_name(name).is_none()
+                        && !crate::deep_type::is_retired_integer_dtype_name(name)
                         && !is_unsigned_dtype_name(name)
                         && !is_deferred_dtype_name(name)
-                        && seen.insert((def_context.to_string(), name.to_string()))
+                        && seen.insert((owner.clone(), name.to_string()))
                     {
-                        // WS-A5 RT-3a F3: an identifier in a `t-prim`
+                        let active_set = "f32, f64, bf16, f16, bool, i8, i16, i32, i64";
+                        // F3: an identifier in a value-position `t-prim`
                         // precision slot that is neither a known active
-                        // primitive nor a §1.1.1 deferred dtype name
-                        // (unsigned alias or reserved name) is an
-                        // unbound name. Inside a sig the desugarer emits
-                        // such an identifier as `t-var`, so reaching this
-                        // arm with `t-prim` proves the name appears in a
-                        // value-position annotation (let binding, def
-                        // param without a surrounding sig that quantified
-                        // it) where the closed primitive set must apply.
+                        // primitive nor a §1.1.1 deferred dtype name is an
+                        // unbound name. Declaration signatures returned
+                        // above, and declaration body annotations consult the
+                        // session's shared resolver witness before this arm,
+                        // so this legacy fallback cannot duplicate their
+                        // located unknown-primitive diagnostic.
                         // Without this guard the name silently collapses
                         // to a witnessed resolution failure at the centralized
                         // Deep type boundary's
@@ -479,15 +1103,15 @@ pub(super) fn walk_for_tensor_precision(
                             CheckErrorKind::UnsupportedTensorPrecision,
                             format!(
                                 "tensor element precision `{name}` is not a recognized \
-                                 primitive (active set: {active_set}); inside a sig an \
-                                 unbound lowercase name introduces a precision tvar per \
-                                 spec/04-type-system.md §5.8, but in this position the \
-                                 closed primitive set applies",
+                                 primitive in this value-position annotation \
+                                 (active set: {active_set}); generic declaration \
+                                 variables require an explicit binder list under \
+                                 spec/04-type-system.md §5.8.1",
                             ),
                             vec![format!(
-                                "Use one of {active_set}, or move the annotation into a \
-                                 `sig` declaration that quantifies `{name}` as a precision \
-                                 type variable",
+                                "Use one of {active_set}, or declare `{name}` explicitly \
+                                 on the enclosing `sig` or `def` and use it in that \
+                                 declaration's type",
                             )],
                         ));
                     }
@@ -497,113 +1121,44 @@ pub(super) fn walk_for_tensor_precision(
             // `cast` is inferred by infer_cast which already emits a clearer
             // site-local error for bad precisions. Skip the walker's recursion
             // inside a cast so we don't duplicate the diagnostic.
-            if get_tag(list) == Some(DeepTag::Cast) {
+            if tag == DeepTag::Cast {
                 return;
             }
 
-            // Recurse into metadata map (element[1]), which may carry
-            // `type:` ascriptions that also contain t-tensor types.
-            if list.elements.len() >= 2
-                && let deep::Expr::Map(map, _) = &list.elements[1]
-            {
-                for (_, v) in &map.entries {
-                    walk_for_tensor_precision(v, errors, seen, def_context);
-                }
-            }
+            // Metadata may carry `type:` ascriptions containing tensor types.
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
 
-            // Recurse into children (elements after index 1).
-            for child in children(list) {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+            for child in kids {
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
-                walk_for_tensor_precision(v, errors, seen, def_context);
+        deep::ExprCarrier::MetadataMap(metadata) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
+        }
+        deep::ExprCarrier::MetadataExpression(metadata_expr) => {
+            metadata_expr.metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
+            walk_for_tensor_precision(&metadata_expr.expr, errors, seen, owner);
+        }
+        deep::ExprCarrier::Atom(_) => {}
+        deep::ExprCarrier::StructuralList(elements) => {
+            for child in elements {
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::Expr::MetaExpr(meta, _) => {
-            for (_, v) in &meta.entries {
-                walk_for_tensor_precision(v, errors, seen, def_context);
-            }
-            walk_for_tensor_precision(&meta.expr, errors, seen, def_context);
-        }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_tensor_precision(&bridged, errors, seen, def_context);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                walk_for_tensor_precision(child, errors, seen, def_context);
+        deep::ExprCarrier::UndecodableHead(_, metadata, children) => {
+            metadata.visit_syntax(&mut |_, value| {
+                walk_for_tensor_precision(value, errors, seen, owner);
+            });
+            for child in children {
+                walk_for_tensor_precision(child, errors, seen, owner);
             }
         }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                walk_for_tensor_precision(child, errors, seen, def_context);
-            }
-        }
-    }
-}
-
-/// WS-A8 cross-row enforcement: spec/04-type-system.md §5.4 (transcendentals
-/// on float-only) and §5.7.2 (matmul not admitted on integer operands)
-/// fire correctly at direct primitive call sites
-/// (see `check_matmul_signature` and the `TENSOR_OPS` post-check in
-/// `infer_app`), but were silent when the same restricted op was reached
-/// through a polymorphic-precision sig instantiation.
-///
-/// Example: a stdlib `linear.forward` body uses `matmul(x, w)`. Its sig
-/// is `&tensor[a, b, p] -> &tensor[b, c, p] -> tensor[a, c, p]`. Inside
-/// the body, `matmul`'s operand precisions are both `Var(p)`; the §5.7.2
-/// check (`lhs_prec.is_integer()`) returns `false` for a `Var`. At a
-/// concrete call site `linear.forward(x: int32, w: int32)`, the call
-/// site instantiates `p` to `int32` via unification — but the body's
-/// already-checked `matmul(x, w)` doesn't get re-checked. The integer
-/// rejection silently slipped through.
-///
-/// This pass closes the gap. It walks every `(app (var name) ...)` call
-/// site post-inference and, when the callee is a top-level user-def
-/// with a polymorphic-precision sig, builds a precision-tvar
-/// substitution from the call site's arg types vs the callee's sig
-/// parameter types, then re-checks the callee's body for restricted
-/// ops with the substituted operand precisions.
-pub(super) fn validate_polymorphic_op_constraints(
-    exprs: &[deep::Expr],
-    type_env: &IrTypeEnv,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let defs_with_bodies = collect_def_bodies(exprs);
-    let defsigs = collect_defsig_exprs(exprs);
-    // Merge defsig sigs into the type-env view so polymorphic
-    // signatures (which haven't been annotated onto def bodies yet) are
-    // visible to the call-site lookup.
-    let mut combined_env: IrTypeEnv = type_env.clone();
-    for (name, sig_expr) in &defsigs {
-        combined_env.entry(name.clone()).or_insert(sig_expr.clone());
-    }
-    // For each top-level def we walk into, build a local scope mapping
-    // body-param names to their declared types (extracted from the
-    // def's sig in `combined_env`). This lets us resolve `(var x)`
-    // references inside the body without requiring the bodies to have
-    // been annotated. Bodies of polymorphic defs intentionally have
-    // their inner exprs untouched by the annotator at this stage.
-    // chelis#930: per-top-level-declaration cancellation; see
-    // `validate_ir_program`. Measured at ~0.85s over 1500 declarations, this
-    // was the largest remaining uninterruptible step in the check phase.
-    let cancel = crate::cancel::current_cancel_token();
-    for expr in top_level_decl_items(exprs) {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            break;
-        }
-        let scope = build_def_param_scope(expr, &combined_env);
-        walk_for_poly_op_constraint_violations(
-            expr,
-            &defs_with_bodies,
-            &combined_env,
-            &scope,
-            errors,
-        );
     }
 }
 
@@ -614,11 +1169,8 @@ pub(super) fn build_def_param_scope(
     sigs: &IrTypeEnv,
 ) -> BTreeMap<String, deep::Expr> {
     let mut scope = BTreeMap::new();
-    // chelis#1107: carrier-preserving read. A `List`-only destructure returned
-    // an empty scope for every stamped `def`, which -- together with the two
-    // collectors below and the callee read in
-    // `check_app_for_poly_op_constraint` -- left the whole WS-A8 cross-row
-    // pass inert on `check_typed_program`.
+    // chelis#1107: preserve stamped and ordinary carriers alike. A List-only
+    // destructure loses every stamped definition's parameter scope.
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return scope;
     };
@@ -666,19 +1218,14 @@ pub(super) fn build_def_param_scope(
     scope
 }
 
-/// The `[name, {type: T}]` element sequence shared by the two carriers an
-/// inline-annotated param can arrive in: a tagless `Expr::List` on the
-/// serialized-IR ingress and an `Expr::BareList` on the stamped one.
+/// The `[name, {type: T}]` element sequence of an inline-annotated param,
+/// which every ingress carries as an `Expr::BareList`.
 fn inline_param_parts(elements: &[deep::Expr]) -> Option<(String, Option<deep::Expr>)> {
     let Some(deep::Expr::Atom(deep::Atom::Name(name), _)) = elements.first() else {
         return None;
     };
     let ty = match elements.get(1) {
-        Some(deep::Expr::Map(meta, _)) => meta
-            .entries
-            .iter()
-            .find(|(k, _)| k == "type")
-            .map(|(_, v)| v.clone()),
+        Some(deep::Expr::Map(meta, _)) => meta.ty().map(|v| v.expression().clone()),
         _ => None,
     };
     Some((name.clone(), ty))
@@ -692,7 +1239,6 @@ pub(super) fn param_name_and_inline_type(
 ) -> Option<(String, Option<deep::Expr>)> {
     match param {
         deep::Expr::Atom(deep::Atom::Name(name), _) => Some((name.clone(), None)),
-        deep::Expr::List(list, _) => inline_param_parts(&list.elements),
         // chelis#1125 PP7 finding 1 / [04-TOT-5]: an inline-annotated param
         // `(x {type: T})` is a TAGLESS list, so the stamp pass produces an
         // `Expr::BareList`, not an `Expr::Node`. `build_def_param_scope` was
@@ -707,65 +1253,11 @@ pub(super) fn param_name_and_inline_type(
             let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
-            let ty = meta
-                .entries
-                .iter()
-                .find(|(k, _)| k == "type")
-                .map(|(_, v)| v.clone());
+            let ty = meta.metadata.ty().map(|v| v.expression().clone());
             Some((name.clone(), ty))
         }
         _ => None,
     }
-}
-
-/// Collect every `(defsig {} name sig_expr)` at the top level into a
-/// name → sig-expr map. WS-A8 needs this so polymorphic-sig info reaches
-/// the cross-row enforcement pass even when the def's body annotation
-/// has not yet been populated by the annotator.
-pub(super) fn collect_defsig_exprs(exprs: &[deep::Expr]) -> BTreeMap<String, deep::Expr> {
-    let mut out = BTreeMap::new();
-    for expr in top_level_decl_items(exprs) {
-        // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if tag != DeepTag::Defsig {
-            continue;
-        }
-        if let Some(name) = kids.first().and_then(symbol_name)
-            && let Some(sig) = kids.get(1)
-        {
-            out.insert(name.to_string(), sig.clone());
-        }
-    }
-    out
-}
-
-/// Map from def name to (params: Vec<param-name>, body-expr).
-pub(super) type DefBodyMap = UnordMap<String, (Vec<String>, deep::Expr)>;
-
-pub(super) fn collect_def_bodies(exprs: &[deep::Expr]) -> DefBodyMap {
-    let mut out = UnordMap::new();
-    for expr in top_level_decl_items(exprs) {
-        // chelis#1107: carrier-preserving read; see `build_def_param_scope`.
-        let Some((tag, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        if tag != DeepTag::Def {
-            continue;
-        }
-        let Some(name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
-        let Some(body) = kids.get(1) else {
-            continue;
-        };
-        let Some((params, body_expr)) = extract_fn_params_and_body(body) else {
-            continue;
-        };
-        out.insert(name.to_string(), (params, body_expr));
-    }
-    out
 }
 
 pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<String>, deep::Expr)> {
@@ -776,9 +1268,6 @@ pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<Strin
     let body_expr = kids.get(1)?;
     let params = match params_expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(params_list, _) if get_tag(params_list) == Some(DeepTag::Params) => {
-            children(params_list)
-        }
         deep::Expr::BareList(elements, _) => elements.as_slice(),
         _ => return None,
     };
@@ -789,163 +1278,6 @@ pub(super) fn extract_fn_params_and_body(expr: &deep::Expr) -> Option<(Vec<Strin
         }
     }
     Some((names, body_expr.clone()))
-}
-
-pub(super) fn walk_for_poly_op_constraint_violations(
-    expr: &deep::Expr,
-    defs: &DefBodyMap,
-    type_env: &IrTypeEnv,
-    scope: &BTreeMap<String, deep::Expr>,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    stack_guard!("walk_for_poly_op_constraint_violations", expr);
-    match expr {
-        deep::Expr::List(list, _span) => {
-            // Check if this is `(app (var name) arg1 arg2 ...)` calling
-            // a top-level user-def with a polymorphic precision sig.
-            if get_tag(list) == Some(DeepTag::App) {
-                check_app_for_poly_op_constraint(list, defs, type_env, scope, errors);
-            }
-            for child in &list.elements {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
-            }
-        }
-        deep::Expr::Map(map, _) => {
-            for (_, v) in &map.entries {
-                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            }
-        }
-        deep::Expr::MetaExpr(meta, _) => {
-            walk_for_poly_op_constraint_violations(&meta.expr, defs, type_env, scope, errors);
-            for (_, v) in &meta.entries {
-                walk_for_poly_op_constraint_violations(v, defs, type_env, scope, errors);
-            }
-        }
-        deep::Expr::Atom(_, _) => {}
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            walk_for_poly_op_constraint_violations(&bridged, defs, type_env, scope, errors);
-        }
-        deep::Expr::BareList(elems, _) => {
-            for child in elems {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
-            }
-        }
-        deep::Expr::UnknownForm(data) => {
-            for child in &data.children {
-                walk_for_poly_op_constraint_violations(child, defs, type_env, scope, errors);
-            }
-        }
-    }
-}
-
-/// At an `(app (var callee_name) arg1 arg2 ...)` call site, if `callee_name`
-/// is a top-level user-def with a polymorphic-precision sig, compute the
-/// call-site precision substitution and re-check the body for restricted
-/// ops with substituted precisions.
-pub(super) fn check_app_for_poly_op_constraint(
-    list: &deep::List,
-    defs: &DefBodyMap,
-    type_env: &IrTypeEnv,
-    scope: &BTreeMap<String, deep::Expr>,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let kids = children(list);
-    let Some(callee_expr) = kids.first() else {
-        return;
-    };
-    // chelis#1107: carrier-preserving read. The walker's Node bridge rebuilds
-    // only the `app` node, so the callee arrives as `Expr::Node` and a
-    // `List`-only destructure returned before any call site was ever checked.
-    let Some((callee_tag, _, callee_kids)) = stamped_parts(callee_expr) else {
-        return;
-    };
-    if callee_tag != DeepTag::Var {
-        return;
-    }
-    let Some(callee_name) = callee_kids.first().and_then(symbol_name) else {
-        return;
-    };
-    // Look up the callee's declared signature; only proceed if it carries
-    // a precision tvar (otherwise there's nothing to monomorphize).
-    let Some(sig_expr) = lookup_sig_in_type_env(type_env, callee_name) else {
-        return;
-    };
-    let Some((sig_params, _sig_ret)) = parse_t_fn_parts(sig_expr) else {
-        return;
-    };
-    if !sig_params.iter().any(type_expr_has_tensor_prec_var) {
-        return;
-    }
-    // Look up the callee's body so we can scan it.
-    let Some((body_params, body)) = defs.get(callee_name) else {
-        return;
-    };
-    // Build the call-site precision substitution: for each sig parameter
-    // whose precision slot is `(t-var {} q)`, resolve the corresponding
-    // call-site argument's concrete precision. Try the arg's `type:`
-    // annotation first; fall back to the enclosing-def `scope` when the
-    // arg is `(var x)` for an unannotated body-level reference.
-    let mut subst: UnordMap<String, String> = UnordMap::new();
-    for (sig_param, arg_expr) in sig_params.iter().zip(kids.iter().skip(1)) {
-        let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) else {
-            continue;
-        };
-        let arg_ty =
-            annotated_type_of_expr(arg_expr).or_else(|| resolve_var_type_in_scope(arg_expr, scope));
-        let Some(arg_ty) = arg_ty else {
-            continue;
-        };
-        let Some(prim_name) = precision_prim_name_in_type_expr(&arg_ty) else {
-            continue;
-        };
-        // Last-write-wins is fine: if the same `q` appears in multiple
-        // params, the call site's unification already enforced consistency
-        // (otherwise `chelis check` would have surfaced a precision
-        // mismatch earlier in the pipeline).
-        subst.insert(prec_var_name, prim_name);
-    }
-    if subst.is_empty() {
-        return;
-    }
-    // Map the body's parameter names to the sig's parameter precision-var
-    // names, so we can resolve `(var x)` inside the body to a precision
-    // variable. The body's params and the sig's params line up by
-    // position.
-    let mut param_to_prec: UnordMap<String, String> = UnordMap::new();
-    for (body_param_name, sig_param) in body_params.iter().zip(sig_params.iter()) {
-        if let Some(prec_var_name) = precision_var_name_in_type_expr(sig_param) {
-            param_to_prec.insert(body_param_name.clone(), prec_var_name);
-        }
-    }
-    // Walk the body looking for restricted ops applied to body parameters
-    // whose precision tvar (after substitution) violates §5.4 / §5.7.2.
-    walk_body_for_restricted_ops(body, &param_to_prec, &subst, callee_name, list, errors);
-}
-
-/// Top-level def signature lookup: scan `type_env` for the callee's
-/// declared `(t-fn ...)` signature.
-pub(super) fn lookup_sig_in_type_env<'a>(
-    type_env: &'a IrTypeEnv,
-    name: &str,
-) -> Option<&'a deep::Expr> {
-    type_env.get(name).or_else(|| {
-        // Fall back to terminal-name match (mirrors `lookup_declared_type_expr`).
-        let mut matches = type_env.iter().filter_map(|(key, value)| {
-            let key_terminal = key
-                .rsplit_once("__")
-                .map(|(_, t)| t)
-                .unwrap_or(key.as_str());
-            let key_terminal = key_terminal
-                .rsplit_once('.')
-                .map(|(_, t)| t)
-                .unwrap_or(key_terminal);
-            (key_terminal == name).then_some(value)
-        });
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first)
-    })
 }
 
 pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, deep::Expr)> {
@@ -961,376 +1293,31 @@ pub(super) fn parse_t_fn_parts(expr: &deep::Expr) -> Option<(Vec<deep::Expr>, de
     Some((args.iter().map(|e| (*e).clone()).collect(), (*ret).clone()))
 }
 
-/// Strip a leading `(t-ref {} ...)` wrapper for precision-var probing;
-/// the borrow doesn't affect the precision slot.
-pub(super) fn strip_t_ref(expr: &deep::Expr) -> &deep::Expr {
-    // chelis#1107: carrier-preserving read.
-    if let Some((DeepTag::TRef, _, kids)) = stamped_parts(expr)
-        && let Some(inner) = kids.first()
-    {
-        return inner;
-    }
-    expr
-}
-
-pub(super) fn type_expr_has_tensor_prec_var(expr: &deep::Expr) -> bool {
-    let stripped = strip_t_ref(expr);
-    // chelis#1107: carrier-preserving read.
-    let Some((tag, _, kids)) = stamped_parts(stripped) else {
-        return false;
-    };
-    match tag {
-        DeepTag::TTensor => precision_var_name_in_type_expr(stripped).is_some(),
-        DeepTag::TFn | DeepTag::TTuple | DeepTag::TAdt => {
-            kids.iter().any(type_expr_has_tensor_prec_var)
-        }
-        _ => false,
-    }
-}
-
-/// Pull the precision-var name out of a tensor-type expression's
-/// last child (the precision slot). Returns `Some(name)` when the
-/// slot is `(t-var {} name)`; `None` when concrete or non-tensor.
-pub(super) fn precision_var_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
-    let stripped = strip_t_ref(expr);
-    // chelis#1107: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(stripped)?;
-    if tag != DeepTag::TTensor {
-        return None;
-    }
-    let last = kids.last()?;
-    let (prec_tag, _, prec_kids) = stamped_parts(last)?;
-    if prec_tag != DeepTag::TVar {
-        return None;
-    }
-    prec_kids.first().and_then(symbol_name).map(String::from)
-}
-
-/// Pull the concrete `(t-prim {} name)` from a tensor-type expression's
-/// precision slot. Returns `None` when the slot is a tvar.
-pub(super) fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<String> {
-    let stripped = strip_t_ref(expr);
-    // chelis#1107: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(stripped)?;
-    if tag != DeepTag::TTensor {
-        return None;
-    }
-    let last = kids.last()?;
-    let (prec_tag, _, prec_kids) = stamped_parts(last)?;
-    if prec_tag != DeepTag::TPrim {
-        return None;
-    }
-    prec_kids.first().and_then(symbol_name).map(String::from)
-}
-
-/// Look up the type of `(var name)` in the enclosing-def `scope` map
-/// (built from the def's sig + inline param annotations). Returns
-/// `None` when the expression is not a var or the name is not in
-/// scope.
-pub(super) fn resolve_var_type_in_scope(
-    expr: &deep::Expr,
-    scope: &BTreeMap<String, deep::Expr>,
-) -> Option<deep::Expr> {
-    // chelis#1107: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(expr)?;
-    if tag != DeepTag::Var {
-        return None;
-    }
-    let name = kids.first().and_then(symbol_name)?;
-    scope.get(name).cloned()
-}
-
-/// Pull the `type:` meta entry off a Deep expression. Returns the inner
-/// type expression when present.
-pub(super) fn annotated_type_of_expr(expr: &deep::Expr) -> Option<deep::Expr> {
-    // chelis#1107: carrier-preserving read.
-    let (_, meta, _) = stamped_parts(expr)?;
-    meta.entries
-        .iter()
-        .find(|(k, _)| k == "type")
-        .map(|(_, v)| v.clone())
-}
-
-/// Walk a polymorphic def's body looking for `(app (var op) arg1 arg2 ...)`
-/// where `op` is one of the §5.4 (transcendental, float-only) or §5.7.2
-/// (matmul, integer-rejected) restricted ops, and `arg1`/`arg2` are
-/// `(var name)` references to body parameters. Validate the substituted
-/// precision against the spec rule.
-pub(super) fn walk_body_for_restricted_ops(
-    expr: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-    callee_name: &str,
-    call_site_list: &deep::List,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    stack_guard!("walk_body_for_restricted_ops", expr);
-    // chelis#1107: carrier-preserving read, so the walk descends through
-    // stamped `Expr::Node` bodies instead of stopping at the first one.
-    if let Some((tag, _, kids)) = stamped_parts(expr) {
-        if tag == DeepTag::App
-            && let Some(callee) = kids.first()
-            && let Some((DeepTag::Var, _, callee_kids)) = stamped_parts(callee)
-            && let Some(op_name) = callee_kids.first().and_then(symbol_name)
-        {
-            check_restricted_op_in_body(
-                op_name,
-                &kids[1..],
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-        for child in kids {
-            walk_body_for_restricted_ops(
-                child,
-                param_to_prec,
-                subst,
-                callee_name,
-                call_site_list,
-                errors,
-            );
-        }
-    } else if let deep::Expr::MetaExpr(meta, _) = expr {
-        walk_body_for_restricted_ops(
-            &meta.expr,
-            param_to_prec,
-            subst,
-            callee_name,
-            call_site_list,
-            errors,
-        );
-    }
-}
-
-/// `op_name`: the name of the inner operation (e.g. `matmul`, `exp`).
-/// `op_args`: the arg expressions of the `(app (var op_name) ...)` form.
-pub(super) const TRANSCENDENTAL_FLOAT_ONLY_OPS: &[&str] = &[
-    "exp",
-    "log",
-    "sin",
-    "cos",
-    "sqrt",
-    "tan",
-    "atan",
-    "softmax",
-    "sigmoid",
-    "tanh",
-    "silu",
-    "gelu",
-    "layer_norm",
-    "normalize",
-    // `recip` is float-only per spec/05-risc-primitives.md §2.2: an
-    // integer reciprocal has no meaningful IEEE-754 interpretation
-    // (would always be 0 for |x| > 1 and undefined for x = 0).
-    // `div` is NOT here — it is float-only too (chelis#178) but carries
-    // a §2.1 citation pointing at `floor_div` / `trunc_div`, so it is
-    // handled by `FLOAT_ONLY_DIV_OPS` with a tailored diagnostic.
-    "recip",
-];
-
-/// Float-only ops whose integer-operand rejection cites
-/// spec/05-risc-primitives.md §2.1 and points at the integer-division
-/// replacements (chelis#178). Kept separate from
-/// `TRANSCENDENTAL_FLOAT_ONLY_OPS` so the diagnostic names the migration
-/// ops rather than the generic transcendental §5.4 rule.
-pub(super) const FLOAT_ONLY_DIV_OPS: &[&str] = &["div"];
-
-/// Integer-only ops whose float-operand rejection cites
-/// spec/05-risc-primitives.md §2.1 (chelis#178). `trunc_div` is the
-/// C/Rust truncating quotient and is not defined on float operands.
-pub(super) const INTEGER_ONLY_DIV_OPS: &[&str] = &["trunc_div"];
-
-pub(super) const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
-
-pub(super) fn check_restricted_op_in_body(
-    op_name: &str,
-    op_args: &[deep::Expr],
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-    callee_name: &str,
-    call_site_list: &deep::List,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    if !INTEGER_REJECTED_OPS.contains(&op_name)
-        && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
-        && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
-        && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
-        && !BOOL_REJECTED_ARITH_OPS.contains(&op_name)
-        && op_name != "mean"
-    {
-        return;
-    }
-    // Resolve each arg's precision through the param-to-prec mapping and
-    // the call-site substitution. The arg may be either a direct
-    // `(var x)` reference to a body param OR a deeper expression — for
-    // the latter we look at its annotated type's precision slot.
-    for (arg_index, arg) in op_args.iter().enumerate() {
-        let resolved_prim = resolve_arg_precision_through_subst(arg, param_to_prec, subst);
-        let Some(prim_name) = resolved_prim else {
-            continue;
-        };
-        let Some(prim) = Prim::parse_name(&prim_name) else {
-            continue;
-        };
-        let _ = call_site_list; // span hint reserved for future plumbing
-        let first_data_arg = arg_index == 0;
-        let consult_shared_policy =
-            BOOL_REJECTED_ARITH_OPS.contains(&op_name) || (op_name == "mean" && first_data_arg);
-        if consult_shared_policy
-            && let Some((kind, message, mut hints)) =
-                operand_dtype_rejection(op_name, &Type::Prim(prim))
-        {
-            hints.push(format!(
-                "Reached through the polymorphic sig for `{callee_name}` instantiated at \
-                 `{prim_name}`; the same operand-dtype rule applies to every such \
-                 instantiation, including via stdlib wrappers."
-            ));
-            errors.push(CheckError::new(kind, message, hints));
-            return;
-        }
-        if INTEGER_REJECTED_OPS.contains(&op_name) && prim.is_integer() {
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "{op_name} on integer operand precision `{prim_name}` is not \
-                     admitted in this cycle per spec/04-type-system.md \u{00a7}5.7.2: \
-                     integer matmul not admitted (the spec deliberately defers the \
-                     integer-matmul accumulator rule). Reached through the polymorphic \
-                     sig for `{callee_name}` instantiated at integer precision; the \
-                     restriction fires on every integer instantiation, including via \
-                     stdlib wrappers."
-                ),
-                vec![format!(
-                    "spec/04-type-system.md \u{00a7}5.7.2: there is no current backend \
-                     that supports integer BLAS. Use reduce_sum over an explicit \
-                     expand+mul lowering for integer inner products, or float \
-                     instantiations of `{callee_name}`."
-                )],
-            ));
-            return;
-        }
-        if TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name) && !prim.is_float() {
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "{op_name} on operand precision `{prim_name}` is not admitted per \
-                     spec/04-type-system.md \u{00a7}5.4: transcendental operations are \
-                     restricted to f32, f64, bf16, f16 (not integer). Reached through \
-                     the polymorphic sig for `{callee_name}` instantiated at \
-                     `{prim_name}`; the restriction fires on every non-float \
-                     instantiation, including via stdlib wrappers."
-                ),
-                vec![format!(
-                    "spec/04-type-system.md \u{00a7}5.4: cast to a float precision \
-                     before applying `{op_name}`, or pick a float instantiation of \
-                     `{callee_name}`."
-                )],
-            ));
-            return;
-        }
-        if FLOAT_ONLY_DIV_OPS.contains(&op_name) && prim.is_integer() {
-            // chelis#178: integer `div` reached through a polymorphic
-            // wrapper instantiated at an integer dtype.
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "div on integer operand precision `{prim_name}` is not admitted per \
-                     spec/05-risc-primitives.md \u{00a7}2.1: `div` is float-only \
-                     (IEEE-754). Use `floor_div` (round toward -inf) or `trunc_div` \
-                     (round toward zero) for integers. Reached through the polymorphic \
-                     sig for `{callee_name}` instantiated at `{prim_name}`; the \
-                     restriction fires on every integer instantiation, including via \
-                     stdlib wrappers."
-                ),
-                vec![format!(
-                    "spec/05-risc-primitives.md \u{00a7}2.1: integer division uses \
-                     `floor_div` or `trunc_div`; pick a float instantiation of \
-                     `{callee_name}` for `div`."
-                )],
-            ));
-            return;
-        }
-        if INTEGER_ONLY_DIV_OPS.contains(&op_name) && prim.is_float() {
-            // chelis#178: `trunc_div` reached through a polymorphic
-            // wrapper instantiated at a float dtype.
-            errors.push(CheckError::new(
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "trunc_div on float operand precision `{prim_name}` is not admitted \
-                     per spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` is \
-                     integer-only. Use `div` for IEEE-754 float division, or `floor_div` \
-                     for a floored float quotient. Reached through the polymorphic sig \
-                     for `{callee_name}` instantiated at `{prim_name}`."
-                ),
-                vec![format!(
-                    "spec/05-risc-primitives.md \u{00a7}2.1: `trunc_div` requires integer \
-                     operands; pick an integer instantiation of `{callee_name}`."
-                )],
-            ));
-            return;
-        }
-    }
-}
-
-/// Resolve a single arg's precision-tvar binding for restricted-op
-/// checking. If the arg is `(var name)` and `name` is in the body's
-/// param-to-prec map, look up the call-site substitution.  If the arg
-/// is itself an `app` with an annotated tensor type whose precision
-/// slot is concrete, use that. Returns `Some(prim_name)` if resolvable.
-pub(super) fn resolve_arg_precision_through_subst(
-    arg: &deep::Expr,
-    param_to_prec: &UnordMap<String, String>,
-    subst: &UnordMap<String, String>,
-) -> Option<String> {
-    // chelis#1107: carrier-preserving read -- the last link in the WS-A8
-    // chain, so a stamped `(var {} x)` operand resolves its precision.
-    if let Some((DeepTag::Var, _, kids)) = stamped_parts(arg)
-        && let Some(name) = kids.first().and_then(symbol_name)
-        && let Some(prec_var) = param_to_prec.get(name)
-        && let Some(prim) = subst.get(prec_var)
-    {
-        return Some(prim.clone());
-    }
-    // Fall back to the arg's annotated type's concrete precision (when
-    // the body did its own arithmetic, e.g. `wx = matmul(x, w);
-    // softmax(wx)`).
-    if let Some(ty) = annotated_type_of_expr(arg)
-        && let Some(prim) = precision_prim_name_in_type_expr(&ty)
-    {
-        return Some(prim);
-    }
-    None
-}
-
 pub(super) fn validate_ir_expr(
     expr: &deep::Expr,
     type_env: &ShapeTypeEnv,
     static_env: &mut UnordMap<String, StaticValue>,
-    failed_let_names: &mut UnordSet<String>,
     declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
     errors: &mut DiagnosticSink<'_>,
 ) -> StaticValue {
     stack_guard!("validate_ir_expr", expr, StaticValue::Unknown);
     match expr {
-        deep::Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::Module) {
-                for elem in list.elements.iter().skip(3) {
-                    validate_ir_expr(
-                        elem,
-                        type_env,
-                        static_env,
-                        failed_let_names,
-                        declared_signatures,
-                        errors,
-                    );
+        deep::Expr::Node(node, _) => {
+            if node.tag() == DeepTag::Module {
+                for elem in node.children_slice().iter().skip(1) {
+                    validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Def) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Def {
+                validate_expression_metadata(
+                    node.meta(),
+                    type_env,
+                    static_env,
+                    declared_signatures,
+                    errors,
+                );
+                let kids = node.children_slice();
                 let Some(name) = kids.first().and_then(symbol_name) else {
                     return StaticValue::Unknown;
                 };
@@ -1348,31 +1335,38 @@ pub(super) fn validate_ir_expr(
                     value_expr,
                     signature_env.as_ref().unwrap_or(type_env),
                     static_env,
-                    failed_let_names,
                     declared_signatures,
                     errors,
                 );
                 static_env.insert(name.to_string(), value);
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Fn) {
-                let scoped_env = extend_ir_env_with_fn_params(list, type_env);
+            if node.tag() == DeepTag::Fn {
+                let scoped_env = extend_ir_env_with_fn_params(node, type_env);
                 let mut scoped_static_env = static_env.clone();
-                bind_fn_params_unknown(list, &mut scoped_static_env);
-                for elem in &list.elements {
+                bind_fn_params_unknown(node, &mut scoped_static_env);
+                node.meta().visit_syntax(&mut |_, value| {
+                    validate_ir_expr(
+                        value,
+                        &scoped_env,
+                        &mut scoped_static_env,
+                        declared_signatures,
+                        errors,
+                    );
+                });
+                for elem in node.children_slice() {
                     validate_ir_expr(
                         elem,
                         &scoped_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Arm) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Arm {
+                let kids = node.children_slice();
                 let mut scoped_static_env = static_env.clone();
                 if let Some(pattern) = kids.first() {
                     for name in chelis_deep::pattern_binder_names(pattern) {
@@ -1386,42 +1380,33 @@ pub(super) fn validate_ir_expr(
                         elem,
                         type_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
                 }
                 return StaticValue::Unknown;
             }
-            if get_tag(list) == Some(DeepTag::Let) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Let {
+                let kids = node.children_slice();
                 let mut scoped_static_env = static_env.clone();
                 // Clone the type env on let-scope entry so each binding's
-                // derivable IR-shape-sensitive type (e.g. conv2d's output
+                // derivable IR-shape-sensitive type (e.g. conv's output
                 // dims) can extend the env visible to the let body. Without
                 // this the validator cannot resolve `(var y)` for a let-
-                // bound `y = conv2d(...)` and silently rejects the next
+                // bound `y = conv(...)` and silently rejects the next
                 // shape-sensitive call that consumes `y` (RT-205 F5).
                 let mut scoped_type_env = type_env.clone();
-                if let Some(deep::Expr::List(bind_list, _)) = kids.first()
-                    && get_tag(bind_list) == Some(DeepTag::Bind)
+                if let Some(bind_expr) = kids.first()
+                    && let Some((DeepTag::Bind, _, bind_children)) = stamped_parts(bind_expr)
                 {
-                    let bind_children = children(bind_list);
                     let mut index = 0;
                     while index + 1 < bind_children.len() {
                         if let Some(name) = symbol_name(&bind_children[index]) {
                             let value_expr = &bind_children[index + 1];
-                            // Recurse into the RHS so its own validation
-                            // can push diagnostics and suppress downstream
-                            // cascade errors via `failed_let_names` (set
-                            // below when the RHS is a recognized
-                            // shape-sensitive form whose output type is
-                            // non-derivable, RT-205 round-4 / issue #212).
                             let value = validate_ir_expr(
                                 value_expr,
                                 &scoped_type_env,
                                 &mut scoped_static_env,
-                                failed_let_names,
                                 declared_signatures,
                                 errors,
                             );
@@ -1431,7 +1416,6 @@ pub(super) fn validate_ir_expr(
                                 value_expr,
                                 &mut scoped_type_env,
                                 &scoped_static_env,
-                                failed_let_names,
                             );
                         }
                         index += 2;
@@ -1442,35 +1426,25 @@ pub(super) fn validate_ir_expr(
                         body,
                         &scoped_type_env,
                         &mut scoped_static_env,
-                        failed_let_names,
                         declared_signatures,
                         errors,
                     );
                 }
                 return StaticValue::Unknown;
             }
-            if let Some(tag) = get_tag(list) {
-                // `par` (sequential v1, spec/03-deep-syntax.md §2.3) and `jit`
-                // (compilation trigger, §2.7) are spec-blessed pass-through
-                // forms at Phase 0 evaluation. The validator used to reject
-                // both; the rejection is removed because lowering handles them
-                // (see `lower_par` and the `jit` lowering arm).
-                if tag == DeepTag::App
-                    && let Some(func_name) = active_ir_builtin_name(list, static_env)
-                    && is_ir_shape_sensitive_builtin(func_name)
-                {
-                    validate_ir_builtin_symbolic_requirements(
-                        list,
-                        func_name,
-                        type_env,
-                        failed_let_names,
-                        errors,
-                    );
-                }
+            // `jit` is a spec-blessed pass-through form. `par` retains a
+            // legacy validation disposition here, but infer_expr owns the
+            // typed chelis#2503 checker fence before a checked program can
+            // reach lowering.
+            if node.tag() == DeepTag::App
+                && let Some(func_name) = active_ir_builtin_name(node, static_env)
+                && is_ir_shape_sensitive_builtin(func_name)
+            {
+                validate_ir_builtin_semantic_requirements(node, func_name, type_env, errors);
             }
 
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
+            if node.tag() == DeepTag::Var
+                && let Some(name) = node.children_slice().first().and_then(symbol_name)
             {
                 return if name == "Nil" {
                     StaticValue::List(Vec::new())
@@ -1481,27 +1455,20 @@ pub(super) fn validate_ir_expr(
                         .unwrap_or(StaticValue::Unknown)
                 };
             }
-            if get_tag(list) == Some(DeepTag::Lit) {
+            if node.tag() == DeepTag::Lit {
                 return literal_static_value(expr);
             }
-            if get_tag(list) == Some(DeepTag::Cast) {
-                let kids = children(list);
+            if node.tag() == DeepTag::Cast {
+                let kids = node.children_slice();
                 return kids
                     .first()
                     .map(|inner| {
-                        validate_ir_expr(
-                            inner,
-                            type_env,
-                            static_env,
-                            failed_let_names,
-                            declared_signatures,
-                            errors,
-                        )
+                        validate_ir_expr(inner, type_env, static_env, declared_signatures, errors)
                     })
                     .unwrap_or(StaticValue::Unknown);
             }
-            if get_tag(list) == Some(DeepTag::App) {
-                let kids = children(list);
+            if node.tag() == DeepTag::App {
+                let kids = node.children_slice();
                 let func_name = kids
                     .first()
                     .and_then(app_builtin_name)
@@ -1510,14 +1477,7 @@ pub(super) fn validate_ir_expr(
                     .iter()
                     .skip(1)
                     .map(|arg| {
-                        validate_ir_expr(
-                            arg,
-                            type_env,
-                            static_env,
-                            failed_let_names,
-                            declared_signatures,
-                            errors,
-                        )
+                        validate_ir_expr(arg, type_env, static_env, declared_signatures, errors)
                     })
                     .collect::<Vec<_>>();
                 if func_name == Some("Cons") && arg_values.len() == 2 {
@@ -1533,91 +1493,126 @@ pub(super) fn validate_ir_expr(
                 return StaticValue::Unknown;
             }
 
-            for elem in &list.elements {
-                validate_ir_expr(
-                    elem,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+            node.meta().visit_syntax(&mut |_, value| {
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+            });
+            for elem in node.children_slice() {
+                validate_ir_expr(elem, type_env, static_env, declared_signatures, errors);
             }
             StaticValue::Unknown
         }
         deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                validate_ir_expr(
-                    value,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
-            }
+            map.visit_syntax(&mut |_, value| {
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+            });
             StaticValue::Unknown
         }
         deep::Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                validate_ir_expr(
-                    value,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
-            }
+            meta.metadata.visit_syntax(&mut |_, value| {
+                validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+            });
             validate_ir_expr(
                 &meta.expr,
                 type_env,
                 static_env,
-                failed_let_names,
                 declared_signatures,
                 errors,
             )
         }
         deep::Expr::Atom(_, _) => literal_static_value(expr),
-        // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            validate_ir_expr(
-                &bridged,
-                type_env,
-                static_env,
-                failed_let_names,
-                declared_signatures,
-                errors,
-            )
-        }
         deep::Expr::BareList(elems, _) => {
             let mut last = StaticValue::Unknown;
             for child in elems {
-                last = validate_ir_expr(
-                    child,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                last = validate_ir_expr(child, type_env, static_env, declared_signatures, errors);
             }
             last
         }
         deep::Expr::UnknownForm(data) => {
             for child in &data.children {
-                validate_ir_expr(
-                    child,
-                    type_env,
-                    static_env,
-                    failed_let_names,
-                    declared_signatures,
-                    errors,
-                );
+                validate_ir_expr(child, type_env, static_env, declared_signatures, errors);
             }
             StaticValue::Unknown
         }
+    }
+}
+
+/// Apply semantic admission to metadata leaves whose registered key gives
+/// them the expression role.
+///
+/// spec/03 [03-META-2] makes `property_tolerance`, `property_seed`, and
+/// `property_samples` runtime expressions rather than preserved syntax.  A
+/// `def` therefore cannot return from validation after checking only its body:
+/// doing so lets an [`deep::Expr::UnknownForm`] in one of these leaves bypass
+/// the check and reach evaluation.  Keep the role decision in `chelis-deep`'s
+/// metadata registry and send only expression leaves through the same semantic
+/// validator as ordinary runtime children.
+fn validate_expression_metadata(
+    metadata: &deep::Metadata,
+    type_env: &ShapeTypeEnv,
+    static_env: &mut UnordMap<String, StaticValue>,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    metadata.visit_expressions(&mut |value, role| {
+        if role != chelis_deep::metadata::MetadataRole::Expression {
+            return;
+        }
+        reject_unknown_metadata_forms(value, errors);
+        validate_ir_expr(value, type_env, static_env, declared_signatures, errors);
+    });
+}
+
+/// Reject undecodable forms inside a registered runtime-expression payload.
+///
+/// `validate_ir_expr` deliberately leaves the checker's ordinary unknown-form
+/// diagnostic to inference. Metadata expressions are not inference children,
+/// so this role-owned preflight supplies the otherwise missing disposition
+/// without duplicating diagnostics for ordinary bodies.
+fn reject_unknown_metadata_forms(expr: &deep::Expr, errors: &mut DiagnosticSink<'_>) {
+    stack_guard!("reject_unknown_metadata_forms", expr);
+    match expr.carrier() {
+        deep::ExprCarrier::DecodedNode(_, metadata, children) => {
+            metadata.visit_expressions(&mut |value, role| {
+                if role == chelis_deep::metadata::MetadataRole::Expression {
+                    reject_unknown_metadata_forms(value, errors);
+                }
+            });
+            for child in children {
+                reject_unknown_metadata_forms(child, errors);
+            }
+        }
+        deep::ExprCarrier::UndecodableHead(head, _, _) => {
+            errors.push(CheckError::new(
+                CheckErrorKind::UnknownForm,
+                format!(
+                    "unknown Deep form `{head}` in runtime-expression metadata; every expression form requires an explicit checker disposition (spec/03 [03-META-2]; spec/04 [04-TOT-1])"
+                ),
+                vec![],
+            ));
+        }
+        deep::ExprCarrier::MetadataMap(metadata) => {
+            metadata.visit_expressions(&mut |value, role| {
+                if role == chelis_deep::metadata::MetadataRole::Expression {
+                    reject_unknown_metadata_forms(value, errors);
+                }
+            });
+        }
+        deep::ExprCarrier::MetadataExpression(metadata_expr) => {
+            metadata_expr
+                .metadata
+                .visit_expressions(&mut |value, role| {
+                    if role == chelis_deep::metadata::MetadataRole::Expression {
+                        reject_unknown_metadata_forms(value, errors);
+                    }
+                });
+            reject_unknown_metadata_forms(&metadata_expr.expr, errors);
+        }
+        deep::ExprCarrier::StructuralList(elements) => {
+            for child in elements {
+                reject_unknown_metadata_forms(child, errors);
+            }
+        }
+        deep::ExprCarrier::Atom(_) => {}
     }
 }
 
@@ -1627,10 +1622,6 @@ pub(super) fn validate_ir_expr(
 /// alias-resolved ADT field types without reparsing authored declarations.
 pub fn type_to_deep_expr(ty: &Type) -> deep::Expr {
     type_to_deep_expr_with(ty, stamped_node_expr)
-}
-
-pub(super) fn type_to_legacy_deep_expr(ty: &Type) -> deep::Expr {
-    type_to_deep_expr_with(ty, node_expr)
 }
 
 type NodeBuilder = fn(DeepTag, Vec<deep::Expr>) -> deep::Expr;
@@ -1705,17 +1696,8 @@ fn dim_to_deep_expr_with(dim: &Dim, make_node: NodeBuilder) -> deep::Expr {
     }
 }
 
-pub(super) fn node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(tag), zero_span()),
-        deep::Expr::Map(deep::MetaMap::default(), zero_span()),
-    ];
-    elements.extend(children);
-    deep::Expr::List(deep::List { elements }, zero_span())
-}
-
 pub(super) fn stamped_node_expr(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
-    deep::Expr::node(tag, deep::MetaMap::default(), children, zero_span())
+    deep::Expr::node(tag, deep::Metadata::default(), children, zero_span())
 }
 
 pub(super) fn symbol_expr(name: &str) -> deep::Expr {
@@ -1726,27 +1708,8 @@ pub(super) fn zero_span() -> Span {
     Span::new(0, 0)
 }
 
-pub(super) fn span_of_expr(expr: &deep::Expr) -> Span {
-    match expr {
-        deep::Expr::Atom(_, span)
-        | deep::Expr::List(_, span)
-        | deep::Expr::Map(_, span)
-        | deep::Expr::MetaExpr(_, span)
-        | deep::Expr::Node(_, span)
-        | deep::Expr::BareList(_, span) => *span,
-        deep::Expr::UnknownForm(data) => data.span,
-    }
-}
-
-pub(super) fn span_of_list(list: &deep::List) -> Span {
-    list.elements
-        .first()
-        .map(span_of_expr)
-        .unwrap_or_else(zero_span)
-}
-
-pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
-    ir_builtin_name_of_expr(list.elements.get(2)?)
+pub(super) fn ir_builtin_name(node: &DeepNode) -> Option<&str> {
+    ir_builtin_name_of_expr(node.children_slice().first()?)
 }
 
 /// Preserve ordinary lexical precedence when this post-inference validator
@@ -1754,10 +1717,10 @@ pub(super) fn ir_builtin_name(list: &deep::List) -> Option<&str> {
 /// scoped binding environment: function parameters, sequential let binders,
 /// and pattern binders are inserted before their bodies are visited.
 pub(super) fn active_ir_builtin_name<'a>(
-    list: &'a deep::List,
+    node: &'a DeepNode,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<&'a str> {
-    ir_builtin_name(list).filter(|name| compiler_name_is_active(name, static_env))
+    ir_builtin_name(node).filter(|name| compiler_name_is_active(name, static_env))
 }
 
 pub(super) fn compiler_name_is_active(
@@ -1767,11 +1730,9 @@ pub(super) fn compiler_name_is_active(
     !builtins::BUILTIN_NAMES.contains(&name) || !static_env.contains_key(name)
 }
 
-/// The builtin callee name of an `app`'s callee child, on either carrier.
+/// The builtin callee name of an `app`'s callee child.
 ///
-/// chelis#1107 amendment: `validate_ir_expr` bridges a stamped `Expr::Node`
-/// one level (`Node::to_list`), so the callee child it hands on is still an
-/// `Expr::Node`. The previous `List`-only read returned `None` for every
+/// chelis#1107 amendment: a `List`-only read here returned `None` for every
 /// stamped callee, which silently disabled the shape-sensitivity and
 /// output-type derivation below on the stamped carrier.
 pub(super) fn ir_builtin_name_of_expr(func_expr: &deep::Expr) -> Option<&str> {
@@ -1784,25 +1745,6 @@ pub(super) fn ir_builtin_name_of_expr(func_expr: &deep::Expr) -> Option<&str> {
     }
 }
 
-/// Borrow `expr` as a `deep::List`, materializing a one-level bridge for a
-/// stamped `Expr::Node` into `storage`.
-///
-/// chelis#1107 amendment: the `derive_*` output-type family threads
-/// `&deep::List` through several helpers. Rather than change all of their
-/// signatures, the entry points bridge once here; every leaf reader they call
-/// (`tensor_precision_expr`, `ir_builtin_name`, …) is carrier-agnostic, so one
-/// level is enough.
-pub(super) fn as_list<'a>(
-    expr: &'a deep::Expr,
-    storage: &'a mut Option<deep::List>,
-) -> Option<&'a deep::List> {
-    match expr {
-        deep::Expr::List(list, _) => Some(list),
-        deep::Expr::Node(node, span) => Some(storage.insert(node.to_list(*span))),
-        _ => None,
-    }
-}
-
 pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -1810,7 +1752,7 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
             | "softmax"
             | "mean"
             | "layer_norm"
-            | "conv2d"
+            | "conv"
             | "sum"
             | "count"
             | "max_reduce"
@@ -1828,155 +1770,23 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
     )
 }
 
-/// Is `name` a unary shape-passthrough op for the purposes of let-RHS
-/// recognition? Must match the unary arm of
-/// `derive_ir_builtin_output_type` so the failed-marker insertion in
-/// the let arm covers the same surface as the type-derivation
-/// passthrough recognition (issue #212 / RT-205 round-4).
-pub(super) fn is_ir_unary_shape_passthrough_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "relu"
-            | "tanh"
-            | "sigmoid"
-            | "gelu"
-            | "silu"
-            | "exp"
-            | "log"
-            | "neg"
-            | "recip"
-            | "sqrt"
-            | "abs"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "atan"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "not"
-            | "softmax"
-    )
-}
-
-/// Is `name` a binary shape-passthrough op? Must match the binary arm
-/// of `derive_ir_builtin_output_type` for the same reason as
-/// `is_ir_unary_shape_passthrough_builtin` (issue #212 / RT-205
-/// round-4).
-pub(super) fn is_ir_binary_shape_passthrough_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "add"
-            | "sub"
-            | "mul"
-            | "div"
-            | "max_elem"
-            | "min_elem"
-            | "cmplt"
-            | "lt"
-            | "gt"
-            | "gte"
-            | "lte"
-            | "eq"
-            | "neq"
-            | "and"
-            | "or"
-    )
-}
-
-/// Recognise a let-RHS expression as a "shape-sensitive form" for the
-/// purposes of cascade-suppression marker insertion: either a direct
-/// recognised shape-sensitive IR builtin, or a unary/binary shape-
-/// passthrough wrapper around one (recursively). Peeks through
-/// borrow wrappers like the rest of the validator.
-///
-/// Returns true when, structurally, this RHS shape COULD have a
-/// derivable output type via `derive_ir_builtin_output_type` -- which since
-/// chelis#668 means a shape-sensitive callee that also has an arm in that
-/// function, not merely a shape-sensitive one; the
-/// caller pairs this with `derived.is_none()` to detect the "should
-/// have derived but didn't" failure mode (issue #212 / RT-205
-/// round-4). The decoupled structural check means we no longer
-/// depend on whether the RHS validation pushed a diagnostic at this
-/// level: cascade-suppressed intermediate let-binders are still
-/// marked failed so the suppression propagates unboundedly down the
-/// chain.
-pub(super) fn let_rhs_is_recognized_shape_sensitive(
-    expr: &deep::Expr,
-    static_env: &UnordMap<String, StaticValue>,
-) -> bool {
-    stack_guard!("let_rhs_is_recognized_shape_sensitive", expr, false);
-    let inner = peel_borrow(expr);
-    // chelis#1107 amendment: carrier-preserving read.
-    let Some((DeepTag::App, _, kids)) = stamped_parts(inner) else {
-        return false;
-    };
-    let Some(func_name) = kids.first().and_then(ir_builtin_name_of_expr) else {
-        return false;
-    };
-    if !compiler_name_is_active(func_name, static_env) {
-        return false;
-    }
-    // Both halves are required. `is_ir_shape_sensitive_builtin` alone would
-    // mark `y = expand(...)`, `insert`, and `stride` as failed derivations
-    // although this validator no longer derives anything for them, and a
-    // marked name silences the whole `conv2d` validator downstream
-    // (chelis#668 round-1 P0). `ir_builtin_has_output_type_derivation` alone
-    // would mark every `y = relu(x)`, because the Identity fallthrough has an
-    // arm for `relu` while the recursion below is what is meant to reach it.
-    if is_ir_shape_sensitive_builtin(func_name) && ir_builtin_has_output_type_derivation(func_name)
-    {
-        return true;
-    }
-    if is_ir_unary_shape_passthrough_builtin(func_name)
-        && let Some(arg) = kids.get(1)
-    {
-        return let_rhs_is_recognized_shape_sensitive(arg, static_env);
-    }
-    if is_ir_binary_shape_passthrough_builtin(func_name) {
-        // Either operand being a recognised shape-sensitive form is
-        // sufficient: the passthrough derivation uses the first
-        // resolvable operand's type and falls through to the second,
-        // so a failed inner shape-sensitive call on either side
-        // means the whole RHS is structurally broken.
-        if let Some(lhs) = kids.get(1)
-            && let_rhs_is_recognized_shape_sensitive(lhs, static_env)
-        {
-            return true;
-        }
-        if let Some(rhs) = kids.get(2)
-            && let_rhs_is_recognized_shape_sensitive(rhs, static_env)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
     stack_guard!("expr_type_expr", expr, None);
     match expr {
         deep::Expr::Node(node, _) => {
-            if let Some((_, ty)) = node.meta().entries.iter().find(|(key, _)| key == "type") {
-                return Some(ty.clone());
+            if let Some(ty) = node.meta().ty() {
+                return Some(ty.expression().clone());
             }
             if node.tag() == DeepTag::Var
                 && let Some(name) = node.children_slice().first().and_then(symbol_name)
             {
                 return type_env.get(name).cloned();
             }
-            None
-        }
-        deep::Expr::List(list, _) => {
-            if let Some(meta) = get_meta(list)
-                && let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type")
-            {
-                return Some(ty.clone());
-            }
-            if get_tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
-            {
-                return type_env.get(name).cloned();
+            // A block's value is its body's (chelis#2547): read the body with
+            // each binding's type in scope, so a top-level value defined by
+            // a block records its type like any other.
+            if node.tag() == DeepTag::Let {
+                return let_type_expr(expr, type_env);
             }
             None
         }
@@ -1985,36 +1795,70 @@ pub(super) fn expr_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<
     }
 }
 
+/// The type of a `let` block: its body's, with each binding's type in scope.
+/// A block desugars to one `let` per binding, so the nesting is walked in a
+/// loop over a single copy of the environment rather than copying it again
+/// at each level.
+fn let_type_expr(expr: &deep::Expr, type_env: &IrTypeEnv) -> Option<deep::Expr> {
+    let mut scoped = type_env.clone();
+    let mut current = expr;
+    loop {
+        let node = match current {
+            deep::Expr::Node(node, _) => node,
+            deep::Expr::MetaExpr(meta, _) => {
+                current = &meta.expr;
+                continue;
+            }
+            _ => break,
+        };
+        if node.tag() != DeepTag::Let {
+            break;
+        }
+        if let Some(ty) = node.meta().ty() {
+            return Some(ty.expression().clone());
+        }
+        let [bind, body] = node.children_slice() else {
+            return None;
+        };
+        let Some((DeepTag::Bind, _, pairs)) = stamped_parts(bind) else {
+            return None;
+        };
+        for pair in pairs.chunks(2) {
+            let [name, value] = pair else {
+                return None;
+            };
+            let name = symbol_name(name)?;
+            match expr_type_expr(value, &scoped) {
+                Some(ty) => {
+                    scoped.insert(name.to_string(), ty);
+                }
+                None => {
+                    scoped.remove(name);
+                }
+            }
+        }
+        current = body;
+    }
+    expr_type_expr(current, &scoped)
+}
+
 pub(super) fn extend_ir_env_with_fn_params(
-    fn_list: &deep::List,
+    fn_node: &DeepNode,
     type_env: &ShapeTypeEnv,
 ) -> ShapeTypeEnv {
     let mut scoped = type_env.clone();
-    let Some(params_expr) = children(fn_list).first() else {
+    let Some(params_expr) = fn_node.children_slice().first() else {
         return scoped;
     };
-    // chelis#1107 amendment: carrier-preserving read. `validate_ir_expr`
-    // bridges only the `fn` node, so `(params {} ...)` arrives as `Expr::Node`.
     let Some((DeepTag::Params, _, param_entries)) = stamped_parts(params_expr) else {
         return scoped;
     };
     for param in param_entries {
         // An inline-annotated entry `(x {type: T})` is symbol-headed, so the
         // stamp pass carries it as `Expr::BareList`, never a `Node` -- this
-        // one needs its own arm rather than `stamped_parts`.
-        // chelis#1107 amendment (justified-safe, not routed): this match
-        // handles every carrier a params entry can take -- `List` (legacy) and
-        // `BareList` (stamped, symbol-headed) -- so there is no fall-through.
+        // one needs its own arm rather than `stamped_parts`. A bare name has
+        // no inline annotation to record.
         let (name, meta) = match param {
-            deep::Expr::List(param_list, _) => {
-                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let Some(meta) = get_meta(param_list) else {
-                    continue;
-                };
-                (name, meta)
-            }
             deep::Expr::BareList(elems, _) => {
                 let Some(name) = elems.first().and_then(symbol_name) else {
                     continue;
@@ -2026,120 +1870,31 @@ pub(super) fn extend_ir_env_with_fn_params(
             }
             _ => continue,
         };
-        let Some((_, ty)) = meta.entries.iter().find(|(k, _)| k == "type") else {
+        let Some(ty) = meta.ty() else {
             continue;
         };
-        scoped.insert(name.to_string(), ty.clone());
+        // An inline parameter whose generated `defsig` owns the real type
+        // carries a whole-slot hole here. The enclosing `Def` arm has already
+        // installed that signature type in this scope; replacing it with `_`
+        // would erase concrete shape evidence before validation. A real
+        // independently authored annotation still overrides as before.
+        if is_wildcard_tvar_expr(ty.expression()) {
+            continue;
+        }
+        scoped.insert(name.to_string(), ty.expression().clone());
     }
     scoped
 }
 
-pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &ShapeTypeEnv) -> bool {
-    // Peel `(borrow {} ...)` so the idiomatic Surf borrow form does
-    // not silently bypass the dim-concreteness check.
-    arg_tensor_type_expr(expr, type_env)
-        .map(|ty| type_expr_is_ir_concrete(&ty))
-        .unwrap_or(false)
-}
-
-/// Check whether a conv2d input tensor argument is concrete in every
-/// dimension EXCEPT axis 0 (batch). Per spec/05-risc-primitives.md
-/// §4.5 the canonical signature is `tensor[batch, in_c, h, w, p]`
-/// and `batch` is named, so symbolic-batch programs are first-class
-/// (RT-205 round-3 F-C). The spatial dims and `in_c` must remain
-/// concrete because they appear in the im2col/matmul lowering.
-///
-/// Returns true when the type resolves to a rank-4 tensor whose
-/// axes 1, 2, 3 are all `Dim::Lit`. Axis 0 may be `Dim::Lit` or
-/// `Dim::NonConcrete`. Returns false on unresolvable type or any
-/// non-concrete axis other than 0.
-pub(super) fn conv2d_input_dims_concrete_modulo_batch(
-    expr: Option<&deep::Expr>,
-    type_env: &ShapeTypeEnv,
-) -> bool {
-    let Some(expr) = expr else {
-        return false;
-    };
-    let Some(ty) = arg_tensor_type_expr(expr, type_env) else {
-        return false;
-    };
-    let Some(dims) = tensor_dims_from_type_expr(&ty) else {
-        // Not a tensor; fall back to scalar-prim check.
-        return type_expr_is_ir_concrete(&ty);
-    };
-    if dims.len() != 4 {
-        // Rank mismatch is reported separately; return true so the
-        // rank-4 guard later in the validator can fire instead of
-        // suppressing it with a metadata error.
-        return true;
-    }
-    // axes 1, 2, 3 must be concrete; axis 0 (batch) may be symbolic.
-    dims[1..].iter().all(|d| matches!(d, DeepDimKind::Lit(_)))
-}
-
-pub(super) fn validate_ir_builtin_symbolic_requirements(
-    list: &deep::List,
+pub(super) fn validate_ir_builtin_semantic_requirements(
+    node: &DeepNode,
     func_name: &str,
     type_env: &ShapeTypeEnv,
-    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    match func_name {
-        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
-        "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                "IR builtin `mean` requires a concrete reduced axis extent".to_string(),
-                vec!["Use a concrete d-lit dimension on the reduced axis".to_string()],
-            ));
-        }
-        "layer_norm" => {
-            let x_dims = list
-                .elements
-                .get(3)
-                .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-                .and_then(|ty| tensor_dims_from_type_expr(&ty));
-            if matches!(
-                x_dims.as_ref().and_then(|dims| dims.last()),
-                Some(DeepDimKind::NonConcrete)
-            ) {
-                errors.push(validator_error(
-                    CheckErrorKind::DimensionMismatch,
-                    list,
-                    "IR builtin `layer_norm` requires a concrete normalized axis extent"
-                        .to_string(),
-                    vec!["Use a concrete d-lit dimension for the final axis".to_string()],
-                ));
-            }
-        }
-        _ => {}
+    if func_name == "conv" {
+        validate_conv_semantic_requirements(node, type_env, errors);
     }
-}
-
-/// Return `true` if any of `list`'s tensor arguments (positional 3, 4)
-/// is a `(var <name>)` whose `name` is in `failed_let_names`. Used by
-/// `validate_conv2d_symbolic_requirements` to suppress the cascade
-/// diagnostic when a let-bound name's own derivation already emitted
-/// the owning diagnostic (RT-205 round-2 F3).
-pub(super) fn conv2d_input_is_failed_let_name(
-    list: &deep::List,
-    failed_let_names: &UnordSet<String>,
-) -> bool {
-    if failed_let_names.is_empty() {
-        return false;
-    }
-    for arg in list.elements.iter().skip(3).take(2) {
-        let inner = peel_borrow(arg);
-        if let deep::Expr::List(arg_list, _) = inner
-            && get_tag(arg_list) == Some(DeepTag::Var)
-            && let Some(name) = children(arg_list).first().and_then(symbol_name)
-            && failed_let_names.contains(name)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// Build a `CheckError` for a validator-arm diagnostic that
@@ -2153,7 +1908,7 @@ pub(super) fn conv2d_input_is_failed_let_name(
 /// that JSON tooling already understands (RT-205 F6).
 pub(super) fn validator_error(
     kind: CheckErrorKind,
-    call_site: &deep::List,
+    call_site: &DeepNode,
     message: String,
     suggestions: Vec<String>,
 ) -> CheckError {
@@ -2167,30 +1922,17 @@ pub(super) fn validator_error(
 /// Render the call site's source span as a parenthesized suffix
 /// (e.g. ` (at surf:144..165)`). Returns `None` when the call site
 /// carries no `:span` metadata so the unmodified message is used.
-pub(super) fn validator_span_suffix(call_site: &deep::List) -> Option<String> {
-    let meta = get_meta(call_site)?;
-    for (key, value) in &meta.entries {
-        if key == "span"
-            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
-        {
-            return Some(format!("(at {s})"));
-        }
-    }
-    None
+pub(super) fn validator_span_suffix(call_site: &DeepNode) -> Option<String> {
+    call_site
+        .meta()
+        .span_id()
+        .map(|v| format!("(at {})", v.value()))
 }
 
-/// Extract the `:span` metadata string from a list node, if present.
+/// Extract the `:span` metadata string from a node, if present.
 /// Used to propagate external span identifiers into check diagnostics.
-pub(super) fn list_span_id(list: &deep::List) -> Option<&str> {
-    let meta = get_meta(list)?;
-    for (key, value) in &meta.entries {
-        if key == "span"
-            && let deep::Expr::Atom(deep::Atom::Str(s), _) = value
-        {
-            return Some(s.as_str());
-        }
-    }
-    None
+pub(super) fn node_span_id(node: &DeepNode) -> Option<&str> {
+    node.meta().span_id().map(|v| v.value())
 }
 
 /// Parse the start byte offset from a span identifier string.
@@ -2208,252 +1950,106 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
         .and_then(|(start, _)| start.parse::<usize>().ok())
 }
 
-/// Validate the symbolic requirements of an IR-level `conv2d` call.
+/// [05-OP-51] check-time obligations for canonical convolution.
 ///
-/// The previous implementation read `:type` from the app node's
-/// metadata via `app_result_type_is_concrete` to decide whether the
-/// output dims were concrete. Surf-desugared apps only carry `:span`
-/// metadata; the annotation pass that would stamp inferred app types
-/// back into Deep runs after `validate_ir_program`, so that check was
-/// structurally always-false for any Surf source (see issue #186).
-///
-/// The replacement derives output concreteness from the arguments
-/// (input tensor dims, kernel tensor dims, stride/padding literal
-/// values), all of which are knowable at validation time. After
-/// extracting the args this function evaluates the output spatial-
-/// dim formula `floor((in + 2 * padding - kernel) / stride) + 1`
-/// per axis (spec/05-risc-primitives.md §471-483) and rejects calls
-/// whose evaluated output dim is non-positive. Also enforces rank-4
-/// input/kernel and positive-stride / non-negative-padding.
-pub(super) fn validate_conv2d_symbolic_requirements(
-    list: &deep::List,
+/// Literal-provable stride, padding, kernel, fit, and arithmetic failures are
+/// type errors. Symbolic tensor extents and runtime stride/padding metadata are
+/// legal language inputs and retain runtime guards; backend capability limits
+/// are not checker signatures.
+pub(super) fn validate_conv_semantic_requirements(
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
-    failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    // The inference pass owns builtin arity diagnostics. This validator only
-    // owns the symbolic requirements of the canonical 4-argument call:
-    // (app {} (var conv2d) input kernel stride padding). Returning here keeps
-    // malformed calls total and prevents a secondary validator diagnostic.
-    let [_, _, _, input, kernel, _, _] = list.elements.as_slice() else {
+    let [_, input, kernel, strides, padding] = node.children_slice() else {
         return;
     };
-
-    // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
-    // whose `name` is in the failed-derivation set, the owning
-    // diagnostic was already emitted for the let-binding's own RHS.
-    // Suppress the cascade so the user sees one error per root cause,
-    // not one per consumer.
-    if conv2d_input_is_failed_let_name(list, failed_let_names) {
-        return;
-    }
-    // Args at elements[3]..[6] for the canonical 4-arg call shape:
-    // (app {} (var conv2d) input kernel stride padding).
-    //
-    // RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
-    // NonConcrete per spec/05 §4.5, since it does not enter the
-    // spatial-dim formula and conv2d's IR lowering can carry a
-    // symbolic batch through. All OTHER input axes (in_c, h, w) and
-    // all kernel axes must remain concrete -- they appear in the
-    // im2col/matmul lowering and must be statically knowable.
-    if !conv2d_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
-        || !expr_tensor_type_is_concrete(kernel, type_env)
-    {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
-            vec![
-                "Use concrete d-lit dimensions for IR lowering (axis 0 / batch may be symbolic)"
-                    .to_string(),
-            ],
-        ));
-        return;
-    }
-    // Extract and range-check stride/padding. The IR lowering relies
-    // on these being statically-knowable positive (stride) or
-    // non-negative (padding) integers; the output spatial dim formula
-    // `floor((in + 2p - k) / s) + 1` (spec/05-risc-primitives.md
-    // §471-483) divides by stride, so `stride <= 0` is undefined and
-    // a negative padding shrinks the effective input below zero.
-    // Without these guards the validator silently accepts the
-    // ill-formed call and the back-end ICEs at codegen time
-    // (issue #186 RT findings F1, F2, F3).
-    let stride = match extract_typed_scalar_literal(list, 5, "stride", errors) {
-        Some(v) => v,
-        None => return,
-    };
-    if stride <= 0 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!("IR builtin `conv2d` requires a positive stride, got {stride}"),
-            vec!["Stride must be >= 1; the output dim formula divides by stride".to_string()],
-        ));
-        return;
-    }
-    let padding = match extract_typed_scalar_literal(list, 6, "padding", errors) {
-        Some(v) => v,
-        None => return,
-    };
-    if padding < 0 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!("IR builtin `conv2d` requires non-negative padding, got {padding}"),
-            vec!["Padding must be >= 0".to_string()],
-        ));
-        return;
-    }
-    // Resolve input + kernel tensor dims so we can evaluate the
-    // output spatial-dim formula. expr_tensor_type_is_concrete above
-    // already established concreteness; the lookups below should both
-    // succeed, but bail gracefully on the unexpected case rather than
-    // unwrap-panicking.
-    let Some(input_dims) = list
-        .elements
-        .get(3)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))
-    else {
-        return;
-    };
-    let Some(kernel_dims) = list
-        .elements
-        .get(4)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))
-    else {
-        return;
-    };
-    // Rank guard: the canonical conv2d shape is [N, C, H, W] x [F, C, kH, kW].
-    // The HM signature check (check_conv2d_signature, infer.rs:9999+) also
-    // catches rank errors and may have already emitted its diagnostic via
-    // `check_conv2d_signature`. Dedupe so the user sees ONE rank error per
-    // role (input/kernel), not two (RT-205 round-2 F4).
-    if input_dims.len() != 4 {
-        let rank = input_dims.len();
-        let hm_emitted = errors.iter().any(|e| {
-            e.message.contains(&format!(
-                "conv2d expects rank-4 input tensor, got rank {rank}"
-            ))
+    let input_dims =
+        arg_tensor_type_expr(input, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let kernel_dims =
+        arg_tensor_type_expr(kernel, type_env).and_then(|ty| tensor_dims_from_type_expr(&ty));
+    let spatial_rank = input_dims
+        .as_ref()
+        .or(kernel_dims.as_ref())
+        .and_then(|dims| dims.len().checked_sub(2))
+        .filter(|rank| *rank > 0)
+        .or_else(|| {
+            collect_shape_list_elements(strides)
+                .map(|entries| entries.len())
+                .or_else(|| collect_shape_list_elements(padding).map(|entries| entries.len()))
         });
-        if !hm_emitted {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a rank-4 input tensor, got rank {rank}"),
-                vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
-            ));
-        }
+    let Some(spatial_rank) = spatial_rank else {
         return;
-    }
-    if kernel_dims.len() != 4 {
-        let rank = kernel_dims.len();
-        let hm_emitted = errors.iter().any(|e| {
-            e.message.contains(&format!(
-                "conv2d expects rank-4 kernel tensor, got rank {rank}"
-            ))
-        });
-        if !hm_emitted {
+    };
+    let params = match conv_parameters(strides, padding, spatial_rank) {
+        Ok(Some(params)) => params,
+        Ok(None) => return,
+        Err(message) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {rank}"),
-                vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
-            ));
-        }
-        return;
-    }
-    // Output spatial-dim formula per spec/05-risc-primitives.md §471-483:
-    //   out = floor((in + 2 * padding - kernel) / stride) + 1
-    // for both H (axis 2) and W (axis 3). If either evaluates to <= 0
-    // the call is ill-formed; without this guard the back-end emits a
-    // less-actionable error after codegen begins.
-    let in_h = match input_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let in_w = match input_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let k_h = match kernel_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let k_w = match kernel_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    for (axis, name, in_extent, k_extent) in [("H", "height", in_h, k_h), ("W", "width", in_w, k_w)]
-        .iter()
-        .map(|(short, long, inp, kr)| (*short, *long, *inp, *kr))
-    {
-        let Some(val) = conv2d_output_extent(in_extent, k_extent, stride, padding) else {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!(
-                    "IR builtin `conv2d` output {name} (axis {axis}) cannot be computed: input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding} overflows i64 in the canonical formula"
-                ),
-                vec![
-                    "Use input/kernel/stride/padding values whose intermediate `input + 2 * padding - kernel` and final `+ 1` fit in a signed 64-bit integer".to_string(),
-                ],
+                node,
+                message,
+                vec![],
             ));
             return;
-        };
-        if val <= 0 {
-            // Reaching this branch implies `conv2d_output_extent`
-            // returned `Some(val)`, which in turn means
-            // `padding.checked_mul(2)` and
-            // `in_extent.checked_add(2 * padding)` both succeeded
-            // upstream. Plain arithmetic is safe here; the
-            // saturating-mul + checked-add fallback that earlier
-            // code carried is unreachable. (RT-205 round-3 F-D.)
-            let padded_hint = in_extent + 2 * padding;
+        }
+    };
+    let (Some(input_dims), Some(kernel_dims)) = (input_dims, kernel_dims) else {
+        return;
+    };
+    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
+        return;
+    }
+    for (axis, ((input, kernel), (stride, low, high))) in input_dims[2..]
+        .iter()
+        .zip(&kernel_dims[2..])
+        .zip(params)
+        .enumerate()
+    {
+        if matches!(kernel, DeepDimKind::Lit(value) if *value <= 0) {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
-                list,
-                format!(
-                    "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
-                ),
-                vec![format!(
-                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({padded_hint}) is at least the kernel size ({k_extent})"
-                )],
+                node,
+                format!("conv requires positive kernel extents at spatial axis {axis}"),
+                vec![],
             ));
+            return;
+        }
+        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
+            continue;
+        };
+        if conv_output_extent(*input, *kernel, stride, low, high).is_none() {
+            errors.push(validator_error(CheckErrorKind::DimensionMismatch, node,
+                match input.checked_add(low).and_then(|n| n.checked_add(high)) {
+                    Some(padded) if *kernel > padded => format!("IR builtin `conv` output spatial axis {axis}: kernel must fit the padded input"),
+                    _ => format!("IR builtin `conv` output spatial axis {axis} arithmetic overflows i64"),
+                }, vec![]));
             return;
         }
     }
 }
 
-/// Compute the output spatial extent of a conv2d axis using the
-/// canonical formula `floor((in + 2 * padding - kernel) / stride) + 1`
-/// (spec/05-risc-primitives.md §471-483). Returns a signed value so
-/// the validator can detect ill-formed configurations (output <= 0)
-/// before they reach the back-end.
-///
-/// Uses `div_euclid` for floor division so a negative numerator (the
-/// kernel does not fit the padded input) produces an informative
-/// negative output value rather than truncating toward zero.
-/// `stride` is required to be positive by the caller, which is what
-/// makes `div_euclid` equivalent to mathematical floor here.
-///
-/// Returns `None` on integer overflow in any intermediate (RT-205
-/// round-2 F1). Callers must treat `None` as "input parameters
-/// outside the representable range" and emit a diagnostic; previously
-/// a huge `padding` like `i64::MAX/2` triggered `attempt to multiply
-/// with overflow` and panicked `chelis check`.
-pub(super) fn conv2d_output_extent(
+/// [05-OP-51]: positive kernel, nonnegative padding, positive stride, and
+/// checked i64 arithmetic. A kernel that does not fit is never an empty
+/// result or a truncating-division special case.
+pub(super) fn conv_output_extent(
     input: i64,
     kernel: i64,
     stride: i64,
-    padding: i64,
+    low: i64,
+    high: i64,
 ) -> Option<i64> {
-    let two_p = padding.checked_mul(2)?;
-    let padded = input.checked_add(two_p)?;
-    let numerator = padded.checked_sub(kernel)?;
-    numerator.checked_div_euclid(stride)?.checked_add(1)
+    if input < 0 || kernel <= 0 || stride <= 0 || low < 0 || high < 0 {
+        return None;
+    }
+    let padded = input.checked_add(low)?.checked_add(high)?;
+    if kernel > padded {
+        return None;
+    }
+    padded
+        .checked_sub(kernel)?
+        .checked_div(stride)?
+        .checked_add(1)
 }
 
 /// If `expr` is a recognizable shape-sensitive IR builtin call whose
@@ -2463,11 +2059,11 @@ pub(super) fn conv2d_output_extent(
 /// so downstream uses of a let-bound name resolve to a concrete
 /// tensor type (RT-205 F5).
 ///
-/// In addition to `conv2d` direct calls, this also handles
+/// In addition to `conv` direct calls, this also handles
 /// shape-PRESERVING unary and binary point-wise ops (relu, tanh,
 /// add, mul, etc.) so the canonical CNN layer pattern
-/// `y = relu(conv2d(...))` chains correctly into a downstream
-/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
+/// `y = relu(conv(...))` chains correctly into a downstream
+/// `conv(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
 /// ops are intentionally NOT handled here; they need separate per-op
 /// derivation because they change rank or shape. `stride`, `expand`, and
 /// `insert` are deliberately absent: the rank-only facts they used to derive
@@ -2483,20 +2079,19 @@ pub(super) fn derive_ir_builtin_output_type(
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    // chelis#1107 amendment: carrier-preserving entry. The `derive_*` helpers
-    // below take `&deep::List`, so bridge a stamped Node once here.
-    let mut bridge = None;
-    let list = as_list(expr, &mut bridge)?;
-    if get_tag(list) != Some(DeepTag::App) {
+    let deep::Expr::Node(node, _) = expr else {
+        return None;
+    };
+    if node.tag() != DeepTag::App {
         return None;
     }
-    let func_name = active_ir_builtin_name(list, static_env)?;
+    let func_name = active_ir_builtin_name(node, static_env)?;
     match func_name {
-        "conv2d" => derive_conv2d_output_type(list, type_env),
+        "conv" => derive_conv_output_type(node, type_env),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
-        "softmax" => derive_unary_shape_passthrough(list, type_env, static_env),
+        "softmax" => derive_unary_shape_passthrough(node, type_env, static_env),
         // The central shape registry owns every shape-identity builtin. This
         // resolver must consume that registry directly: a second manual
         // allowlist omitted floor_div/mod/clamp/where/bitwise identities and
@@ -2505,39 +2100,23 @@ pub(super) fn derive_ir_builtin_output_type(
         // registry-owned path preserves their inferred shapes without
         // restoring a second spelling list here.
         _ if crate::shape_class(func_name) == crate::ShapeClass::Identity => {
-            derive_identity_shape_passthrough(list, type_env, static_env)
+            derive_identity_shape_passthrough(node, type_env, static_env)
         }
         _ => None,
     }
 }
 
-/// Does `derive_ir_builtin_output_type` have an arm for `name`?
-///
-/// This mirrors the `match` above and must list exactly the callees it
-/// dispatches on. It exists because the two questions "is this operation
-/// shape-sensitive" and "can this validator derive its output type" stopped
-/// having the same answer when chelis#668 deleted the
-/// `stride`/`expand`/`insert` arms. Keying
-/// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
-/// bindings as FAILED derivations, which suppressed every downstream `conv2d`
-/// check (round-1 P0). The failed-derivation marker means "this validator owed
-/// a type here and could not produce one", so it must be keyed on the table
-/// that owes it.
-pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
-    matches!(name, "conv2d" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
-}
-
 /// Derive the output tensor type of a shape-preserving unary
 /// point-wise call: it equals the type of the single argument.
-/// Recurses through nested apps so e.g. `relu(conv2d(...))`
-/// resolves to conv2d's derived output type, peeking through any
+/// Recurses through nested apps so e.g. `relu(conv(...))`
+/// resolves to conv's derived output type, peeking through any
 /// borrow wrapper as usual (RT-205 round-2 F2).
 pub(super) fn derive_unary_shape_passthrough(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    let arg = list.elements.get(3)?;
+    let arg = node.children_slice().get(1)?;
     resolve_let_value_tensor_type(arg, type_env, static_env)
 }
 
@@ -2547,15 +2126,15 @@ pub(super) fn derive_unary_shape_passthrough(
 /// `uniform_like`), so arity-specific allowlists are both unnecessary and a
 /// source of registry drift. Rank agreement, broadcasting, and dtype
 /// promotion are ordinary inference's; this helper carries an exact shape to
-/// the exact-shape validators (`conv2d` chaining, RT-205) and nothing else.
+/// the exact-shape validators (`conv` chaining, RT-205) and nothing else.
 pub(super) fn derive_identity_shape_passthrough(
-    list: &deep::List,
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
     static_env: &UnordMap<String, StaticValue>,
 ) -> Option<deep::Expr> {
-    list.elements
+    node.children_slice()
         .iter()
-        .skip(3)
+        .skip(1)
         .find_map(|argument| resolve_let_value_tensor_type(argument, type_env, static_env))
 }
 
@@ -2572,88 +2151,37 @@ fn resolve_let_value_tensor_type(
         .or_else(|| expr_shape_type_fact(inner, type_env))
 }
 
-/// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
-/// with the input's precision) from its argument types and literal
-/// stride/padding values. Returns `None` if any non-batch input dim
-/// or any kernel dim is non-concrete, stride/padding are not int
-/// literals, ranks are wrong, or the output dims would be non-positive.
-///
-/// RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
-/// `Dim::NonConcrete` per spec/05 §4.5. When the input batch is
-/// symbolic, the synthesized output type preserves the input
-/// tensor's raw batch-dim expression (e.g. `(d-name {} batch)`)
-/// rather than forcing a `d-lit`. This lets downstream chained
-/// conv2d calls resolve `&y` to the symbolic-batch type.
-pub(super) fn derive_conv2d_output_type(
-    list: &deep::List,
+/// Derive all convolution spatial extents, preserving the batch dimension's
+/// original symbolic identity when it is not a literal.
+pub(super) fn derive_conv_output_type(
+    node: &DeepNode,
     type_env: &ShapeTypeEnv,
 ) -> Option<deep::Expr> {
-    let input_ty = list
-        .elements
-        .get(3)
-        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
-    let kernel_ty = list
-        .elements
-        .get(4)
-        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let args = node.children_slice();
+    let input_ty = arg_tensor_type_expr(args.get(1)?, type_env)?;
+    let kernel_ty = arg_tensor_type_expr(args.get(2)?, type_env)?;
     let input_dims = tensor_dims_from_type_expr(&input_ty)?;
     let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
-    if input_dims.len() != 4 || kernel_dims.len() != 4 {
+    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
         return None;
     }
-    // Issue #216: cast-aware so `conv2d(x, k, cast(1, int32), cast(0, int32))`
-    // surfaces the same derived output type as the bare-literal form.
-    let stride = extract_int_for_dim(list.elements.get(5)?)?;
-    let padding = extract_int_for_dim(list.elements.get(6)?)?;
-    if stride <= 0 || padding < 0 {
-        return None;
+    let params = conv_parameters(args.get(3)?, args.get(4)?, input_dims.len() - 2).ok()??;
+    let mut trailing = vec![match kernel_dims[0] {
+        DeepDimKind::Lit(n) => n,
+        _ => return None,
+    }];
+    for ((input, kernel), (stride, low, high)) in
+        input_dims[2..].iter().zip(&kernel_dims[2..]).zip(params)
+    {
+        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
+            return None;
+        };
+        trailing.push(conv_output_extent(*input, *kernel, stride, low, high)?);
     }
-    // Capture the input tensor's raw batch-dim Expr (axis 0) so a
-    // symbolic batch can pass through verbatim into the synthesized
-    // output type. axes 1-3 must be concrete literals (RT-205 r3 F-C).
-    let input_dim_exprs = tensor_dim_exprs_from_type_expr(&input_ty)?;
-    if input_dim_exprs.len() != 4 {
-        return None;
-    }
-    let batch_dim_expr = input_dim_exprs[0].clone();
-    let f = match kernel_dims[0] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let in_h = match input_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let in_w = match input_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let k_h = match kernel_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let k_w = match kernel_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    // `conv2d_output_extent` returns None on integer overflow (RT-205
-    // round-2 F1); in that case there's no valid output tensor type
-    // to register, so the caller falls back to no extension and the
-    // validator's own arm will emit the overflow diagnostic.
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
-    if out_h <= 0 || out_w <= 0 {
-        return None;
-    }
-    // Build `(t-tensor {} <batch-expr> (d-lit {} f) (d-lit {} out_h)
-    // (d-lit {} out_w) <precision-expr>)` from the input's precision
-    // and the captured batch-dim expression (which may be a symbolic
-    // `(d-name {} ...)` per RT-205 r3 F-C).
-    let prec_expr = tensor_precision_expr(&input_ty)?;
     Some(build_tensor_type_expr_with_batch(
-        batch_dim_expr,
-        &[f, out_h, out_w],
-        prec_expr,
+        tensor_dim_exprs_from_type_expr(&input_ty)?.first()?.clone(),
+        &trailing,
+        tensor_precision_expr(&input_ty)?,
     ))
 }
 
@@ -2664,19 +2192,13 @@ pub(super) fn derive_conv2d_output_type(
 /// so the caller can carry it forward verbatim when synthesizing a
 /// derived tensor type (RT-205 round-3 F-C, symbolic batch propagation).
 pub(super) fn tensor_dim_exprs_from_type_expr(expr: &deep::Expr) -> Option<Vec<deep::Expr>> {
-    let list = match expr {
-        deep::Expr::List(list, _) => list,
-        _ => return None,
-    };
-    if get_tag(list) == Some(DeepTag::TRef) {
-        return children(list)
-            .first()
-            .and_then(tensor_dim_exprs_from_type_expr);
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::TRef {
+        return kids.first().and_then(tensor_dim_exprs_from_type_expr);
     }
-    if get_tag(list) != Some(DeepTag::TTensor) {
+    if tag != DeepTag::TTensor {
         return None;
     }
-    let kids = children(list);
     if kids.is_empty() {
         return None;
     }
@@ -2703,7 +2225,7 @@ pub(super) fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
 /// (d-lit {} d2) ... prec)`, placing a verbatim Deep expression at
 /// axis 0 (the batch dim) and integer literals for the remaining
 /// axes. Used to preserve symbolic batch (`(d-name {} batch)`) when
-/// deriving a chained conv2d's output type (RT-205 round-3 F-C).
+/// deriving a chained conv's output type (RT-205 round-3 F-C).
 /// Spans are zeroed because the derived type is synthetic; downstream
 /// lookups care only about the structural shape.
 pub(super) fn build_tensor_type_expr_with_batch(
@@ -2712,92 +2234,18 @@ pub(super) fn build_tensor_type_expr_with_batch(
     prec: deep::Expr,
 ) -> deep::Expr {
     let zero = zero_span();
-    let empty_meta = || deep::MetaMap { entries: vec![] };
     let make_d_lit = |v: i64| {
-        deep::Expr::List(
-            deep::List {
-                elements: vec![
-                    deep::Expr::Atom(deep::Atom::Tag(DeepTag::DLit), zero),
-                    deep::Expr::Map(empty_meta(), zero),
-                    deep::Expr::Atom(deep::Atom::Int(v), zero),
-                ],
-            },
-            zero,
+        stamped_node_expr(
+            DeepTag::DLit,
+            vec![deep::Expr::Atom(deep::Atom::Int(v), zero)],
         )
     };
-    let mut elements = vec![
-        deep::Expr::Atom(deep::Atom::Tag(DeepTag::TTensor), zero),
-        deep::Expr::Map(empty_meta(), zero),
-    ];
-    elements.push(batch_dim);
+    let mut children = vec![batch_dim];
     for &d in other_dims {
-        elements.push(make_d_lit(d));
+        children.push(make_d_lit(d));
     }
-    elements.push(prec);
-    deep::Expr::List(deep::List { elements }, zero)
-}
-
-/// Look up positional arg `idx` of a `conv2d` call, attempt to
-/// extract it as an integer literal, and emit a clear diagnostic if
-/// the arg is missing or non-literal.
-///
-/// `label` names the role (`"stride"` / `"padding"`) for the error
-/// message. Returns `Some(value)` on success and `None` when an error
-/// was pushed (the caller should bail to avoid piling on cascading
-/// diagnostics).
-pub(super) fn extract_typed_scalar_literal(
-    list: &deep::List,
-    idx: usize,
-    label: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Option<i64> {
-    let Some(arg) = list.elements.get(idx) else {
-        // Arity mismatch is caught elsewhere; bail without piling on.
-        return None;
-    };
-    // Issue #216: cast-aware so a cast-wrapped literal (e.g.
-    // `conv2d(x, k, cast(0, int32), 0)`) lands the precise
-    // positive-stride / non-negative-padding diagnostic instead of the
-    // misleading "requires a literal integer stride" message that
-    // pre-fix appeared whenever the literal was wrapped.
-    match extract_int_for_dim(arg) {
-        Some(v) => Some(v),
-        None => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a literal integer {label}"),
-                vec![format!(
-                    "Pass `{label}` as a constant int literal, not a variable or expression"
-                )],
-            ));
-            None
-        }
-    }
-}
-
-pub(super) fn ir_builtin_axis_dim(
-    list: &deep::List,
-    type_env: &ShapeTypeEnv,
-    tensor_arg_index: usize,
-    axis_arg_index: usize,
-) -> Option<DeepDimKind> {
-    let tensor_dims = list
-        .elements
-        .get(3 + tensor_arg_index)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))?;
-    // Negative axes index from the end; normalize against the operand
-    // rank so this concrete-extent check inspects the same axis the op
-    // actually reduces.
-    // Issue #216: cast-aware so a `cast(N, int32)`-wrapped axis arg
-    // still resolves through to the operand's concrete dim.
-    let raw_axis = list
-        .elements
-        .get(3 + axis_arg_index)
-        .and_then(extract_int_for_dim)?;
-    let axis = normalize_static_axis(tensor_dims.len(), raw_axis)?;
-    tensor_dims.get(axis).copied()
+    children.push(prec);
+    stamped_node_expr(DeepTag::TTensor, children)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -2822,48 +2270,35 @@ pub(super) fn annotated_totality_invariant_traces(exprs: &[deep::Expr]) -> Vec<S
         match expr {
             deep::Expr::Atom(_, _) | deep::Expr::Map(_, _) => {}
             deep::Expr::MetaExpr(meta, _) => walk(&meta.expr, traces),
-            deep::Expr::List(list, _) => {
-                let tag = get_tag(list);
-                let requires_stamp = tag.is_some_and(|tag| {
-                    tag == DeepTag::Fn
-                        || matches!(tag, DeepTag::PatVar | DeepTag::PatAs)
-                        || should_attach_type_metadata(tag)
-                });
-                if requires_stamp
-                    && !get_meta(list)
-                        .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"))
-                {
+            deep::Expr::Node(node, _) => {
+                let tag = node.tag();
+                let requires_stamp = tag == DeepTag::Fn
+                    || matches!(tag, DeepTag::PatVar | DeepTag::PatAs)
+                    || should_attach_type_metadata(tag);
+                if requires_stamp && node.meta().ty().is_none() {
                     traces.push(format!(
                         "annotated `{}` node is missing its type stamp",
-                        tag.map(DeepTag::as_str).unwrap_or("<untagged-list>")
+                        tag.as_str()
                     ));
                 }
 
-                let kids = children(list);
+                let kids = node.children_slice();
                 for (index, child) in kids.iter().enumerate() {
                     // Decode-once: `child_stamp_role` is total over
                     // `DeepTag`, so the version-skew arm is
                     // unrepresentable; untagged structural lists take the
-                    // recursive walk.
-                    match tag.map(|tag| child_stamp_role(tag, index, kids.len())) {
-                        Some(
-                            ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass,
-                        )
-                        | None => walk(child, traces),
-                        Some(
-                            ChildStampRole::Syntax
-                            | ChildStampRole::Selector
-                            | ChildStampRole::EffectHandler
-                            | ChildStampRole::Binder
-                            | ChildStampRole::Type,
-                        ) => {}
+                    // `BareList` walk below.
+                    match child_stamp_role(tag, index, kids.len()) {
+                        ChildStampRole::RuntimeExpr | ChildStampRole::ExplicitInferenceBypass => {
+                            walk(child, traces)
+                        }
+                        ChildStampRole::Syntax
+                        | ChildStampRole::Selector
+                        | ChildStampRole::EffectHandler
+                        | ChildStampRole::Binder
+                        | ChildStampRole::Type => {}
                     }
                 }
-            }
-            // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
-            deep::Expr::Node(node, span) => {
-                let bridged = deep::Expr::List(node.to_list(*span), *span);
-                walk(&bridged, traces);
             }
             deep::Expr::BareList(elems, _) => {
                 for child in elems {
@@ -2942,4 +2377,488 @@ pub(super) fn totality_violation_error(traces: &[String]) -> CheckError {
         ),
         vec![],
     )
+}
+
+#[cfg(test)]
+mod core_transform_fragment_tests {
+    use super::*;
+
+    fn deep_type(source: &str) -> deep::Expr {
+        let mut parsed = chelis_deep::parser::parse_str(source).expect("canonical Deep type");
+        assert_eq!(parsed.len(), 1, "one Deep type expression");
+        parsed.remove(0)
+    }
+
+    fn pattern_scope(source: &str, value: CoreTransformValue) -> CoreTransformScope {
+        let pattern = deep_type(source);
+        let mut scope = CoreTransformScope::default();
+        bind_core_transform_pattern(&pattern, &value, &mut scope);
+        scope
+    }
+
+    fn binding<'a>(scope: &'a CoreTransformScope, name: &str) -> &'a CoreTransformValue {
+        scope
+            .local_values
+            .get(name)
+            .unwrap_or_else(|| panic!("missing pattern binding `{name}`"))
+    }
+
+    #[test]
+    fn core_transform_value_classifier_covers_forwarding_and_results() {
+        let top_level_functions = UnordSet::new();
+        let module_values = UnordMap::new();
+        let lexical_scope = CoreTransformScope::default();
+        let untyped = "(fn {} (params {} v) (var {} v))";
+        let cases = [
+            (
+                "direct tuple projection",
+                format!(
+                    "(tuple-get {{}} (tuple {{}} {untyped} (lit {{type: (t-prim {{}} i32)}} 0)) \
+                     (lit {{type: (t-prim {{}} i32)}} 0))"
+                ),
+            ),
+            (
+                "transparent let result",
+                format!(
+                    "(let {{}} \
+                       (bind {{}} mapped {untyped} forwarded (var {{}} mapped)) \
+                       (var {{}} forwarded))"
+                ),
+            ),
+            (
+                "transparent block result",
+                format!("(block {{}} (lit {{type: (t-prim {{}} i32)}} 0) {untyped})"),
+            ),
+            (
+                "match result",
+                format!(
+                    "(match {{}} {untyped} \
+                       (arm {{}} (pat-var {{}} mapped) () (var {{}} mapped)))"
+                ),
+            ),
+        ];
+
+        for (name, source) in cases {
+            assert_eq!(
+                classify_core_transform_value(
+                    &deep_type(&source),
+                    &top_level_functions,
+                    &module_values,
+                    &lexical_scope,
+                ),
+                CoreTransformValue::UntypedVmapLambda,
+                "{name}: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_transform_values_use_structural_projection() {
+        let source = "def reduce(v: tensor[4, 3, f32]) -> tensor[3, f32] = sum(v, 0i32)\n\
+                      pair = (reduce, 0i32)\n\
+                      mapped = pair.0\n";
+        let declarations = chelis_surf::parser::parse_str(source).expect("module values parse");
+        let program = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let items = program.iter().collect::<Vec<_>>();
+        let top_level_functions = collect_top_level_function_names(&items);
+        let module_values = collect_top_level_transform_values(&items, &top_level_functions);
+        assert!(
+            module_values
+                .get("mapped")
+                .is_some_and(CoreTransformValue::aliases_top_level_function),
+            "module tuple projection must retain top-level alias provenance"
+        );
+    }
+
+    #[test]
+    fn local_vmap_lambda_uses_effective_function_type_metadata() {
+        let top_level_functions = UnordSet::new();
+        let module_values = UnordMap::new();
+        let lexical_scope = CoreTransformScope::default();
+        let concrete = deep_type(
+            "(fn {type: (t-fn {} \
+               (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32)) \
+               (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} \
+             (params {} v) (var {} v))",
+        );
+        assert_eq!(
+            classify_core_transform_value(
+                &concrete,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+            ),
+            CoreTransformValue::ConstrainedVmapLambda,
+            "a local ascription supplies the pre-transform function structure"
+        );
+
+        let unresolved = deep_type(
+            "(fn {type: (t-fn {} (t-var {} _) (t-var {} _))} \
+             (params {} v) (var {} v))",
+        );
+        assert_eq!(
+            classify_core_transform_value(
+                &unresolved,
+                &top_level_functions,
+                &module_values,
+                &lexical_scope,
+            ),
+            CoreTransformValue::UntypedVmapLambda,
+            "an ascription containing a mapped type hole remains fenced"
+        );
+    }
+
+    #[test]
+    fn core_transform_provenance_is_scoped_by_enclosing_module() {
+        let source = "\
+          (module {} Alpha \
+            (def {} reduce \
+              (fn {} (params {} (v {type: \
+                (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) \
+                (var {} v)))) \
+          (module {} Beta \
+            (def {} probe \
+              (fn {} (params {} t) \
+                (let {} \
+                  (bind {} reduce \
+                    (fn {} (params {} (v {type: \
+                      (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))})) \
+                      (var {} v))) \
+                  (vmap {} (var {} reduce))))))";
+        let program = chelis_deep::parser::parse_str(source).expect("canonical module program");
+        let result = crate::infer_program(&program);
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("core transform fragment")),
+            "Alpha.reduce must not taint Beta's local reduce: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn alternate_result_join_preserves_hazards_and_tuple_siblings() {
+        let untyped = CoreTransformValue::UntypedVmapLambda;
+        let typed = CoreTransformValue::ConstrainedVmapLambda;
+        assert_eq!(
+            typed.join(&untyped),
+            typed,
+            "an explicitly structured arm constrains the same callable result slot"
+        );
+        assert_eq!(
+            CoreTransformValue::Ordinary.join(&untyped),
+            untyped,
+            "an unrelated ordinary result must not erase an untyped lambda hazard"
+        );
+        assert_eq!(
+            CoreTransformValue::TopLevelFunctionAlias.join(&typed),
+            CoreTransformValue::TopLevelFunctionAlias,
+            "a typed sibling must not erase top-level function provenance"
+        );
+
+        let left = CoreTransformValue::Tuple(vec![
+            CoreTransformValue::UntypedVmapLambda,
+            CoreTransformValue::Ordinary,
+        ]);
+        let right = CoreTransformValue::Tuple(vec![
+            CoreTransformValue::Ordinary,
+            CoreTransformValue::TopLevelFunctionAlias,
+        ]);
+        assert_eq!(
+            left.join(&right),
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::UntypedVmapLambda,
+                CoreTransformValue::TopLevelFunctionAlias,
+            ])
+        );
+
+        assert_eq!(
+            CoreTransformValue::Tuple(vec![CoreTransformValue::UntypedVmapLambda]).join(
+                &CoreTransformValue::Tuple(vec![
+                    CoreTransformValue::Ordinary,
+                    CoreTransformValue::Ordinary,
+                ])
+            ),
+            CoreTransformValue::Ordinary,
+            "mismatched result structure must not invent transferable provenance"
+        );
+    }
+
+    #[test]
+    fn match_pattern_provenance_transfer_is_structural_and_conservative() {
+        let direct = pattern_scope("(pat-var {} mapped)", CoreTransformValue::UntypedVmapLambda);
+        assert_eq!(
+            binding(&direct, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+
+        let nested = pattern_scope(
+            "(pat-tuple {} \
+               (pat-var {} alias) \
+               (pat-tuple {} (pat-wild {}) (pat-var {} mapped)))",
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::TopLevelFunctionAlias,
+                CoreTransformValue::Tuple(vec![
+                    CoreTransformValue::Ordinary,
+                    CoreTransformValue::UntypedVmapLambda,
+                ]),
+            ]),
+        );
+        assert_eq!(
+            binding(&nested, "alias"),
+            &CoreTransformValue::TopLevelFunctionAlias
+        );
+        assert_eq!(
+            binding(&nested, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert!(!nested.local_values.contains_key("_"));
+
+        let siblings = pattern_scope(
+            "(pat-tuple {} (pat-var {} left) (pat-var {} right))",
+            CoreTransformValue::Tuple(vec![
+                CoreTransformValue::UntypedVmapLambda,
+                CoreTransformValue::Ordinary,
+            ]),
+        );
+        assert_eq!(
+            binding(&siblings, "left"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert_eq!(binding(&siblings, "right"), &CoreTransformValue::Ordinary);
+
+        let as_pattern = pattern_scope(
+            "(pat-as {} whole (pat-var {} mapped))",
+            CoreTransformValue::UntypedVmapLambda,
+        );
+        assert_eq!(
+            binding(&as_pattern, "whole"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+        assert_eq!(
+            binding(&as_pattern, "mapped"),
+            &CoreTransformValue::UntypedVmapLambda
+        );
+
+        for pattern in [
+            "(pat-tuple {} (pat-var {} left) (pat-var {} right))",
+            "(pat-as {} whole (pat-tuple {} (pat-var {} mapped)))",
+            "(pat-ctor {} Box (pat-var {} mapped))",
+            "(pat-record {} Box (kv {} value (pat-var {} mapped)))",
+        ] {
+            let mismatched = pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda);
+            for (_, value) in mismatched.local_values.to_sorted() {
+                assert_eq!(
+                    value,
+                    &CoreTransformValue::Ordinary,
+                    "{pattern} must not transfer provenance through unknown or mismatched structure"
+                );
+            }
+        }
+
+        for pattern in ["(pat-wild {})", "(pat-lit {} 0)"] {
+            assert!(
+                pattern_scope(pattern, CoreTransformValue::UntypedVmapLambda)
+                    .local_values
+                    .is_empty(),
+                "{pattern} binds no value"
+            );
+        }
+    }
+
+    #[test]
+    fn vmap_parameter_holes_follow_only_transform_relevant_type_structure() {
+        let cases = [
+            ("whole type hole", "(t-var {} _)", true),
+            ("authored bare type variable", "(t-var {} a)", false),
+            ("reference inner type hole", "(t-ref {} (t-var {} _))", true),
+            (
+                "tuple element type hole",
+                "(t-tuple {} (t-prim {} i32) (t-var {} _))",
+                true,
+            ),
+            (
+                "tensor rank hole",
+                "(t-tensor {} (d-rank {} _) (t-prim {} f32))",
+                true,
+            ),
+            (
+                "tensor dimension hole",
+                "(t-tensor {} (d-var {} _) (t-prim {} f32))",
+                false,
+            ),
+            (
+                "tensor precision hole",
+                "(t-tensor {} (d-lit {} 4) (t-var {} _))",
+                false,
+            ),
+            (
+                "named tensor rank binder",
+                "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+                false,
+            ),
+            (
+                "shared nominal type hole",
+                "(t-adt {} List (t-var {} _))",
+                false,
+            ),
+            (
+                "shared function type hole",
+                "(t-fn {} (t-var {} _) (t-unit {}))",
+                false,
+            ),
+        ];
+
+        for (name, source, expected) in cases {
+            assert_eq!(
+                vmap_parameter_type_has_unmapped_hole(&deep_type(source)),
+                expected,
+                "{name}: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn surf_vmap_tensor_slot_holes_have_earlier_or_safe_boundaries() {
+        let bare_type_variable = "out = vmap(fn (v: a) -> v)(to_tensor([[1.0f32]]))\n";
+        let declarations =
+            chelis_surf::parser::parse_str(bare_type_variable).expect("bare type variable parses");
+        let program = chelis_surf::desugar::desugar_program(&declarations)
+            .expect("Surf fixture must desugar");
+        let result = crate::infer_program(&program);
+        assert!(
+            result.errors.iter().any(|error| {
+                matches!(error.kind, CheckErrorKind::TypeMismatch)
+                    && error
+                        .message
+                        .contains("unknown primitive type `a` in type annotation")
+                    && error.suggestions.iter().any(|suggestion| {
+                        suggestion.contains("declare `a` in the signature binder list")
+                    })
+            }),
+            "Surf bare type names remain owned by explicit-binder type resolution: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|error| !error.message.contains("core transform fragment")),
+            "the vmap fence must not steal an undeclared type variable: {:?}",
+            result.errors
+        );
+
+        let precision_hole = "out = vmap(fn (v: tensor[4, _]) -> v)(to_tensor([[1.0f32]]))\n";
+        assert!(
+            chelis_surf::parser::parse_str(precision_hole).is_err(),
+            "Surf requires a named tensor precision"
+        );
+
+        let rank_hole = "out = vmap(fn (v: tensor[.._, f32]) -> v)(to_tensor([[1.0f32]]))\n";
+        assert!(
+            chelis_surf::parser::parse_str(rank_hole).is_err(),
+            "Surf requires a named rank spread"
+        );
+
+        let dimension_hole = "def probe(t: tensor[5, 4, 3, f32]) -> tensor[5, 3, f32] =\n\
+             vmap(fn (v: tensor[_, 3, f32]) -> sum(v, 0i32))(t)\n";
+        assert!(
+            chelis_surf::parser::parse_str(dimension_hole).is_err(),
+            "Surf dimension `_` must be rejected before desugaring"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Observation {
+        reported_success: bool,
+        messages: Vec<String>,
+    }
+
+    type Entry = fn(&[deep::Expr]) -> Observation;
+
+    fn validation_only_failure_fixture() -> Vec<deep::Expr> {
+        let declarations = chelis_surf::parser::parse_str(
+            "def f(x: tensor[1, 1, 4, f32], k: tensor[1, 1, 2, f32]) = \
+             conv(x, k, [0i64], [(0i64, 0i64)])\n",
+        )
+        .expect("the zero-stride Surf fixture must parse");
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
+    }
+
+    fn observe_check(result: Result<CheckedProgram, InferResult>) -> Observation {
+        match result {
+            Ok(_) => Observation {
+                reported_success: true,
+                messages: Vec::new(),
+            },
+            Err(result) => Observation {
+                reported_success: false,
+                messages: result
+                    .errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect(),
+            },
+        }
+    }
+
+    fn observe_infer(result: InferResult) -> Observation {
+        Observation {
+            reported_success: result.errors.is_empty(),
+            messages: result
+                .errors
+                .into_iter()
+                .map(|error| error.message)
+                .collect(),
+        }
+    }
+
+    fn run_with_validator_cancellation(
+        exprs: &[deep::Expr],
+        run: impl FnOnce(&[deep::Expr]) -> Observation,
+    ) -> Observation {
+        let token = crate::cancel::CancelToken::new();
+        let _cancel_guard = crate::cancel::install_cancel_token(token);
+        let _hook_guard = cancel_before_declaration_validation_for_test();
+        run(exprs)
+    }
+
+    #[test]
+    fn cancellation_inside_shared_semantic_validation_is_hard_at_every_public_entry() {
+        let exprs = validation_only_failure_fixture();
+        let entries: [(&str, Entry); 4] = [
+            ("check_ir_program", |exprs| {
+                observe_check(crate::check_ir_program(exprs))
+            }),
+            ("check_typed_program", |exprs| {
+                observe_check(crate::check_typed_program(exprs))
+            }),
+            ("infer_ir_program", |exprs| {
+                observe_infer(crate::infer_ir_program(exprs))
+            }),
+            ("infer_program", |exprs| {
+                observe_infer(crate::infer_program(exprs))
+            }),
+        ];
+
+        for (entry, run) in entries {
+            let observation = run_with_validator_cancellation(&exprs, run);
+            assert!(
+                !observation.reported_success,
+                "{entry} returned without a cancellation diagnostic: {observation:?}"
+            );
+            assert_eq!(
+                observation.messages,
+                [crate::cancel::EVAL_CANCELLED_MSG.to_string()],
+                "{entry} must report exactly one cancellation diagnostic in order"
+            );
+        }
+    }
 }

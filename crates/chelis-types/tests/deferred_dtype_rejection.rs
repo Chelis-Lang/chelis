@@ -30,7 +30,7 @@ const DEFERRED_NAMES: &[&str] = &[
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -79,7 +79,7 @@ fn parse_name_rejects_every_deferred_name() {
 #[test]
 fn cast_scalar_to_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
     for name in DEFERRED_NAMES {
-        assert_deferred_rejection(&format!("def main() -> int32 = cast(1, {name})"), name);
+        assert_deferred_rejection(&format!("def main() -> i32 = cast(1, {name})"), name);
     }
 }
 
@@ -97,26 +97,25 @@ fn tensor_element_deferred_name_rejected_with_spec_1_1_1_diagnostic() {
 }
 
 /// Sig surface: a reserved name in a sig's tensor precision slot must
-/// reach the §1.1.1 rejection path, not be silently absorbed as an
-/// implicit quantified type variable (the trap the unsigned family's
-/// desugar exclusion already guards against).
+/// reach the §1.1.1 rejection path, not be admitted as a type variable
+/// (the trap the unsigned family's desugar exclusion already guards against).
 #[test]
 fn sig_precision_deferred_name_rejected_not_quantified() {
     for name in DEFERRED_NAMES {
         let src = format!(
-            "sig f: tensor[d, {name}] -> tensor[d, {name}]\n\
+            "sig f[d]: tensor[d, {name}] -> tensor[d, {name}]\n\
              def f(x) = x"
         );
         assert_deferred_rejection(&src, name);
     }
 }
 
-/// Negative-parity twin: an ordinary lowercase name in a sig precision
-/// slot is still absorbed as an implicit quantifier (WS-A5), so the
-/// desugar exclusion is exactly the reserved list and nothing wider.
+/// Negative-parity twin: an ordinary lowercase name explicitly listed in a
+/// sig remains a type variable, so the desugar exclusion is exactly the
+/// reserved list and nothing wider.
 #[test]
-fn sig_precision_ordinary_tvar_still_quantifies() {
-    let src = "sig f: tensor[d, p] -> tensor[d, p]\n\
+fn sig_precision_explicit_ordinary_tvar_still_quantifies() {
+    let src = "sig f[d, p]: tensor[d, p] -> tensor[d, p]\n\
                def f(x) = x";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -128,12 +127,12 @@ fn sig_precision_ordinary_tvar_still_quantifies() {
 }
 
 /// Negative-parity twin: active dtypes sharing a prefix with reserved
-/// names (`int32` vs `int4`, `f16` vs `f8e5m2`) must not trip the
+/// names (`i32` vs `int4`, `f16` vs `f8e5m2`) must not trip the
 /// deferred rejection path.
 #[test]
 fn active_dtypes_do_not_match_deferred_family() {
     for (src, what) in [
-        ("def main() -> int32 = cast(1, int32)", "int32"),
+        ("def main() -> i32 = cast(1, i32)", "i32"),
         ("def main() -> f16 = cast(1.0, f16)", "f16"),
     ] {
         let deep = surf_to_deep(src);

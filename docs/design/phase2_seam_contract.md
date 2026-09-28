@@ -3,7 +3,7 @@
 Status: SIGNED OFF by the Beacon shell agent (`Chelis-Lang/beacon`,
 `~/Documents/scratch/beacon-bakeoff`) with one correction to ① (recorded
 below). Surfaces 1, 3, 4 confirmed usable as shipped; surface 2 (`IrHandle`)
-is now frozen at the hash-addressed exact-version `WireDag` v6 shape the correction
+is now frozen at the hash-addressed exact-version `WireDag` v9 shape the correction
 specified, and WI-3 populates against it.
 
 The verification-stack dispatch layer (WI-3 graph-extraction producer, WI-9
@@ -39,8 +39,8 @@ impl Goal {
 
 ```rust
 pub struct IrHandle {                  // private fields
-    dag_hash: Option<String>,          // lowercase-hex sha256 of the serialized WireDag v6 bytes
-    root_index: Option<u64>,           // which WireDag.roots entry the goal's output selects
+    dag_hash: Option<String>,          // lowercase-hex sha256 of the serialized WireDag v9 bytes
+    root_index: Option<u64>,           // node ID selected by the goal's named output
 }
 
 impl IrHandle {
@@ -55,11 +55,12 @@ impl IrHandle {
 **① RESOLVED.** Beacon's sign-off corrected the default assumption: Beacon does
 not consume a `node: u64` index, nor a borrow of an in-memory `chelis_ir::Dag`.
 It consumes the SERIALIZED exact-version `WireDag` JSON bytes out of process:
-it parses the slice, requires the current `WIRE_DAG_SCHEMA_VERSION` (version 7
-in the chelis#1277 Slice A change), validates the complete
+it parses the slice, requires the current `WIRE_DAG_SCHEMA_VERSION` (version 9), validates the complete
 cross-node wire contract, computes a sha256 over those bytes, and
 selects the output by `root_index`. So `IrHandle` addresses that artifact by its
-content hash (lowercase hex) plus a root index, NOT by a node id.
+content hash (lowercase hex) plus the selected node ID, exposed as
+`root_index`. The ID is resolved within the enclosed DAG; it need not occur
+in `WireDag.roots`.
 
 The version requirement is exact. Missing, older, and future schema versions
 are rejected before any `WireRiscOp` is decoded; there is no compatibility
@@ -69,26 +70,21 @@ payload it addresses.
 `IrHandle` still holds only a hash + index: it does NOT carry a `chelis_ir::Dag`
 or a `WireDag` value, so populating it pulls no live IR dependency into
 `chelis-prove`'s public API. The WI-3 producer (which DOES have the IR in scope)
-serializes the exact-version `WireDag` v6, validates its version and complete
+serializes the exact-version `WireDag` v9, validates its version and complete
 cross-node contract at the producer
 boundary, hashes the bytes, and hands the digest + root index here via
 `from_wire_dag`. A bare `from_node(u64)` is removed: it addressed nothing a
 cross-process consumer could resolve.
 
-**Finite-float precondition on the content-address path.** The hash is taken
-over the JSON serialization of the `WireDag`, and `serde_json` serializes a
-non-finite f64 (`NaN` / `+inf` / `-inf`) as the JSON token `null`. That breaks
-content addressing two ways: the bytes no longer parse back as a `WireDag` (a
-consumer's `from_validated_json` fails on `null`-where-`f64`-expected, *after*
-the self-consistent hash already matched, so it is silent at the producer), and
-`+inf` / `-inf` / `NaN` all collapse to the same `null`, so three distinct DAGs
-would share one hash. **The content-address path therefore requires finite
-floats: the WI-3 producer rejects any `WireDag` carrying a non-finite node-op
-float at its boundary** (before serialize + hash), the same fail-closed posture
-as the `schema_version` check. A canonical non-finite representation — to support
-content-addressing DAGs that legitimately contain `inf`/`NaN` — is a tracked
-follow-up requiring a coordinated `WireDag`-JSON-format change with Beacon's
-consume path; it is out of scope for WI-3.
+**Finite-value precondition for BoxRange proofs.** The exact numeric wire
+codec in `spec/10-serialization.md` §3.2 preserves nonfinite bit patterns as
+well as finite values; it does not collapse them to `null`. BoxRange retains
+its existing finite-only proof support: the WI-3 producer rejects a nonfinite
+node-op value before hashing a proof artifact. The graph's own numeric and
+reference domains are validated first, including the random draws' finite-parameter
+requirements. This proof precondition does not narrow the wire codec's value
+domain. Named output references must resolve to nodes of the enclosed,
+validated DAG before a handle is created.
 
 ## 3. `GoalShape::BoxRange`  — OPEN QUESTION ② for Beacon
 
@@ -96,6 +92,7 @@ consume path; it is out of scope for WI-3.
 pub enum GoalShape {
     Smt(SmtProperty),
     BoxRange { inputs: IntervalBox, output: OutputRange },
+    ScalarUpperBound { inputs: IntervalBox, upper: chelis_types::ScalarValue },
 }
 
 pub struct IntervalBox { pub dims: Vec<(String, f64, f64)> }   // (name, lo, hi) per input
@@ -104,6 +101,13 @@ pub struct OutputRange { pub output: String, pub lo: f64, pub hi: f64 }
 
 Per-named-dim `[lo, hi]` input box; a single named output asserted within
 `[lo, hi]`. `f64` bounds.
+
+The additive scalar-network lane uses `ScalarUpperBound` for a one-sided
+output inequality, with an explicit finite f64 `ScalarValue` threshold and
+distinct named scalar input intervals. It does not invent a finite lower
+output limit. [Scalar range properties](beacon_scalar_range.md) specify its
+source subset, exact graph transport, budgets and real-arithmetic qualification.
+The historical `BoxRange` lane and its dispatch policy remain separate.
 
 **② Is this shape what Beacon's interval evaluator actually consumes?** Specifically:
 - Per-named-scalar-dim boxes sufficient, or do you need affine / zonotope input

@@ -103,7 +103,7 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence};
+use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
@@ -142,6 +142,11 @@ pub struct VerifiedDagView<'a> {
 }
 
 impl<'a> VerifiedDagView<'a> {
+    /// The declaration `decl` names in the verified graph.
+    pub fn declaration(self, decl: crate::dag::DeclId) -> &'a crate::dag::Declaration {
+        self.dag.declaration(decl)
+    }
+
     pub fn nodes(self) -> &'a [DagNode] {
         self.dag.nodes()
     }
@@ -166,12 +171,37 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.is_root(id)
     }
 
+    /// The trap seed and activation-gate queries over this graph
+    /// ([`crate::dag::TrapSeeds`]: whether a node checks nothing where its
+    /// activation is false, the one gate declaration, and the literal result
+    /// claims a witness checks). An emitter takes one per graph.
+    pub fn trap_seeds(self) -> crate::dag::TrapSeeds<'a> {
+        self.dag.trap_seeds()
+    }
+
     pub fn topological_order(self) -> Vec<NodeId> {
         self.dag.topological_order()
     }
 
-    pub fn symbolic_bindings(self) -> Vec<SymbolicDimBinding> {
-        crate::dag::symbolic_bindings(self.dag)
+    /// Every name this graph renders as a C identifier, paired with the
+    /// origin that produces its value (chelis#665, C4.4). A declaration
+    /// consumer reads this instead of searching for a `Load` whose type
+    /// carries a matching string.
+    pub fn dim_extent_origins(self) -> Vec<(String, crate::axis_sources::ExtentOrigin)> {
+        crate::axis_sources::dim_extent_origins(self.dag)
+    }
+
+    /// The names this graph renders that resolve to no origin. A lane turns
+    /// each into a typed receipt; the legacy walk panicked instead.
+    pub fn unresolved_dim_names(self) -> Vec<String> {
+        crate::axis_sources::unresolved_dim_names(self.dag)
+    }
+
+    /// Every name this graph can render as an identifier, whether or not the
+    /// entry supplies its extent. An emitter checks its own declarations
+    /// against this set.
+    pub fn rendered_dim_names(self) -> Vec<String> {
+        crate::axis_sources::rendered_dim_names(self.dag)
     }
 
     /// The INTERFACE bindings: the declaration and entry-guard set, derived
@@ -215,6 +245,13 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::member_load_axis(self.dag, member)
     }
 
+    /// Closed primitive form from the verified IR rank relation. Backends and
+    /// local extent diagnostics consume the same derivation.
+    pub fn expansion_kind(self, id: NodeId) -> crate::axis_sources::ExpansionKind {
+        crate::axis_sources::expansion_kind(self.dag, id)
+            .expect("verified expansion node has a rank-preserving or inserting form")
+    }
+
     /// C1.3's local guard sites for this verified payload.
     ///
     /// The derivation is [`crate::axis_sources::local_dim_guard_sites`], which
@@ -223,8 +260,23 @@ impl<'a> VerifiedDagView<'a> {
     /// values. The view asks it here rather than handing a backend a raw
     /// [`Dag`], under the same chelis#1538 discipline as
     /// [`Self::member_load_axis`].
-    pub fn local_dim_guard_sites(self) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+    pub fn local_dim_guard_sites(self) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
         crate::axis_sources::local_dim_guard_sites(self.dag)
+    }
+
+    pub fn result_extent_sites(self, root: NodeId) -> Vec<crate::axis_sources::ResultExtentSite> {
+        crate::axis_sources::result_extent_sites(self.dag, root)
+    }
+
+    /// The complete positive-rank operand relation for a verified same-shape
+    /// result. Verification rejects malformed or empty relations before a
+    /// backend can obtain this view.
+    pub fn same_shape_result_agreement(
+        self,
+        node: NodeId,
+    ) -> Option<crate::axis_sources::SameShapeAgreement> {
+        crate::axis_sources::same_shape_result_agreement(self.dag, node)
+            .expect("verified same-shape result agreement")
     }
 
     pub fn entry_dim_classes(self) -> Vec<crate::axis_sources::RuntimeDimClass> {
@@ -232,6 +284,43 @@ impl<'a> VerifiedDagView<'a> {
             .into_iter()
             .filter(|class| class.placement(self.dag) == crate::axis_sources::GuardPlacement::Entry)
             .collect()
+    }
+
+    /// Individual interface checks, shared with Eval and already scheduled.
+    pub fn entry_extent_guards(self) -> Vec<crate::axis_sources::EntryExtentGuard> {
+        crate::axis_sources::entry_extent_guards(self.dag)
+    }
+
+    /// The same ordered input admission plan consumed by DAG evaluation.
+    pub fn entry_validation_plan(self) -> Vec<crate::axis_sources::EntryValidationStep> {
+        crate::axis_sources::entry_validation_plan(self.dag)
+    }
+
+    /// The named witness claims the entry schedule above already compares, so
+    /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
+    /// The view answers this for the same reason it answers placement: the
+    /// question needs the class derivation, not the graph.
+    pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
+        crate::axis_sources::entry_covered_witness_claims(self.dag)
+    }
+
+    /// Is this witness retained purely as a section 4.7 entry obligation, with
+    /// nothing reading its value?
+    ///
+    /// A target whose device lane excludes runtime shape reads asks this to
+    /// tell an obligation it can discharge in its host prologue from a read it
+    /// must refuse.
+    pub fn witness_is_entry_obligation(self, id: NodeId) -> bool {
+        crate::axis_sources::witness_is_entry_obligation(self.dag, id)
+    }
+
+    /// The obligations that witness owes, reduced to input reads, or `None`
+    /// when one of them cannot be rendered from the interface alone.
+    pub fn witness_entry_obligations(
+        self,
+        id: NodeId,
+    ) -> Option<Vec<crate::axis_sources::WitnessEntryObligation>> {
+        crate::axis_sources::witness_entry_obligations(self.dag, id)
     }
 
     /// The unit-extent claims whose guard section 4.7 places at entry.
@@ -262,10 +351,6 @@ impl<'a> VerifiedDagView<'a> {
             .collect()
     }
 
-    pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
-        crate::dag::symbolic_occurrences(self.dag)
-    }
-
     pub fn symbolic_params(self) -> Vec<String> {
         crate::dag::symbolic_params(self.dag)
     }
@@ -287,6 +372,16 @@ impl<'a> VerifiedDagView<'a> {
         stage: chelis_types::unsupported::Stage,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
         crate::axis_sources::check_axis_sources(self.dag, stage)
+    }
+
+    /// Every name a lane renders as an identifier resolves to one origin
+    /// (chelis#665). An emission boundary calls this; lowering, capacity
+    /// planning and evaluation do not, for the reason the derivation records.
+    pub fn check_rendered_dim_origins(
+        self,
+        stage: chelis_types::unsupported::Stage,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        crate::axis_sources::check_rendered_dim_origins(self.dag, stage)
     }
 
     /// The checked extent source for each output axis of `node`.
@@ -378,6 +473,46 @@ pub struct VerifiedBlockId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VerifiedUnitId {
     key: u32,
+}
+
+/// Feature-only view of a source expression at its ownership-verified host
+/// site, before host ABI erasure. This is not a Surf elaboration certificate.
+#[cfg(feature = "lowering-trace")]
+#[derive(Clone, Copy)]
+pub struct VerifiedHostSourceSite<'a> {
+    site: VerifiedHostSiteView<'a>,
+    expression: &'a ConcreteHostExpr,
+}
+
+#[cfg(feature = "lowering-trace")]
+impl<'a> VerifiedHostSourceSite<'a> {
+    pub fn site(self) -> VerifiedHostSiteView<'a> {
+        self.site
+    }
+    pub fn expression(self) -> &'a ConcreteHostExpr {
+        self.expression
+    }
+    /// Observation-only words in distinct unit and host-site namespaces.
+    pub fn unit_word(self) -> usize {
+        self.site.record.unit
+    }
+    pub fn site_word(self) -> usize {
+        self.site.id().index()
+    }
+    pub fn direct_callee_word(self) -> Option<usize> {
+        self.direct_callee().map(|callee| callee.key as usize)
+    }
+    pub fn direct_callee(self) -> Option<VerifiedUnitId> {
+        let mut callees = self.site.actions().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                kind: VerifiedApplyKind::DirectCall { callee, .. },
+                ..
+            }) => Some(callee),
+            _ => None,
+        });
+        let callee = callees.next()?;
+        callees.next().is_none().then_some(callee)
+    }
 }
 
 /// Opaque stable identity for one operation within a verified unit.
@@ -929,9 +1064,16 @@ fn verified_host_action<'a>(
 pub struct VerifiedHostTensorHelperView<'a> {
     helper: &'a HostTensorHelper,
     dag: VerifiedDagView<'a>,
+    #[cfg(feature = "lowering-trace")]
+    source_location: (usize, usize),
 }
 
 impl<'a> VerifiedHostTensorHelperView<'a> {
+    /// Observation-only owning unit and helper-slot words; not function labels.
+    #[cfg(feature = "lowering-trace")]
+    pub fn source_location(self) -> (usize, usize) {
+        self.source_location
+    }
     pub fn name(self) -> &'a str {
         &self.helper.name
     }
@@ -946,6 +1088,12 @@ impl<'a> VerifiedHostTensorHelperView<'a> {
 
     pub fn specialization(self) -> Option<&'a HostTensorSpecialization> {
         self.helper.specialization.as_ref()
+    }
+
+    /// The input this helper returns unchanged, by the one definition the
+    /// ownership lowering read ([`crate::host::HostTensorHelper::identity_input`]).
+    pub fn identity_input(self) -> Option<&'a HostTensorInput> {
+        self.helper.identity_input()
     }
 
     pub fn summary_rejection(self) -> Option<&'a crate::host::HelperSummaryRejection> {
@@ -971,6 +1119,10 @@ impl<'a> VerifiedHostFunctionView<'a> {
 
     pub fn name(self) -> &'a str {
         &self.function().name
+    }
+
+    pub fn helper_result_claim_axes(self) -> &'a [crate::dag::RtAxis] {
+        &self.function().helper_result_claim_axes
     }
 
     pub fn params(self) -> &'a [ConcreteHostParam] {
@@ -1074,6 +1226,8 @@ impl<'a> VerifiedHostFunctionView<'a> {
         })?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
+            #[cfg(feature = "lowering-trace")]
+            source_location: (self.index + 1, helper),
             dag: VerifiedDagView {
                 dag: &raw.dag,
                 plan: &plan.plan,
@@ -1109,6 +1263,10 @@ pub struct VerifiedHostEmission<'a> {
 }
 
 impl<'a> VerifiedHostEmission<'a> {
+    #[cfg(feature = "lowering-trace")]
+    pub fn source_expressions(self) -> Vec<VerifiedHostSourceSite<'a>> {
+        verify::source_expressions(self)
+    }
     fn ownership_program(self) -> &'a ir::OwnershipProgram {
         // The emission cursor is built only from the host proof variant.
         // Its program reference is threaded explicitly below rather than
@@ -1143,6 +1301,8 @@ impl<'a> VerifiedHostEmission<'a> {
             .find(|candidate| candidate.location == NestedDagLocation::Global(helper))?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
+            #[cfg(feature = "lowering-trace")]
+            source_location: (0, helper),
             dag: VerifiedDagView {
                 dag: &raw.dag,
                 plan: &plan.plan,
@@ -1152,6 +1312,13 @@ impl<'a> VerifiedHostEmission<'a> {
 
     pub fn summary_rejections(self) -> &'a [SummaryRejection] {
         &self.payload.program.summary_rejections
+    }
+
+    /// The constructor layouts of the ADTs the functions' parameters carry.
+    pub fn adt_layouts(
+        self,
+    ) -> &'a [crate::host::HostAdtLayout<crate::host_type_state::ConcreteHostType>] {
+        &self.payload.program.adt_layouts
     }
 
     pub fn manifest(self) -> &'a RootManifest {
@@ -1316,6 +1483,22 @@ pub type VerifiedDagProgram = VerifiedOwnershipProgram<DagEmissionPayload>;
 /// Consume a concrete host program, materialize every manifested host root,
 /// and lower the exact resulting payload to ownership IR.
 pub fn lower_host_ownership(
+    manifested: &ManifestedProgram,
+    host: ConcreteHostProgram,
+) -> Result<HostOwnershipProgram, OwnershipError> {
+    lower_host_ownership_impl(manifested, host)
+}
+
+/// Consume the opaque host carrier, whose helper traces the caller has
+/// already snapshotted, and lower its exact host payload to ownership IR.
+pub fn lower_host_execution_ownership(
+    manifested: &ManifestedProgram,
+    plan: crate::host::HostExecutionPlan,
+) -> Result<HostOwnershipProgram, OwnershipError> {
+    lower_host_ownership_impl(manifested, plan.into_program())
+}
+
+fn lower_host_ownership_impl(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
@@ -1787,7 +1970,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -1999,7 +2183,8 @@ impl DagOwnershipPlan {
                 }
                 _ => {
                     let mut borrows = node.inputs.clone();
-                    for dependency in &node.shape_deps {
+                    // A node reads its activation to decide whether it checks.
+                    for dependency in node.shape_deps.iter().chain(&node.owner.activation) {
                         if !borrows.contains(dependency) {
                             borrows.push(*dependency);
                         }
@@ -2172,8 +2357,8 @@ fn require_dag_arity(
 }
 
 fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<(), OwnershipError> {
-    for input in node.inputs.iter().chain(&node.shape_deps) {
-        if input.0 >= node.id.0 || dag.get(*input).is_none() {
+    for input in node.dependencies() {
+        if input.0 >= node.id.0 || dag.get(input).is_none() {
             return Err(OwnershipError::DagInput {
                 node: node.id.0,
                 input: input.0,
@@ -2184,11 +2369,12 @@ fn validate_dag_dependencies(dag: &Dag, node: &crate::dag::DagNode) -> Result<()
 }
 
 fn dag_owner_used_after(dag: &Dag, owner: NodeId, consumer: NodeId) -> bool {
-    dag.nodes()
-        .iter()
-        .skip(consumer.0 + 1)
-        .any(|node| node.inputs.contains(&owner) || node.shape_deps.contains(&owner))
-        || dag.roots().contains(&owner)
+    dag.nodes().iter().skip(consumer.0 + 1).any(|node| {
+        node.inputs.contains(&owner)
+            || node.shape_deps.contains(&owner)
+            || node.result_claim_deps.contains(&owner)
+            || node.owner.activation == Some(owner)
+    }) || dag.roots().contains(&owner)
 }
 
 fn require_live_dag_owner(

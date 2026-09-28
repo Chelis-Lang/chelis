@@ -53,14 +53,37 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "direct Sub lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
             ),
         ),
         SourceContract(
             "direct MinElem lowering",
             "crates/chelis-ir/src/tier2.rs",
             (
-                "add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)",
+                "add_synth(\n"
+                "        owner,\n"
+                "        dag,\n"
+                "        RiscOp::MinElem,\n"
+                "        vec![a, b],\n"
+                "        ty.clone(),\n"
+                "        parent_span,\n"
+                "    )",
+            ),
+        ),
+        SourceContract(
+            "evaluator canonical subtraction NaNs",
+            "crates/chelis-types/src/dtype_semantics.rs",
+            (
+                "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
+                "f32::from_bits(0x7fc0_0000)",
+                "fn canonicalize_subtraction_f64(value: f64) -> f64 {",
+                "f64::from_bits(0x7ff8_0000_0000_0000)",
+                "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
+                "FloatBinOp::Sub => canonicalize_subtraction_f64(value),",
+            ),
+            (
+                "_ => canonicalize_subtraction_f32(value),",
+                "_ => canonicalize_subtraction_f64(value),",
             ),
         ),
         SourceContract(
@@ -69,6 +92,19 @@ def source_contracts() -> tuple[SourceContract, ...]:
             (
                 "chelis_int_checked_sub",
                 '"-" => "sub",',
+            ),
+        ),
+        SourceContract(
+            "C subtraction canonical NaNs",
+            "crates/chelis-backend-c/src/emit.rs",
+            (
+                'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
+                'Prim::F64 => Some("chelis_f64_from_bits(UINT64_C(0x7ff8000000000000))"),',
+                'Prim::F16 => "UINT16_C(0x7e00)",',
+                'Prim::Bf16 => "UINT16_C(0x7fc0)",',
+                "isnan({raw}) ? {canonical_nan} : {raw}",
+                "isnan({raw}) ? {canonical_nan} : {store}({raw})",
+                "_mm256_set1_ps(chelis_f32_from_bits(UINT32_C(0x7fc00000)))",
             ),
         ),
         SourceContract(
@@ -101,10 +137,71 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
+            "HIP checked subtraction trap channel",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                "pub fn binary_checked_sub_integer(",
+                "chelis_record_numeric_failure((unsigned long long)i);",
+                "__device__ unsigned int chelis_numeric_failure_flag = 0;",
+                "__device__ unsigned long long chelis_numeric_failure_index = ~0ULL;",
+            ),
+        ),
+        SourceContract(
+            "HIP checked subtraction host observation",
+            "crates/chelis-backend-hip/src/emit.rs",
+            (
+                "hipModuleGetGlobal(&chelis_numeric_flag_symbol",
+                "\\\"chelis_numeric_failure_flag\\\"",
+                "hipModuleGetGlobal(&chelis_numeric_index_symbol",
+                "\\\"chelis_numeric_failure_index\\\"",
+            ),
+        ),
+        SourceContract(
+            "HIP narrow direct arithmetic",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                "pub fn binary_sub_reduced(",
+                "pub fn binary_extrema_reduced(",
+                "pub fn extrema_adjoint_reduced(",
+                "pub fn fused_elementwise_reduced(",
+                "chelis_round_shift_right_even(mantissa, shift)",
+                "0x00007fffu + ((bits >> 16) & 1u)",
+                "return (chelis_u16)0x7fc0u;",
+                "return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);",
+            ),
+            (
+                "chelis_u32 round_bit = 0x00008000u;",
+                "chelis_u32 round_bit = 0x00001000u;",
+                "return (chelis_u16)((bits >> 16) | 0x0040u);",
+                "chelis_u32 nan_bit = mantissa == 0 ? 0u : 0x0200u;",
+            ),
+        ),
+        SourceContract(
+            "HIP wide subtraction canonical NaNs",
+            "crates/chelis-backend-hip/src/kernels.rs",
+            (
+                '("-", "float")',
+                "__int_as_float(0x7fc00000)",
+                "__longlong_as_double(0x7ff8000000000000LL)",
+                "isnan({raw}) ? {canonical} : {raw}",
+            ),
+        ),
+        SourceContract(
+            "HIP reduced-float target matrix",
+            "spec/04-type-system.md",
+            (
+                "[05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`",
+            ),
+        ),
+        SourceContract(
             "target dispositions",
             "crates/chelis-compiler-api/src/compiler.rs",
             (
-                "chelis_types::unimplemented_rejection!(\n                    1306,\n                    \"the Metal direct-subtraction/extrema",
+                "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
+                "HIP checked integer subtraction now has a device trap channel",
+                "HIP narrow-float direct arithmetic now has exact kernels",
+            ),
+            (
                 "checked signed-integer subtraction needs an exact HIP overflow-trap channel",
                 "the HIP bf16/f16 direct-subtraction/extrema bit-preserving kernels are not implemented",
             ),
@@ -113,7 +210,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "current WireDag identities",
             "crates/chelis-compiler-api/src/schema.rs",
             (
-                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;",
+                "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;",
                 "pub enum WireFusedStepOp {\n    Add,\n    Sub,",
                 "MaxElem,\n    MinElem,\n    ExtremaAdjoint {",
                 'r#"{\"kind\":\"extrema_adjoint\",\"extrema\":\"max\",\"operand\":\"left\"}"#',
@@ -139,18 +236,6 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ("sub is a derived built-in, lowered to add(a, neg(b))",),
         ),
         SourceContract(
-            "current captured direct arithmetic narrative",
-            "openspec/changes/capture-risc-primitives/specs/risc-primitives/spec.md",
-            (
-                "it remains a direct `RiscOp::Sub` identity during IR construction",
-                "it remains a direct `RiscOp::MinElem` selection identity",
-            ),
-            (
-                "it becomes `add(a, neg(b))` during IR construction",
-                "with `sub` decomposed rather than present as a node",
-            ),
-        ),
-        SourceContract(
             "current canonical direct arithmetic narrative",
             "spec/design/chelis_canonical_reference.md",
             ("`sub` and `min_elem` are direct Tier-1 RISC identities",),
@@ -159,15 +244,15 @@ def source_contracts() -> tuple[SourceContract, ...]:
         SourceContract(
             "current exactness regression narrative",
             "crates/chelis-cli/tests/issue_680_int_exactness.rs",
-            ("direct `min_elem` compares the stored int64 operands",),
+            ("direct `min_elem` compares the stored i64 operands",),
             ("`min_elem` lowers via `neg(max_elem(neg, neg))`",),
         ),
         SourceContract(
             "current precision matrix narrative",
             "crates/chelis-cli/tests/precision_matrix.rs",
             (
-                "Direct `max_elem` compares both int64 operands at their declared width",
-                "Direct `min_elem` compares both int64 operands at their declared width",
+                "Direct `max_elem` compares both i64 operands at their declared width",
+                "Direct `min_elem` compares both i64 operands at their declared width",
             ),
             (
                 "Verified: returns the SMALLER operand",

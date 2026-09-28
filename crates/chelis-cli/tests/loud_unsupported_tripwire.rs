@@ -385,12 +385,15 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrDefault,
         "crates/chelis-ir/src/host.rs",
-        6,
+        4,
         "one effect-kind extraction fallback removed by the Phase 2 typed \
          decoder and one generic-ADT substitution default removed by the \
          applied-type Result boundary; source-reconstructed ADT parameters \
-         now come from the checker registry; the remaining 6 pre-existing \
-         non-censused uses stay frozen",
+         now come from the checker registry; the typed annotation migration \
+         consolidates two optional callable type constructors into one; the \
+         empty field list for a constructor pattern with no definition went \
+         with the per-type match paths (chelis#2446); the remaining 4 \
+         pre-existing non-censused uses stay frozen",
     ),
     (
         Pat::UnwrapOrDefault,
@@ -424,13 +427,9 @@ const BASELINE: &[Entry] = &[
     ),
     // -- unwrap-or-prim: census rows 13 and 14 converted at Phase 1
     // (lower_cast and lower_transcendental raise; named_axis errors) ----
-    (
-        Pat::UnwrapOrPrim,
-        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        2,
-        "to_tensor literal-precision defaults: float literals default to F32 \
-         per spec (int/bool elements override); audited, not a substitution",
-    ),
+    // chelis#1650 removed the two List-conversion dtype defaults: the
+    // checked element dtype is now a required collector input.
+
     // -- elemkind-wildcard-arm: ZERO entries left - census row 5's
     // wildcard deleted at Phase 1 (section C4.1); elem_kind is an
     // exhaustive Result-returning match ---------------------------------
@@ -441,7 +440,7 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/lower.rs",
-        12,
+        8,
         "structural at the P1 baseline: recursion-depth counter and \
          desync-guarded rank/extent reads. The uniform-ConstTensor \
          first-element read LEFT this census at chelis#856 (13 -> 12, per \
@@ -450,20 +449,26 @@ const BASELINE: &[Entry] = &[
          raw f64 buffer into `unwrap_or(RawScalar::Int(0))` on a buffer \
          the `windows(2)` guard already proved non-empty, and the value \
          now finalizes at the node's dtype or raises a cited lowering \
-         diagnostic, so no numeric default survives the site. FLAGGED, \
-         not proven: conv2d's present-but-non-literal stride unwrap_or(1) \
-         / padding unwrap_or(0) - the chelis#776 shape (census row 23) - \
-         and the with-seed defaults, whose effects-checker cover the \
-         chelis#793 red team pierced (a negative .dp int64 seed extracts \
-         to None and falls to seed 0) - that .dp repro is now rejected at \
-         CHECK time by chelis#793's negative-seed checker case, so the \
-         sites are checker-guarded pending their census rows",
+         diagnostic, so no numeric default survives the site. Chelis#1299 \
+         removed both convolution metadata defaults (12 -> 10): canonical \
+         conv requires exact per-axis metadata, with no absent-argument \
+         fallback. The two with-seed seed-0 defaults LEFT this census at \
+         chelis#2413 (10 -> 8): the legacy lowering-time draw keys and \
+         their seed mixing are gone, every draw reads its handler through \
+         a draw key, and an unhandled draw is an execution error rather \
+         than a seed-0 draw",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/dag.rs",
-        1,
-        "proven-structural at the P1 baseline (symbolic-dim bookkeeping)",
+        0,
+        "chelis#665 removed the one site (1 -> 0, per \
+         spec/design/loud_unsupported.md B1: removals only with the site's \
+         fix). It was the legacy occurrence walk's canonical-index pick, \
+         `position(..).unwrap_or(0)` over a name's grouped occurrences, and \
+         the walk itself is gone: a declaration now comes from the axis's \
+         resolved extent ORIGIN, and a name that resolves to none is a typed \
+         receipt rather than a defaulted index",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -474,8 +479,8 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-backend-c/src/host_emit.rs",
-        1,
-        "proven-structural: tensor-helper root count floor (max(1))",
+        0,
+        "chelis#1361: verified output types replace the missing-helper count fallback",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -505,16 +510,18 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        2,
-        "with-seed default (mirrors lower.rs; the chelis#793 negative-seed \
-         repro is now checker-rejected); plus the `map_or(-1_i64, ...)` \
+        1,
+        "the `map_or(-1_i64, ...)` \
          process-exit-code default (proven-structural: a signal-killed \
          child has no exit code, and -1 is the conventional sentinel, not \
          a chelis#703 value substitution) newly counted by the rt791 F6 \
          widening. The former scalarization first-element read was FIXED \
          by chelis#729 Phase 1 (tensor_to_scalar reads the sealed storage \
-         and errors loudly on an empty buffer), shrinking this row per B1; \
-         P1-frozen for the Phase 2 lint audit",
+         and errors loudly on an empty buffer), shrinking this row per B1. \
+         The interpreter's with-seed default was FIXED by chelis#2413 \
+         phase 3 (a draw outside every handler is an internal error, never \
+         seed 0), shrinking this row again per B1; P1-frozen for the Phase \
+         2 lint audit",
     ),
     (
         Pat::UnwrapOrNumericLiteral,
@@ -705,25 +712,33 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        37,
-        "declared derived-Debug residue carriers: Err(format!) \
+        29,
+        "chelis#1650 removed five List-conversion Debug interpolations; \
+         declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
          format_element), and cfg(test) assertions; chelis#729 Phase 1 \
          deleted the to_list mismatch site and consolidated the duplicate \
          pad_sequences_to diagnostics; Phase 2 deleted eleven more \
          closure-dispatch mismatch/debug paths when host arithmetic moved \
-         to typed kernel errors",
+         to typed kernel errors; chelis#1299 removed two obsolete 2D \
+         shape-debug diagnostics when convolution became rank-generic; \
+         chelis#2631 consolidated two bitwise/shift mismatch diagnostics \
+         into one shared tagged-kernel dispatcher",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        24,
+        22,
         "declared derived-Debug residue carriers: Err(format!) \
          diagnostics over Value/callable/handle shapes; the seven \
          chelis#890/#903 JSON/CSV builtin dispatch arms left with \
          chelis#997's FO-DIAG migration onto host_ops::describe_value / \
-         describe_argument",
+         describe_argument. One fewer since chelis#1923: the evaluator's \
+         pipe-only callable-application path is deleted, and with it its \
+         `pipe stage is not callable: {other:?}` arm. One fewer since \
+         chelis#2413: the `with seed` handler and its seed diagnostic are \
+         deleted",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -742,12 +757,13 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        23,
+        21,
         "cfg-gated runtime unit-test assertions, not product exits; \
          chelis#729 Phase 1 replaced one raw-scalar assertion with two \
          sealed ScalarValue assertion sites (net +1); branch-owned JSON \
          and CSV pipeline centralization removed the former local test \
-         assertions",
+         assertions; chelis#1281 replaced two lossy reduction Debug \
+         assertions with exact typed-storage checks (net -2)",
     ),
     (
         Pat::RustDebugNumericFormat,

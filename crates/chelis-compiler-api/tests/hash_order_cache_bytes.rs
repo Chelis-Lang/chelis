@@ -38,6 +38,7 @@ enum Artifact {
     CompiledEncode,
     CompiledSave,
     CliWorkerHandoff,
+    CliWorkerHandoffDigest,
     CompiledCacheKey,
     CompiledCacheKeyInputs,
     PreparedGraphEncode,
@@ -47,7 +48,7 @@ enum Artifact {
     PreparedGraphStdlibSourceDigest,
 }
 
-const ALL_ARTIFACTS: [Artifact; 16] = [
+const ALL_ARTIFACTS: [Artifact; 17] = [
     Artifact::StdlibKey,
     Artifact::StdlibCacheKeyInputs,
     Artifact::LibraryKey,
@@ -57,6 +58,7 @@ const ALL_ARTIFACTS: [Artifact; 16] = [
     Artifact::CompiledEncode,
     Artifact::CompiledSave,
     Artifact::CliWorkerHandoff,
+    Artifact::CliWorkerHandoffDigest,
     Artifact::CompiledCacheKey,
     Artifact::CompiledCacheKeyInputs,
     Artifact::PreparedGraphEncode,
@@ -78,6 +80,7 @@ impl Artifact {
             Self::CompiledEncode => "compiled_encode.bin",
             Self::CompiledSave => "compiled_save.bin",
             Self::CliWorkerHandoff => "cli_worker_handoff.bin",
+            Self::CliWorkerHandoffDigest => "cli_worker_handoff_digest.txt",
             Self::CompiledCacheKey => "compiled_cache_key.bin",
             Self::CompiledCacheKeyInputs => "compiled_cache_key_inputs.bin",
             Self::PreparedGraphEncode => "prepared_graph_encode.bin",
@@ -140,21 +143,21 @@ const SOURCE_PERMUTATIONS: [[usize; 3]; 6] = [
 const SOURCES: [(&str, &str); 3] = [
     (
         "main.ch",
-        "module HashOrderCache.Main\n\ndef main_value() -> int32 = cast(1, int32)\n",
+        "module HashOrderCache.Main\n\ndef main_value() -> i32 = cast(1, i32)\n",
     ),
     (
         "alpha.ch",
-        "module HashOrderCache.Alpha\n\ndef alpha_value() -> int32 = cast(2, int32)\n",
+        "module HashOrderCache.Alpha\n\ndef alpha_value() -> i32 = cast(2, i32)\n",
     ),
     (
         "beta.ch",
-        "module HashOrderCache.Beta\n\ndef beta_value() -> int32 = cast(3, int32)\n",
+        "module HashOrderCache.Beta\n\ndef beta_value() -> i32 = cast(3, i32)\n",
     ),
 ];
 
 fn parse_decls(module: &str, name: &str, value: i32) -> Vec<chelis_surf::ast::Decl> {
     chelis_surf::parser::parse_str(&format!(
-        "module {module}\nexport ({name})\ndef {name}() -> int32 = cast({value}, int32)\n"
+        "module {module}\nexport ({name})\ndef {name}() -> i32 = cast({value}, i32)\n"
     ))
     .expect("cache fixture declarations must parse")
 }
@@ -301,10 +304,27 @@ fn write_worker_artifacts(package_root: &Path, reef_home: &Path, result_dir: &Pa
     let encoded = context.encode().expect("encode compiled context");
     artifacts.write(Artifact::CompiledEncode, &encoded);
 
-    // The CLI parent writes `CompiledContext::encode()` directly to the worker
-    // tempfile. This artifact locks that public handoff root under its product
-    // name while making the intentional byte identity explicit.
-    artifacts.write(Artifact::CliWorkerHandoff, &encoded);
+    // The CLI parent writes `CompiledContext::encode_for_handoff()` directly to
+    // the worker tempfile and passes the digest it returns in the worker's
+    // environment (chelis#2211). Both entry points build the same envelope, so
+    // this artifact locks that public handoff root under its product name while
+    // making the intentional byte identity explicit; the assertion below is
+    // what says the two really are the same bytes.
+    let (handoff, handoff_digest) = context
+        .encode_for_handoff()
+        .expect("encode compiled context for handoff");
+    assert!(
+        handoff == encoded,
+        "the handoff and disk-cache encoders must build the same envelope"
+    );
+    artifacts.write(Artifact::CliWorkerHandoff, &handoff);
+    // The digest is a function of those bytes, so pinning it beside them
+    // extends this oracle's hash-state independence to the exact value the
+    // parent puts in the worker's environment.
+    artifacts.write(
+        Artifact::CliWorkerHandoffDigest,
+        handoff_digest.to_hex().as_bytes(),
+    );
 
     let compiled_save = result_dir.join("compiled-save-producer.tmp");
     context
@@ -409,10 +429,10 @@ fn cache_roots_are_exact_bytes_across_24_fresh_processes() {
         .expect("compiled saved bytes are part of the artifact set")
         .1
         .clone();
-    assert!(saved.starts_with(b"CHELIS_CTX_V16\n"));
-    let mut preceding = b"CHELIS_CTX_V15\n".to_vec();
-    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V16\n".len()..]);
-    let preceding_path = scratch.path().join("compiled-context-v15.ctx");
+    assert!(saved.starts_with(b"CHELIS_CTX_V23\n"));
+    let mut preceding = b"CHELIS_CTX_V18\n".to_vec();
+    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V23\n".len()..]);
+    let preceding_path = scratch.path().join("compiled-context-v18.ctx");
     fs::write(&preceding_path, preceding).expect("write preceding-format fixture");
     assert!(matches!(
         CompiledContext::load_if_fresh(&preceding_path, scratch.path(), &package_root),

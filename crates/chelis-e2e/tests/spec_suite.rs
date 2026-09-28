@@ -7,7 +7,7 @@ use chelis_unord::UnordMap;
 use std::io::Write;
 use std::process::Command;
 
-use chelis_deep::ast::{Atom, Expr};
+use chelis_deep::ast::Expr;
 use chelis_e2e::pipeline::compile_surf;
 use chelis_ir::dag::{Dag, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue, eval_scalar, eval_tensor, eval_tensor_roots_with_strict};
@@ -54,7 +54,8 @@ fn lower_deep(src: &str) -> Dag {
 fn spec_surf_to_deep_roundtrip() {
     let src = include_str!("../../../examples/mnist.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let deep_text = chelis_deep::printer::print_canonical(&deep_exprs);
 
     // Re-parse the canonical Deep text -- must succeed without error.
@@ -76,7 +77,8 @@ fn spec_surf_to_deep_roundtrip() {
 fn spec_deep_strict_validates_desugared() {
     let src = include_str!("../../../examples/mnist.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     let warnings = chelis_deep::validate::validate(&deep_exprs);
     let unknown_tags: Vec<_> = warnings
@@ -111,7 +113,8 @@ fn spec_all_executable_examples_parse_and_check() {
                 result.err()
             );
             let decls = result.unwrap();
-            let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+            let deep_exprs =
+                chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
             assert!(
                 !deep_exprs.is_empty(),
                 "{} desugared to empty",
@@ -143,43 +146,23 @@ fn spec_all_executable_examples_parse_and_check() {
 fn spec_deep_3tuple_format() {
     let src = include_str!("../../../examples/hello_tensor.ch");
     let decls = chelis_surf::parser::parse_str(src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     fn check_3tuple(expr: &Expr) {
+        // A tagged node is an `Expr::Node`, whose metadata map is a
+        // structural field, so the walk checks the nested forms it reaches.
         match expr {
-            Expr::List(list, _) => {
-                if list.elements.len() >= 2
-                    && matches!(
-                        list.elements.first(),
-                        Some(Expr::Atom(Atom::Name(_) | Atom::Tag(_), _))
-                    )
-                {
-                    // Second element must be a map (metadata).
-                    assert!(
-                        matches!(list.elements.get(1), Some(Expr::Map(_, _))),
-                        "tagged node must have metadata map at element[1], got: {:?}",
-                        list.elements.get(1)
-                    );
-                }
-                for child in &list.elements {
-                    check_3tuple(child);
-                }
-            }
             Expr::MetaExpr(meta, _) => {
                 check_3tuple(&meta.expr);
-                for (_, v) in &meta.entries {
-                    check_3tuple(v);
-                }
+                meta.metadata.visit_syntax(&mut |_, v| check_3tuple(v));
             }
             Expr::Map(map, _) => {
-                for (_, v) in &map.entries {
-                    check_3tuple(v);
-                }
+                map.visit_syntax(&mut |_, v| check_3tuple(v));
             }
             Expr::Node(node, _) => {
-                for (_, value) in &node.meta().entries {
-                    check_3tuple(value);
-                }
+                node.meta()
+                    .visit_syntax(&mut |_, value| check_3tuple(value));
                 for child in node.children_iter() {
                     match child {
                         chelis_deep::node::ChildRef::Expr(expr)
@@ -198,9 +181,7 @@ fn spec_deep_3tuple_format() {
                 }
             }
             Expr::UnknownForm(data) => {
-                for (_, value) in &data.meta.entries {
-                    check_3tuple(value);
-                }
+                data.meta.visit_syntax(&mut |_, value| check_3tuple(value));
                 for child in &data.children {
                     check_3tuple(child);
                 }
@@ -221,9 +202,10 @@ fn spec_deep_3tuple_format() {
 #[test]
 fn spec_correct_program_fitness_1() {
     // Use the Surf pipeline: a well-typed Surf program should get fitness 1.0.
-    let surf_src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
+    let surf_src = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let report = chelis_types::check_program(&deep_exprs);
     assert!(
         (report.score - 1.0).abs() < 1e-9,
@@ -242,10 +224,11 @@ fn spec_correct_program_fitness_1() {
 fn spec_precision_mismatch_is_error() {
     // add(tensor[n, f32], tensor[n, bf16]) should produce PrecisionMismatch.
     let surf_src = r#"
-def bad(a: tensor[n, f32], b: tensor[n, bf16]) -> tensor[n, f32] = add(a, b)
+def bad[n](a: tensor[n, f32], b: tensor[n, bf16]) -> tensor[n, f32] = add(a, b)
     "#;
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = chelis_types::infer_program(&deep_exprs);
     assert!(!result.errors.is_empty(), "expected type errors");
     let has_precision_error = result
@@ -266,7 +249,8 @@ fn spec_dimension_mismatch_is_error() {
 def bad(a: tensor[batch, f32], b: tensor[seq, f32]) -> tensor[batch, f32] = add(a, b)
     "#;
     let decls = chelis_surf::parser::parse_str(surf_src).expect("Surf parse failed");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let result = chelis_types::infer_program(&deep_exprs);
     assert!(!result.errors.is_empty(), "expected type errors");
     let has_dim_error = result
@@ -296,6 +280,43 @@ fn spec_unbound_variable_is_error() {
         "expected UnboundVariable error, got: {:?}",
         result.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn spec_top_level_initialization_cycle_is_not_a_perfect_wrapperless_check() {
+    // [04-INF-4]/[04-INF-7]/[04-INF-8], chelis#1601: this suite calls the
+    // wrapper-less public APIs directly, so the initialization report must
+    // live in their shared semantic driver rather than only in
+    // `check_typed_program`.
+    let declarations =
+        chelis_surf::parser::parse_str("a = b\nb = a\n").expect("cycle fixture must parse");
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
+    let inferred = chelis_types::infer_program(&deep_exprs);
+    assert!(
+        inferred
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::CycleDetected)),
+        "infer_program must report the top-level initialization cycle: {:?}",
+        inferred.errors
+    );
+    let report = chelis_types::check_program(&deep_exprs);
+    assert!(report.score < 1.0, "a cycle cannot receive perfect fitness");
+    let diagnostics = |errors: &[chelis_types::errors::CheckError]| {
+        errors
+            .iter()
+            .map(|error| {
+                format!(
+                    "{}|{}|{}",
+                    error.kind.diagnostic_name(),
+                    error.message,
+                    error.suggestions.join("\u{1f}")
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(diagnostics(&report.errors), diagnostics(&inferred.errors));
 }
 
 // =========================================================================
@@ -408,67 +429,6 @@ fn gcc_available() -> bool {
         .unwrap_or(false)
 }
 
-fn runtime_src_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../chelis-runtime/include")
-        .canonicalize()
-        .expect("runtime dir not found")
-}
-
-/// Resolve the workspace `target/` directory from the running test binary
-/// rather than a `CARGO_MANIFEST_DIR`-relative path, so an external
-/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
-/// `target/agents/<name>`) is honored. The binary lives at
-/// `<target>/<profile>/deps/<test-bin>`; strip a trailing `deps` component if
-/// present, then drop the profile component to reach `<target>`. See
-/// chelis#747.
-fn target_dir_from_current_exe() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("could not determine current test executable");
-    let mut profile_dir = exe
-        .parent()
-        .expect("test executable should have a parent directory");
-    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        profile_dir = profile_dir
-            .parent()
-            .expect("`deps` directory should have a parent");
-    }
-    profile_dir
-        .parent()
-        .map(std::path::PathBuf::from)
-        .expect("profile directory should have a parent target directory")
-}
-
-fn runtime_library_path() -> std::path::PathBuf {
-    let target_dir = target_dir_from_current_exe();
-    for path in [
-        target_dir.join("debug/libchelis_runtime.a"),
-        target_dir.join("release/libchelis_runtime.a"),
-    ] {
-        if path.exists() {
-            return path;
-        }
-    }
-    for dir in [
-        target_dir.join("debug/deps"),
-        target_dir.join("release/deps"),
-    ] {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-                {
-                    return path;
-                }
-            }
-        }
-    }
-    panic!("runtime lib not found");
-}
-
 fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     assert!(gcc_available(), "gcc not available -- skipping");
     let selected = chelis_backend_c::prepare_dag_for_codegen(
@@ -481,28 +441,14 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     .unwrap();
     let result = chelis_backend_c::codegen(verified, func_name).unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let rt_dir = runtime_src_dir();
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let write = |name: &str, content: &str| {
         let path = tmp.path().join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
     };
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = std::fs::read_to_string(rt_dir.join(header)).unwrap();
-        write(header, &src);
-    }
-    std::fs::copy(
-        runtime_library_path(),
-        tmp.path().join("libchelis_runtime.a"),
-    )
-    .unwrap();
     write("model.c", &result.c_source);
 
     let main_c = format!(
@@ -533,8 +479,7 @@ int main() {{
     cmd.args(&toolchain.compile_flags);
     cmd.arg(tmp.path().join("main.c").to_str().unwrap());
     cmd.arg(tmp.path().join("model.c").to_str().unwrap());
-    cmd.arg(format!("-L{}", tmp.path().display()));
-    cmd.arg("-lchelis_runtime");
+    cmd.arg(&staged.archive);
     cmd.args(&toolchain.link_flags);
     cmd.arg("-o");
     cmd.arg(bin_path.to_str().unwrap());
@@ -563,19 +508,22 @@ fn spec_generated_c_compiles() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let selected = chelis_backend_c::prepare_dag_for_codegen(
@@ -602,19 +550,22 @@ fn spec_add_numerical_correctness() {
         return;
     }
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
 
     let out = compile_and_run_dag(&dag, "spec_add");
@@ -634,19 +585,22 @@ fn spec_relu_numerical_correctness() {
     // relu(const(-1)) -> 0.0
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, -1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        let r = dag.add_node(decl, RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_neg");
@@ -656,19 +610,22 @@ fn spec_relu_numerical_correctness() {
     // relu(const(5)) -> 5.0
     {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 5.0),
             vec![],
             scalar_f32(),
             None,
         );
         let zero = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 0.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let r = dag.add_node(RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
+        let r = dag.add_node(decl, RiscOp::MaxElem, vec![x, zero], scalar_f32(), None);
         dag.add_root(r);
 
         let out = compile_and_run_dag(&dag, "spec_relu_pos");
@@ -688,19 +645,22 @@ fn spec_relu_numerical_correctness() {
 fn spec_grad_add_is_one() {
     // f(x,y) = x + y => df/dx = 1, df/dy = 1
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![x, y], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -743,19 +703,22 @@ fn spec_grad_add_is_one() {
 fn spec_grad_mul_is_cross() {
     // f(x,y) = x * y => df/dx = y, df/dy = x
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let out = dag.add_node(RiscOp::Mul, vec![x, y], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Mul, vec![x, y], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x, y]).expect("grad_dag failed");
@@ -796,14 +759,16 @@ fn spec_grad_mul_is_cross() {
 fn spec_grad_composed_chain() {
     // f(x) = exp(neg(x)) = exp(-x), df/dx = -exp(-x)
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_f64(),
         None,
     );
-    let neg_x = dag.add_node(RiscOp::Neg, vec![x], scalar_f64(), None);
-    let out = dag.add_node(RiscOp::Exp, vec![neg_x], scalar_f64(), None);
+    let neg_x = dag.add_node(decl, RiscOp::Neg, vec![x], scalar_f64(), None);
+    let out = dag.add_node(decl, RiscOp::Exp, vec![neg_x], scalar_f64(), None);
     dag.add_root(out);
 
     let grad_result = grad_dag(&dag, out, &[x]).expect("grad_dag failed");
@@ -861,7 +826,9 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
     let actual = values[&root].clone();
 
     let mut single = Dag::new();
+    let single_decl = single.declare("test");
     let x = single.add_node(
+        single_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -871,6 +838,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         None,
     );
     let sq = single.add_node(
+        single_decl,
         RiscOp::Mul,
         vec![x, x],
         TensorType {
@@ -880,6 +848,7 @@ def per_example_grad(xs: tensor[batch, features, f32]) -> tensor[batch, features
         None,
     );
     let loss = single.add_node(
+        single_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,

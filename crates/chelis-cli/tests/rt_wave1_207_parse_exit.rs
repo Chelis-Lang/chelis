@@ -54,7 +54,7 @@ fn run_check_capture(path: &std::path::Path) -> (Option<i32>, String, String) {
 /// test"), this MUST exit 2, not 1.
 #[test]
 fn rt_wave1_207_parse_error_exits_with_check_errors_code() {
-    let src = "def main() -> tensor[n, f32] = { @invalid }\n";
+    let src = "def main[n]() -> tensor[n, f32] = { @invalid }\n";
     let tmp = write_tempfile("rt207-parse-", src);
     let (code, _stdout, stderr) = run_check_capture(tmp.path());
     assert_eq!(
@@ -70,7 +70,7 @@ fn rt_wave1_207_parse_error_exits_with_check_errors_code() {
 /// empty). This breaks the literal iff.
 #[test]
 fn rt_wave1_207_parse_error_emits_errors_array_in_json() {
-    let src = "def main() -> tensor[n, f32] = { @invalid }\n";
+    let src = "def main[n]() -> tensor[n, f32] = { @invalid }\n";
     let tmp = write_tempfile("rt207-parse-json-", src);
     let (_code, stdout, stderr) = run_check_capture(tmp.path());
     assert!(

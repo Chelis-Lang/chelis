@@ -117,43 +117,24 @@ fn c_run(program: &str, name: &str) -> Result<(bool, String, String), String> {
     ))
 }
 
-fn branded_line(text: &str) -> Option<&str> {
-    text.lines().find(|l| l.contains("unsupported: "))
-}
-
-/// The section C2 rendering, checked structurally: the literal brand, an
-/// ` on ` context clause, a parenthesized stage, and typed authority.
-fn assert_frozen_shape(line: &str, ctx: &str) {
-    let tail = line
-        .split_once("unsupported: ")
-        .map(|(_, t)| t)
-        .unwrap_or_default();
-    assert!(
-        tail.contains(" on ")
-            && (line.contains("); deliberate [") || line.contains("); unimplemented chelis#")),
-        "{ctx}: not the authority-bearing `unsupported: <what> on <context> (<stage>); <authority>: <hint>` \
-         shape: {line}"
-    );
-}
-
 // ===========================================================================
 // Orchestrator probe 1 - the absorption-guard boundary
 // ===========================================================================
 
-/// 1(a): an unsupported-op def that IS a DAG root (tensor signature) must
-/// surface the branded rejection in eval - even when a healthy tensor
-/// root sits beside it.
+/// 1(a): an invalid-family def that IS a DAG root must be rejected before
+/// eval, even when a healthy tensor root sits beside it.
 #[test]
 fn rt_p1a_unsupported_tensor_root_surfaces_in_eval() {
     let program = "module M.Main\n\
-         def bad(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
+         def bad(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
          def good(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
          out = print(good(to_tensor([1.0, -2.0, 3.0, -4.0])))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => {
-            let line = branded_line(&stderr)
-                .unwrap_or_else(|| panic!("rejection must be branded; got: {stderr}"));
-            assert!(line.contains("Cos") || line.contains("cos"), "got: {line}");
+            assert!(
+                stderr.contains("dtype family `Float`") && stderr.contains("i32"),
+                "invalid cos operand must be rejected by the checked family contract: {stderr}"
+            );
         }
         Ok(stdout) => panic!(
             "a program containing a DAG-rooted unsupported def must not eval cleanly \
@@ -171,14 +152,14 @@ fn rt_p1c_consumed_unsupported_def_is_never_absorbed() {
         (
             "print",
             "module M.Main\n\
-             def bad(x: tensor[2, int32]) -> tensor[2, int32] = cos(x)\n\
-             out = print(bad(to_tensor([cast(0, int32), cast(1, int32)])))\n",
+             def bad(x: tensor[2, i32]) -> tensor[2, i32] = cos(x)\n\
+             out = print(bad(to_tensor([cast(0, i32), cast(1, i32)])))\n",
         ),
         (
             "to_list",
             "module M.Main\n\
-             def bad(x: tensor[2, int32]) -> tensor[2, int32] = cos(x)\n\
-             out = print(to_list(bad(to_tensor([cast(0, int32), cast(1, int32)]))))\n",
+             def bad(x: tensor[2, i32]) -> tensor[2, i32] = cos(x)\n\
+             out = print(to_list(bad(to_tensor([cast(0, i32), cast(1, i32)]))))\n",
         ),
     ];
     for (label, program) in consumers {
@@ -214,8 +195,8 @@ fn rt_p1c_consumed_unsupported_def_is_never_absorbed() {
 #[test]
 fn rt_p1b_host_classified_def_is_host_correct_or_loud() {
     let program = "module M.Main\n\
-         def wrap(x: tensor[2, int32]) -> string = to_string(cos(x))\n\
-         out = print(wrap(to_tensor([cast(0, int32), cast(1, int32)])))\n";
+         def wrap(x: tensor[2, i32]) -> string = to_string(cos(x))\n\
+         out = print(wrap(to_tensor([cast(0, i32), cast(1, i32)])))\n";
     match eval_full(program, ".ch") {
         Err(stderr) => assert!(
             !stderr.trim().is_empty(),
@@ -240,7 +221,7 @@ fn rt_p1b_host_classified_def_is_host_correct_or_loud() {
 fn rt_p1b_inline_forward_exact_output_no_fabricated_roots() {
     let program = "module M.Main\n\
          out = print(sum(mul(to_tensor([0.1, 0.2, 0.3, 0.4]), \
-         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), int64)), f32)), 0))\n";
+         cast(abs(cast(to_tensor([-100.0, 200.0, -300.0, 400.0]), i64)), f32)), 0))\n";
     let stdout = eval_full(program, ".ch").expect("the inline host forward must evaluate");
     let first = stdout.lines().next().unwrap_or_default();
     // Re-baselined at the chelis#792 rebase ([05-OBS-4]): a rank-0 eval
@@ -423,54 +404,38 @@ fn rt_keep2_unknown_tag_with_children_is_rejected() {
 // Orchestrator probe 4 - frozen-shape byte parity across lanes
 // ===========================================================================
 
-/// The same lowering raise (cos on an int32 tensor, def-rooted) must
-/// render the identical branded byte sequence via eval and via
-/// `chelis build --target c` / `--target hip` (a lane-skewed rendering is
-/// the chelis#712 shape the corpus exists to catch).
+/// The checked Float-family rejection for cos on an i32 tensor must be
+/// present on eval and both build lanes. The build lanes share the same
+/// checker boundary and therefore retain byte parity.
 #[test]
 fn rt_p4_branded_bytes_agree_across_lanes() {
     let program = "module M.Main\n\
-         def run(x: tensor[4, int32]) -> tensor[4, int32] = cos(x)\n\
-         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-         cast(4, int32)]))\n";
+         def run(x: tensor[4, i32]) -> tensor[4, i32] = cos(x)\n\
+         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+         cast(4, i32)]))\n";
     let eval_err = eval_full(program, ".ch").expect_err("eval must reject the cos-int program");
     let (c_ok, c_err, _) = build_target(program, ".ch", "rt_parity_c", "c");
     let (h_ok, h_err, _) = build_target(program, ".ch", "rt_parity_hip", "hip");
     assert!(!c_ok && !h_ok, "both build lanes must reject");
-    let brand = |s: &str| -> String {
-        branded_line(s)
-            .and_then(|l| l.split_once("unsupported: ").map(|(_, t)| t.to_string()))
-            .unwrap_or_else(|| panic!("no branded line in: {s}"))
-    };
-    let (e, c, h) = (brand(&eval_err), brand(&c_err), brand(&h_err));
-    for (lane, line) in [("eval", &e), ("build-c", &c), ("build-hip", &h)] {
-        assert_frozen_shape(&format!("unsupported: {line}"), lane);
+    for (lane, diagnostic) in [
+        ("eval", &eval_err),
+        ("build-c", &c_err),
+        ("build-hip", &h_err),
+    ] {
         assert!(
-            line.to_lowercase().contains("cos"),
-            "{lane} must name the op; got: {line}"
+            diagnostic.contains("dtype family `Float`") && diagnostic.contains("i32"),
+            "{lane} must report the checked Float-family rejection; got: {diagnostic}"
         );
     }
-    // The BUILD lanes must agree byte-for-byte (the c host emitter is the
-    // shared refusal point). eval-vs-build render DIFFERENT diagnostics
-    // for this repro (lowering raise vs host-emission arm) - a DISCLOSED
-    // routing skew (issue_687 corpus row comment) reported in prose, not
-    // asserted here.
-    assert_eq!(c, h, "C vs HIP branded bytes must agree");
+    assert_eq!(c_err, h_err, "C vs HIP checker diagnostics must agree");
 }
 
-/// The effect-kind rejection must agree between the eval lane and the
-/// build lane on the same `.dp`. Re-baselined at the chelis#793 rebase:
-/// the CHECKER's handle-effect case (chelis#731 P1) now rejects the
-/// unknown kind FIRST in both lanes - the earliest competent stage - so
-/// the surviving parity surface is the checker's `MalformedForm`
-/// diagnostic naming the kind, identical in content across lanes; the
-/// chelis#730 rows 9/20 lowering raises are defense-in-depth behind it
-/// and no longer reachable from this surface (the section I1 interlock,
-/// honored from both sides).
+/// Text admission rejects unknown effect kinds before either execution lane.
+/// The diagnostic retains the offending kind and agrees across eval and build.
 #[test]
 fn rt_p4_effect_kind_bytes_agree_across_lanes() {
     let dp = "(defsig {} f (t-fn {} (t-prim {} f32)))\n\n(def {}\n  f\n  (fn {}\n    (params {})\n    \
-              (handle-effect {effect: teleport}\n      (lit {type: (t-prim {} int64)} 42)\n      \
+              (handle-effect {effect: teleport}\n      (lit {type: (t-prim {} i64)} 42)\n      \
               (lit {type: (t-prim {} f32)} 2.5))))\n\n(def {}\n  out\n  (app {}\n    \
               (var {} print)\n    (app {} (var {} f))))\n";
     let eval_out = eval_full(dp, ".dp");
@@ -480,7 +445,7 @@ fn rt_p4_effect_kind_bytes_agree_across_lanes() {
             for (lane, text) in [("eval", &e), ("build", &b_err)] {
                 assert!(
                     text.contains("unknown effect kind `teleport`"),
-                    "{lane} must reject with the checker diagnostic naming the \
+                    "{lane} must reject with the admission diagnostic naming the \
                      kind; got: {text}"
                 );
             }
@@ -512,18 +477,19 @@ fn rt_control_float_cos_still_works_both_lanes() {
     assert!(ok, "float cos must keep building; stderr: {stderr}");
 }
 
-/// `with seed(...) { ... }` (a KNOWN effect kind) must keep working after
-/// the rows 9/20 string-match conversion.
+/// `with device(...) { ... }` (a KNOWN effect kind) must keep working after
+/// the rows 9/20 string-match conversion. The control used the `random`
+/// kind until chelis#2413 retired it; `device` is the remaining known kind.
 #[test]
-fn rt_control_random_effect_still_works() {
+fn rt_control_known_effect_kind_still_works() {
     let program = "module M.Main\n\
-         def f() -> tensor[2, f32] = with seed(42i64) { uniform_like(to_tensor([0.0, 0.0]), 0.0, 1.0) }\n\
+         def f() -> tensor[2, f32] = with device(\"gpu:0\") { to_tensor([2.5f32, 1.0f32]) }\n\
          out = print(f())\n";
     match eval_full(program, ".ch") {
         Ok(stdout) => assert!(
-            stdout.contains("data=["),
-            "seeded uniform must produce a tensor; got: {stdout}"
+            stdout.contains("data=[2.5, 1.0]"),
+            "the handled body must produce its tensor; got: {stdout}"
         ),
-        Err(stderr) => panic!("the `random` effect kind must keep evaluating; got: {stderr}"),
+        Err(stderr) => panic!("the `device` effect kind must keep evaluating; got: {stderr}"),
     }
 }

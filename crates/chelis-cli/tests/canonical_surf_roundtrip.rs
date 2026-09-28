@@ -14,7 +14,7 @@ fn surf_command_resugars_the_expanded_macro_program() {
         &source,
         concat!(
             "macro bump(x) = add(x, 1)\n",
-            "def apply(x: int32) -> int32 = bump(x)\n",
+            "def apply(x: i32) -> i32 = bump(x)\n",
         ),
     )
     .expect("write fixture");
@@ -25,7 +25,7 @@ fn surf_command_resugars_the_expanded_macro_program() {
         .arg(&source)
         .assert()
         .success()
-        .stdout(predicate::str::contains("def apply(x: int32) -> int32"))
+        .stdout(predicate::str::contains("def apply(x: i32) -> i32"))
         .stdout(predicate::str::contains("macro").not());
 }
 
@@ -37,7 +37,7 @@ fn surf_command_reports_macro_expansion_failure() {
         &source,
         concat!(
             "macro loop(x) = loop(x)\n",
-            "def apply(x: int32) -> int32 = loop(x)\n",
+            "def apply(x: i32) -> i32 = loop(x)\n",
         ),
     )
     .expect("write fixture");
@@ -51,18 +51,10 @@ fn surf_command_reports_macro_expansion_failure() {
         .stderr(predicate::str::contains("macro expansion limit exceeded"));
 }
 
-#[test]
-fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
+fn assert_macro_roundtrip(source: &str) {
     let directory = tempdir().expect("tempdir");
     let authored = directory.path().join("authored.ch");
-    fs::write(
-        &authored,
-        concat!(
-            "macro bump(x) = add(x, 1)\n",
-            "def apply(x: int32) -> int32 = bump(x)\n",
-        ),
-    )
-    .expect("write fixture");
+    fs::write(&authored, source).expect("write fixture");
 
     let original_deep = Command::cargo_bin("chelis")
         .expect("binary")
@@ -102,19 +94,41 @@ fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
     .expect("roundtrip Deep output parses");
     assert_eq!(
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
+                .expect("valid metadata for round-trip normalization"),
         ),
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                .expect("valid metadata for round-trip normalization"),
         )
     );
+}
+
+#[test]
+fn macro_program_round_trips_after_expansion_modulo_derived_metadata() {
+    assert_macro_roundtrip(concat!(
+        "macro bump(x) = add(x, 1)\n",
+        "def apply(x: i32) -> i32 = bump(x)\n",
+    ));
+}
+
+#[test]
+fn a_hygienized_typed_vocabulary_binder_round_trips_after_expansion() {
+    assert_macro_roundtrip(concat!(
+        "macro add_one(v) = (fn (record: f32) -> add(record, v))(1.0f32)\n",
+        "def run(record: f32) -> f32 = {\n",
+        "  result: f32 = add_one(record)\n",
+        "  result\n",
+        "}\n",
+        "out = run(10.0f32)\n",
+    ));
 }
 
 #[test]
 fn checked_deep_resugars_without_losing_expression_types() {
     let directory = tempdir().expect("tempdir");
     let authored = directory.path().join("typed.ch");
-    fs::write(&authored, "def identity(x: int32) -> int32 = x\n").expect("write fixture");
+    fs::write(&authored, "def identity(x: i32) -> i32 = x\n").expect("write fixture");
 
     let checked_deep = Command::cargo_bin("chelis")
         .expect("binary")
@@ -162,10 +176,12 @@ fn checked_deep_resugars_without_losing_expression_types() {
     .expect("roundtrip Deep parses");
     assert_eq!(
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&checked),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&checked)
+                .expect("valid metadata for round-trip normalization"),
         ),
         chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                .expect("valid metadata for round-trip normalization"),
         )
     );
 }
@@ -192,7 +208,7 @@ fn surf_command_preserves_checked_standalone_binding_types_and_unit() {
         .arg(&deep_path)
         .assert()
         .success()
-        .stdout(predicate::str::contains("answer: int32 = 42"))
+        .stdout(predicate::str::contains("answer: i32 = 42"))
         .stdout(predicate::str::contains("unit_value: unit = ()"));
 }
 
@@ -254,7 +270,7 @@ fn signed_minimum_double_negation_traps_without_aborting_the_compiler() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "numeric trap: overflow in neg at int64",
+            "numeric trap: overflow in neg at i64",
         ));
 }
 
@@ -327,10 +343,12 @@ fn repository_surf_corpus_obeys_the_normalized_deep_retraction_law() {
         .expect("roundtrip Deep parses");
         assert_eq!(
             chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original),
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&original)
+                    .expect("valid metadata for round-trip normalization"),
             ),
             chelis_deep::printer::print_canonical(
-                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip),
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&roundtrip)
+                    .expect("valid metadata for round-trip normalization"),
             ),
             "normalized Deep retraction law failed for {}",
             path.display()
@@ -374,4 +392,36 @@ fn tracked_surf_files(workspace: &Path) -> Vec<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(|path| workspace.join(path))
         .collect()
+}
+
+#[test]
+fn migration_preserves_empty_property_preconditions() {
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("property.ch");
+    for text in [
+        "@property p forall(): true\n",
+        "@property p forall(x: i32): x == x\n",
+    ] {
+        fs::write(&source, text).unwrap();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+            .arg(&source)
+            .assert()
+            .success();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(["migrate", "surf", "--from", "0.18", "--check"])
+            .arg(&source)
+            .assert()
+            .success();
+    }
+    fs::write(&source, "@property p forall(x: i32):\n").unwrap();
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&source)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("panicked").not());
 }

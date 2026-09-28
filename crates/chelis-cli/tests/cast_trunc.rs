@@ -10,7 +10,7 @@
 //!   (never wraps, never saturates);
 //! * `NaN` / `+-inf` TRAP `domain`;
 //! * scalar and tensor surfaces agree, and the eval and compiled C lanes
-//!   produce byte-identical output over {f32,f64} -> {int32,int64};
+//!   produce byte-identical output over {f32,f64} -> {i32,i64};
 //! * a non-float source, a non-integer target, and a gradient through it
 //!   are each a clean typed error.
 //!
@@ -106,12 +106,12 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
 #[test]
 fn scalar_fractional_values_truncate_toward_zero() {
     for (expr, expected) in [
-        ("cast_trunc(1.9, int32)", "1"),
-        ("cast_trunc(-1.9, int32)", "-1"),
-        ("cast_trunc(0.9, int32)", "0"),
-        ("cast_trunc(-0.9, int32)", "0"),
-        ("cast_trunc(3.0, int32)", "3"),
-        ("cast_trunc(-3.0, int32)", "-3"),
+        ("cast_trunc(1.9, i32)", "1"),
+        ("cast_trunc(-1.9, i32)", "-1"),
+        ("cast_trunc(0.9, i32)", "0"),
+        ("cast_trunc(-0.9, i32)", "0"),
+        ("cast_trunc(3.0, i32)", "3"),
+        ("cast_trunc(-3.0, i32)", "-3"),
     ] {
         assert_eq!(
             eval_expr(expr).unwrap_or_else(|e| panic!("`{expr}` must evaluate: {e}")),
@@ -124,7 +124,7 @@ fn scalar_fractional_values_truncate_toward_zero() {
 #[test]
 fn tensor_surface_truncates_elementwise_toward_zero() {
     assert_eq!(
-        eval_expr("cast_trunc(to_tensor([1.9, -1.9, 0.5, -0.5, 3.0]), int32)")
+        eval_expr("cast_trunc(to_tensor([1.9, -1.9, 0.5, -0.5, 3.0]), i32)")
             .expect("tensor cast_trunc must evaluate"),
         "tensor(shape=[5], data=[1, -1, 0, 0, 3])"
     );
@@ -136,17 +136,17 @@ fn tensor_surface_truncates_elementwise_toward_zero() {
 fn agrees_with_the_checked_default_on_integral_values() {
     for expr in ["3.0", "-3.0", "0.0"] {
         assert_eq!(
-            eval_expr(&format!("cast({expr}, int64)")).expect("checked default"),
-            eval_expr(&format!("cast_trunc({expr}, int64)")).expect("truncating rung"),
+            eval_expr(&format!("cast({expr}, i64)")).expect("checked default"),
+            eval_expr(&format!("cast_trunc({expr}, i64)")).expect("truncating rung"),
             "the rungs agree on an already-integral {expr}"
         );
     }
     assert_eq!(
-        eval_expr("cast_trunc(1.9, int64)").expect("truncating rung defines the fractional case"),
+        eval_expr("cast_trunc(1.9, i64)").expect("truncating rung defines the fractional case"),
         "1"
     );
     assert!(
-        eval_expr("cast(1.9, int64)").is_err(),
+        eval_expr("cast(1.9, i64)").is_err(),
         "the checked default still traps on the fractional case ([04-NUM-14])"
     );
 }
@@ -155,7 +155,7 @@ fn agrees_with_the_checked_default_on_integral_values() {
 /// migration target, not call it future work.
 #[test]
 fn the_checked_default_teaches_cast_trunc_as_the_named_form() {
-    let stderr = eval_expr("cast(1.9, int32)").expect_err("the checked default traps");
+    let stderr = eval_expr("cast(1.9, i32)").expect_err("the checked default traps");
     assert!(
         stderr.contains("cast_trunc"),
         "the fractional-cast hint must name `cast_trunc` now that it ships: {stderr}"
@@ -169,10 +169,10 @@ fn the_checked_default_teaches_cast_trunc_as_the_named_form() {
 #[test]
 fn out_of_range_truncated_values_trap_overflow_never_saturate() {
     for (expr, prim) in [
-        ("cast_trunc(1e30, int32)", "int32"),
-        ("cast_trunc(-1e30, int32)", "int32"),
-        ("cast_trunc(300.9, int8)", "int8"),
-        ("cast_trunc(to_tensor([300.9]), int8)", "int8"),
+        ("cast_trunc(1e30, i32)", "i32"),
+        ("cast_trunc(-1e30, i32)", "i32"),
+        ("cast_trunc(300.9, i8)", "i8"),
+        ("cast_trunc(to_tensor([300.9]), i8)", "i8"),
     ] {
         let stderr = eval_expr(expr).expect_err("an out-of-range value must trap");
         assert!(
@@ -186,13 +186,13 @@ fn out_of_range_truncated_values_trap_overflow_never_saturate() {
 #[test]
 fn non_finite_sources_trap_domain() {
     for expr in [
-        "cast_trunc(sqrt(-1.0), int32)",
-        "cast_trunc(div(1.0, 0.0), int32)",
-        "cast_trunc(sqrt(to_tensor([-1.0])), int32)",
+        "cast_trunc(sqrt(-1.0), i32)",
+        "cast_trunc(div(1.0, 0.0), i32)",
+        "cast_trunc(sqrt(to_tensor([-1.0])), i32)",
     ] {
         let stderr = eval_expr(expr).expect_err("a non-finite source must trap");
         assert!(
-            stderr.contains("numeric trap: domain in cast_trunc at int32"),
+            stderr.contains("numeric trap: domain in cast_trunc at i32"),
             "`{expr}`: truncation of a non-finite value has no integer meaning \
              and must trap Domain, not Overflow: {stderr}"
         );
@@ -205,7 +205,7 @@ fn non_finite_sources_trap_domain() {
 
 #[test]
 fn a_non_float_source_is_a_check_time_type_error() {
-    for expr in ["cast_trunc(3, int64)", "cast_trunc(to_tensor([3]), int64)"] {
+    for expr in ["cast_trunc(3, i64)", "cast_trunc(to_tensor([3]), i64)"] {
         let stderr = eval_expr(expr).expect_err("an integer source is not a truncating cast");
         assert!(
             stderr.contains("is not a float dtype") && stderr.contains("cast_trunc"),
@@ -234,7 +234,7 @@ fn a_non_integer_target_is_a_check_time_type_error() {
 #[test]
 fn a_gradient_through_cast_trunc_is_a_clean_error_not_a_silent_zero() {
     let program = "module M.Main\n\
-                   def f(x: f32) -> f32 = cast(cast_trunc(x, int32), f32)\n\
+                   def f(x: f32) -> f32 = cast(cast_trunc(x, i32), f32)\n\
                    out = print(grad(f)(2.5))\n";
     let stderr = eval_program(program)
         .expect_err("[05-OP-6] carries the no_grad rule; a gradient goal must fail");
@@ -253,31 +253,31 @@ fn a_gradient_through_cast_trunc_is_a_clean_error_not_a_silent_zero() {
 }
 
 // ===========================================================================
-// Cross-lane agreement: eval vs compiled C, over {f32,f64} x {int32,int64}
+// Cross-lane agreement: eval vs compiled C, over {f32,f64} x {i32,i64}
 // ===========================================================================
 
 /// The §8 acceptance matrix. Each row is evaluated on BOTH lanes and the
 /// stdout compared byte for byte.
 const AGREEMENT_MATRIX: &[(&str, &str, &str)] = &[
     // (label, source expression at the stated dtype, target dtype)
-    ("f32_pos_frac", "1.9f32", "int32"),
-    ("f32_neg_frac", "-1.9f32", "int32"),
-    ("f32_pos_small", "0.9f32", "int32"),
-    ("f32_neg_small", "-0.9f32", "int32"),
-    ("f32_neg_zero", "-0.0f32", "int32"),
-    ("f32_integral", "3.0f32", "int32"),
-    ("f32_to_i64", "1.9f32", "int64"),
-    ("f64_pos_frac", "1.9f64", "int32"),
-    ("f64_neg_frac", "-1.9f64", "int32"),
-    ("f64_integral", "-3.0f64", "int32"),
-    ("f64_to_i64", "1.9f64", "int64"),
-    ("f64_neg_to_i64", "-1.9f64", "int64"),
-    // Boundary: the largest int32 and its fractional neighbour, which
+    ("f32_pos_frac", "1.9f32", "i32"),
+    ("f32_neg_frac", "-1.9f32", "i32"),
+    ("f32_pos_small", "0.9f32", "i32"),
+    ("f32_neg_small", "-0.9f32", "i32"),
+    ("f32_neg_zero", "-0.0f32", "i32"),
+    ("f32_integral", "3.0f32", "i32"),
+    ("f32_to_i64", "1.9f32", "i64"),
+    ("f64_pos_frac", "1.9f64", "i32"),
+    ("f64_neg_frac", "-1.9f64", "i32"),
+    ("f64_integral", "-3.0f64", "i32"),
+    ("f64_to_i64", "1.9f64", "i64"),
+    ("f64_neg_to_i64", "-1.9f64", "i64"),
+    // Boundary: the largest i32 and its fractional neighbour, which
     // truncates back INTO range rather than overflowing.
-    ("f64_i32_max", "2147483647.0f64", "int32"),
-    ("f64_i32_max_frac", "2147483647.9f64", "int32"),
-    ("f64_i32_min", "-2147483648.0f64", "int32"),
-    ("f64_i32_min_frac", "-2147483647.9f64", "int32"),
+    ("f64_i32_max", "2147483647.0f64", "i32"),
+    ("f64_i32_max_frac", "2147483647.9f64", "i32"),
+    ("f64_i32_min", "-2147483648.0f64", "i32"),
+    ("f64_i32_min_frac", "-2147483647.9f64", "i32"),
 ];
 
 #[test]
@@ -312,17 +312,17 @@ fn compiled_c_lane_traps_overflow_with_the_same_brand() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-                   def f() -> tensor[1, int8] = cast_trunc(to_tensor([300.9]), int8)\n\
+                   def f() -> tensor[1, i8] = cast_trunc(to_tensor([300.9]), i8)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "ct_overflow").expect("C lane");
     assert!(
-        !ok && stderr.contains("numeric trap: overflow in cast_trunc at int8"),
+        !ok && stderr.contains("numeric trap: overflow in cast_trunc at i8"),
         "the compiled lane must raise the SAME branded overflow diagnostic as \
          eval; got ok={ok} stdout={stdout} stderr={stderr}"
     );
-    let eval_err = eval_expr("cast_trunc(to_tensor([300.9]), int8)").expect_err("eval traps too");
+    let eval_err = eval_expr("cast_trunc(to_tensor([300.9]), i8)").expect_err("eval traps too");
     assert!(
-        eval_err.contains("numeric trap: overflow in cast_trunc at int8"),
+        eval_err.contains("numeric trap: overflow in cast_trunc at i8"),
         "and eval's brand must match: {eval_err}"
     );
 }
@@ -333,11 +333,11 @@ fn compiled_c_lane_traps_domain_on_non_finite_with_the_same_brand() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-                   def f() -> tensor[1, int32] = cast_trunc(sqrt(to_tensor([-1.0])), int32)\n\
+                   def f() -> tensor[1, i32] = cast_trunc(sqrt(to_tensor([-1.0])), i32)\n\
                    out = print(f())\n";
     let (stdout, stderr, ok) = c_lane_run(program, "ct_domain").expect("C lane");
     assert!(
-        !ok && stderr.contains("numeric trap: domain in cast_trunc at int32"),
+        !ok && stderr.contains("numeric trap: domain in cast_trunc at i32"),
         "the compiled lane must Domain-trap on NaN with the same brand; \
          got ok={ok} stdout={stdout} stderr={stderr}"
     );
@@ -349,7 +349,7 @@ fn compiled_c_lane_traps_domain_on_non_finite_with_the_same_brand() {
 /// non-finite pre-pass and answer `domain` where C answered `overflow`,
 /// which contradicts [05-OP-6]'s identical-lanes clause.
 ///
-/// The int8 rows are the discriminating ones: at int64 both offender
+/// The i8 rows are the discriminating ones: at i64 both offender
 /// kinds are caught in the same pass, so a narrower width is required to
 /// see the divergence at all.
 #[test]
@@ -363,13 +363,13 @@ fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
     // would route it through the HOST tensor lane, which is a different
     // code path and not what MEDIUM-1 is about.
     let cases = [
-        ("mix_over_first_i32", "[1e30, -1.0]", "int32", "overflow"),
-        ("mix_nan_first_i32", "[-1.0, 1e30]", "int32", "domain"),
+        ("mix_over_first_i32", "[1e30, -1.0]", "i32", "overflow"),
+        ("mix_nan_first_i32", "[-1.0, 1e30]", "i32", "domain"),
         // The discriminating rows: 90000.0 -> sqrt -> 300.0, which fits
-        // i64 but not int8. Only a narrow width exposes an out-of-order
+        // i64 but not i8. Only a narrow width exposes an out-of-order
         // width check.
-        ("mix_over_first_i8", "[90000.0, -1.0]", "int8", "overflow"),
-        ("mix_nan_first_i8", "[-1.0, 90000.0]", "int8", "domain"),
+        ("mix_over_first_i8", "[90000.0, -1.0]", "i8", "overflow"),
+        ("mix_nan_first_i8", "[-1.0, 90000.0]", "i8", "domain"),
     ];
     for (label, elements, target, expected_kind) in cases {
         let expr = format!("cast_trunc(sqrt(to_tensor({elements})), {target})");
@@ -401,15 +401,15 @@ fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
 ///
 /// This is pinned deliberately, because the checked `cast`'s host arm
 /// ends in `_ => arg_vars[0].0.clone()` and therefore emits NO conversion
-/// at all for this shape -- it reinterprets the f32 buffer as int32. That
+/// at all for this shape -- it reinterprets the f32 buffer as i32. That
 /// is a pre-existing silent-wrong-answer path on `cast` (chelis#729 /
 /// chelis#730 territory, not fixed here). `cast_trunc` must not acquire
 /// the same hole by someone "fixing" this rejection with a fallback arm.
 #[test]
 fn host_lane_tensor_cast_trunc_rejects_loudly_rather_than_passing_through() {
     let program = "module M.Main\n\
-                   def f() -> tensor[2, int32] = \
-                   cast_trunc(to_tensor([1.9, sqrt(4.0)]), int32)\n\
+                   def f() -> tensor[2, i32] = \
+                   cast_trunc(to_tensor([1.9, sqrt(4.0)]), i32)\n\
                    out = print(f())\n";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("m.ch");
@@ -451,7 +451,7 @@ fn canonical_formatting_preserves_the_rung() {
     let path = dir.path().join("m.ch");
     write_file(
         &path,
-        "module M.Main\n\ndef f(x: f32) -> int32 = cast_trunc(x, int32)\n",
+        "module M.Main\n\ndef f(x: f32) -> i32 = cast_trunc(x, i32)\n",
     );
     let out = Command::cargo_bin("chelis")
         .expect("binary")
@@ -461,7 +461,7 @@ fn canonical_formatting_preserves_the_rung() {
     assert!(out.status.success(), "fmt must succeed");
     let formatted = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
-        formatted.contains("cast_trunc(x, int32)"),
+        formatted.contains("cast_trunc(x, i32)"),
         "the formatter must not rewrite `cast_trunc` into the checked `cast`: {formatted}"
     );
 }

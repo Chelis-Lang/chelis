@@ -27,7 +27,7 @@ repository `AGENTS.md` plus the shared local skills in `agent-skills/`.
 
 Prefer this subset before trying broader planned language features:
 
-- Function definitions: `def f(x: tensor[n, f32]) -> tensor[n, f32] = ...`
+- Function definitions: `def f[n](x: tensor[n, f32]) -> tensor[n, f32] = ...`
 - Blocks with local bindings: `{ y = relu(x); softmax(y, 0) }`
 - Tensor types with explicit dimensions and precision: `tensor[f32]`,
   `tensor[n, f32]`, `tensor[batch, hidden, f32]`
@@ -44,7 +44,7 @@ Rules to preserve:
 - No implicit broadcasting. Shapes must match unless an explicit helper changes them.
 - No implicit precision promotion. Use `cast` when changing precision.
 - Named dimensions are nominal: `batch` and `seq` do not unify by size.
-- Integer literals default to `int32`; float literals default to `f32`.
+- Integer literals default to `i32`; float literals default to `f32`.
 - Reduction-style calls need an explicit axis argument.
 
 ## Style Rules for Generated Surf
@@ -64,17 +64,17 @@ def square(x: tensor[f32]) -> tensor[f32] = mul(x, x)
 ```
 
 ```chelis-surf
-def relu_then_softmax(x: tensor[n, f32]) -> tensor[n, f32] =
+def relu_then_softmax[n](x: tensor[n, f32]) -> tensor[n, f32] =
   softmax(relu(x), 0)
 ```
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] =
   add(x, y)
 ```
 
 ```chelis-surf
-def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
+def twice_then_relu[n](x: tensor[n, f32]) -> tensor[n, f32] =
   {
     y = add(x, x)
     relu(y)
@@ -82,7 +82,7 @@ def twice_then_relu(x: tensor[n, f32]) -> tensor[n, f32] =
 ```
 
 ```chelis-surf
-def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
+def classify[n](x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
   logits = x |> relu |> add(labels)
   loss =
     softmax(logits, 0)
@@ -94,12 +94,12 @@ def classify(x: tensor[n, f32], labels: tensor[n, f32]) -> tensor[f32] = {
 ```
 
 ```chelis-surf
-def logistic_step(x: tensor[n, f32]) -> tensor[n, f32] =
+def logistic_step[n](x: tensor[n, f32]) -> tensor[n, f32] =
   sigmoid(x)
 ```
 
 ```chelis-surf
-def clamp_low(x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
+def clamp_low[n](x: tensor[n, f32], low: tensor[n, f32]) -> tensor[n, f32] =
   max_elem(x, low)
 ```
 
@@ -118,7 +118,7 @@ type Activation =
   | Relu
   | Sigmoid
 
-def activate(act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
+def activate[n](act: Activation, x: tensor[n, f32]) -> tensor[n, f32] =
   match act with {
     | Relu => relu(x)
     | Sigmoid => sigmoid(x)
@@ -155,31 +155,33 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   add_vec
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   add_vec
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (y {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (y {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} add) (var {} x) (var {} y))))
 ```
 
 ```chelis-deep
 (defsig {}
   twice_then_relu
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   twice_then_relu
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (let {}
       (bind {} y (app {} (var {} add) (var {} x) (var {} x)))
       (app {} (var {} relu) (var {} y)))))
@@ -188,34 +190,36 @@ map, calls use `app`, references use `var`, and literals carry a type.
 ```chelis-deep
 (defsig {}
   relu_then_softmax
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   relu_then_softmax
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {}
       (var {} softmax)
       (app {} (var {} relu) (var {} x))
-      (lit {type: (t-prim {} int32)} 0))))
+      (lit {type: (t-prim {} i32)} 0))))
 ```
 
 ```chelis-deep
 (defsig {}
   classify
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
     (t-tensor {} (t-prim {} f32))))
 
 (def {}
   classify
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (labels {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (labels {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (let {}
       (bind {}
         logits
@@ -225,47 +229,50 @@ map, calls use `app`, references use `var`, and literals carry a type.
           (fn {} (params {} __chelis_pipe) (app {} (var {} add) (var {} __chelis_pipe) (var {} labels))))
         loss
         (pipe {}
-          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} int32)} 0))
+          (app {} (var {} softmax) (var {} logits) (lit {type: (t-prim {} i32)} 0))
           (var {} log)
           (fn {} (params {} __chelis_pipe) (app {} (var {} mul) (var {} __chelis_pipe) (var {} labels)))
-          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} int32)} 0)))))
+          (fn {} (params {} __chelis_pipe) (app {} (var {} sum) (var {} __chelis_pipe) (lit {type: (t-prim {} i32)} 0)))))
       (var {} loss))))
 ```
 
 ```chelis-deep
 (defsig {}
   logistic_step
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   logistic_step
   (fn {}
-    (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+    (params {} (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} sigmoid) (var {} x))))
 ```
 
 ```chelis-deep
 (defsig {}
   clamp_low
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   clamp_low
   (fn {}
     (params {}
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})
-      (low {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))})
+      (low {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (app {} (var {} max_elem) (var {} x) (var {} low))))
 ```
 
 ```chelis-deep
 (defsig {}
   identity
+  (a)
   (t-fn {}
     (t-tensor {} (d-var {} a) (t-prim {} f32))
     (t-tensor {} (d-var {} a) (t-prim {} f32))))
@@ -294,17 +301,18 @@ map, calls use `app`, references use `var`, and literals carry a type.
 
 (defsig {}
   activate
+  (n)
   (t-fn {}
     (t-adt {} Activation)
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 
 (def {}
   activate
   (fn {}
     (params {}
       (act {type: (t-adt {} Activation)})
-      (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))}))
+      (x {type: (t-tensor {} (d-var {} n) (t-prim {} f32))}))
     (match {}
       (var {} act)
       (arm {} (pat-ctor {} Relu) () (app {} (var {} relu) (var {} x)))

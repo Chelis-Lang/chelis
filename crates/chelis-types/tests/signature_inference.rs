@@ -7,7 +7,7 @@ use chelis_types::{
 
 fn checked_surf(source: &str) -> CheckedProgram {
     let decls = parse_str(source).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     check_typed_program(&deep).expect("type check")
 }
 
@@ -237,7 +237,7 @@ def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
 "#,
     )
     .expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let result = check_typed_program(&deep).expect_err("unknown helper must reject");
     assert_eq!(result.errors.len(), 1, "unknown helper owns one diagnostic");
     assert!(matches!(
@@ -250,7 +250,7 @@ def caller(a, b: tensor[4, f32]) = missing_helper(a, b)
 fn recursive_cycle_member_does_not_infer_read_only_param() {
     let checked = checked_surf(
         r#"
-def recur(x, y: tensor[4, f32], n: int32) =
+def recur(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else recur(x, y, sub(n, 1))
 "#,
     );
@@ -269,10 +269,10 @@ def recur(x, y: tensor[4, f32], n: int32) =
 fn mutual_recursive_cycle_members_do_not_infer_read_only_params() {
     let checked = checked_surf(
         r#"
-def ping(x, y: tensor[4, f32], n: int32) =
+def ping(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else pong(x, y, sub(n, 1))
 
-def pong(x, y: tensor[4, f32], n: int32) =
+def pong(x, y: tensor[4, f32], n: i32) =
   if eq(n, 0) then add(x, y) else ping(x, y, sub(n, 1))
 "#,
     );
@@ -301,7 +301,7 @@ def helper(x, y: tensor[4, f32]) = add(x, y)
 "#,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
@@ -314,7 +314,7 @@ def caller(a, b: tensor[4, f32]) = {
 "#,
     )
     .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls);
+    let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
     let checked = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),
@@ -344,12 +344,12 @@ def make[n](xs: tensor[n, f32]) -> Curve[n] =
   Curve { xs }
 def value[n](curve: Curve[n]) -> f32 =
   match curve with {
-    | Curve { xs: values } => index(to_list(values), cast(0, int64))
+    | Curve { xs: values } => index(to_list(values), cast(0, i64))
   }
 "#,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
 
@@ -371,7 +371,7 @@ def second() -> f32 =
             second_values = vector(second_extent),
         );
         let app_decls = parse_str(&app_source).expect("app surf parse");
-        let app_deep = desugar_program(&app_decls);
+        let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
         check_ir_with_signature_context(
             &type_env,
             library_checked.signature_inference(),
@@ -394,11 +394,11 @@ fn imported_fixed_rank_signature_still_rejects_a_different_extent() {
     let library_decls = parse_str(
         r#"
 def fixed(xs: tensor[3, f32]) -> f32 =
-  index(to_list(xs), cast(0, int64))
+  index(to_list(xs), cast(0, i64))
 "#,
     )
     .expect("library surf parse");
-    let library_deep = desugar_program(&library_decls);
+    let library_deep = desugar_program(&library_decls).expect("Surf fixture must desugar");
     let (type_env, library_checked) =
         build_compiled_library_context(&library_deep).expect("library context");
     let app_decls = parse_str(
@@ -408,7 +408,7 @@ def wrong() -> f32 =
 "#,
     )
     .expect("app surf parse");
-    let app_deep = desugar_program(&app_decls);
+    let app_deep = desugar_program(&app_decls).expect("Surf fixture must desugar");
     let err = check_ir_with_signature_context(
         &type_env,
         library_checked.signature_inference(),

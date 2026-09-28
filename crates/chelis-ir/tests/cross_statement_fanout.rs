@@ -50,7 +50,7 @@ use chelis_types::{check_linearity, check_typed_program};
 /// mode.
 fn surf_to_dag(source: &str) -> Result<Dag, String> {
     let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -424,7 +424,9 @@ struct Scalarized {
 fn scalarize_root(dag: &Dag, root: NodeId) -> Scalarized {
     use chelis_ir::dag::TensorType;
     let mut out = dag.clone();
+    let out_decl = out.nodes()[0].owner.decl;
     let scalar = out.add_node(
+        out_decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,

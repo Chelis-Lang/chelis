@@ -63,17 +63,30 @@ fn assert_emits_real_kernel(src: &str, label: &str) {
 fn m7_zero_element_tensor_does_not_panic() {
     // n=0 is a corner case for the host-side memcpy and the device buffer.
     // The runtime header bumps zero-length allocations to 1 byte, so the
-    // pipeline shouldn't crash; the kernel's `if (tid >= n) return;` guard
-    // means no thread does work.
+    // output remains allocated, while shared launch planning emits no work.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(0), None);
-    let s = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(0), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(0),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(0),
+        None,
+    );
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(0), None);
     dag.add_root(s);
 
     let result = codegen_metal(&dag, "zero");
     let src = &result.mm_source;
     assert_emits_real_kernel(src, "zero-element add");
+    assert!(!src.contains("chelis_metal_launch("), "{src}");
     // Allocation bytes should be `0u * sizeof(float)` — runtime tolerates 0.
     assert!(
         src.contains("0u * sizeof(float)"),
@@ -84,8 +97,16 @@ fn m7_zero_element_tensor_does_not_panic() {
 #[test]
 fn m7_single_element_reduction_emits_real_kernel() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(1), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(1),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -111,12 +132,31 @@ fn m7_chain_of_elementwise_does_not_collapse_to_one_kernel() {
     // one MSL kernel per node — not silently merge them. This catches a
     // class of regressions where a future fusion pass over-merges.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(8), None);
-    let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_f32(8), None);
-    let m = dag.add_node(RiscOp::Mul, vec![a, b], vec_f32(8), None);
-    let s = dag.add_node(RiscOp::Add, vec![m, c], vec_f32(8), None);
-    let e = dag.add_node(RiscOp::Exp, vec![s], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let c = dag.add_node(
+        decl,
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
+    let m = dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_f32(8), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![m, c], vec_f32(8), None);
+    let e = dag.add_node(decl, RiscOp::Exp, vec![s], vec_f32(8), None);
     dag.add_root(e);
 
     let result = codegen_metal(&dag, "chain");
@@ -140,19 +180,23 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
     }
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(16, 16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(16, 16),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(16),
@@ -162,6 +206,7 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(16),
@@ -170,8 +215,15 @@ fn wsm1_matmul_at_tile_boundary_routes_to_mps() {
         tensor3_f32(16, 16, 16),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(16, 16, 16), None);
+    let mul = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![ea, eb],
+        tensor3_f32(16, 16, 16),
+        None,
+    );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -206,8 +258,16 @@ fn m7_partial_axis_reduction_is_rejected_before_codegen() {
     // reduction is M4.next territory. Emitter must not silently emit a
     // full-axis kernel and lie about the result.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(8),
+        None,
+    );
     let r = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -232,13 +292,16 @@ fn m7_oversized_reduction_returns_typed_unsupported() {
     // n > 4096 exceeds the single-threadgroup wrap-loop ceiling. Two-pass
     // reduction is M4.next; until then, this MUST fall through.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(8192),
         None,
     );
     let r = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -263,8 +326,16 @@ fn m7_non_power_of_two_reduction_emits_real_kernel() {
     // emitter still produces real code for the awkward sizes.
     for &n in &[33usize, 50, 100, 200, 333, 1000, 4095] {
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(n), None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            vec_f32(n),
+            None,
+        );
         let r = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 0,
                 accumulator: chelis_types::types::Prim::F32,
@@ -292,19 +363,22 @@ fn m7_rank2_elementwise_without_matmul_returns_typed_unsupported() {
     // M-phase emits rank-2 only in the matmul subgraph specialization.
     // A bare rank-2 add has no broadcast/stride machinery yet.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f32(4, 4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f32(4, 4),
         None,
     );
-    let s = dag.add_node(RiscOp::Add, vec![a, b], mat_f32(4, 4), None);
+    let s = dag.add_node(decl, RiscOp::Add, vec![a, b], mat_f32(4, 4), None);
     dag.add_root(s);
 
     let error = try_codegen_metal(&dag, "rank2add").unwrap_err();
@@ -318,7 +392,14 @@ fn m7_bool_load_without_where_emits_real_output() {
     // M-phase emitter doesn't yet wire bool inputs through `where` or
     // any other op.
     let mut dag = Dag::new();
-    let _cond = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], vec_bool(8), None);
+    let decl = dag.declare("test");
+    let _cond = dag.add_node(
+        decl,
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        vec_bool(8),
+        None,
+    );
     // `where` doesn't exist as a RiscOp variant in this IR; the closest
     // unsupported case is loading a bool tensor and trying to add it to
     // a float, which the type checker would reject upstream — but a
@@ -341,8 +422,8 @@ fn m7_bool_load_without_where_emits_real_output() {
 
 #[test]
 fn wsm1_int32_unary_neg_emits_typed_kernel() {
-    // WS-M1: int32 is now in the active Metal dtype set
-    // (spec/04-type-system.md §1.1.3). Unary Neg on int32 should
+    // WS-M1: i32 is now in the active Metal dtype set
+    // (spec/04-type-system.md §1.1.3). Unary Neg on i32 should
     // emit a properly typed kernel (`device const int*`), not the
     // stub and not the f32 kernel that would silently misinterpret
     // the buffer's bytes.
@@ -351,28 +432,30 @@ fn wsm1_int32_unary_neg_emits_typed_kernel() {
         precision: Prim::Int32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         int_ty.clone(),
         None,
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], int_ty, None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], int_ty, None);
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "int_neg");
     let src = &result.mm_source;
     assert!(
         src.contains("device const int* a"),
-        "int32 unary neg must emit an int-typed input parameter: {src}"
+        "i32 unary neg must emit an int-typed input parameter: {src}"
     );
     assert!(
         src.contains("device int* out"),
-        "int32 unary neg must emit an int-typed output parameter: {src}"
+        "i32 unary neg must emit an int-typed output parameter: {src}"
     );
     assert!(
         src.contains("CHELIS_DTYPE_I32"),
-        "int32 root output should declare CHELIS_DTYPE_I32 dtype: {src}"
+        "i32 root output should declare CHELIS_DTYPE_I32 dtype: {src}"
     );
 }
 
@@ -387,13 +470,15 @@ fn wsm1_unary_transcendental_on_int_rejected_before_codegen() {
         precision: Prim::Int32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         int_ty.clone(),
         None,
     );
-    let n = dag.add_node(RiscOp::Exp, vec![a], int_ty, None);
+    let n = dag.add_node(decl, RiscOp::Exp, vec![a], int_ty, None);
     dag.add_root(n);
 
     let error = chelis_ir::ownership::lower_dag_ownership(dag)
@@ -412,7 +497,9 @@ fn wsm1_f64_matmul_returns_typed_unsupported() {
         precision: Prim::F64,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f64(2, 3),

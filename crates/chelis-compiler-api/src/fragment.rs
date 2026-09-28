@@ -10,26 +10,26 @@
 //!
 //! ## Why whole-module, and what the future optimization is
 //!
-//! Single-def-scoped validation is unsound for cross-def properties. Two of
-//! them bite:
+//! Single-def-scoped validation is unsound for cross-def properties. The
+//! clearest example is:
 //!
 //! - effect propagation to held callers: splicing a `Random`/`Io`-performing
 //!   body into a function declared pure must be rejected because a sibling that
 //!   calls it and is itself declared pure now violates its own declared purity.
 //!   A def-local effect check never sees the sibling.
-//! - recursion-group termination: a base-case-free recursion group is a property
-//!   of the whole strongly-connected group, not of any single def. A sibling
-//!   holding the sole base case can be spliced away while a def-local view of
-//!   the rewritten def still looks fine.
 //!
 //! The deferred optimization is NOT "incremental validation is unsound" and NOT
 //! "whole-module forever." Single-def scoping is unsound; CLOSURE-scoped
 //! validation is sound and is the real later optimization: validate effects over
 //! the caller-ward effect closure of the target (every def that transitively
-//! holds the target), validate termination over the target's
-//! strongly-connected component, and validate type per-def against its declared
-//! signature. Until that closure machinery exists, the L0 verdict is the full
-//! whole-module check of the rewritten module.
+//! holds the target), retain the declarations needed to resolve sibling calls,
+//! and validate type per-def against its declared signature. Until that closure
+//! machinery exists, the L0 verdict is the full whole-module check of the
+//! rewritten module.
+//!
+//! Uniform recursion without a syntactic base case is checker-legal under
+//! [04-INF-2]/[04-INF-3]. Whether a backend can represent or lower a particular
+//! recursive program is a separate capability boundary owned by chelis#730.
 //!
 //! ## The pipeline
 //!
@@ -41,8 +41,7 @@
 //! 3. The linearity check returns [`ReplacementError::Linearity`] on rejection.
 //!
 //! Type analysis returns [`ReplacementError::Type`] on rejection. It also
-//! rejects unsafe recursion groups and top-level binding cycles before later
-//! stages start.
+//! rejects top-level binding cycles before later stages start.
 //!
 //! The rewritten module contains a `(module ...)` wrapper. The shared effect
 //! transition checks declarations inside that wrapper.
@@ -131,10 +130,10 @@ pub enum ReplacementError {
         location: Option<DiagnosticSpan>,
     },
     /// The fitness or type pass (`check_ir_fitness` or `check_typed_program`)
-    /// rejected the rewritten module. This covers cross-def structural
-    /// violations (a base-case-free recursion group, a value-binding cycle)
-    /// the fitness pass detects, and any type error whole-module inference
-    /// reports.
+    /// rejected the rewritten module. This covers structural violations such
+    /// as a value-binding cycle that the fitness pass detects, and any type
+    /// error whole-module inference reports. Base-case-free uniform recursion
+    /// is not a type error; unsupported lowering remains a chelis#730 boundary.
     Type {
         message: String,
         location: Option<DiagnosticSpan>,
@@ -353,7 +352,8 @@ mod tests {
     /// Render Surf source to canonical Deep, as `chelis deep` does for `.ch`.
     fn render_deep(surf: &str) -> Vec<Expr> {
         let decls = chelis_surf::parser::parse_str(surf).expect("surf parse");
-        let deep = chelis_surf::desugar::desugar_program(&decls);
+        let deep =
+            chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
             .expect("macro expand")
             .into_exprs()
@@ -366,14 +366,14 @@ mod tests {
         let def = module
             .iter()
             .find_map(|expr| {
-                let Expr::List(list, _) = expr else {
+                let Expr::Node(node, _) = expr else {
                     return None;
                 };
-                let is_module = list.tag() == Some(DeepTag::Module);
-                if !is_module {
+                if node.tag() != DeepTag::Module {
                     return None;
                 }
-                list.elements.get(3 + resolved.decl_index)
+                // Child 0 is the module name; declarations follow it.
+                node.children_slice().get(1 + resolved.decl_index)
             })
             .expect("def node")
             .clone();
@@ -404,9 +404,9 @@ mod tests {
     #[test]
     fn whole_module_rejections_return_no_validation_proof() {
         let fixtures = [
-            ("module M\ndef broken() -> int32 = missing\n", "check"),
+            ("module M\ndef broken() -> i32 = missing\n", "check"),
             (
-                "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
+                "module M\ndef noisy() -> unit ! { } = test_assert(true, \"leak\")\n",
                 "effects",
             ),
             (
@@ -477,42 +477,67 @@ mod tests {
     }
 
     /// A `ping`/`pong` mutually-recursive pair where `ping` holds the sole base
-    /// case. Splicing `ping`'s body to call `pong` unconditionally removes the
-    /// only base case, closing a base-case-free recursion group that the
-    /// whole-module `detect_trivial_non_terminating_fns` detector flags.
-    const PINGPONG: &str = "module Frag.PingPong\nexport (ping, pong)\ndef ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))\ndef pong(n: int32) -> int32 = ping(sub(n, 1))\n";
+    /// case. Splicing `ping`'s body to call `pong` unconditionally removes that
+    /// base case while preserving one uniform recursive instantiation.
+    const PINGPONG: &str = "module Frag.PingPong\nexport (ping, pong)\ndef ping(n: i32) -> i32 = if eq(n, 0) then 0 else pong(sub(n, 1))\ndef pong(n: i32) -> i32 = ping(sub(n, 1))\n";
 
     #[test]
-    fn cross_def_base_case_drop_is_rejected_promptly() {
-        // Whole-module fitness over the rewritten module catches the
-        // base-case-free recursion group the 2-decl-local view never sees,
-        // matching full `chelis check`. The fitness pass runs first, before the
-        // whole-module inference that can wedge on such a module, so this
-        // returns promptly.
+    fn cross_def_base_case_drop_is_accepted_promptly() {
+        // [04-INF-2]/[04-INF-3] admit this uniform recursive group. PP9 removed
+        // the old syntactic-base-case checker restriction, so fragment
+        // replacement must agree with full check by accepting it promptly.
         let module = render_deep(PINGPONG);
-        let new_body = render_body(
-            "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
-            "f",
-        );
+        let new_body = render_body("module M\ndef f(n: i32) -> i32 = pong(sub(n, 1))\n", "f");
         let start = std::time::Instant::now();
-        let err = check_body_replacement(&module, "ping", &new_body)
-            .expect_err("base-case drop must be rejected to agree with full check");
+        let report = check_body_replacement(&module, "ping", &new_body)
+            .expect("uniform base-case-free recursion is checker-legal");
         let elapsed = start.elapsed();
         assert!(
-            matches!(err, ReplacementError::Type { .. }),
-            "expected Type (structural fitness) rejection, got {err:?}",
+            !report.validated_module.as_exprs().is_empty(),
+            "accepted replacement returns its validated module",
         );
-        assert_eq!(err.stage(), "check");
-        assert!(
-            err.message().contains("trivially non-terminating"),
-            "fitness diagnostic should name the non-termination cause: {}",
-            err.message(),
-        );
-        // The path returns without wedging; the fitness pass precedes the
-        // whole-module inference that can hang on base-case-free recursion.
         assert!(
             elapsed < std::time::Duration::from_secs(30),
-            "body-replacement path should reject promptly, took {elapsed:?}",
+            "body-replacement acceptance should return promptly, took {elapsed:?}",
+        );
+    }
+
+    #[test]
+    fn base_case_free_replacement_reaches_loud_lowering_boundary() {
+        // The checker accepts uniform recursion, but that does not promise that
+        // every lowering strategy supports it. chelis#730 owns this capability
+        // boundary; today's static DAG lowering refuses the unbounded expansion
+        // at the chelis#620 unroll cap instead of hanging or silently changing
+        // the program.
+        let module = render_deep(
+            "module Frag.TensorLoop\nexport (loop_self)\ndef loop_self(x: tensor[3, f32]) -> tensor[3, f32] = x\n",
+        );
+        let new_body = render_body(
+            "module M\ndef replacement(x: tensor[3, f32]) -> tensor[3, f32] = loop_self(x)\n",
+            "replacement",
+        );
+        let report = check_body_replacement(&module, "loop_self", &new_body)
+            .expect("uniform tensor recursion is checker-legal");
+        let error = crate::compiler::lower(crate::schema::LowerRequest {
+            source_kind: crate::schema::SourceKind::Deep,
+            source: chelis_deep::printer::print_canonical(report.validated_module.as_exprs()),
+            entry: Some("loop_self".to_string()),
+        })
+        .expect_err("static DAG lowering must refuse unbounded recursive expansion");
+        assert_eq!(error.stage, "lower", "{error:?}");
+        assert_eq!(error.errors.len(), 1, "{error:?}");
+        let message = &error.errors[0].message;
+        assert!(
+            message.contains("static unroll limit"),
+            "lowering refusal must name the unroll boundary: {message}",
+        );
+        assert!(
+            message.contains("loop_self"),
+            "lowering refusal must name the recursive callee: {message}",
+        );
+        assert!(
+            message.contains("chelis#620"),
+            "lowering refusal must retain its implementation receipt: {message}",
         );
     }
 

@@ -16,16 +16,18 @@
 //! test locks). This mirrors [`crate::obligation_engine`], which already
 //! shares the derived-obligation run across the two surfaces.
 
-use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
 };
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, Metadata};
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TypeExpr,
+    BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TensorPrecision,
+    TypeExpr,
 };
 
 mod smt_lower;
@@ -33,6 +35,7 @@ use smt_lower::{
     ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith, surf_expr_to_smt,
 };
 
+mod beacon;
 mod injection;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
@@ -60,6 +63,8 @@ pub enum PropertyTier {
     Smt,
     /// Mathematical induction with separately dispatched base and step SMT goals.
     Induction,
+    /// Scalar real-arithmetic relaxation through the external Beacon engine.
+    Beacon,
     Fuzz,
     /// No tier ran (a sampling/declaration error).
     None,
@@ -70,6 +75,7 @@ impl PropertyTier {
         match self {
             PropertyTier::Smt => "smt",
             PropertyTier::Induction => "induction",
+            PropertyTier::Beacon => "beacon",
             PropertyTier::Fuzz => "fuzz",
             PropertyTier::None => "none",
         }
@@ -139,6 +145,8 @@ pub struct PropertyOutcome {
     /// Present only after the induction classifier constructed and dispatched
     /// real base and step obligations.
     pub induction_evidence: Option<InductionEvidence>,
+    /// Exact external-engine report, including hull, reason, tree and request binding.
+    pub engine_evidence: Option<serde_json::Value>,
 }
 
 impl PropertyOutcome {
@@ -213,6 +221,7 @@ impl PropertyOutcome {
             accepted_samples: 0,
             rejected_samples: 0,
             induction_evidence: None,
+            engine_evidence: None,
         }
     }
 
@@ -251,7 +260,9 @@ impl PropertyOutcome {
             return None;
         }
         match self.proof_tier {
-            PropertyTier::Smt | PropertyTier::Induction => self.base_discharge.clone(),
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => {
+                self.base_discharge.clone()
+            }
             PropertyTier::Fuzz if self.samples > 0 => Some((
                 crate::discharge::Soundness::Empirical,
                 QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
@@ -314,8 +325,10 @@ impl PropertyOutcome {
             return false;
         }
         self.status == PropertyStatus::Passed
-            && (matches!(self.proof_tier, PropertyTier::Smt | PropertyTier::Induction)
-                || self.samples > 0)
+            && (matches!(
+                self.proof_tier,
+                PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon
+            ) || self.samples > 0)
     }
 
     /// The display status label, bucketed through [`is_pass`] so a
@@ -381,12 +394,14 @@ fn base_verdict(
             // Beacon interval discharge reads `sound_approximate`. A green base
             // MUST carry its discharge; a missing one is a covered-or-rejected
             // `Unsupported`, never a silent proof.
-            PropertyTier::Smt | PropertyTier::Induction => match base_discharge {
-                Some((soundness, qualifiers)) => {
-                    base_verdict_from_discharge(*soundness, qualifiers)
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => {
+                match base_discharge {
+                    Some((soundness, qualifiers)) => {
+                        base_verdict_from_discharge(*soundness, qualifiers)
+                    }
+                    None => CompositeVerdict::Unsupported,
                 }
-                None => CompositeVerdict::Unsupported,
-            },
+            }
             // A fuzz-tier base pass is empirically validated, NOT proven: seed
             // `FuzzBase` so it renders `fuzz_validated` and can never read
             // `proven_*` (chelis#422).
@@ -435,6 +450,10 @@ pub struct PropertyRunOptions {
     pub seed: u64,
     pub samples: usize,
     pub smt_timeout_ms: u64,
+    /// Engine-owned search budget; the outer deadline adds a response margin.
+    pub beacon_budget: std::time::Duration,
+    /// Optional caller wall deadline, including compiler preparation.
+    pub beacon_deadline: Option<std::time::Instant>,
     /// `"auto"` (Tier B then C), `"smt-only"`, `"induction-only"`, `"fuzz-only"`.
     pub tier: String,
     /// Property-name selector (`--only`); `None` runs all.
@@ -451,6 +470,8 @@ impl Default for PropertyRunOptions {
             seed: 0,
             samples: 100,
             smt_timeout_ms: 5000,
+            beacon_budget: std::time::Duration::from_secs(60),
+            beacon_deadline: None,
             tier: "auto".to_string(),
             only: None,
             invariant_min_rate: 0.01,
@@ -525,7 +546,7 @@ pub fn run_surf_decls_properties_with_contract_decls(
     trusted_contract_decls: &[Decl],
     options: &PropertyRunOptions,
 ) -> Result<PropertyRunResult, String> {
-    let properties = collect_surf_properties(entry_decls, options.only.as_deref());
+    let properties = collect_surf_properties(entry_decls, module_decls, options.only.as_deref())?;
     let mut out = Vec::new();
     for property in &properties {
         // chelis#436: the discharged proposition travels with the record,
@@ -584,6 +605,7 @@ pub fn run_deep_source_properties(
 #[derive(Debug, Clone)]
 struct Property {
     name: String,
+    decl_path: Vec<usize>,
     params: Vec<Param>,
     preconditions: Vec<Expr>,
     body: Expr,
@@ -603,33 +625,83 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
     out
 }
 
-/// Discover every `@property` declaration in flattened Surf decls (no
-/// hardcoded name; the `only` filter narrows by name pattern). This is the
-/// SAME discovery the CLI uses (it was relocated here so both surfaces share
-/// it, U4).
-fn collect_surf_properties(decls: &[Decl], only: Option<&str>) -> Vec<Property> {
-    decls
-        .iter()
-        .filter_map(|decl| match decl {
-            Decl::Property {
-                name,
-                params,
-                preconditions,
-                body,
-                options,
-                ..
-            } if matches_filter(name, only) => Some(Property {
-                name: name.clone(),
-                params: params.clone(),
-                preconditions: preconditions.clone(),
-                body: body.clone(),
-                samples: property_samples(options),
-                seed: property_seed(options),
-                contracts: property_contracts(options),
-            }),
-            _ => None,
-        })
-        .collect()
+/// Discover every entry `@property` and attach its exact declaration path in
+/// the declaration tree used for whole-program injection validation. Linked
+/// entry declarations are a subset of that tree, while direct source entry
+/// declarations are flattened clones, so discovery matches the complete
+/// declaration structurally and consumes each occurrence exactly once.
+fn collect_surf_properties(
+    entry_decls: &[Decl],
+    module_decls: &[Decl],
+    only: Option<&str>,
+) -> Result<Vec<Property>, String> {
+    let mut entry_properties = Vec::new();
+    collect_property_decls(entry_decls, only, &mut Vec::new(), &mut entry_properties);
+
+    let mut module_properties = Vec::new();
+    collect_property_decls(module_decls, None, &mut Vec::new(), &mut module_properties);
+    let mut used = vec![false; module_properties.len()];
+    let mut properties = Vec::with_capacity(entry_properties.len());
+
+    for (_, entry_decl) in entry_properties {
+        let Some((index, (decl_path, module_decl))) = module_properties
+            .iter()
+            .enumerate()
+            .find(|(index, (_, module_decl))| !used[*index] && *module_decl == entry_decl)
+        else {
+            let name = match entry_decl {
+                Decl::Property { name, .. } => name.as_str(),
+                _ => unreachable!("property discovery returns only property declarations"),
+            };
+            return Err(format!(
+                "entry property `{name}` is absent from the validation declaration tree"
+            ));
+        };
+        used[index] = true;
+
+        let Decl::Property {
+            name,
+            params,
+            preconditions,
+            body,
+            options,
+            ..
+        } = module_decl
+        else {
+            unreachable!("property discovery returns only property declarations");
+        };
+        properties.push(Property {
+            name: name.clone(),
+            decl_path: decl_path.clone(),
+            params: params.clone(),
+            preconditions: preconditions.clone(),
+            body: body.clone(),
+            samples: property_samples(options),
+            seed: property_seed(options),
+            contracts: property_contracts(options),
+        });
+    }
+
+    Ok(properties)
+}
+
+fn collect_property_decls<'a>(
+    decls: &'a [Decl],
+    only: Option<&str>,
+    path: &mut Vec<usize>,
+    out: &mut Vec<(Vec<usize>, &'a Decl)>,
+) {
+    for (index, decl) in decls.iter().enumerate() {
+        path.push(index);
+        match decl {
+            Decl::Module { decls, .. } => collect_property_decls(decls, only, path, out),
+            Decl::Property { name, .. } if matches_filter(name, only) => {
+                out.push((path.clone(), decl));
+            }
+            _ => {}
+        }
+        path.pop();
+    }
 }
 
 fn property_samples(options: &[PropertyOption]) -> Option<usize> {
@@ -671,6 +743,9 @@ fn prove_surf_property(
     property: &Property,
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
+    if options.tier == "beacon-only" {
+        return beacon::prove(decls, property, options);
+    }
     let seed = options.effective_seed(property.seed);
     let contract_assumptions = match contract_assumptions(property) {
         Ok(records) => records,
@@ -697,7 +772,22 @@ fn prove_surf_property(
     let auto_recursive =
         options.tier == "auto" && property_reaches_recursive_model(decls, property);
     if options.tier == "induction-only" || auto_recursive {
-        let deep = chelis_surf::desugar::desugar_program(decls);
+        let deep = match chelis_surf::desugar::desugar_program(decls) {
+            Ok(deep) => deep,
+            Err(error) => {
+                return PropertyOutcome::new(
+                    property.name.clone(),
+                    PropertyStatus::Error,
+                    PropertyTier::Induction,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("induction desugar failed: {error}")),
+                    false,
+                    Vec::new(),
+                );
+            }
+        };
         if let Err(infer) = chelis_types::check_typed_program(&deep) {
             return PropertyOutcome::new(
                 property.name.clone(),
@@ -727,7 +817,27 @@ fn prove_surf_property(
     // Assumption injection (RFC D-INJECT): a property with an
     // invariant-carrying opaque binder is verified ONLY over
     // invariant-satisfying binder values; the injection path owns it.
-    if injection::property_has_opaque_invariant_binder(module_decls, &property.params) {
+    let has_injected_binder = match injection::property_has_opaque_invariant_binder(
+        module_decls,
+        &property.decl_path,
+        &property.params,
+    ) {
+        Ok(has_injected_binder) => has_injected_binder,
+        Err(error) => {
+            return PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Error,
+                PropertyTier::None,
+                0,
+                seed,
+                None,
+                Some(error),
+                false,
+                Vec::new(),
+            );
+        }
+    };
+    if has_injected_binder {
         let mut outcome = injection::prove_with_injection(
             module_decls,
             &property.name,
@@ -3069,19 +3179,19 @@ fn sample_value(name: &str, ty: &TypeExpr, rng: &mut Lcg) -> Result<SampleValue,
         }
         // Every signed integer width, recognized through the single-source
         // `is_int_width` and sampled within the width's representable range
-        // via the single-source `int_sample_bounds` (review 5): an int8
+        // via the single-source `int_sample_bounds` (review 5): an i8
         // samples in [-128, 127], never an unrepresentable value.
         TypeExpr::Named(type_name, _) if crate::opaque::is_int_width(type_name) => {
             let (lo, hi) = crate::opaque::int_sample_bounds(type_name)
                 .expect("is_int_width implies int_sample_bounds");
             let value = rng.next_i64(lo, hi);
             let lit = Expr::Lit(Literal::Int(value), sp);
-            if type_name == "int32" {
-                // int32 is the integer-literal default; no cast needed.
+            if type_name == "i32" {
+                // i32 is the integer-literal default; no cast needed.
                 Ok(scalar_sample(
                     name,
                     lit,
-                    deep_lit(deep_int(value), "int32"),
+                    deep_lit(deep_int(value), "i32"),
                     serde_json::json!(value),
                 ))
             } else {
@@ -3278,7 +3388,7 @@ fn eval_surf_sample(
                 effects: None,
                 span: chelis_deep::Span::new(0, 0),
             });
-            debug_assert_eq!(tensor.data.len(), tensor.shape.iter().product::<usize>());
+            debug_assert!(tensor.validate().is_ok());
         }
     }
     source_decls.push(Decl::LetDef {
@@ -3352,7 +3462,7 @@ fn eval_bool_with_bindings(
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
             ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data.element_as_f64_lossy(0) != 0.0)
+                Ok(value.data.element_f64_lossy(0) != 0.0)
             }
             other => Err(format!(
                 "property root evaluated to non-bool value: {other:?}"
@@ -3596,7 +3706,7 @@ fn int_sample(name: &str, type_name: &str, value: i64) -> SampleValue {
         crate::opaque::int_sample_bounds(type_name).expect("int shrink only uses int widths");
     let value = value.clamp(lo, hi);
     let lit = Expr::Lit(Literal::Int(value), chelis_deep::Span::new(0, 0));
-    let surf_expr = if type_name == "int32" {
+    let surf_expr = if type_name == "i32" {
         lit
     } else {
         cast_expr(lit, type_name)
@@ -3762,8 +3872,8 @@ fn discover_deep_properties_expr(
                         body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
                             format!("property `{name}` def body must be a callable `fn`")
                         })?,
-                        samples: deep_int_meta(meta, "property_samples"),
-                        seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
+                        samples: deep_int_meta(meta.property_samples()),
+                        seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
                     });
                 }
             }
@@ -3789,24 +3899,22 @@ enum DeepSourceKind {
 /// matching the CLI discoverer's `property_source_kind` (F6): `None` for a
 /// non-property def; `Err` for a `chelis_role: "property"` def with an
 /// absent or invalid `property_source_kind` (a malformed property is an
-/// error on BOTH surfaces, never silently skipped). The legacy
-/// `c_earchin_role` witness without an explicit kind defaults to Bridge.
-fn deep_property_source_kind(meta: &MetaMap, name: &str) -> Result<Option<DeepSourceKind>, String> {
+/// error on BOTH surfaces, never silently skipped). Producer extensions
+/// carry no property-discovery authority.
+fn deep_property_source_kind(
+    meta: &Metadata,
+    name: &str,
+) -> Result<Option<DeepSourceKind>, String> {
     let has_chelis = meta
-        .entries
-        .iter()
-        .any(|(k, v)| k == "chelis_role" && string_value(v) == Some("property"));
-    let has_legacy = meta
-        .entries
-        .iter()
-        .any(|(k, v)| k == "c_earchin_role" && string_value(v) == Some("property_witness"));
-    if !has_chelis && !has_legacy {
+        .chelis_role()
+        .is_some_and(|value| value.value() == "property");
+    if !has_chelis {
         return Ok(None);
     }
-    let Some(kind) = deep_meta_value(meta, "property_source_kind").and_then(string_value) else {
-        if has_legacy {
-            return Ok(Some(DeepSourceKind::Bridge));
-        }
+    let Some(kind) = meta
+        .property_source_kind()
+        .map(|value| value.value().spelling())
+    else {
         return Err(format!(
             "property `{name}` metadata must include string `property_source_kind`"
         ));
@@ -3826,6 +3934,22 @@ fn prove_deep_property(
     options: &PropertyRunOptions,
 ) -> PropertyOutcome {
     let seed = options.effective_seed(property.seed);
+
+    // The range-goal extractor currently owns checked Surf syntax only.
+    // An explicitly selected engine must never fall through to sampling.
+    if options.tier == "beacon-only" {
+        return PropertyOutcome::new(
+            property.name.clone(),
+            PropertyStatus::Unsupported,
+            PropertyTier::Beacon,
+            0,
+            seed,
+            None,
+            Some("beacon-only is unavailable for Deep properties; use a checked Surf scalar range goal".to_string()),
+            false,
+            Vec::new(),
+        );
+    }
 
     // chelis#978's production induction classifier consumes checked Surf AST.
     // Deep has no equivalent structural-recursion ownership record yet. An
@@ -3998,13 +4122,32 @@ fn try_deep_tier_b(
     options: &PropertyRunOptions,
     seed: u64,
 ) -> Option<PropertyOutcome> {
+    let grad_diagnostic = RefCell::new(None);
     let ctx = DeepInlineCtx {
         exprs,
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: Some(&grad_diagnostic),
     };
-    let postcondition = deep_expr_to_smt(&property.body, &ctx)?;
+    let postcondition = match deep_expr_to_smt(&property.body, &ctx) {
+        Some(postcondition) => postcondition,
+        None if options.tier == "smt-only" => {
+            let reason = grad_diagnostic.borrow().clone()?;
+            return Some(PropertyOutcome::new(
+                property.name.clone(),
+                PropertyStatus::Unsupported,
+                PropertyTier::Smt,
+                0,
+                seed,
+                None,
+                Some(reason),
+                false,
+                Vec::new(),
+            ));
+        }
+        None => return None,
+    };
     let variables: Vec<(String, crate::solver::SmtSort)> = property
         .params
         .iter()
@@ -4192,6 +4335,7 @@ fn deep_constraint_sampling_plan(
         depth: 0,
         max_depth: 3,
         call_stack: vec![],
+        grad_diagnostic: None,
     };
     let preconditions = property
         .preconditions
@@ -4322,41 +4466,29 @@ fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
 // Deep metadata helpers
 // ===========================================================================
 
-/// Observe either stamped `Node` or transitional canonical `List` through one
-/// consumer view. This does not normalize, clone, or reconstruct the tree: new
-/// file ingress stays in the role-typed representation while legacy callers
-/// remain readable until the carrier is deleted atomically.
-fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &MetaMap, &[DeepExpr])> {
-    match expr {
-        DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        DeepExpr::List(list, _) => {
-            let tag = list_tag_from_list(list)?;
-            let meta = list.elements.get(1).and_then(meta_map)?;
-            let children = list.elements.get(2..)?;
-            Some((tag, meta, children))
-        }
-        _ => None,
+/// Borrow a decoded node's tag, metadata and children without cloning or
+/// reconstructing the tree.
+fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => Some((tag, metadata, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
-fn meta_map(expr: &DeepExpr) -> Option<&MetaMap> {
+fn meta_map(expr: &DeepExpr) -> Option<&Metadata> {
     match expr {
         DeepExpr::Map(map, _) => Some(map),
         _ => None,
     }
 }
 
-fn deep_meta_value<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a DeepExpr> {
-    meta.entries
-        .iter()
-        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
-}
-
-fn deep_int_meta(meta: &MetaMap, key: &str) -> Option<usize> {
-    match deep_meta_value(meta, key).and_then(deep_int_value) {
-        Some(value) if value >= 0 => Some(value as usize),
-        _ => None,
-    }
+fn deep_int_meta(value: Option<&chelis_deep::annotations::RuntimeExpression>) -> Option<usize> {
+    let value = deep_int_value(value?.expression())?;
+    usize::try_from(value).ok()
 }
 
 fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
@@ -4369,26 +4501,22 @@ fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
     }
 }
 
-fn deep_property_params(meta: &MetaMap) -> Option<Vec<Param>> {
-    let (tag, _, children) = deep_node_parts(deep_meta_value(meta, "property_quantifiers")?)?;
-    if tag != DeepTag::Params {
-        return None;
-    }
-    let mut params = Vec::new();
-    for child in children {
-        if let Some(param) = deep_param(child) {
-            params.push(param);
-        }
-    }
-    Some(params)
+fn deep_property_params(meta: &Metadata) -> Option<Vec<Param>> {
+    meta.property_quantifiers()?
+        .values()
+        .iter()
+        .map(|binder| deep_param(&binder.to_expression()))
+        .collect()
 }
 
-fn deep_property_preconditions(meta: &MetaMap) -> Option<Vec<DeepExpr>> {
-    let (tag, _, children) = deep_node_parts(deep_meta_value(meta, "property_preconditions")?)?;
-    if tag != DeepTag::Tuple {
-        return None;
-    }
-    Some(children.to_vec())
+fn deep_property_preconditions(meta: &Metadata) -> Option<Vec<DeepExpr>> {
+    Some(
+        meta.property_preconditions()?
+            .values()
+            .iter()
+            .map(|value| value.expression().clone())
+            .collect(),
+    )
 }
 
 fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
@@ -4426,7 +4554,11 @@ fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
                     }
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(TypeExpr::Tensor(dims, precision.to_string(), span))
+            Some(TypeExpr::Tensor(
+                dims,
+                TensorPrecision::new(precision, span),
+                span,
+            ))
         }
         _ => None,
     }
@@ -4464,16 +4596,21 @@ fn deep_param(expr: &DeepExpr) -> Option<Param> {
             span: *span,
         });
     }
-    let (elements, span) = match expr {
-        DeepExpr::BareList(elements, span) => (elements.as_slice(), *span),
-        DeepExpr::List(list, span) => (list.elements.as_slice(), *span),
-        _ => return None,
+    let span = expr.span();
+    let (name, metadata) = match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => (
+            elements.first().and_then(symbol_text)?,
+            elements.get(1).and_then(meta_map),
+        ),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return None,
     };
-    let name = elements.first().and_then(symbol_text)?;
-    let ty = elements
-        .get(1)
-        .and_then(meta_map)
-        .and_then(|meta| deep_meta_value(meta, "type"))
+    let ty = metadata
+        .and_then(|meta| meta.ty())
+        .map(|ty| ty.expression())
         .and_then(type_expr_from_deep);
     Some(Param {
         name: name.to_string(),
@@ -4535,25 +4672,16 @@ fn deep_bool(value: bool) -> DeepExpr {
 fn deep_string(value: &str) -> DeepExpr {
     DeepExpr::Atom(DeepAtom::Str(value.to_string()), deep_span())
 }
-fn deep_map(entries: Vec<(String, DeepExpr)>) -> DeepExpr {
-    DeepExpr::Map(MetaMap { entries }, deep_span())
-}
-fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
-    DeepExpr::List(DeepList { elements }, deep_span())
-}
 fn deep_node(tag: &str, children: Vec<DeepExpr>) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(Vec::new())];
-    elements.extend(children);
-    deep_list(elements)
+    deep_node_meta(tag, Vec::new(), children)
 }
-fn deep_node_meta(
-    tag: &str,
-    entries: Vec<(String, DeepExpr)>,
-    children: Vec<DeepExpr>,
-) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(entries)];
-    elements.extend(children);
-    deep_list(elements)
+fn deep_node_meta(tag: &str, entries: Vec<M>, children: Vec<DeepExpr>) -> DeepExpr {
+    DeepExpr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::try_from_values(entries).expect("distinct producer annotations"),
+        children,
+        deep_span(),
+    )
 }
 fn deep_var(name: &str) -> DeepExpr {
     deep_node("var", vec![deep_symbol(name)])
@@ -4561,26 +4689,17 @@ fn deep_var(name: &str) -> DeepExpr {
 fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     deep_node_meta(
         "lit",
-        vec![(
-            "type".to_string(),
-            deep_node("t-prim", vec![deep_symbol(ty_name)]),
+        vec![M::Type(
+            TypeSyntax::try_new(deep_node("t-prim", vec![deep_symbol(ty_name)]))
+                .expect("primitive type"),
         )],
         vec![value],
     )
 }
 
-fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
-    list.tag()
-}
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),
-        _ => None,
-    }
-}
-fn string_value(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::Atom(DeepAtom::Str(value), _) => Some(value),
         _ => None,
     }
 }
@@ -4652,7 +4771,7 @@ pub fn property_dependency_edges(
             _ => None,
         })
         .collect();
-    let properties = collect_surf_properties(&flat, None);
+    let properties = collect_surf_properties(&flat, &flat, None)?;
     let mut edges = Vec::new();
     for property in &properties {
         let param_names: std::collections::BTreeSet<&str> =

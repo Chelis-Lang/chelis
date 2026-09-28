@@ -163,17 +163,17 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     // Anchor on the opening brace: every compiled function is also
     // forward-declared, and matching the bare signature slices the
     // declaration plus whatever function happens to follow it.
-    let (head, params) = signature
+    let (head, _params) = signature
         .split_once('(')
         .expect("function signature has parameters");
-    let (ret, name) = head
+    let (_ret, name) = head
         .rsplit_once(' ')
         .expect("function signature has a return type and name");
-    let definition = format!("{ret} {name}__chelis_owned_body({params} {{");
-    let start = emitted
-        .find(&definition)
-        .unwrap_or_else(|| panic!("emitted C defines `{definition}`:\n{emitted}"));
-    let rest = &emitted[start..];
+    // chelis#1820: located by NAME, not by the full signature. chelis#1799
+    // added a `chelis_rng_state` parameter to every host body, and the old
+    // full-signature needle then missed the definition and failed before this
+    // row counted anything. The parameter list is not what the row asserts.
+    let rest = common::authored_host_body_definition(emitted, name);
     let end = rest.find("\n}").expect("function is closed");
     &rest[..end]
 }
@@ -503,18 +503,55 @@ fn conditional_over_existing_bindings_claims_no_third_allocation() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = to_tensor([1.0f32, 2.0f32])\n\
-                  d = to_tensor([3.0f32, 4.0f32])\n\
-                  c = if true then a else d\n";
-    let (stdout, emitted) = build_run_and_emit(source, "alias_if");
-    assert_retain_release_counts(
-        &emitted,
-        "chelis_tensor_retain(",
-        "chelis_tensor_release(",
-        (5, 6),
-        "two allocations, the two emitted arm clones, and three artifact roots stay exact",
-    );
-    assert_line_matches_eval(source, "alias_if", &stdout, "c");
+    // [04-LIN-5..6]: each selected arm provides one owner while both input
+    // roots stay live. A literal condition folds away the arm clones, so it
+    // cannot exercise this control-flow ownership join (chelis#1776).
+    for condition in ["3i64 > 2i64", "3i64 < 2i64"] {
+        let source = format!(
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             d = to_tensor([3.0f32, 4.0f32])\n\
+             flag = {condition}\n\
+             c = if flag then a else d\n"
+        );
+        let (stdout, emitted) = build_run_and_emit(&source, "alias_if");
+        assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+        assert_retain_release_counts(
+            &emitted,
+            "chelis_tensor_retain(",
+            "chelis_tensor_release(",
+            (5, 6),
+            "two allocations, the two emitted arm clones, and three artifact roots stay exact",
+        );
+        for root in ["a", "d", "c"] {
+            assert_line_matches_eval(&source, "alias_if", &stdout, root);
+        }
+    }
+}
+
+#[test]
+fn folded_conditional_preserves_both_input_roots_without_arm_clones() {
+    if skip_without_cc() {
+        return;
+    }
+    for condition in ["true", "false"] {
+        let source = format!(
+            "a = to_tensor([1.0f32, 2.0f32])\n\
+             d = to_tensor([3.0f32, 4.0f32])\n\
+             c = if {condition} then a else d\n"
+        );
+        let (stdout, emitted) = build_run_and_emit(&source, "folded_alias_if");
+        assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+        assert_retain_release_counts(
+            &emitted,
+            "chelis_tensor_retain(",
+            "chelis_tensor_release(",
+            (3, 5),
+            "constant folding removes arm clones, not either input allocation or a root owner",
+        );
+        for root in ["a", "d", "c"] {
+            assert_line_matches_eval(&source, "folded_alias_if", &stdout, root);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,21 +652,50 @@ fn block_result_aliasing_an_outer_binding_claims_no_second_allocation() {
     assert_line_matches_eval(source, "alias_block_result", &stdout, "b");
 }
 
+/// A handler scope returning an outer binding. The scope was `with seed`
+/// until chelis#2413 retired it; `with device("cpu")` is the handler scope
+/// host C builds. One allocation plus two retained owners balance three
+/// releases.
 #[test]
-fn seeded_block_returning_an_outer_binding_claims_no_second_allocation() {
+fn handler_block_returning_an_outer_binding_claims_no_second_allocation() {
     if skip_without_cc() {
         return;
     }
-    let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with seed(1i64) { a }\n";
-    let (stdout, emitted) = build_run_and_emit(source, "alias_with_seed");
+    let source = "a = to_tensor([1.0f32, 2.0f32])\nb = with device(\"cpu\") { a }\n";
+    let (stdout, emitted) = build_run_and_emit(source, "alias_with_device");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 1);
     assert_retain_release_counts(
         &emitted,
         "chelis_tensor_retain(",
         "chelis_tensor_release(",
         (2, 3),
-        "a seed scope changes the RNG while two artifact roots remain balanced",
+        "one allocation and two artifact roots balance",
     );
-    assert_line_matches_eval(source, "alias_with_seed", &stdout, "b");
+    assert_line_matches_eval(source, "alias_with_device", &stdout, "a");
+    assert_line_matches_eval(source, "alias_with_device", &stdout, "b");
+}
+
+/// Negative parity: a handler scope that constructs a tensor must not be
+/// mistaken for the alias above and lose its independent allocation.
+#[test]
+fn handler_block_constructing_a_tensor_keeps_its_independent_allocation() {
+    if skip_without_cc() {
+        return;
+    }
+    let source = "a = to_tensor([1.0f32, 2.0f32])\n\
+                  b = with device(\"cpu\") { to_tensor([3.0f32, 4.0f32]) }\n";
+    let (stdout, emitted) = build_run_and_emit(source, "fresh_with_device");
+    assert_eq!(release_count(&emitted, "chelis_tensor_from_values("), 2);
+    assert_retain_release_counts(
+        &emitted,
+        "chelis_tensor_retain(",
+        "chelis_tensor_release(",
+        (2, 4),
+        "the fresh result transfers directly out of the handler scope; two allocations and two roots balance",
+    );
+    for root in ["a", "b"] {
+        assert_line_matches_eval(source, "fresh_with_device", &stdout, root);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -775,8 +841,8 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     if skip_without_cc() {
         return;
     }
-    let source = "def idl(p: List[int64]) -> List[int64] = p\n\
-                  def h3() -> int64 = {\n  base = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
+    let source = "def idl(p: List[i64]) -> List[i64] = p\n\
+                  def h3() -> i64 = {\n  base = [1i64, 2i64]\n  r = idl(base)\n  len(r)\n}\n\
                   n = h3()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_balance");
     let body = emitted_function(&emitted, "int64_t h3()");
@@ -792,7 +858,7 @@ fn call_escape_retain_inside_a_block_keeps_its_matching_release() {
     assert_eq!(
         creations + retains,
         releases,
-        "`h3` returns an int64, so it transfers no reference out: every \
+        "`h3` returns an i64, so it transfers no reference out: every \
          allocation it makes and every reference it retains must be \
          released before it returns (chelis#1222). Got {creations} \
          creation(s) + {retains} retain(s) vs {releases} \
@@ -810,8 +876,8 @@ fn call_escape_retain_survives_a_callee_that_may_return_a_captured_binding() {
     // outer-aliasing. The retain has already fired for the argument, so
     // the outer-alias verdict must not cancel the release.
     let source = "g = [9i64]\n\
-                  def f1(p: List[int64], c: bool) -> List[int64] = if c then p else g\n\
-                  def h1() -> int64 = {\n  base = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
+                  def f1(p: List[i64], c: bool) -> List[i64] = if c then p else g\n\
+                  def h1() -> i64 = {\n  base = [1i64, 2i64]\n  r = f1(base, true)\n  len(r)\n}\n\
                   n = h1()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "escape_retain_outer");
     let body = emitted_function(&emitted, "int64_t h1()");
@@ -900,8 +966,8 @@ fn renaming_a_lambda_parameter_that_shadows_a_binding_changes_nothing() {
     // emitted a `chelis_list_retain` inside the loop for one spelling and not
     // the other -- a leak that grew with the iteration count.
     assert_alpha_invariant(
-        "def idl(x: List[int64]) -> List[int64] = x\n\
-         def h() -> int64 = {\n\
+        "def idl(x: List[i64]) -> List[i64] = x\n\
+         def h() -> i64 = {\n\
          \x20 p = [[1i64], [2i64]]\n\
          \x20 q = map(fn (p) -> idl(p), p)\n\
          \x20 add(len(p), len(q))\n\
@@ -986,13 +1052,15 @@ fn file_fed_pipeline_with_an_alias_binding_runs_to_completion() {
     // is about and the one that must not move for any lowering reason. Counted
     // over the emitted file rather than over `main`, because where a
     // descriptor is released is a lowering decision and whether it is released
-    // is not.
+    // is not. One of the releases is not this program's: the emitted prelude's
+    // key helper `chelis_key_take_value` (chelis#2413) takes ownership of a
+    // rank-0 key tensor and releases it within that helper.
     assert_eq!(
         (
             emitted.matches("chelis_tensor_retain(").count(),
             emitted.matches("chelis_tensor_release(").count(),
         ),
-        (7, 16),
+        (7, 17),
         "the file-fed pipeline must balance every artifact owner and \
          descriptor across the emitted unit",
     );
@@ -1066,10 +1134,10 @@ fn a_parameter_spelled_like_a_binder_key_takes_no_retain() {
     // key the block's own binding had just been given. The escaping result
     // then looked like a transfer of that binding and took a retain nobody
     // releases.
-    let colliding = "def f(__bind_0: List[int64]) -> List[int64] = {\n\
+    let colliding = "def f(__bind_0: List[i64]) -> List[i64] = {\n\
                      \x20 q = [1i64]\n  __bind_0\n}\n\
                      z = [7i64]\nb = f(z)\n";
-    let distinct = "def f(zzq_param: List[int64]) -> List[int64] = {\n\
+    let distinct = "def f(zzq_param: List[i64]) -> List[i64] = {\n\
                     \x20 q = [1i64]\n  zzq_param\n}\n\
                     z = [7i64]\nb = f(z)\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "binder_key_param");
@@ -1102,10 +1170,10 @@ fn a_let_binder_shadowing_a_parameter_does_not_mask_an_outer_result() {
     // returns, and `main` released `g` twice. Parameters are the outermost
     // scope, so `env` decides.
     let colliding = "g = [1i64]\n\
-                     def f(p: List[int64]) -> List[int64] = {\n  p = g\n  p\n}\n\
+                     def f(p: List[i64]) -> List[i64] = {\n  p = g\n  p\n}\n\
                      b = f([2i64])\nc = g\n";
     let distinct = "g = [1i64]\n\
-                    def f(p: List[int64]) -> List[int64] = {\n\
+                    def f(p: List[i64]) -> List[i64] = {\n\
                     \x20 zzq_inner = g\n  zzq_inner\n}\n\
                     b = f([2i64])\nc = g\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "param_shadow_outer");
@@ -1196,7 +1264,7 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     // the block frees at its close, the result slot needs the issue #406
     // escape retain the bare-`Var` and call transfers already take. Without
     // it the block released one allocation twice.
-    let source = "def h() -> int64 = {\n  base = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
+    let source = "def h() -> i64 = {\n  base = [1i64, 2i64]\n  r = debug(base)\n  len(r)\n}\n\
                   n = h()\n";
     let (_stdout, emitted) = build_run_and_emit(source, "builtin_transfer_balance");
     let body = emitted_function(&emitted, "int64_t h()");
@@ -1211,7 +1279,7 @@ fn a_builtin_transfer_out_of_a_block_keeps_its_matching_release() {
     assert_eq!(
         creations + retains,
         releases,
-        "`h` returns an int64, so it transfers no reference out: every \
+        "`h` returns an i64, so it transfers no reference out: every \
          allocation it makes and every reference it retains must be released \
          before it returns. Got {creations} creation(s) + {retains} \
          retain(s) vs {releases} release(s):\n{body}"

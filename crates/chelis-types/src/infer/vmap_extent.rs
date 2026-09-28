@@ -34,14 +34,19 @@ pub(super) fn validate_vmap_extent_dependencies(
     type_env: &IrTypeEnv,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let defs = collect_functions(exprs, type_env);
+    let declared_signatures = collect_declared_sig_metadata(top_level_decl_items(exprs));
+    let defs = collect_functions(exprs, type_env, &declared_signatures);
     let summaries = summarize_functions(&defs);
     for expr in exprs {
         walk_vmap_sites(expr, &defs, &summaries, errors);
     }
 }
 
-fn collect_functions(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> BTreeMap<String, FunctionDef> {
+fn collect_functions(
+    exprs: &[deep::Expr],
+    type_env: &IrTypeEnv,
+    declared_signatures: &UnordMap<String, DeclaredSigMetadata>,
+) -> BTreeMap<String, FunctionDef> {
     let mut defs = BTreeMap::new();
     for expr in top_level_decl_items(exprs) {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
@@ -54,12 +59,16 @@ fn collect_functions(exprs: &[deep::Expr], type_env: &IrTypeEnv) -> BTreeMap<Str
             continue;
         };
         let param_types = build_def_param_scope(expr, type_env);
+        let declared_param_types = declared_signatures
+            .get(name)
+            .map(|signature| signature.param_types.as_slice());
         let tensor_params = params
             .iter()
             .enumerate()
             .filter_map(|(index, param)| {
-                param_types
-                    .get(param)
+                declared_param_types
+                    .and_then(|types| types.get(index))
+                    .or_else(|| param_types.get(param))
                     .is_some_and(type_expr_contains_tensor)
                     .then_some(index)
             })
@@ -84,7 +93,6 @@ fn inline_function(expr: &deep::Expr) -> Option<FunctionDef> {
     let body = kids.get(1)?.clone();
     let param_exprs = match params_expr {
         deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
         deep::Expr::BareList(elements, _) => elements.as_slice(),
         _ => return None,
     };
@@ -173,18 +181,15 @@ fn analyze_expr(
                 analyze_expr(&meta.expr, locals, summaries, movement_deps)
             }
             deep::Expr::Map(map, _) => {
-                let values = map
-                    .entries
-                    .iter()
-                    .map(|(_, value)| value.clone())
-                    .collect::<Vec<_>>();
+                let mut values = Vec::new();
+                map.visit_syntax(&mut |_, value| values.push(value.clone()));
                 union_children(&values, locals, summaries, movement_deps)
             }
             deep::Expr::UnknownForm(data) => {
                 union_children(&data.children, locals, summaries, movement_deps)
             }
             deep::Expr::Atom(_, _) => ParamDeps::new(),
-            deep::Expr::List(_, _) | deep::Expr::Node(_, _) => ParamDeps::new(),
+            deep::Expr::Node(_, _) => ParamDeps::new(),
         };
     };
 
@@ -389,15 +394,15 @@ fn walk_vmap_sites(
 
     match expr {
         deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
+            map.visit_syntax(&mut |_, value| {
                 walk_vmap_sites(value, defs, summaries, errors);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
             walk_vmap_sites(&meta.expr, defs, summaries, errors);
-            for (_, value) in &meta.entries {
+            meta.metadata.visit_syntax(&mut |_, value| {
                 walk_vmap_sites(value, defs, summaries, errors);
-            }
+            });
         }
         deep::Expr::BareList(elements, _) => {
             for child in elements {
@@ -409,7 +414,7 @@ fn walk_vmap_sites(
                 walk_vmap_sites(child, defs, summaries, errors);
             }
         }
-        deep::Expr::Atom(_, _) | deep::Expr::List(_, _) | deep::Expr::Node(_, _) => {}
+        deep::Expr::Atom(_, _) | deep::Expr::Node(_, _) => {}
     }
 }
 

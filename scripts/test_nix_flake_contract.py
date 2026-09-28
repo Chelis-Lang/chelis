@@ -21,6 +21,7 @@ EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelisup", "default"]
 EXPECTED_APPS = ["chelis", "chelisup", "default"]
 EXPECTED_HEADERS = [
     "chelis_runtime.h",
+    "chelis_runtime_views.h",
     "chelis_runtime_dtype.h",
     "chelis_blas.h",
     "chelis_simd.h",
@@ -93,6 +94,18 @@ def assert_automatic_crate2nix_contract(
         )
 
 
+RUNTIME_EXPORT_HEADER = re.compile(
+    r'cp "\$runtime_export/(chelis_[^\s/"]+\.h)" "\$staging/include/"'
+)
+
+
+def release_staging_steps(release: str) -> list[str]:
+    """Each release job's `Stage tarball contents` step, up to its next step."""
+    marker = "      - name: Stage tarball contents\n"
+    return [part.split("\n      - name: ", 1)[0] for part in release.split(marker)[1:]]
+
+
+
 class NixFlakeContractTests(unittest.TestCase):
     @REQUIRES_NIX
     def test_contract_records_exact_release_header_manifest(self) -> None:
@@ -102,18 +115,30 @@ class NixFlakeContractTests(unittest.TestCase):
         release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        staged_headers = set(
-            re.findall(
-                r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
-                r'"\$staging/include/"',
-                release,
-            )
-        )
-        self.assertEqual(staged_headers, set(EXPECTED_HEADERS))
-        self.assertIn('cp target/release/chelis "$staging/bin/"', release)
-        self.assertIn(
-            'cp target/release/libchelis_runtime.a "$staging/lib/"', release
-        )
+        # Every release job ships the runtime its chelis carries: `lib/` and
+        # `include/` come from `chelis runtime export`, and the shipped archive
+        # must match the sealed export's receipt (spec/08-backends.md §2.1).
+        steps = release_staging_steps(release)
+        self.assertEqual(len(steps), 3, "each release job stages one tarball")
+        for step in steps:
+            with self.subTest(staging=re.search(r'staging="([^"]+)"', step).group(1)):
+                self.assertIn('cp target/release/chelis "$staging/bin/"', step)
+                self.assertIn(
+                    './target/release/chelis runtime export "$runtime_export"', step
+                )
+                self.assertIn(
+                    'cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"', step
+                )
+                self.assertIn('("sealed", digest)', step)
+                self.assertIn(
+                    '"$runtime_export/chelis_runtime.receipt.json" '
+                    '"$staging/lib/libchelis_runtime.a"',
+                    step,
+                )
+                self.assertEqual(
+                    set(RUNTIME_EXPORT_HEADER.findall(step)), set(EXPECTED_HEADERS)
+                )
+        self.assertNotIn("target/release/libchelis_runtime.a", release)
         self.assertEqual(
             contracts["runtimeConsumers"],
             {"aarch64-darwin": "Accelerate", "x86_64-linux": "OpenBLAS"},
@@ -180,61 +205,6 @@ class NixFlakeContractTests(unittest.TestCase):
         )
         self.assertEqual(default_program, chelis_program)
 
-    def test_package_shape_rejects_every_undeclared_path(self) -> None:
-        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
-        self.assertIn("assert_exact_inventory", checks)
-        self.assertIn('find "$package" -mindepth 1 -printf \'%P\\n\' | sort', checks)
-
-    def test_static_cvc5_library_does_not_force_a_static_executable(self) -> None:
-        cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
-        self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
-        self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
-
-    def test_flake_pins_crate2nix_as_a_non_flake_input(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        self.assertIn('url = "github:nix-community/crate2nix/0.15.0";', flake)
-        self.assertRegex(
-            flake,
-            r"crate2nix\s*=\s*\{[^}]*flake\s*=\s*false;",
-        )
-        lock = json.loads((REPO_ROOT / "flake.lock").read_text(encoding="utf-8"))
-        crate2nix = lock["nodes"]["crate2nix"]
-        self.assertFalse(crate2nix["flake"])
-        self.assertEqual(
-            crate2nix["locked"]["rev"],
-            "7c33e664668faecf7655fa53861d7a80c9e464a2",
-        )
-        self.assertEqual(crate2nix["original"]["ref"], "0.15.0")
-
-    def test_rust_builds_use_an_automatic_crate2nix_graph(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        assert_automatic_crate2nix_contract(
-            flake,
-            packages,
-            source,
-            cargo_nix_exists=(REPO_ROOT / "Cargo.nix").exists(),
-        )
-        self.assertIn('workspaceMembers."chelis-cli".build', packages)
-        self.assertIn('workspaceMembers."chelis-runtime".build', packages)
-        self.assertIn('workspaceMembers."chelisup".build', packages)
-        self.assertIn('features = [ "smt" ];', packages)
-        self.assertNotIn("buildRustPackage", packages)
-
-    def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = flake.replace("allow-import-from-derivation = true;", "")
-        with self.assertRaisesRegex(AssertionError, "enable import from derivation"):
-            assert_automatic_crate2nix_contract(
-                mutated,
-                packages,
-                source,
-                cargo_nix_exists=False,
-            )
-
     @REQUIRES_NIX
     def test_nix_evaluation_fails_when_ifd_is_disabled(self) -> None:
         system = nix_raw(
@@ -263,82 +233,6 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("allow-import-from-derivation", completed.stderr)
         self.assertIn("disabled", completed.stderr)
-
-    def test_online_generator_fails_the_automatic_graph_contract(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = packages.replace('      CARGO_NET_OFFLINE = "true";\n', "")
-        with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
-            assert_automatic_crate2nix_contract(
-                flake,
-                mutated,
-                source,
-                cargo_nix_exists=False,
-            )
-
-    def test_missing_generator_source_fails_the_automatic_graph_contract(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = source.replace('    "Cargo.lock"\n', "")
-        with self.assertRaisesRegex(AssertionError, "generator source is incomplete"):
-            assert_automatic_crate2nix_contract(
-                flake,
-                packages,
-                mutated,
-                cargo_nix_exists=False,
-            )
-
-    def test_cvc5_sys_override_uses_the_fixed_native_inputs(self) -> None:
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        self.assertIn('"cvc5-sys" = attrs:', packages)
-        self.assertIn('CVC5_DIR = "${cvc5.dir}";', packages)
-        self.assertIn("pkgs.llvmPackages.libclang", packages)
-        self.assertIn("pkgs.pkg-config", packages)
-        self.assertIn("LIBCLANG_PATH", packages)
-
-    def test_chelisup_rust_crate_does_not_own_nix_gc_roots(self) -> None:
-        crate_dir = REPO_ROOT / "crates" / "chelisup"
-        rust_sources = sorted(crate_dir.rglob("*.rs"))
-        self.assertTrue(rust_sources)
-        for path in rust_sources:
-            source = path.read_text(encoding="utf-8")
-            self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
-
-    def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        expected_roots = {
-            "chelis-cli": "chelis-source/crates/chelis-cli",
-            "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
-            "chelis-cove": "chelis-source/crates/chelis-cove",
-            "tree-sitter-chelis": "chelis-source/tree-sitter-chelis",
-        }
-        for crate, source_root in expected_roots.items():
-            with self.subTest(crate=crate):
-                self.assertIn(f'"{crate}" = attrs:', packages)
-                self.assertIn(f'sourceRoot = "{source_root}";', packages)
-        self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
-
-    def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
-        policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")
-        self.assertNotIn('pattern = "Cargo.nix"', policy)
-
-    def test_native_checks_inspect_the_automatic_crate2nix_graph(self) -> None:
-        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
-        self.assertIn("crate2nixGeneration", checks)
-        self.assertIn("built.generatedCargoNix", checks)
-        self.assertIn("Cargo-generated.nix", checks)
-        self.assertNotIn("crate2nixGraphSync", checks)
-        self.assertNotIn("crate2nixRegeneration", checks)
-        self.assertFalse((REPO_ROOT / "scripts/check_crate2nix_sync.py").exists())
-
-    def test_version_contract_requires_exact_cli_output(self) -> None:
-        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
-        self.assertIn(
-            'if [ "$version_output" != ${escape "chelis ${built.version}"} ]; then',
-            checks,
-        )
 
     @REQUIRES_NIX
     def test_contract_stubs_cover_package_shape_and_behavior(self) -> None:
@@ -689,6 +583,164 @@ class NixFlakeContractTests(unittest.TestCase):
             staging_root = home / "nix-gcroots" / "chelisup.next"
             self.assertFalse(staging_root.exists())
             self.assertFalse(staging_root.is_symlink())
+
+
+class NixSourceContractTests(unittest.TestCase):
+    def test_package_shape_rejects_every_undeclared_path(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertIn("assert_exact_inventory", checks)
+        self.assertIn('find "$package" -mindepth 1 -printf \'%P\\n\' | sort', checks)
+
+    def test_static_cvc5_library_does_not_force_a_static_executable(self) -> None:
+        cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
+        self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
+
+    def test_flake_pins_crate2nix_as_a_non_flake_input(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        self.assertIn('url = "github:nix-community/crate2nix/0.15.0";', flake)
+        self.assertRegex(
+            flake,
+            r"crate2nix\s*=\s*\{[^}]*flake\s*=\s*false;",
+        )
+        lock = json.loads((REPO_ROOT / "flake.lock").read_text(encoding="utf-8"))
+        crate2nix = lock["nodes"]["crate2nix"]
+        self.assertFalse(crate2nix["flake"])
+        self.assertEqual(
+            crate2nix["locked"]["rev"],
+            "7c33e664668faecf7655fa53861d7a80c9e464a2",
+        )
+        self.assertEqual(crate2nix["original"]["ref"], "0.15.0")
+
+    def test_rust_builds_use_an_automatic_crate2nix_graph(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        assert_automatic_crate2nix_contract(
+            flake,
+            packages,
+            source,
+            cargo_nix_exists=(REPO_ROOT / "Cargo.nix").exists(),
+        )
+        self.assertIn('workspaceMembers."chelis-cli".build', packages)
+        self.assertIn('workspaceMembers."chelisup".build', packages)
+        self.assertNotIn("buildRustPackage", packages)
+
+    def test_packages_ship_the_sealed_compilers_runtime_export(self) -> None:
+        # `chelis` and `chelis-runtime` ship the runtime the compiler carries,
+        # never a separately built crate (spec/08-backends.md §2.1).
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        compiler = re.search(
+            r'compilerCrate = cargoGraph\.workspaceMembers\."chelis-cli"\.build\.override \{\s*'
+            r"features = \[([^\]]*)\];",
+            packages,
+        )
+        self.assertIsNotNone(compiler, "the compiler crate override is missing")
+        self.assertEqual(
+            set(re.findall(r'"([^"]+)"', compiler.group(1))), {"smt", "sealed-runtime"}
+        )
+        self.assertNotIn('workspaceMembers."chelis-runtime"', packages)
+        runtime = packages.split('runtime = pkgs.runCommand "chelis-runtime-${version}"', 1)[
+            1
+        ].split("\n  '';", 1)[0]
+        for line in (
+            '${compiler}/bin/chelis runtime export "$export_dir"',
+            'test "$(jq -r .mode "$receipt")" = sealed',
+            'test "$archive_sha256" = "$(jq -r .archive_sha256 "$receipt")"',
+        ):
+            self.assertIn(line, runtime)
+        self.assertIn(
+            "cp ${runtime}/lib/libchelis_runtime.a $out/lib/libchelis_runtime.a", packages
+        )
+
+    def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        mutated = flake.replace("allow-import-from-derivation = true;", "")
+        with self.assertRaisesRegex(AssertionError, "enable import from derivation"):
+            assert_automatic_crate2nix_contract(
+                mutated,
+                packages,
+                source,
+                cargo_nix_exists=False,
+            )
+
+    def test_online_generator_fails_the_automatic_graph_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        mutated = packages.replace('      CARGO_NET_OFFLINE = "true";\n', "")
+        with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
+            assert_automatic_crate2nix_contract(
+                flake,
+                mutated,
+                source,
+                cargo_nix_exists=False,
+            )
+
+    def test_missing_generator_source_fails_the_automatic_graph_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        mutated = source.replace('    "Cargo.lock"\n', "")
+        with self.assertRaisesRegex(AssertionError, "generator source is incomplete"):
+            assert_automatic_crate2nix_contract(
+                flake,
+                packages,
+                mutated,
+                cargo_nix_exists=False,
+            )
+
+    def test_cvc5_sys_override_uses_the_fixed_native_inputs(self) -> None:
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        self.assertIn('"cvc5-sys" = attrs:', packages)
+        self.assertIn('CVC5_DIR = "${cvc5.dir}";', packages)
+        self.assertIn("pkgs.llvmPackages.libclang", packages)
+        self.assertIn("pkgs.pkg-config", packages)
+        self.assertIn("LIBCLANG_PATH", packages)
+
+    def test_chelisup_rust_crate_does_not_own_nix_gc_roots(self) -> None:
+        crate_dir = REPO_ROOT / "crates" / "chelisup"
+        rust_sources = sorted(crate_dir.rglob("*.rs"))
+        self.assertTrue(rust_sources)
+        for path in rust_sources:
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
+
+    def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        expected_roots = {
+            "chelis-cli": "chelis-source/crates/chelis-cli",
+            "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
+            "chelis-cove": "chelis-source/crates/chelis-cove",
+            "tree-sitter-chelis": "chelis-source/tree-sitter-chelis",
+        }
+        for crate, source_root in expected_roots.items():
+            with self.subTest(crate=crate):
+                self.assertIn(f'"{crate}" = attrs:', packages)
+                self.assertIn(f'sourceRoot = "{source_root}";', packages)
+        self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
+
+    def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
+        policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")
+        self.assertNotIn('pattern = "Cargo.nix"', policy)
+
+    def test_native_checks_inspect_the_automatic_crate2nix_graph(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertIn("crate2nixGeneration", checks)
+        self.assertIn("built.generatedCargoNix", checks)
+        self.assertIn("Cargo-generated.nix", checks)
+        self.assertNotIn("crate2nixGraphSync", checks)
+        self.assertNotIn("crate2nixRegeneration", checks)
+        self.assertFalse((REPO_ROOT / "scripts/check_crate2nix_sync.py").exists())
+
+    def test_version_contract_requires_exact_cli_output(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertIn(
+            'if [ "$version_output" != ${escape "chelis ${built.version}"} ]; then',
+            checks,
+        )
 
 
 if __name__ == "__main__":

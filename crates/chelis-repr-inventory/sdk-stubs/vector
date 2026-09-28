@@ -1,0 +1,15 @@
+#ifndef CHELIS_STUB_VECTOR
+#define CHELIS_STUB_VECTOR
+#include <stddef.h>
+namespace std {
+template<class T> class vector {
+public:
+    vector();
+    void reserve(size_t);
+    void push_back(const T &);
+    size_t max_size() const noexcept;
+    T *data() noexcept;
+    const T *data() const noexcept;
+};
+}
+#endif

@@ -146,7 +146,7 @@ fn assert_eval_and_build_reject_unbound(root: &Path, entry: &Path, identifier: &
 fn assert_all_value_lanes_pass(root: &Path, entry: &Path) {
     let (check, report) = run_check(root, entry);
     assert!(check.status.success(), "check failed: {check:?}");
-    assert_eq!(report["score"], 1, "check must be perfect: {report}");
+    assert_eq!(report["score"], 1.0, "check must be perfect: {report}");
     assert!(errors(&report).is_empty(), "check errors: {report}");
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
 
@@ -205,8 +205,8 @@ fn unrelated_exporters_cannot_change_an_unbound_value_verdict() {
 
     for provider in [
         None,
-        Some("module Scope.Other\nexport (absent)\ndef absent() -> i64 = cast(1, int64)\n"),
-        Some("module Scope.Other\nexport (renamed)\ndef renamed() -> i64 = cast(1, int64)\n"),
+        Some("module Scope.Other\nexport (absent)\ndef absent() -> i64 = cast(1, i64)\n"),
+        Some("module Scope.Other\nexport (renamed)\ndef renamed() -> i64 = cast(1, i64)\n"),
     ] {
         let path = root.join("src/other.ch");
         match provider {
@@ -221,11 +221,11 @@ fn unrelated_exporters_cannot_change_an_unbound_value_verdict() {
 
     write_file(
         &root.join("src/second.ch"),
-        "module Scope.Second\nexport (absent)\ndef absent() -> i64 = cast(2, int64)\n",
+        "module Scope.Second\nexport (absent)\ndef absent() -> i64 = cast(2, i64)\n",
     );
     write_file(
         &root.join("src/other.ch"),
-        "module Scope.Other\nexport (absent)\ndef absent() -> i64 = cast(1, int64)\n",
+        "module Scope.Other\nexport (absent)\ndef absent() -> i64 = cast(1, i64)\n",
     );
     let (check, report) = run_check(&root, &entry);
     assert_check_name_error(&check, &report, "UnboundVariable", "absent");
@@ -239,13 +239,13 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
         &root.join("src/model.ch"),
         "module Scope.Model\n\
          export (Payload)\n\
-         type Payload = | Payload { value: int64 }\n",
+         type Payload = | Payload { value: i64 }\n",
     );
     let entry = root.join("src/consumer.ch");
     write_file(
         &entry,
         "module Scope.Consumer\n\
-         def make() = Payload { value: cast(1, int64) }\n",
+         def make() = Payload { value: cast(1, i64) }\n",
     );
     let (check, report) = run_check(&root, &entry);
     assert_check_name_error(&check, &report, "UnknownConstructor", "Payload");
@@ -254,7 +254,7 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
         &root.join("src/other.ch"),
         "module Scope.Other\n\
          export (Payload)\n\
-         type Payload = | Payload { other: int64 }\n",
+         type Payload = | Payload { other: i64 }\n",
     );
     let (check, report) = run_check(&root, &entry);
     assert_check_name_error(&check, &report, "UnknownConstructor", "Payload");
@@ -263,14 +263,14 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
         &entry,
         "module Scope.Consumer\n\
          import Scope.Model (Payload)\n\
-         def make() = Payload { value: cast(1, int64) }\n",
+         def make() = Payload { value: cast(1, i64) }\n",
     );
     let (check, report) = run_check(&root, &entry);
     assert!(
         check.status.success(),
         "imported constructor failed: {check:?}"
     );
-    assert_eq!(report["components"]["names"], 1);
+    assert_eq!(report["components"]["names"], 1.0);
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
     assert!(errors(&report).is_empty(), "imported constructor: {report}");
 }
@@ -282,7 +282,7 @@ fn unrelated_exporters_cannot_change_a_positional_constructor_kind() {
     write_file(
         &entry,
         "module Scope.Consumer\n\
-         def make() = Token(cast(1, int64))\n",
+         def make() = Token(cast(1, i64))\n",
     );
 
     let (check, report) = run_check(&root, &entry);
@@ -293,19 +293,19 @@ fn unrelated_exporters_cannot_change_a_positional_constructor_kind() {
             "src/model.ch",
             "module Scope.Model\n\
              export (Token)\n\
-             type Envelope = | Token(int64)\n",
+             type Envelope = | Token(i64)\n",
         ),
         (
             "src/other.ch",
             "module Scope.Other\n\
              export (Token)\n\
-             type OtherEnvelope = | Token(int64)\n",
+             type OtherEnvelope = | Token(i64)\n",
         ),
         (
             "src/third.ch",
             "module Scope.Third\n\
              export (Token)\n\
-             type ThirdEnvelope = | Token(int64)\n",
+             type ThirdEnvelope = | Token(i64)\n",
         ),
     ] {
         write_file(&root.join(path), source);
@@ -317,14 +317,14 @@ fn unrelated_exporters_cannot_change_a_positional_constructor_kind() {
         &entry,
         "module Scope.Consumer\n\
          import Scope.Model (Token)\n\
-         def make() = Token(cast(1, int64))\n",
+         def make() = Token(cast(1, i64))\n",
     );
     let (check, report) = run_check(&root, &entry);
     assert!(
         check.status.success(),
         "imported positional constructor failed: {check:?}"
     );
-    assert_eq!(report["components"]["names"], 1);
+    assert_eq!(report["components"]["names"], 1.0);
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
     assert!(
         errors(&report).is_empty(),

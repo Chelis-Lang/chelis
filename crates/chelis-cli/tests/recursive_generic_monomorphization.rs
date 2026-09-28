@@ -1,4 +1,4 @@
-//! Acceptance oracle for `openspec/changes/add-bounded-monomorphization`
+//! Acceptance oracle for `chelis-plans:chelis-add-bounded-monomorphization`
 //! (chelis#1158): bounded memoized monomorphization of recursive generic
 //! host calls, plus the spec/04 §3.1.1 uniform-recursive-instantiation rule.
 //!
@@ -84,27 +84,27 @@ mod common;
 use common::{link_generated, write_file};
 
 /// Direct recursion at one instantiation: `depth` over `Box[a]` recursing at
-/// the caller's own `Box[a]`, applied at `Box[int32]`. Prints `3`.
+/// the caller's own `Box[a]`, applied at `Box[i32]`. Prints `3`.
 const DIRECT_ONE_INSTANTIATION: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 = depth(Full { value: cast(7, int32) }, 3)
+def concrete() -> i32 = depth(Full { value: cast(7, i32) }, 3)
 out = print(concrete())
 ";
 
-/// The same recursive generic applied at `Box[int32]` and `Box[bool]`.
+/// The same recursive generic applied at `Box[i32]` and `Box[bool]`.
 /// Prints `5` (2 + 3).
 const DIRECT_TWO_INSTANTIATIONS: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 =
-  depth(Full { value: cast(7, int32) }, 2) + depth(Full { value: true }, 3)
+def concrete() -> i32 =
+  depth(Full { value: cast(7, i32) }, 2) + depth(Full { value: true }, 3)
 out = print(concrete())
 ";
 
@@ -114,10 +114,10 @@ const DIRECT_TWO_CALL_SITES: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 =
-  depth(Full { value: cast(7, int32) }, 2) + depth(Full { value: cast(9, int32) }, 3)
+def concrete() -> i32 =
+  depth(Full { value: cast(7, i32) }, 2) + depth(Full { value: cast(9, i32) }, 3)
 out = print(concrete())
 ";
 
@@ -126,11 +126,11 @@ const MUTUAL_ONE_INSTANTIATION: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def ping[a](box: Box[a], n: int32) -> int32 =
+def ping[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else pong(box, n - 1) + 1
-def pong[a](box: Box[a], n: int32) -> int32 =
+def pong[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 100 else ping(box, n - 1) + 1
-def concrete() -> int32 = ping(Full { value: cast(1.0, f32) }, 4)
+def concrete() -> i32 = ping(Full { value: cast(1.0, f32) }, 4)
 out = print(concrete())
 ";
 
@@ -143,9 +143,9 @@ const PERMUTED_INSTANTIATION: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def swap[a, b](x: a, y: b, n: int32) -> int32 =
+def swap[a, b](x: a, y: b, n: i32) -> i32 =
   if n <= 0 then 0 else swap(y, x, n - 1) + 1
-def concrete() -> int32 = swap(Full { value: cast(1, int32) }, true, 3)
+def concrete() -> i32 = swap(Full { value: cast(1, i32) }, true, 3)
 out = print(concrete())
 ";
 
@@ -159,12 +159,12 @@ const PROBE_TRIGGER: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def caller(n: int32) -> int32 = wrap_int(n) + wrap_bool(n)
-def wrap_int(n: int32) -> int32 = depth(Full { value: cast(7, int32) }, n)
-def wrap_bool(n: int32) -> int32 = depth(Full { value: true }, n)
-def depth[a](box: Box[a], n: int32) -> int32 =
+def caller(n: i32) -> i32 = wrap_int(n) + wrap_bool(n)
+def wrap_int(n: i32) -> i32 = depth(Full { value: cast(7, i32) }, n)
+def wrap_bool(n: i32) -> i32 = depth(Full { value: true }, n)
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def concrete() -> int32 = caller(2)
+def concrete() -> i32 = caller(2)
 out = print(concrete())
 ";
 
@@ -178,10 +178,10 @@ const PERMUTED_WITH_UNCONSTRAINED: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def tri[a, b, c](x: a, y: b, z: Box[c], n: int32) -> int32 =
+def tri[a, b, c](x: a, y: b, z: Box[c], n: i32) -> i32 =
   if n <= 0 then 0 else tri(y, x, Empty, n - 1) + 1
-def concrete() -> int32 =
-  tri(Full { value: cast(1, int32) }, true, Full { value: cast(1.5, f32) }, 3)
+def concrete() -> i32 =
+  tri(Full { value: cast(1, i32) }, true, Full { value: cast(1.5, f32) }, 3)
 out = print(concrete())
 ";
 
@@ -194,11 +194,11 @@ const MUTUAL_UNCONSTRAINED_CROSS_EDGE: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def even2[a](box: Box[a], n: int32) -> bool =
+def even2[a](box: Box[a], n: i32) -> bool =
   if n <= 0 then true else odd2(Empty, n - 1)
-def odd2[b](box: Box[b], n: int32) -> bool =
+def odd2[b](box: Box[b], n: i32) -> bool =
   if n <= 0 then false else even2(Empty, n - 1)
-def main() -> bool = even2(Full { value: cast(1, int32) }, 3)
+def main() -> bool = even2(Full { value: cast(1, i32) }, 3)
 ";
 
 /// Polymorphic recursion: `f` over `a` recursively calls `f` at `Box[a]`.
@@ -207,9 +207,9 @@ const POLYMORPHIC_RECURSION: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def f[a](x: a, n: int32) -> int32 =
+def f[a](x: a, n: i32) -> i32 =
   if n <= 0 then 0 else f(Full { value: x }, n - 1) + 1
-def main() -> int32 = f(1, 3)
+def main() -> i32 = f(1, 3)
 ";
 
 /// A recursive generic call whose instantiation never resolves (`a` is
@@ -380,24 +380,24 @@ fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
     );
     write_file(
         &root.join("src/a.ch"),
-        "module Demo.A\nexport (depth)\ndef depth[a](x: a, n: int32) -> int32 = if n <= 0 then 0 else depth(x, n - 1) + 1\n",
+        "module Demo.A\nexport (depth)\ndef depth[a](x: a, n: i32) -> i32 = if n <= 0 then 0 else depth(x, n - 1) + 1\n",
     );
     write_file(
         &root.join("src/b.ch"),
-        "module Demo.B\nexport (depth)\ndef depth[a](x: a, n: int32) -> int32 = if n <= 0 then 0 else depth(x, n - 1) + 10\n",
+        "module Demo.B\nexport (depth)\ndef depth[a](x: a, n: i32) -> i32 = if n <= 0 then 0 else depth(x, n - 1) + 10\n",
     );
     write_file(
         &root.join("src/use_a.ch"),
-        "module Demo.Use_A\nimport Demo.A (depth)\nexport (call_a)\ndef call_a() -> int32 = depth(true, 2)\n",
+        "module Demo.Use_A\nimport Demo.A (depth)\nexport (call_a)\ndef call_a() -> i32 = depth(true, 2)\n",
     );
     write_file(
         &root.join("src/use_b.ch"),
-        "module Demo.Use_B\nimport Demo.B (depth)\nexport (call_b)\ndef call_b() -> int32 = depth(true, 3)\n",
+        "module Demo.Use_B\nimport Demo.B (depth)\nexport (call_b)\ndef call_b() -> i32 = depth(true, 3)\n",
     );
     let main = root.join("src/main.ch");
     write_file(
         &main,
-        "module Demo.Main\nimport Demo.Use_A (call_a)\nimport Demo.Use_B (call_b)\ndef concrete() -> int32 = call_a() + call_b()\nout = print(concrete())\n",
+        "module Demo.Main\nimport Demo.Use_A (call_a)\nimport Demo.Use_B (call_b)\ndef concrete() -> i32 = call_a() + call_b()\nout = print(concrete())\n",
     );
     main
 }
@@ -439,7 +439,7 @@ fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
 fn direct_recursion_at_one_instantiation_compiles_links_and_runs() {
     let (_dir, out_dir) = build_ok(DIRECT_ONE_INSTANTIATION, "direct_one");
     let c_source = read_generated_c(&out_dir, "direct_one");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -458,7 +458,7 @@ fn direct_recursion_at_one_instantiation_compiles_links_and_runs() {
 fn distinct_instantiations_get_distinct_specializations() {
     let (_dir, out_dir) = build_ok(DIRECT_TWO_INSTANTIATIONS, "direct_two");
     let c_source = read_generated_c(&out_dir, "direct_two");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         2,
@@ -477,8 +477,8 @@ fn distinct_instantiations_get_distinct_specializations() {
 fn mutual_recursion_specializes_as_a_group() {
     let (_dir, out_dir) = build_ok(MUTUAL_ONE_INSTANTIATION, "mutual_one");
     let c_source = read_generated_c(&out_dir, "mutual_one");
-    let ping = identifiers_with_prefix(&c_source, "ping");
-    let pong = identifiers_with_prefix(&c_source, "pong");
+    let ping = identifiers_with_prefix(&c_source, &common::authored_c_symbol("ping"));
+    let pong = identifiers_with_prefix(&c_source, &common::authored_c_symbol("pong"));
     assert_eq!(
         ping.len(),
         1,
@@ -496,7 +496,7 @@ fn mutual_recursion_specializes_as_a_group() {
 fn memoized_specialization_reuses_one_symbol_across_call_sites() {
     let (_dir, out_dir) = build_ok(DIRECT_TWO_CALL_SITES, "memoized");
     let c_source = read_generated_c(&out_dir, "memoized");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -674,7 +674,7 @@ fn permuted_recursive_instantiation_specializes_per_orbit_member() {
     let eval = eval_first_line(PERMUTED_INSTANTIATION, "permuted_eval");
     let (_dir, out_dir) = build_ok(PERMUTED_INSTANTIATION, "permuted");
     let c_source = read_generated_c(&out_dir, "permuted");
-    let specialized = identifiers_with_prefix(&c_source, "swap");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("swap"));
     assert_eq!(
         specialized.len(),
         2,
@@ -700,7 +700,7 @@ fn permuted_edge_with_unconstrained_argument_specializes_correctly() {
     let eval = eval_first_line(PERMUTED_WITH_UNCONSTRAINED, "tri_eval");
     let (_dir, out_dir) = build_ok(PERMUTED_WITH_UNCONSTRAINED, "tri");
     let c_source = read_generated_c(&out_dir, "tri");
-    let specialized = identifiers_with_prefix(&c_source, "tri");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("tri"));
     assert_eq!(
         specialized.len(),
         2,
@@ -748,7 +748,7 @@ fn issue_941_minimized_reproducer_compiles() {
     // in `build_artifacts_link_cleanly_and_match_eval`.
     let (_dir, out_dir) = build_ok(ISSUE_941_REPRODUCER, "issue_941_repro");
     let c_source = read_generated_c(&out_dir, "issue_941_repro");
-    let specialized = identifiers_with_prefix(&c_source, "loop");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("loop"));
     assert_eq!(
         specialized.len(),
         1,
@@ -791,7 +791,7 @@ fn emitted_c_is_byte_identical_across_repeated_builds() {
         let (_dir, out_dir) = build_ok(PROBE_TRIGGER, "probe_trigger");
         read_generated_c(&out_dir, "probe_trigger")
     };
-    let specialized = identifiers_with_prefix(&first, "depth");
+    let specialized = identifiers_with_prefix(&first, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         2,
@@ -821,7 +821,7 @@ fn published_header_omits_specialized_symbols() {
          specializations:\n{header}"
     );
     assert!(
-        header.contains("concrete"),
+        header.contains(&common::authored_c_symbol("concrete")),
         "the authored surface stays declared:\n{header}"
     );
     // The `.c` keeps its internal prototypes: it still compiles, links, and
@@ -839,7 +839,9 @@ out = authored__mono_0123456789abcdef(to_tensor([1.0, 2.0]))
     let header = fs::read_to_string(out_dir.join("authored_mono_name.h"))
         .expect("build writes the published header");
     assert!(
-        header.contains("authored__mono_0123456789abcdef"),
+        header.contains(&common::authored_c_symbol(
+            "authored__mono_0123456789abcdef"
+        )),
         "a valid authored name must not be mistaken for compiler provenance:\n{header}"
     );
 }
@@ -850,17 +852,17 @@ fn specializations_link_cleanly_across_generated_objects() {
 type Box[a] =
   | Empty
   | Full { value: a }
-def loop[a](box: Box[a], n: int32) -> int32 =
+def loop[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else loop(box, n - 1) + 1
-def entry_a() -> int32 = loop(Full { value: cast(1, int32) }, 2)
+def entry_a() -> i32 = loop(Full { value: cast(1, i32) }, 2)
 ";
     const OBJECT_B: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def loop[a](box: Box[a], n: int32) -> int32 =
+def loop[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else loop(box, n - 1) + 1
-def entry_b() -> int32 = loop(Full { value: cast(1, int32) }, 3)
+def entry_b() -> i32 = loop(Full { value: cast(1, i32) }, 3)
 ";
     let (_dir_a, out_a) = build_ok(OBJECT_A, "linkage_a");
     let (_dir_b, out_b) = build_ok(OBJECT_B, "linkage_b");
@@ -923,8 +925,12 @@ fn package_defs_with_one_terminal_name_keep_distinct_specializations() {
         .unwrap_or_default()
         .to_string();
     let c_source = read_generated_c(&out_dir, "main");
-    assert!(c_source.contains("Demo__A__depth__mono_"));
-    assert!(c_source.contains("Demo__B__depth__mono_"));
+    assert!(c_source.contains(&common::authored_c_symbol(
+        "pkg__qualified__collision__Demo__A__depth"
+    )));
+    assert!(c_source.contains(&common::authored_c_symbol(
+        "pkg__qualified__collision__Demo__B__depth"
+    )));
     let compiled = run_first_line(&out_dir, "main");
     assert_eq!(eval, "32");
     assert_eq!(compiled, eval, "native and eval package results must match");
@@ -940,10 +946,10 @@ const SYMBOLIC_DIM_PAYLOAD: &str = "\
 type Box[a] =
   | Empty
   | Full { value: a }
-def depth[a](box: Box[a], n: int32) -> int32 =
+def depth[a](box: Box[a], n: i32) -> i32 =
   if n <= 0 then 0 else depth(box, n - 1) + 1
-def measure[n](t: tensor[n, f32]) -> int32 = depth(Full { value: t }, 2)
-def concrete() -> int32 = measure(to_tensor([1.0, 2.0]))
+def measure[n](t: tensor[n, f32]) -> i32 = depth(Full { value: t }, 2)
+def concrete() -> i32 = measure(to_tensor([1.0, 2.0]))
 out = print(concrete())
 ";
 
@@ -952,7 +958,7 @@ fn symbolic_dim_payload_specializes_with_eval_parity() {
     let eval = eval_first_line(SYMBOLIC_DIM_PAYLOAD, "symdim_eval");
     let (_dir, out_dir) = build_ok(SYMBOLIC_DIM_PAYLOAD, "symdim");
     let c_source = read_generated_c(&out_dir, "symdim");
-    let specialized = identifiers_with_prefix(&c_source, "depth");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("depth"));
     assert_eq!(
         specialized.len(),
         1,
@@ -971,8 +977,14 @@ fn symbolic_dim_payload_specializes_with_eval_parity() {
 fn specialized_symbol_set_is_deterministic_across_builds() {
     let (_dir_a, out_a) = build_ok(DIRECT_TWO_INSTANTIATIONS, "golden_a");
     let (_dir_b, out_b) = build_ok(DIRECT_TWO_INSTANTIATIONS, "golden_b");
-    let symbols_a = identifiers_with_prefix(&read_generated_c(&out_a, "golden_a"), "depth");
-    let symbols_b = identifiers_with_prefix(&read_generated_c(&out_b, "golden_b"), "depth");
+    let symbols_a = identifiers_with_prefix(
+        &read_generated_c(&out_a, "golden_a"),
+        &common::authored_c_symbol("depth"),
+    );
+    let symbols_b = identifiers_with_prefix(
+        &read_generated_c(&out_b, "golden_b"),
+        &common::authored_c_symbol("depth"),
+    );
     assert_eq!(
         symbols_a, symbols_b,
         "specialized symbol set must be identical across consecutive builds"
@@ -998,17 +1010,17 @@ fn specialized_symbol_set_is_deterministic_across_builds() {
 const RECURSIVE_ERASED_DIM: &str = "\
 type Col[n] =
   | FloatCol(tensor[n, f32])
-def zero_i64() -> int64 = cast(0, int64)
-def one_i64() -> int64 = cast(1, int64)
-def col_len[n](col: Col[n]) -> int64 = match col with {
+def zero_i64() -> i64 = cast(0, i64)
+def one_i64() -> i64 = cast(1, i64)
+def col_len[n](col: Col[n]) -> i64 = match col with {
   | FloatCol(xs) => numel(xs)
 }
-def all_eq_len[n](pairs: List[(string, Col[n])], expected: int64) -> bool =
+def all_eq_len[n](pairs: List[(string, Col[n])], expected: i64) -> bool =
   if eq(len(pairs), zero_i64()) then true else {
     entry = index(pairs, zero_i64())
-    if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)
+    if neq(col_len(entry.1), expected) then false else all_eq_len(skip(pairs, one_i64()), expected)
   }
-def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, int64))
+def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, i64))
 out = print(main())
 ";
 
@@ -1022,11 +1034,11 @@ out = print(main())
 const UNDERCONSTRAINED_ERASED_DIM: &str = "\
 type Col[n, a] =
   | Tagged { label: a, xs: tensor[n, f32] }
-def zero_i64() -> int64 = cast(0, int64)
-def one_i64() -> int64 = cast(1, int64)
-def all_eq_len[n, a](pairs: List[(string, Col[n, a])], expected: int64) -> bool =
-  if eq(len(pairs), zero_i64()) then true else all_eq_len(drop(pairs, one_i64()), expected)
-def main() -> bool = all_eq_len([], cast(0, int64))
+def zero_i64() -> i64 = cast(0, i64)
+def one_i64() -> i64 = cast(1, i64)
+def all_eq_len[n, a](pairs: List[(string, Col[n, a])], expected: i64) -> bool =
+  if eq(len(pairs), zero_i64()) then true else all_eq_len(skip(pairs, one_i64()), expected)
+def main() -> bool = all_eq_len([], cast(0, i64))
 out = print(main())
 ";
 
@@ -1035,7 +1047,7 @@ fn recursive_erased_dim_generic_compiles_links_and_runs() {
     let eval = eval_first_line(RECURSIVE_ERASED_DIM, "erased_dim_eval");
     let (_dir, out_dir) = build_ok(RECURSIVE_ERASED_DIM, "erased_dim");
     let c_source = read_generated_c(&out_dir, "erased_dim");
-    let specialized = identifiers_with_prefix(&c_source, "all_eq_len__mono_");
+    let specialized = identifiers_with_prefix(&c_source, &common::authored_c_symbol("all_eq_len"));
     assert!(
         !specialized.is_empty(),
         "the emitted C must contain an `all_eq_len` specialization; the \

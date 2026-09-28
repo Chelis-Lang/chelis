@@ -1,7 +1,7 @@
 """Guard that release.yml's `cargo build -p <target>` lines don't pull pyo3.
 
-`release.yml` (the tag-triggered release workflow) builds `chelis-cli` and
-`chelis-runtime` as release binaries. PR #184 added `.cargo/config.toml`'s
+`release.yml` (the tag-triggered release workflow) builds `chelis-cli`, which
+carries the runtime it ships, as a release binary. PR #184 added `.cargo/config.toml`'s
 `PYO3_PYTHON=.venv/bin/python` setting and the per-job `Install uv` +
 `scripts/ci_setup_uv_python.py` steps in `ci.yml` / `heavy-e2e.yml`, but
 **not** in `release.yml`. The argument for keeping `release.yml` uv-free
@@ -9,7 +9,7 @@ is that its targets don't transitively pull pyo3, so pyo3-build-config
 never runs there.
 
 If a future change adds `chelis-python` (or any other pyo3-pulling crate)
-as a dep of `chelis-cli` or `chelis-runtime`, that argument breaks: the
+as a dep of `chelis-cli` or of the runtime it carries, that argument breaks: the
 tag-push release build would fail at link time, and the breakage would
 be invisible until the next release tag.
 
@@ -68,14 +68,16 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
         self.assertTrue(RELEASE_WORKFLOW.is_file(), f"{RELEASE_WORKFLOW} not found")
 
     def test_extract_release_targets_finds_expected_set(self) -> None:
-        # Sanity check the parser: release.yml builds chelis-cli +
-        # chelis-runtime (the toolchain tarball) and chelisup (the bare
-        # `chelisup-<slug>` bootstrap asset, WS-B / chelis#164). If a
-        # target is added, this test will fail and the new target must be
-        # vetted for pyo3 by the no-pyo3 test below.
+        # Sanity check the parser: release.yml builds chelis-cli (the
+        # toolchain tarball; it carries the runtime the tarball ships through
+        # `chelis runtime export`) and chelisup (the bare `chelisup-<slug>`
+        # bootstrap asset, WS-B / chelis#164). If a target is added, the new
+        # target must be vetted for pyo3 by the no-pyo3 test below. A
+        # separately built runtime would ship bytes the compiler does not
+        # carry (spec/08-backends.md §2.1).
         targets = extract_release_targets(RELEASE_WORKFLOW)
         self.assertIn("chelis-cli", targets)
-        self.assertIn("chelis-runtime", targets)
+        self.assertNotIn("chelis-runtime", targets)
         self.assertIn("chelisup", targets)
 
     @unittest.skipUnless(

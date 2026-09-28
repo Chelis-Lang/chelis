@@ -141,14 +141,14 @@ fn fold_empty_accumulator_uses_checked_callback_type() {
     // chelis#939: the checker-owned callback parameter, not the source
     // spelling of `[]`, determines the accumulator type.
     let source = "\
-def keep_unmasked(masks: List[bool], rows: List[int64]) -> List[int64] =
+def keep_unmasked(masks: List[bool], rows: List[i64]) -> List[i64] =
   fold(
-    fn (acc: List[int64], row: int64) ->
+    fn (acc: List[i64], row: i64) ->
       if index(masks, row) then acc else append(acc, row),
     [],
     rows
   )
-def main() -> List[int64] = keep_unmasked([false], [cast(0, int64)])
+def main() -> List[i64] = keep_unmasked([false], [cast(0, i64)])
 ";
     let (_dir, out_dir) = build(source, "fold_checked_accumulator");
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
@@ -266,12 +266,12 @@ def first[rows, dtype](frame: Frame[rows, dtype]) -> dtype =
       match cols with {
         | Leaf { value: column } =>
           match column with {
-            | Column(values) => index(to_list(values), 0)
+            | Column(values) => index(to_list(values), 0i64)
           }
       }
   }
-def concrete() -> int16 =
-  first(from_column(Column(to_tensor([cast(321, int16), cast(7, int16)]))))
+def concrete() -> i16 =
+  first(from_column(Column(to_tensor([cast(321, i16), cast(7, i16)]))))
 out = print(concrete())
 ";
     let dir = tempdir().expect("tempdir");

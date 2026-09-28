@@ -1,10 +1,13 @@
 //! Toolchain install + store management.
 //!
-//! `chelisup install <ver>` downloads the host-platform release tarball
-//! (`chelis-vX.Y.Z-<slug>.tar.gz`) from `Chelis-Lang/chelis` release
-//! `v<ver>`, unpacks it to `<home>/toolchains/<ver>/`, installs/refreshes
-//! the `chelis` shim, and seeds the default on the first install. It is
-//! idempotent: an already-installed version refreshes the shim only.
+//! `chelisup install <ver>` downloads the host's release tarball
+//! (`chelis-vX.Y.Z-<build>.tar.gz`, see [`release_build`]) from
+//! `Chelis-Lang/chelis` release `v<ver>`, unpacks it, checks its runtime files
+//! against the unpacked compiler's `chelis runtime export` (see
+//! [`crate::runtime_check`]), moves it to `<home>/toolchains/<ver>/`,
+//! installs/refreshes the `chelis` shim, and seeds the default on the first
+//! install. A failed check leaves the store untouched. It is idempotent: an
+//! already-installed version refreshes the shim only.
 //!
 //! # Fetch seams
 //!
@@ -28,7 +31,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::paths::Store;
-use crate::version::validate_install_version;
+use crate::runtime_check::{self, RuntimeCheck};
+use crate::version::{release_triple, validate_install_version};
 
 const DEFAULT_REPO: &str = "Chelis-Lang/chelis";
 const DEFAULT_API_BASE: &str = "https://api.github.com";
@@ -36,8 +40,14 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// What an install did. The CLI prints a different line for each.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallOutcome {
-    /// The toolchain was downloaded and unpacked.
-    Installed { version: String, slug: String },
+    /// The toolchain was downloaded from release build `build` (see
+    /// [`release_build`]), its runtime files checked, and unpacked into the
+    /// store.
+    Installed {
+        version: String,
+        build: String,
+        runtime: RuntimeCheck,
+    },
     /// The toolchain was already present; the shim was refreshed.
     AlreadyInstalled { version: String },
 }
@@ -56,9 +66,29 @@ pub fn detect_slug() -> Result<&'static str, String> {
     }
 }
 
-/// The release-asset file name for a version + slug.
-pub fn asset_name(version: &str, slug: &str) -> String {
-    format!("chelis-v{version}-{slug}.tar.gz")
+/// The first release from which every release publishes a Linux build made
+/// against glibc 2.31 (`chelis-vX.Y.Z-linux-x86_64-glibc2.31.tar.gz`, #330).
+/// The `linux-x86_64` build needs the glibc of the runner that built it (2.39
+/// for recent releases), so from this release on Linux installs the glibc-2.31
+/// build instead (chelis#2686). Of the earlier releases only 0.7.18 publishes
+/// one; they all install their `linux-x86_64` build as before.
+const FIRST_GLIBC_231_RELEASE: &str = "0.7.24";
+
+/// The release build `install` downloads for `version` on the platform
+/// `slug`: the slug itself, except that Linux takes the glibc-2.31 build from
+/// [`FIRST_GLIBC_231_RELEASE`] on. `version` is a validated `X.Y.Z`.
+pub fn release_build(version: &str, slug: &str) -> Result<String, String> {
+    if slug == "linux-x86_64"
+        && release_triple(version)? >= release_triple(FIRST_GLIBC_231_RELEASE)?
+    {
+        return Ok(format!("{slug}-glibc2.31"));
+    }
+    Ok(slug.to_owned())
+}
+
+/// The release-asset file name for a version + release build.
+pub fn asset_name(version: &str, build: &str) -> String {
+    format!("chelis-v{version}-{build}.tar.gz")
 }
 
 /// Install `version`. Idempotent. Validates the version, fetches and
@@ -84,8 +114,8 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
         });
     }
 
-    let slug = detect_slug()?;
-    let asset = asset_name(version, slug);
+    let build = release_build(version, detect_slug()?)?;
+    let asset = asset_name(version, &build);
 
     // Stage under the store root so the final rename is same-filesystem.
     fs::create_dir_all(store.home())
@@ -98,6 +128,7 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
     let tarball = scratch.path().join(&asset);
     fetch_asset(version, &asset, &tarball)?;
     let unpacked = extract_tarball(&tarball, scratch.path())?;
+    let runtime = runtime_check::check(version, &unpacked, scratch.path())?;
     install_into_store(store, version, &unpacked)?;
 
     ensure_shim_installed(store)?;
@@ -105,7 +136,8 @@ pub(crate) fn install(store: &Store, version: &str) -> Result<InstallOutcome, St
 
     Ok(InstallOutcome::Installed {
         version: version.to_string(),
-        slug: slug.to_string(),
+        build,
+        runtime,
     })
 }
 
@@ -363,7 +395,8 @@ fn github_repo() -> String {
 }
 
 /// Unpack `tarball` (gzip) into `dest` and return the single
-/// top-level `chelis-v*` directory, verified to contain `bin/chelis`.
+/// top-level `chelis-v*` directory, a real directory rather than a link,
+/// verified to contain `bin/chelis`.
 fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let file = fs::File::open(tarball)
         .map_err(|e| format!("could not open {}: {e}", tarball.display()))?;
@@ -376,13 +409,16 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|e| format!("could not read {}: {e}", dest.display()))?
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
+        // `DirEntry::file_type` does not follow links. Through a linked root,
+        // the runtime check and the store entry would reach outside the
+        // release.
+        .filter(|e| {
+            e.file_type().is_ok_and(|kind| kind.is_dir())
+                && e.file_name()
+                    .to_str()
                     .is_some_and(|n| n.starts_with("chelis-v"))
         })
+        .map(|e| e.path())
         .collect();
     if candidates.len() != 1 {
         let names: Vec<String> = candidates
@@ -395,7 +431,7 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> Result<PathBuf, String> {
             })
             .collect();
         return Err(format!(
-            "expected exactly one chelis-v* directory in the tarball, found {names:?}"
+            "expected exactly one chelis-v* directory (not a link) in the tarball, found {names:?}"
         ));
     }
     let unpacked = candidates.remove(0);
@@ -595,6 +631,23 @@ mod tests {
             asset_name("0.12.0", "darwin-arm64"),
             "chelis-v0.12.0-darwin-arm64.tar.gz"
         );
+    }
+
+    #[test]
+    fn linux_takes_the_glibc_2_31_build_from_its_first_release() {
+        for (version, slug, build) in [
+            ("0.7.23", "linux-x86_64", "linux-x86_64"),
+            ("0.7.24", "linux-x86_64", "linux-x86_64-glibc2.31"),
+            // Ordered as numbers: 0.10.0 is after 0.7.24.
+            ("0.10.0", "linux-x86_64", "linux-x86_64-glibc2.31"),
+            ("0.18.11", "darwin-arm64", "darwin-arm64"),
+        ] {
+            assert_eq!(
+                release_build(version, slug).unwrap(),
+                build,
+                "{version} {slug}"
+            );
+        }
     }
 
     #[test]

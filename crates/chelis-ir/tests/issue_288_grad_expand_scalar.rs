@@ -6,8 +6,8 @@
 //! ```chelis
 //! module Repro.GradExpandConst
 //! def f(x: tensor[2, f32]) -> f32 = {
-//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, int32), cast(2, int32))
-//!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
+//!   k = expand(scalar_to_tensor(cast(2.5, f32)), cast(0, i32), cast(2, i32))
+//!   tensor_to_scalar(sum(mul(x, k), cast(0, i32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
 //! ```
@@ -91,6 +91,7 @@ fn build_expand_scalar_forward(
     source_shape: &[usize],
 ) -> (Dag, NodeId, NodeId) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = vec_n_f32(n);
     let source_ty = TensorType {
         dims: source_shape.iter().map(|&d| DimInfo::Lit(d)).collect(),
@@ -99,12 +100,14 @@ fn build_expand_scalar_forward(
 
     // scalar_to_tensor(cast(c_val, f32)) -> f32 constant of `source_ty`.
     let raw = dag.add_node(
+        decl,
         RiscOp::synth_const(source_ty.precision, c_val),
         vec![],
         source_ty.clone(),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -115,6 +118,7 @@ fn build_expand_scalar_forward(
 
     // expand(c, axis=0, size=n) -> tensor[n].
     let k = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(n),
@@ -125,13 +129,15 @@ fn build_expand_scalar_forward(
     );
 
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, k], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default for f32"),
         vec![m],
         scalar_f32(),
@@ -283,15 +289,18 @@ fn issue_288_grad_matches_finite_difference() {
 #[test]
 fn issue_288_control_sum_mul_x_x() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = vec_n_f32(2);
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
         None,
     );
-    let sq = dag.add_node(RiscOp::Mul, vec![x, x], vec_ty, None);
+    let sq = dag.add_node(decl, RiscOp::Mul, vec![x, x], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![sq],
         scalar_f32(),
@@ -316,8 +325,10 @@ fn issue_288_control_sum_mul_x_x() {
 #[test]
 fn issue_288_control_mul_by_real_tensor() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = vec_n_f32(2);
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
@@ -327,13 +338,15 @@ fn issue_288_control_mul_by_real_tensor() {
     // `to_tensor`; for this control a rank-1 Load standing in for the
     // literal tensor is sufficient to pin the non-scalar-expand path.
     let t = dag.add_node(
+        decl,
         RiscOp::Load { name: "t".into() },
         vec![],
         vec_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, t], vec_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, t], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![m],
         scalar_f32(),
@@ -363,14 +376,17 @@ fn issue_288_control_mul_by_real_tensor() {
 #[test]
 fn issue_288_grad_wrt_rank0_expand_source() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = vec_n_f32(2);
     let s = dag.add_node(
+        decl,
         RiscOp::Load { name: "s".into() },
         vec![],
         scalar_f32(),
         None,
     );
     let k = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -380,13 +396,15 @@ fn issue_288_grad_wrt_rank0_expand_source() {
         None,
     );
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, k], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![m],
         scalar_f32(),
@@ -423,10 +441,18 @@ fn issue_288_grad_wrt_rank0_expand_source() {
 #[test]
 fn issue_288_grad_wrt_size1_expand_source() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vec_ty = vec_n_f32(2);
     let one_ty = vec_n_f32(1);
-    let s = dag.add_node(RiscOp::Load { name: "s".into() }, vec![], one_ty, None);
+    let s = dag.add_node(
+        decl,
+        RiscOp::Load { name: "s".into() },
+        vec![],
+        one_ty,
+        None,
+    );
     let k = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -436,13 +462,15 @@ fn issue_288_grad_wrt_size1_expand_source() {
         None,
     );
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, k], vec_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, k], vec_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default"),
         vec![m],
         scalar_f32(),
@@ -492,14 +520,22 @@ fn issue_288_grad_wrt_size1_expand_source_nonzero_axis() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let mat_ty = row_vec_ty(3, 2); // [3, 2]
     let col_ty = row_vec_ty(3, 1); // [3, 1] (size-1 on axis 1)
     let row_ty = vec_n_f32(3); // [3] after summing axis 1
 
-    let s = dag.add_node(RiscOp::Load { name: "s".into() }, vec![], col_ty, None);
+    let s = dag.add_node(
+        decl,
+        RiscOp::Load { name: "s".into() },
+        vec![],
+        col_ty,
+        None,
+    );
     // expand(s, axis=1, size=2): [3, 1] -> [3, 2], SAME-RANK broadcast of
     // the size-1 axis 1. This is the non-zero-axis path under test.
     let k = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 1,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -509,20 +545,23 @@ fn issue_288_grad_wrt_size1_expand_source_nonzero_axis() {
         None,
     );
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_ty.clone(),
         None,
     );
-    let m = dag.add_node(RiscOp::Mul, vec![x, k], mat_ty, None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![x, k], mat_ty, None);
     // Reduce [3, 2] -> scalar with two Sums (Sum removes one axis each).
     let row_sums = dag.add_node(
+        decl,
         RiscOp::sum_default(1, Prim::F32).expect("sum_default axis 1"),
         vec![m],
         row_ty,
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::sum_default(0, Prim::F32).expect("sum_default axis 0"),
         vec![row_sums],
         scalar_f32(),

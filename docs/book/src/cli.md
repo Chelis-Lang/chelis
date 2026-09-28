@@ -9,7 +9,16 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis check` parses, desugars, type-checks, and reports fitness/errors.
   Accepts both Surf (`.ch`) and already-lowered Deep (`.dp`) inputs; a
   `.dp` skips desugaring and is type/effect/linearity-checked directly,
-  emitting the same JSON report shape as the `.ch` path.
+  emitting the same JSON report shape as the `.ch` path. Given a
+  directory, it checks every `.ch` and `.dp` file under it (following
+  symlinks, skipping dot-prefixed entries and `target/` directories) and
+  emits one envelope, `{"files": [{"file", "report"}...], "errors": [...]}`.
+  `errors` holds the failures that belong to no single file: a directory
+  that cannot be read, an entry that cannot be resolved, or a path that
+  cannot be written as UTF-8 (all `directory_walk_error`), and a directory
+  with nothing to check (`empty_corpus`). It exits 0 only when every error list in the
+  envelope is empty, and 2 otherwise. `spec/04-type-system.md`
+  § Directory mode is the contract.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
 - `chelis eval` runs the host/runtime evaluator. `chelis eval --file`
@@ -18,6 +27,8 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis prove` discovers and runs executable properties.
 - `chelis validate` runs the executable-grammar validator on the input.
 - `chelis build` emits C or HIP source plus runtime artifacts and compile flags.
+  Experimental HIP builds reject `pad` and `shrink` when their selected helper
+  would execute on the C host; device execution remains tracked in #2493.
 - `chelis tide` exposes the HTTP/MCP tooling surface.
 
 ## Lint Traversal Policy
@@ -148,11 +159,88 @@ Use this loop for project files and generated shell output. `fmt` makes the sour
 canonical, `lint --check` catches naming/style drift, and the later commands re-run the
 same gate before doing semantic work.
 
+C builds keep the source stem in output filenames, including names such as
+`simple-shape.ch`. C symbols use ASCII identifier spelling: a stem that starts with
+an ASCII letter and contains only ASCII letters, digits and underscores keeps its
+spelling, except C keywords, `main`, and the reserved `chelis_file_` prefix.
+Other stems become `chelis_file_` followed by the hexadecimal filename bytes.
+For external calls, use the generated header's declaration. Authored function
+definitions use compiler-reserved `chelis_fn_` symbols followed by their lowercase
+UTF-8 bytes in hexadecimal (except source-level `main`, which is module-qualified);
+their source spelling is not a C linker name. Generated header declarations and
+externally linked authored definitions carry a versioned program-identity and export
+envelope. Structural header records bind each source identity, canonical symbol, exact
+declaration bytes, external linkage, and one AST-identified function definition,
+including multiline and comment-separated formatting. Each definition commitment
+covers its exact bytes plus the source-local preprocessing context, so adding an
+indirect macro alias cannot retarget its body. The header separately binds the complete
+generated source digest. Missing, added, reformatted, macro-rebound, internally linked,
+or reassociated exports fail validation before native execution; every other external
+function is rejected, while `static` helpers remain private. These encodings keep
+`a-b.ch`, `a_b.ch`, and a literal
+`chelis_file_612d62.ch` distinct.
+
+When the compiled C program hits a runtime arithmetic trap, output from
+preceding effects is retained even when redirected to a pipe or file. The
+program still fails, and effects after the trap do not run.
+
+Fixed-control `dropout` builds to C through its sealed source execution plan.
+A concrete tensor function with a source-fixed rate and key is supported on
+its own or beside other definitions, in both Surf and Deep; see
+`examples/dropout_entry.ch`. Whole-program builds emit its named host wrapper.
+Pure tensor entries and selected compiler-API entries keep their existing ABIs.
+Raw-DAG dropout, runtime-rate entries, HIP and Metal remain unsupported.
+
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+Named-axis calls in this compiled library context prepare the lowered call's
+selected tensor inputs and required shape witnesses before execution. A
+same-named formal or a statically dead capture does not by itself initialize
+a library value. Optional shape witnesses can use already-available tensors,
+but do not trigger initialization. An entered initializer's error is preserved.
+The CLI regression fixtures use separate Reef packages to exercise this lazy
+library boundary; a standalone rank-polymorphic example cannot demonstrate it.
+
+The host evaluator reuses a successfully initialized declaration by its resolved
+identity within one evaluation context, independently of the caller's local
+values and type parameters. A failed initializer is not cached; successful
+dependencies survive an outer initializer's failure. Compiling a library context
+does not execute its initializers, and an ordinary host evaluation request starts
+a fresh declaration cache. Invariant predicates retain separate contexts.
+
+Ordinary named and named-axis host calls read free values in declaration scope;
+anonymous host functions keep their lexical captures. Calls still evaluate
+arguments in caller scope (see
+`examples/caller_actual_scope.ch`, whose `out` is 25), and applying a cached
+callable runs its body each time. Supplied tensor observations and displayed
+callable results do not replace the cached callable.
+The [declaration regression tests](../../../crates/chelis-compiler-api/tests/issue_1956_declaration_values.rs)
+exercise named versus anonymous scope, initialization reuse and fresh requests;
+the example above demonstrates caller-argument scope only.
+
+The host `grad` path also uses declaration scope for free tensor values when
+its original operand directly names a checked function declaration and that
+target name is absent from the gradient's captured lexical environment.
+Actual arguments still run once in caller order, before a selected gradient
+demands an uninitialized capture. The written `wrt` order determines result
+grouping, not argument evaluation.
+Anonymous gradients retain creation-time captures. This narrow rule does not
+extend target resolution to aliases or captured target bindings; those paths
+retain their existing admission and behavior.
+A gradient created from a direct declaration before a later same-name alias
+retains its frozen target and declaration captures; this does not admit the
+alias itself as a new transform target.
+The [direct-gradient regression tests](../../../crates/chelis-compiler-api/tests/issue_1956_grad_declaration_captures.rs)
+exercise this scope boundary, frozen gradients, initialization reuse and errors.
+
 ### Targeted evaluation and root manifests
+
+Function aliases remain callable entries, without display roots of their own.
+Calls through them produce ordinary observable results. A nullary function
+alias remains callable when passed as an argument or stored in a local binding;
+only an actual effect-free nullary definition is automatically observed.
 
 `chelis eval --target eval|c|hip|metal` computes the root manifest against the
 selected backend's capabilities. The default is `eval`. This is useful when a
@@ -167,6 +255,24 @@ the selected `target`, ordered `entries` (`name`, `lane`, and
 selected manifest names in the same order. Tuple roots and statically fixed
 ADT roots use dotted component names. If a lane cannot produce an owed root,
 evaluation exits nonzero instead of returning a partial JSON document.
+
+The compiler API can supply tensor bindings when selecting a parameterized
+Host entry, including through `PreparedEvalInContext::eval_root`. An available
+lowered Host kernel contributes its shape-witness parameters to `required_inputs`;
+entry/profile admission is unchanged. Missing required bindings leave the
+declaration unentered; invalid required wire tensors fail before entry.
+Genuinely dead parameters and unrelated
+bindings are not decoded. Preparation can inspect Host lowering metadata again
+per request; it does not cache a speculative execution plan or change runtime
+error ownership. The
+[selected Host API tests](../../../crates/chelis-compiler-api/tests/issue_2013_selected_host_inputs.rs)
+demonstrate supplied bindings; `chelis eval --file` supplies an empty binding map.
+
+If evaluation fails after `print` or `debug`, text mode emits the preceding
+transcript on stdout before reporting the error on stderr. Later effects do
+not run and no result roots are printed. With `--json`, failure leaves stdout
+empty and emits the preceding transcript on stderr before the diagnostic;
+successful JSON responses keep the transcript inside the result document.
 
 ### Bounding a slow evaluation
 
@@ -202,8 +308,11 @@ does not, a backstop terminates the process and says so:
 error: evaluation timed out after 30s (--timeout); cancellation did not complete within 5s, forced exit
 ```
 
-The suffix is worth reading. It means the process was killed rather than
-unwound, so destructors did not run and buffered output was not flushed.
+The suffix means the process exited without unwinding, so destructors did
+not run. Completed `print` and `debug` output is retained and flushed before
+the timeout diagnostic: stdout in text mode, stderr with `--json`. The same
+rule applies to cooperative cancellation. Output still being rendered when
+the process exits is not a completed effect.
 The usual cause is a machine under heavy load, where the cooperative
 unwind competes for CPU against a fixed wall-clock grace period.
 
@@ -262,6 +371,15 @@ Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 serial file execution. Output remains stable in discovery order for both plain
 text and NDJSON.
 
+An ordinary run must select at least one runnable nullary `test_*` function
+returning `unit`. Chelis exits `2` when the directory walk finds no `.ch`
+files, when the discovered files declare no runnable tests, or when `--filter`
+matches none of them. Plain mode prints an error instead of a passing
+`0 passed, 0 failed` summary. Under `--json`, stdout contains one record with
+an `errors` array and an `empty_test_selection` diagnostic; no test row or
+summary is emitted. A failed directory walk retains its own error and is not
+also described as an empty selection.
+
 `--timeout` is a per-test budget (30 seconds by default).
 `--suite-timeout` is an independent bound around the complete command,
 including Reef/context preparation, workers, output collection, and
@@ -305,6 +423,17 @@ consumers do not need a second plain-text run to diagnose the mismatch.
 
 ## Property Proof Loop
 
+For self-contained scalar neural networks, `chelis prove file.ch --tier
+beacon-only --beacon-budget 60000` dispatches rank-zero `tensor[f64]` range
+properties to the executable named by `CHELIS_BEACON_BIN`. Bounds use explicit
+f64 literals and `tensor_to_scalar` in the property. The result includes the
+folded goal, input box, bounds, split tree and always-visible real-arithmetic
+qualification. Float execution is not covered. `--beacon-wall-budget 90000`
+includes compiler preparation when limiting the remaining search time. The
+explicit Beacon lane does not fall back to SMT or fuzz. See
+[the scalar range contract](../../../docs/design/beacon_scalar_range.md) and
+`examples/beacon_scalar_range.ch` for the supported subset.
+
 `chelis prove` runs first-class Surf properties and bridge-emitted Deep property
 witnesses:
 
@@ -333,6 +462,13 @@ overflow, and unsupported differentiated operations return a specific
 unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
 instead. Conditional scalar gradients and differentiated casts remain outside
 the prover subset until the compiler can build them.
+
+Scalar gradients remain scalars when consumed by another expression. For
+example, `grad(fn (x: f32) -> exp(x), wrt=x)(1.0f32) > 0.0f32` evaluates to
+`true`; an equivalent property can be checked with `--tier fuzz-only` or
+`--tier auto`. This does not permit implicit scalar/tensor comparisons:
+the gradient of a rank-zero tensor remains a tensor and needs an explicit
+`tensor_to_scalar` before a scalar comparison.
 
 Contract-backed Reef proofs resolve their implementation through the linker.
 For example, a property importing `Nautilus.Stats.quantile_vec` can request
@@ -435,6 +571,9 @@ CHB digest.
 - Treat `--allow-style-violations` as a local escape hatch, not part of a package build.
 - In pipe-stage Surf, `x |> f(y)` means `f(x, y)`. Use
   `x |> fn (v) -> f(y, v)` when the piped value belongs later.
+- `chelis surf` rejects a Deep `surf_pipe_stage: "call-first"` marker when
+  removing its parameter would leave a zero-argument call or a free reference
+  to that parameter. It reports the stage error without emitting Surf.
 
 For exact CLI semantics, use the numbered specs plus the CLI
 integration tests in the repo (notably

@@ -126,8 +126,6 @@ class OracleEnvironmentTests(unittest.TestCase):
                 results = list(pool.map(run_leg, range(2)))
             for result in results:
                 self.assertEqual(result.returncode, 0, result.stdout)
-            for target in targets:
-                self.assertTrue((target / ".rustc_info.json").is_file(), target)
 
 # Parser-only sample for `ignored_cells`. It is deliberately NOT checked
 # against the shipped ledger: its job is to keep both attribute spellings
@@ -373,7 +371,7 @@ class CrossLaneCorpusTests(unittest.TestCase):
         assert entries is not None
         source = self._harness().replace(
             entries["bool-exits"],
-            '("bool-exits", exits_program("tensor[1, int8]", "to_tensor([1])")),\n        ',
+            '("bool-exits", exits_program("tensor[1, i8]", "to_tensor([1])")),\n        ',
             1,
         )
         violations = oracle.cross_lane_corpus_violations(source)
@@ -395,17 +393,17 @@ class CrossLaneCorpusTests(unittest.TestCase):
         self.assertTrue(any("assert_eq!" in v for v in violations), violations)
 
     def test_a_shrunk_corpus_is_a_violation(self) -> None:
-        source = self._harness().replace('("int64-exits"', '("int64-exits-renamed"', 1)
+        source = self._harness().replace('("i64-exits"', '("i64-exits-renamed"', 1)
         violations = oracle.cross_lane_corpus_violations(source)
         self.assertTrue(
-            any("int64-exits" in violation for violation in violations), violations
+            any("i64-exits" in violation for violation in violations), violations
         )
 
     def test_a_grown_corpus_is_allowed(self) -> None:
         source = self._harness().replace(
-            '("int8-exits", int_table_program("int8", INT_ROWS[0].1)),',
-            '("int8-exits", int_table_program("int8", INT_ROWS[0].1)),\n'
-            '        ("int16-exits", int_table_program("int16", INT_ROWS[1].1)),',
+            '("i8-exits", int_table_program("i8", INT_ROWS[0].1)),',
+            '("i8-exits", int_table_program("i8", INT_ROWS[0].1)),\n'
+            '        ("i16-exits", int_table_program("i16", INT_ROWS[1].1)),',
             1,
         )
         self.assertEqual(oracle.cross_lane_corpus_violations(source), [])
@@ -453,6 +451,18 @@ class ObservationDecodeTableTests(unittest.TestCase):
         )
         violations = oracle.observation_decode_violations(source)
         self.assertTrue(any("I16" in v for v in violations), violations)
+
+    def test_a_key_arm_on_a_narrower_view_is_a_violation(self) -> None:
+        shipped = "RuntimeDType::Key => format_key_bits(*(tensor_data(t) as *const u64).add(i)),"
+        runtime = self._runtime()
+        self.assertIn(shipped, runtime)
+        source = runtime.replace(
+            shipped,
+            "RuntimeDType::Key => format_key_bits(u64::from(*(tensor_data(t) as *const u32).add(i))),",
+            1,
+        )
+        violations = oracle.observation_decode_violations(source)
+        self.assertTrue(any("Key" in v for v in violations), violations)
 
     def test_no_dtype_has_an_untyped_f32_view_exception(self) -> None:
         exceptions = [

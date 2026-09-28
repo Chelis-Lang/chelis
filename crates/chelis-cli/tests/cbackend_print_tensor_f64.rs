@@ -31,7 +31,7 @@
 //!
 //! Each fixture:
 //!   1. Writes a `.ch` program that produces a top-level result tensor
-//!      with the test precision (f64, int64, or f32 control) via a
+//!      with the test precision (f64, i64, or f32 control) via a
 //!      typed kernel function -- this forces the storage-side
 //!      precision into the emitted C, post-PR-#64.
 //!   2. Runs `chelis eval --file` on the source.  This goes through
@@ -49,7 +49,7 @@
 //!   * `cbackend_print_tensor_f64`  -- detects 4-byte-chunk read of an
 //!     f64 buffer.
 //!   * `cbackend_print_tensor_int64` -- detects 4-byte-chunk read of an
-//!     int64 buffer.
+//!     i64 buffer.
 //!   * `cbackend_print_tensor_f32_control` -- f32 baseline; the print
 //!     routine's `float *` read matches the f32 element size, so this
 //!     fixture passes on the buggy code and must keep passing after
@@ -63,59 +63,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-/// Locate `target/debug/` from the test binary's path.  Mirrors the
-/// helper in `cbackend_cast_memcpy.rs` and `cbackend_reshape_memcpy.rs`.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Mirror of `cbackend_reshape_memcpy::ensure_runtime_static_lib`.
-/// `chelis-runtime` is built as a dev-dependency, so cargo only emits
-/// the hashed staticlib in `target/debug/deps/`; the gcc-link step
-/// expects `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
 
 /// Run `chelis eval --file` on the source program.  Returns stdout
 /// trimmed of trailing whitespace.  Asserts the eval call succeeds.
@@ -161,8 +108,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> (tempfile::TempDir, PathBuf) {
 /// gcc-compile the emitted C and run the resulting binary, returning
 /// stdout trimmed of trailing whitespace.
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join(fn_name);
     let compile = StdCommand::new("gcc")
@@ -174,7 +120,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, fn_name: &str) -> Stri
             kernel_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",
@@ -225,32 +171,32 @@ fn cbackend_print_tensor_f64() {
     );
 }
 
-/// int64 print fixture.  Same shape of bug as the f64 case: the print
-/// routine reads `data` as `float *` and decodes 8-byte int64
+/// i64 print fixture.  Same shape of bug as the f64 case: the print
+/// routine reads `data` as `float *` and decodes 8-byte i64
 /// elements at a 4-byte stride.
 ///
-/// Source path is `f32 -> f64 -> int64` rather than `int32 -> int64`
-/// because the host runtime stores int32 tensors as f32 bit patterns
+/// Source path is `f32 -> f64 -> i64` rather than `i32 -> i64`
+/// because the host runtime stores i32 tensors as f32 bit patterns
 /// (see `crates/chelis-runtime/src/lib.rs` line 1559); a cast from
-/// int32 would read those f32 bit patterns through `(int32_t*)
-/// src->data` and produce int64 elements that hold f32 bit patterns
+/// i32 would read those f32 bit patterns through `(int32_t*)
+/// src->data` and produce i64 elements that hold f32 bit patterns
 /// in their low 4 bytes.  That is a downstream same-class bug
 /// flagged in the diagnosis sibling sweep and out of scope for this
 /// PR.  Casting from f64 reads `(double*)src->data` correctly post-
-/// PR-#64 and yields the canonical 8-byte int64 bit pattern in the
+/// PR-#64 and yields the canonical 8-byte i64 bit pattern in the
 /// destination buffer, which is the input this fixture needs to
 /// exercise the print routine in isolation.
 #[test]
 fn cbackend_print_tensor_int64() {
     let source = "def f32_to_f64(x: tensor[4, f32]) -> tensor[4, f64] = cast(x, f64)\n\
-                  def f64_to_i64(y: tensor[4, f64]) -> tensor[4, int64] = cast(y, int64)\n\
+                  def f64_to_i64(y: tensor[4, f64]) -> tensor[4, i64] = cast(y, i64)\n\
                   src = to_tensor([100000.0, 200000.0, 300000.0, 400000.0])\n\
                   mid = f32_to_f64(src)\n\
                   result = f64_to_i64(mid)\n";
     let eval_out = chelis_eval(source, "print_i64");
     let (build, kernel_c) = chelis_build_c(source, "print_i64");
     let cbuild_out = gcc_compile_and_run(build.path(), &kernel_c, "print_i64");
-    // Ground-truth eval: since chelis#732 P1, int64 tensor elements print
+    // Ground-truth eval: since chelis#732 P1, i64 tensor elements print
     // as integers ([05-OBS-2]) while f64 elements keep the `.0` form. Pin
     // the eval output explicitly so the C-build comparison cannot
     // silently agree on garbage.
@@ -261,14 +207,14 @@ fn cbackend_print_tensor_int64() {
          result = tensor(shape=[4], data=[100000, 200000, 300000, 400000])",
         "eval ground truth changed; update fixture"
     );
-    // chelis#732 Phase 2: the generated printer renders int64 elements
+    // chelis#732 Phase 2: the generated printer renders i64 elements
     // as exact integers ([05-OBS-2]), byte-identical to eval.
     assert_eq!(
         cbuild_out,
         "src = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
          mid = tensor(shape=[4], data=[100000.0, 200000.0, 300000.0, 400000.0])\n\
          result = tensor(shape=[4], data=[100000, 200000, 300000, 400000])",
-        "chelis build --target c print routine must decode int64 elements \
+        "chelis build --target c print routine must decode i64 elements \
          at the correct stride (byte parity with eval returns at chelis#732 \
          Phase 2)"
     );

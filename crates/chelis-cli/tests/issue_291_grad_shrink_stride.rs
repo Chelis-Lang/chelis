@@ -5,20 +5,20 @@
 //! Headline reproducers (verbatim from the issue):
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))
+//!   tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))
+//!   tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //!
 //! Before the fix:
 //!   * `chelis check` -> clean (type-checks) for both.
 //!   * `chelis build --target c` -> for `shrink`: "shrink at node ...:
-//!     bounds len 0 != input rank 1" (the `[[cast(0,int32),cast(2,
-//!     int32)]]` bound literal lost its `cast`-wrapped pair elements in
+//!     bounds len 0 != input rank 1" (the `[[cast(0,i32),cast(2,
+//!     i32)]]` bound literal lost its `cast`-wrapped pair elements in
 //!     lowering, producing `RiscOp::Shrink { bounds: [] }`); for
 //!     `stride`: "no reverse-mode adjoint is defined for `stride`".
 //!
@@ -37,24 +37,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use chelis_backend_c::GeneratedHeader;
 use serde_json::Value;
 use tempfile::tempdir;
 
 const SHRINK_DF: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const SHRINK_EVAL: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, i64), cast(2, i64)]]), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 
 const STRIDE_DF: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const STRIDE_EVAL: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, i64)), cast(0, i32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 
@@ -110,6 +111,39 @@ fn run_build_c(source: &str, stem: &str) -> (tempfile::TempDir, PathBuf, std::pr
         .output()
         .expect("run chelis build");
     (dir, kernel_c, output)
+}
+
+fn assert_exact_f_export(kernel_c: &Path) {
+    let emitted = fs::read_to_string(kernel_c).expect("emitted C kernel must exist");
+    let header =
+        fs::read_to_string(kernel_c.with_extension("h")).expect("generated header must exist");
+    let generated = GeneratedHeader::parse(&header).expect("generated declaration metadata");
+    generated
+        .validate_source(&emitted)
+        .expect("generated declaration must match the emitted definition");
+    let declaration = generated
+        .declaration("f")
+        .expect("authored `f` declaration");
+    assert_eq!(declaration.symbol(), "chelis_fn_66");
+    assert_eq!(
+        declaration.declaration(),
+        "float chelis_fn_66(chelis_tensor* x);"
+    );
+    assert!(
+        emitted.contains("chelis_fn_66__chelis_owned_body("),
+        "the public declaration and owned-body call must share the canonical identity"
+    );
+
+    let stale_header = header.replace("chelis_fn_66", "f");
+    assert!(
+        GeneratedHeader::parse(&stale_header).is_err(),
+        "tampering with declaration bytes without its structural record must fail parsing"
+    );
+    let stale_source = emitted.replace("chelis_fn_66(", "f(");
+    assert!(
+        generated.validate_source(&stale_source).is_err(),
+        "a mutated emitted definition must fail agreement"
+    );
 }
 
 // --- check: both reproducers already type-check; pin it. ---
@@ -212,12 +246,7 @@ fn issue_291_shrink_build_c_emits_kernel() {
         "build --target c must succeed; stderr={}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let emitted = fs::read_to_string(&kernel_c).expect("emitted C kernel must exist");
-    assert!(
-        emitted.contains("f("),
-        "emitted C must define the gradient function `f`; got {} bytes",
-        emitted.len(),
-    );
+    assert_exact_f_export(&kernel_c);
 }
 
 #[test]
@@ -228,10 +257,5 @@ fn issue_291_stride_build_c_emits_kernel() {
         "build --target c must succeed; stderr={}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let emitted = fs::read_to_string(&kernel_c).expect("emitted C kernel must exist");
-    assert!(
-        emitted.contains("f("),
-        "emitted C must define the gradient function `f`; got {} bytes",
-        emitted.len(),
-    );
+    assert_exact_f_export(&kernel_c);
 }

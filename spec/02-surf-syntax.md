@@ -11,12 +11,17 @@ Deep desugaring shown as **⟹** with the target Deep s-expression.
 Canonical Surf is the one repository and output spelling for each grammatical
 construct. The normal parser also accepts the explicitly value-preserving
 input families in P10-P12: numeric radix/digit-separator/exponent spellings,
-equivalent valid string escapes, whitespace before a parenthesized call argument
-list, and trailing separators in delimited forms.
+float bodies carrying decimal digits beyond the shortest round-trippable
+spelling, equivalent valid string escapes, whitespace before a parenthesized
+call argument list, and trailing separators in delimited forms.
 `chelis fmt` prints those inputs in canonical form and is idempotent on its own
 output; `chelis fmt --check` enforces that output form in a repository. The
 versioned `chelis migrate surf --from 0.18` path remains for genuinely legacy,
 semantically incompatible, or otherwise non-normal syntax.
+That migration rewrites the retired integer type spellings `int8`, `int16`,
+`int32`, and `int64` to `i8`, `i16`, `i32`, and `i64` only in type positions
+and cast targets. Normal parsing does not accept the retired spellings as
+primitive types.
 
 With `--inplace`, migration is a batch transaction over ordinary source files.
 Before replacing any input, the command MUST preflight every path and reject a
@@ -37,6 +42,10 @@ The canonical forms are:
   returned by another expression uses explicit grouping (`(f(x))(y)`), while
   ungrouped `f(x)(y)` is rejected. The parser accepts whitespace before the
   argument list (`f (x)`, `Some (x)`), and the formatter removes it;
+- consecutive numeric tuple projections group the receiver
+  (`(nested.0).1`), because the ungrouped spelling `nested.0.1` would lex its
+  adjacent numeric suffixes as a floating-point token. Ordinary single
+  projections and mixed field/projection chains need no grouping;
 - ordinary binding blocks use newlines as separators, contain at least one
   binding and one tail expression, and contain no semicolons; `par` and direct
   Deep sequencing use their distinct semicolon-delimited forms;
@@ -45,7 +54,7 @@ The canonical forms are:
 - canonical output omits trailing commas and semicolons, but the parser accepts
   one trailing separator in a delimited nonempty family. The comma in a
   singleton tuple or singleton tuple pattern is semantic rather than cosmetic;
-- built-in effects are spelled `Diff`, `Random`, `Accum`, `IO`, `Test`, and
+- built-in effects are spelled `Diff`, `Accum`, `IO`, `Test`, and
   `Resource(...)` with exactly that casing;
 - record fields preserve source order and evaluate left-to-right; a field
   whose value is the same-named variable is written as a pun;
@@ -62,9 +71,10 @@ The canonical forms are:
   `vmap(f, axis=n)`. Axis zero is written `vmap(f)`;
 - literal output is the canonical literal printer's decimal spelling for the
   decoded value and suffix: no digit separators or redundant leading/trailing
-  zeroes, and the shortest round-trippable float form with a decimal point or
-  canonical exponent when required. P10-P11 define the equivalent spellings
-  accepted as input and the semantic forms that remain rejected.
+  zeroes; a float body uses the shortest round-trippable form with a decimal
+  point or canonical exponent when required, and an integer body under a float
+  suffix keeps its integer spelling (P10a). P10-P11 define the equivalent
+  spellings accepted as input and the semantic forms that remain rejected.
 
 Canonical Deep and canonical Surf are two representations of the same public
 language. The required executable laws are:
@@ -85,7 +95,12 @@ expanded Deep. `normalize_deep` may erase only the derived metadata enumerated b
 `spec/03-deep-syntax.md` section 6.3.2. A well-formed public Deep node has a Surf
 representation unless it carries non-forgeable producer provenance that Surf
 deliberately cannot author; §6.3.1 defines that fail-closed exception. An
-unmapped tag is an implementation or specification bug.
+unmapped tag is an implementation or specification bug. A `grad` carrying
+`wrt` is in the resugaring domain only when its operative selector is a
+well-formed integer selector for a statically resolved callable origin and
+agrees exactly with the ordered metadata names. Contradictory, malformed,
+absent, or dynamically unresolved selectors fail resugaring; the round-trip
+laws do not authorize dropping or reconstructing the operative child.
 
 ---
 
@@ -102,7 +117,7 @@ cast  cast_trunc  par  do  quote  unquote  splice  true  false
 **Total: 29.**
 
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
-`seed`, `device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
+`device`, the dtype-family names `Float`, `Int`, and `Numeric`, and
 the property-option names are contextual words only in the productions that
 name them. A dtype-family name is a family only in a type binder's bound
 position; everywhere else it is an ordinary type name. `effect`, `handler`, `perform`, `resume`, and
@@ -211,7 +226,7 @@ consumer that imports two modules exporting the same type name can annotate
 against one:
 
 ```
-def relay(m: Demo.Dropout.Mode) -> int64 = Demo.Dropout.use(m)
+def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)
 ```
 
 This is the disambiguation escape hatch when two imported modules export the
@@ -234,6 +249,12 @@ its terminal name is a unique match. A bare name with no in-scope binding is an
 unimported module cannot change that verdict. The qualified forms above remain
 available after importing the declaring module, and naming the value in a
 selective import brings it into unqualified scope.
+
+Function calls do not give a named declaration access to its caller's locals.
+Its free references keep their declaration scope; an anonymous `fn` instead
+captures the lexical bindings at its creation site, including local shadows of
+declarations. Arguments are evaluated left-to-right in the caller's scope before
+the callee's parameters are installed ([04-LIN-1], [04-LIN-2]).
 
 **Constructor scope (unqualified references).** A bare (unqualified)
 constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
@@ -285,12 +306,16 @@ def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32] =
 ```
 (defdim {} batch)
 (defdim {} vocab_size)
-(defsig {} transpose (t-fn {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
+(defsig {} transpose (a b) (t-fn {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
                               (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
 (def {} transpose (fn {} (params x) ...))
 ```
 
-**Disambiguation:** A name in a `dim` declaration or imported → concrete `d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase name in a tensor type that is neither declared nor in brackets → parse error.
+**Disambiguation:** A name in a `dim` declaration or imported → concrete
+`d-name`. A name in a function's `[...]` → variable `d-var`. A lowercase
+single-letter name in a tensor type that is neither declared nor in brackets
+remains a `d-var` use and is rejected as undeclared by the checker; a
+multi-letter name remains a concrete `d-name`.
 
 ### P3b: Rank Variables (`..r`)
 
@@ -304,7 +329,7 @@ design and soundness boundary, including §4.5.3 (named-axis reduction).
 **Tier-2 (identity):** `..r` as the sole shape element — one def, every rank:
 
 ```
-def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 **Tier-3 (name-preserving rank arithmetic, §4.5.3):** `..r` may be interleaved
@@ -313,23 +338,23 @@ named-axis reduction drops the named anchor and carries the surrounding spreads
 through — one def reduces a named axis at any rank:
 
 ```
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)
 ```
 
 **⟹**
 ```
-(defsig {} reduce_seq
+(defsig {} reduce_seq (pre post)
   (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-name {} seq) (d-rank {} post) (t-prim {} f32)))
            (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-prim {} f32))))
 ```
 
-`..r` is introduced contextually (like a sig dim variable — no `[..r]`
-quantifier needed). A spread name may not repeat within one tensor shape (a
+`..r` is a variable use whose name must appear in the declaration's complete
+`[...]` binder list. A spread name may not repeat within one tensor shape (a
 **parse error**). A reduction names the axis it removes by the anchor's name
 (`sum(x, seq)`). Multiple named axes use the variadic form
 (`sum(x, head, seq)` or `count(mask, head, seq)`). Value reductions
 lower to the canonical single-axis composition in spec/04 §4.5.3; `count`
-lowers once with its complete named-axis vector because its result is `int64`,
+lowers once with its complete named-axis vector because its result is `i64`,
 not `bool`. The reduced axis must be a **named** anchor present
 exactly once in the operand — a fully-literal or differently-named operand is
 rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
@@ -344,10 +369,12 @@ Both inline and standalone forms. All types are optional — inference fills the
 
 **Inline:**
 ```
-def add_vecs(x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
+def add_vecs[d](x: tensor[d, f32], y: tensor[d, f32]) -> tensor[d, f32] = add(x, y)
 ```
 
-When a `def` has inline type annotations, the desugarer extracts a `defsig` in addition to the `def`.
+When a `def` has inline type annotations and no standalone `sig`, its generated `defsig` owns each parameter type. The corresponding `fn` parameter carries `type: (t-var {} _)`, not a second copy of that type. This inference hole adds no constraint and receives the declared slot's type before the body is checked. A parameter without an annotation remains bare. The presence of the hole preserves the source annotation's presence for signature reports.
+
+Each parameter type retains its inline binding context under §P4b, even in the generated signature. The result type retains its signature context. A standalone `sig` and any separately authored parameter annotations remain independent constraints. Anonymous lambdas and property quantifiers retain their own parameter annotations.
 
 **Standalone (for long signatures):**
 ```
@@ -367,63 +394,90 @@ A `sig` may carry the same bracketed binder list a `def` carries, in the
 same position — immediately after the declared name:
 
 ```text
-sig arange[p: Int]: p -> p -> tensor[n, p]
+sig arange[n, p: Int]: p -> p -> tensor[n, p]
 def arange(start, stop) = ...
 ```
 
-`sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
+`sig` must precede its corresponding definition: either a function `def` or a
+bare top-level value binding. Only a function `def` has an inline binder list.
+A binder-bearing signature for a non-function value therefore stays standalone
+in canonical Surf and is followed by an untyped value binding:
+
+```text
+sig empty[p]: List[p]
+empty = Nil
+```
+
+Writing `empty: List[p] = Nil` instead would lose the quantifier because a typed
+value binding has no binder list or declaration-binder scope.
+
+Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
 Effect annotations are optional suffixes on either `sig` or `def`:
 
 ```text
-sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
-def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
+sig predict[n]: tensor[n, f32] -> tensor[n, f32] ! { IO }
+def train[n](x: tensor[n, f32]) -> tensor[n, f32] ! { IO, Resource("gpu:0") } = ...
 ```
 
-Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, `Test`, and
-`Resource("device")`. `Random` and `Resource("...")` are the user-handler
-boundaries. `IO` covers host interaction and may remain unhandled at the
+Surf accepts the built-in names `Diff`, `Accum`, `IO`, `Test`, and
+`Resource("device")`. `Resource("...")` is the user-handler boundary.
+Randomness is not an effect: a function that draws takes a `key` parameter
+(spec/05 §2.7). `IO` covers host interaction and may remain unhandled at the
 program boundary. `Test` is handled by `chelis test`. `Diff` denotes a
 compiler capability rather than a user-handled effect, and `Accum` is
 internal-only.
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
-#### P4b: Contextual Precision Polymorphism (WS-A5, WS-A6)
+#### P4b: Explicit Declaration Binders
 
-In a sig OR def with quantified type variables, names appearing in
-the precision slot of a `tensor[...]` type that match the
-quantifier list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
+Every type, dimension, and rank variable in a `sig`, annotated `def`, or
+`@property` declaration is declared in that declaration's `[..]` binder list.
+For a property the list follows the property name:
+
+```text
+@property accepts[p] forall(x: p): true
+```
+
+Names appearing
+in the precision slot of a `tensor[...]` type that match the binder
+list become `(t-var {} <name>)`, not `(t-prim {} <name>)`.
 Names matching a primitive (`f32`, `f64`, `bf16`, `f16`, `i8`, `i16`,
 `i32`, `i64`, `bool`) stay as `(t-prim {} <name>)`. Outside a sig
-or def quantifier scope (e.g., in a let-typed binding), no
-quantifier exists, so the existing rule applies.
+or def quantifier scope (e.g., in a top-level typed value binding with no
+standalone `sig`), no quantifier exists, so the existing rule applies.
+Within a quantified def or property body, the declaration's type binders
+remain in scope for every annotation type position, including property
+quantifier types, lambda parameters, expression ascriptions, block bindings,
+nested ADT arguments, and tensor precision slots. One explicit declaration
+binder scope applies throughout the declaration body; a listed name therefore
+lowers according to its position even inside a body-local tensor type.
+The retired v0.18 integer spellings `int8`, `int16`, `int32`, and `int64`
+never become type variables. They are rejected with the
+versioned-migration diagnostic even when listed.
 
-Quantifiers in a sig are **implicit**: any lowercase identifier that
-appears in the sig's type expression and is not a primitive name is
-treated as an implicitly `forall`-quantified type variable.
-Quantifiers in a def, by contrast, are **explicit**: a def's
-`[..]` clause is the authoritative source. A precision name in a
-def parameter annotation must appear in the def's `[..]` clause to
-be promoted to a `t-var`; an unbound precision name surfaces an
-`UnsupportedTensorPrecision` diagnostic per
-`spec/04-type-system.md` §5.8.
+The binder list is complete, not a hint. An unlisted lowercase name in
+a scalar type or tensor precision position stays `(t-prim {} <name>)`
+and is rejected as an unknown dtype with a nearest-active-dtype
+suggestion. A single-letter symbolic dimension still lowers to `d-var`,
+and `..r` still lowers to `d-rank`, but either is undeclared and rejected
+unless its name appears in the list. An unlisted multi-letter tensor axis
+keeps its existing concrete `d-name` meaning. There is no typo-shape or
+alias heuristic and no implicit collection fallback.
 
-A def with no `[..]` clause falls back to WS-A5 implicit collection
-on its synthesized sig so that a bare
-`def f(x: tensor[3, p])` continues to behave as if the user had
-written the equivalent `sig f: tensor[3, p] -> ...` plus an
-untyped def.
+An unbounded listed name may be unused; it denotes a vacuous universal
+quantifier and is preserved by canonical Surf/Deep round-tripping. A listed
+name with a dtype-family bound must occur in the declared type as §P4c
+requires.
 
 The `spec/04-type-system.md` §1.1.2 unsigned aliases (`u8`, `u16`,
 `u32`, `u64`, `uint8`, `uint16`, `uint32`, `uint64`) are explicitly
-excluded from implicit collection so they reach the type-checker's
-§1.1.2 rejection path with a precise diagnostic, rather than being
-silently absorbed as quantifiers. The exclusion is not confined to
-implicit collection: a dtype spelling that `spec/04-type-system.md`
-[04-DTYPE-1] rejects names no type variable in any type position, so a
-`[..]` clause does not rebind one. The clause overrides the case-split
-of §3.1, not the rejected and primitive spellings.
+excluded from binding so they reach the type-checker's §1.1.2 rejection
+path with a precise diagnostic. A dtype spelling that
+`spec/04-type-system.md` [04-DTYPE-1] rejects names no type variable in
+any type position, so a `[..]` clause does not rebind one. The clause
+overrides the case-split of §3.1, not rejected or primitive spellings.
 
 The same identifier in a def's `[..]` clause may act as either a
 dim-var or a precision tvar depending on its position inside a
@@ -466,20 +520,20 @@ clause is a type variable, and a bound single-letter uppercase name in
 a value position is a value. The override is single-letter only;
 multi-letter PascalCase remains a type or constructor everywhere.
 
-Examples:
+Example:
 
 ```text
-sig poly_id: tensor[d, p] -> tensor[d, p]
+sig poly_id[d, p]: tensor[d, p] -> tensor[d, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
-def use_int32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
+def use_int32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
 ```
 
-The sig has implicit quantifiers `d` (a `DimVar`) and `p` (a precision
+The sig explicitly declares `d` (a `DimVar`) and `p` (a precision
 `TypeVar`). Each call site instantiates `p` with a fresh precision
 variable that unifies with the call's actual precision; calling
 `poly_id` with mismatched precisions across a single call (e.g.,
-input `tensor[3, int32]` declared output `tensor[3, f32]`) is a type
+input `tensor[3, i32]` declared output `tensor[3, f32]`) is a type
 error.
 
 Def-level explicit quantifier:
@@ -501,7 +555,7 @@ A binder in a `[..]` clause may declare a **dtype-family bound**,
 written after the binder name:
 
 ```text
-sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 def linspace(start, stop, count) = ...
 
 def arange_values[p: Int](current: p, stop: p, out: List[p]) -> List[p] = ...
@@ -515,16 +569,13 @@ silent bound and a user type named `Float` is unaffected outside this
 position. A binder with no bound keeps its existing meaning: an
 unconstrained type variable, not a dtype.
 
-A `sig`'s `[..]` clause is **partial**: every name it does not list
-stays implicitly quantified exactly as above, so dimension names and
-`..r` rank spreads need no entry. A name it does list is an
-authoritative binder, as in a `def`, so listing a multi-letter
-dimension name makes it a dimension *variable* where an unlisted one
-would be a concrete symbolic axis. A listed name **that declares a
-bound** must occur in the declared type. A bound belongs to one binder
-list per declaration: when a standalone `sig` declares the name, the
-bound goes on the `sig`, and a bound in that `def`'s `[..]` clause is
-an error.
+A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and
+`d-rank` name in the signature appears exactly once. Listing a
+multi-letter dimension name makes it a dimension *variable* where an
+unlisted one is a concrete symbolic axis. A listed name **that declares
+a bound** must occur in the declared type. One binder list owns each
+declaration: a standalone `sig` carries it, and a matching `def` must
+not carry a second list.
 
 A bounded binder is a type binder only. Using one in a dimension slot
 or as a rank spread is an error, since a dtype family cannot name an
@@ -611,28 +662,24 @@ No `where` clauses. Use blocks.
 
 ### P5a: Effect Handlers
 
-Surf defines two `with` block forms:
+Surf defines one `with` block form:
 
 ```text
-with seed(42i64) {
-  dropout(x, 0.5)
-}
-
 with device("gpu:0") {
   body
 }
 ```
 
-`with` handlers are expressions. They take exactly one argument in parentheses and a
+A `with` handler is an expression. It takes exactly one argument in parentheses and a
 brace-delimited block body.
 
 The handler argument rules are:
 
-- `with seed(...)` requires an explicit integer literal seed carrying the `i64`
-  suffix (`with seed(42i64) { ... }`); the seed is semantically int64 and an
-  unsuffixed literal is a type error naming the suffix (§P10a)
 - `with device(...)` requires an explicit string literal device name
-- only `seed` and `device` are valid handler names
+- `device` is the only valid handler name
+
+Randomness has no handler. A random primitive takes an explicit key
+(`dropout(key_from_seed(42i64), x, 0.5)`; spec/05 §2.7).
 
 ### P5b: Macros
 
@@ -655,8 +702,13 @@ Macro rules:
 - a local binding named `linear_layer` or `cross_entropy` blocks macro expansion for
   that identifier
 - hygiene renames only binders introduced by the macro expansion (block-binding names, `fn`
-  params, pattern binders); free references in the macro body remain free and resolve
+  params, pattern binders), including typed parameters whose names require prefix
+  metadata spelling in Deep; free references in the macro body remain free and resolve
   in the caller's scope
+- expansion preserves an invocation's authored expression type ascription and
+  block-binding type origin on the expanded value; a type ascription in the macro
+  body remains a separate obligation when both apply; substituting a macro
+  parameter preserves a type ascription on that parameter reference
 - macro expansion runs before type checking, effect inference, linearity checking, and
   lowering
 
@@ -726,6 +778,9 @@ match n with {
 }
 ```
 
+A guard runs after its pattern matches, and a `false` guard passes control to
+the next arm (`spec/04-type-system.md` [04-PAT-2]).
+
 Record patterns allow punning and ignore unmentioned fields. Field order doesn't matter.
 
 Surf has no or-patterns; write separate arms.
@@ -750,7 +805,7 @@ b = pair.1
 **⟹**
 ```
 (a, b)   ⟹  (tuple {} a' b')
-pair.0   ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))
+pair.0   ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} i32)} 0))
 ()       ⟹  (lit {type: (t-unit {})} ())
 ```
 
@@ -770,12 +825,26 @@ Transforms use call syntax in Surf but desugar to dedicated Deep tags. The parse
 | `grad(f, wrt=(w, b))` | `(grad {wrt: ...} f' (tuple {} idx₁ idx₂))` | Multi-parameter `wrt` preserves the written order |
 | `jit(f)` | `(jit {} f')` | |
 | `vmap(f, axis=n)` | `(vmap {} f' n')` | Named nonzero axis |
-| `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} int32)} 0))` | |
+| `vmap(f)` | `(vmap {} f' (lit {type: (t-prim {} i32)} 0))` | |
 | `cast(e, bf16)` | `(cast {} e' (t-prim {} bf16))` | Second arg is a type literal (special form) |
-| `cast_trunc(e, int32)` | `(cast {} e' (t-prim {} int32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
+| `cast_trunc(e, i32)` | `(cast {} e' (t-prim {} i32) trunc)` | Named truncating float-to-integer cast ([05-OP-6]) |
 | `realize(e)` | `(realize {} e')` | |
 | `copy(e)` | `(copy {} e')` | |
 | `&x` | `(borrow {} (var {} x))` | Explicit read-only borrow; usually inferred at call sites |
+
+For a named `wrt`, desugaring resolves the target value to its immutable
+callable origin and maps each written selector name to that origin's ordered
+formal parameters. Direct definitions, inline lambdas, and lexical aliases
+retain that identity through alias chains; rebinding or shadowing affects only
+subsequent bindings. Tuple, ADT constructor payload, and record-field patterns
+project the corresponding callable origin from their scrutinee, recursively
+through nested patterns. A branch or aggregate join retains a callable origin
+only when the exact lexical origin identity and ordered formal list agree on
+every contributing path; equal display labels or equal function signatures do
+not make distinct lambdas or declarations the same callable. Selector order
+and duplicates are preserved. An unknown formal name, a dynamic or non-callable
+target, or a target whose callable origin cannot be established is a desugaring
+error; no positional fallback is permitted.
 
 Transforms compose naturally: `jit(grad(loss_fn))` **⟹** `(jit {} (grad {} (var {} loss_fn)))`.
 When `grad` targets one differentiable parameter, the result is that gradient value.
@@ -798,30 +867,39 @@ The second argument to `cast` is a precision type literal (`f32`, `bf16`, etc.) 
 
 ### P10: Numeric Literals
 
-Default float precision: **f32**. Default integer type: **int32**.
+Default float precision: **f32**. Default integer type: **i32**.
 
 Canonical Surf output uses the exact spelling emitted by the literal printer.
 Integers are decimal with no separators or redundant leading zeroes. Floats
 are finite and use the shortest round-trippable decimal spelling for their
 decoded value, with `.0` added when the shortest spelling would otherwise look
 like an integer; a lowercase `e` form is used only when the shortest printer
-emits it.
+emits it. A float-suffixed literal whose body is an integer (§P10a) is a
+distinct source form rather than a spelling of the decimal-bodied literal, and
+its canonical output keeps the integer body.
 
 The normal parser additionally accepts value-preserving hexadecimal and binary
-integers, underscores placed strictly between digits, and equivalent finite
-exponent spellings such as `1e3` and `1.0E+3`. The formatter decodes these
-forms and emits the canonical decimal token. This allowance does not admit
-malformed separators, padded non-exponent decimals such as `1.00`, a suffix
-with different type/adoption meaning, or a token whose decoded value is
-non-finite. Surf has no infinity or NaN literal.
+integers, underscores placed strictly between digits, and, for a float-bodied
+literal, any finite decimal body that decodes to the literal's value. That
+family covers equivalent exponent spellings such as `1e3` and `1.0E+3`, padded
+decimals such as `1.00` and `1.10f64`, and bodies carrying digits beyond the
+shortest round-trippable spelling such as `0.319381530` and
+`0.99999999999980993f64`. The formatter decodes these forms and emits the
+canonical token, so a transcribed reference constant is repaired by
+`chelis fmt` rather than refused by the parser.
+
+This allowance does not admit malformed separators, a non-canonical decimal
+body on an integer-bodied literal, a suffix with different type/adoption
+meaning, or a token whose decoded value is non-finite.
+Surf has no infinity or NaN literal. A token that decodes to a finite value
+is still not a literal of a dtype at which that value is non-finite
+(`spec/04-type-system.md` [04-LIT-2]): `1e40` at the `f32` default and
+`70000.0f16` are rejected.
 
 **Literal default rule (authoritative):** an unsuffixed integer literal binds
-at type `int32`; an unsuffixed float literal binds at type `f32`. The lexer
-parses unsuffixed literals at i64/f64 precision so that out-of-range literals
-can be diagnosed before defaulting; the desugarer/type-checker then narrows
-the value to `int32` (for integer tokens) or `f32` (for float tokens) before
-Deep is materialized. The narrowing is the **user-facing contract** and is
-non-overridable except by:
+at type `i32`; an unsuffixed float literal binds at type `f32`, each under
+`spec/04-type-system.md` [04-LIT-2]. The default is the **user-facing
+contract** and is non-overridable except by:
 
 1. an explicit literal suffix (P10a)
 2. the contextual tensor-literal inference rule (P10b) when the literal
@@ -829,7 +907,7 @@ non-overridable except by:
 3. an explicit `cast(literal, p)` around the literal expression
 
 There is no implicit precision promotion. A bare `42` in any unannotated
-position binds at `int32`, not `int64`. A bare `1.0` binds at `f32`, not
+position binds at `i32`, not `i64`. A bare `1.0` binds at `f32`, not
 `f64`. See `spec/04-type-system.md` §5.3 for the type-system statement of
 this rule.
 
@@ -837,7 +915,7 @@ this rule.
 not as a signed literal token. A negative argument is written `f(-42)`.
 Literal patterns are the exception because patterns contain no unary
 expression node: `-42`, `-1.5`, and `-0.0` decode directly to a negative
-`pat-lit`, including the full `int64` minimum.
+`pat-lit`, including the full `i64` minimum.
 
 ### P10a: Literal Suffixes
 
@@ -847,22 +925,46 @@ narrowing. The closed suffix set is:
 
 | Suffix | Bound type | Example | Notes |
 |---|---|---|---|
-| `f32` | `f32` | `1.0f32`, `42.0f32` | Float-typed |
+| `f32` | `f32` | `1.0f32`, `42.0f32`, `42f32` | Float-typed |
 | `f64` | `f64` | `1.0f64` | Float-typed |
 | `bf16` | `bf16` | `1.0bf16` | Float-typed |
 | `f16` | `f16` | `1.0f16` | Float-typed |
-| `i8` | `int8` | `42i8` | Integer-typed |
-| `i16` | `int16` | `42i16` | Integer-typed |
-| `i32` | `int32` | `42i32` | Integer-typed |
-| `i64` | `int64` | `42i64` | Integer-typed |
+| `i8` | `i8` | `42i8` | Integer-typed |
+| `i16` | `i16` | `42i16` | Integer-typed |
+| `i32` | `i32` | `42i32` | Integer-typed |
+| `i64` | `i64` | `42i64` | Integer-typed |
 
 Default-type suffixes are semantic commitments, not syntax-safe aliases. In
 particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
 `cast(1.1, f64)` contextually binds the literal at `f64` under P10b. Both are
-therefore canonical. A float suffix requires the canonical printed float body:
-`42.0f32`, not `42f32`. Integer-typed suffixes attach to
-integer literal tokens only;
-`1.0i8` is a parse error.
+therefore canonical.
+
+A float suffix accepts either a float body or an integer body, and the two are
+semantically distinct rather than spellings of one another. `42.0f32` decodes
+its decimal body and binds the decoded float. `42f32` binds the exact integer
+directly at the suffix width: it is
+`spec/04-type-system.md` [04-LIT-1]'s suffix-bound cross-family form, an exact
+Int atom marked `literal_source: integer`, finalized once at the declared width
+rather than through `f64`. Both are canonical, and `chelis fmt` preserves
+whichever body the author wrote rather than converting between them. Deep-to-Surf
+output is governed separately: `spec/03-deep-syntax.md` §6.3.2 normalizes an
+integer atom at a float primitive to the equivalent float atom, so a resugared
+program prints the decimal body. §0.1's retraction law does not require
+`resugar(desugar(surf))` to reproduce authored bytes.
+
+An integer body binds at the suffix width, so its admissible range is that
+width's, not the body's: a body whose exact value rounds to infinity at the
+declared width is rejected as non-finite, exactly as `1e400` is. `65504f16`
+binds; `65520f16` does not. A decimal body is held to the same width
+(`spec/04-type-system.md` [04-LIT-2]): `65504.0f16` binds; `65520.0f16` does
+not.
+
+No radix body carries a float suffix (`spec/04-type-system.md` §5.5). That
+holds for a hexadecimal body even though every float suffix is spelled in hex
+digits: such a token is rejected, not read as a longer hexadecimal integer.
+
+Integer-typed suffixes attach to integer literal tokens only; `1.0i8` is a
+parse error.
 
 **Adjacency rule.** A suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -895,14 +997,13 @@ Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
 value and has no precision slot, so Surf literal patterns are unsuffixed and a
 suffixed literal pattern is rejected.
 
-The four short integer names `i8`, `i16`, `i32` and `i64` are also accepted in
-a TYPE position, where they name the same primitives as `int8`, `int16`,
-`int32` and `int64`. They are input spellings only: the canonical formatter
-rewrites each to its long name, canonical Deep carries the long name, and a
-Deep `(t-prim {} i64)` written by hand is not a primitive. This is the P10-P12
-pattern, a wider accepted input set than the canonical output set, and it is
-what keeps a short name from being read as an implicitly quantified type
-variable under `spec/04-type-system.md` §5.8.1.
+The four integer names `i8`, `i16`, `i32`, and `i64` are the only integer
+primitive spellings in type positions and canonical output. Canonical Deep
+uses the same names. The v0.18 spellings `int8`, `int16`, `int32`, and `int64`
+are migration input only: `chelis migrate surf --from 0.18` rewrites them
+without making them valid at normal compiler ingress. Neither the canonical
+names nor the retired names may be rebound as type variables under
+`spec/04-type-system.md` §5.8.1.
 
 ### P10b: Contextual Tensor-Literal Inference
 
@@ -919,7 +1020,9 @@ positions is exactly:
 3. the body expression of a function with a declared return type that is a
    tensor type, when the body is itself a tensor literal
 4. the first argument of an explicit `cast(literal, p)` expression — the
-   literals bind at `p`
+   literals bind at `p`, which may also be a dtype-family-bounded type binder;
+   the literal then binds at each admissible instantiation
+   (`spec/04-type-system.md` §5.6)
 
 Position 4 applies to a bare scalar numeric literal as well as to a
 tensor-literal body: `cast(1.1, f64)` binds the decimal at
@@ -932,9 +1035,9 @@ while a fractional value traps `domain`. See `spec/04-type-system.md` §5.2
 and [04-NUM-14] for the full statement.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
-§P10 literal defaults: integer literals to `int32`, float literals to `f32`.
+§P10 literal defaults: integer literals to `i32`, float literals to `f32`.
 A bare `[1, 2, 3]` in an unannotated top-level binding evaluates to
-`tensor[3, int32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
+`tensor[3, i32]`; a bare `[1.0, 2.0, 3.0]` evaluates to `tensor[3, f32]`.
 
 **Mixed suffixes inside a contextual literal.** A suffixed entry inside a
 contextual tensor literal is well-formed only if its suffix matches the
@@ -1018,7 +1121,7 @@ to its position: `p` in the precision slot becomes `(t-var {} p)`, while
 identifier is a concrete symbolic dimension and becomes `d-name`, even when it
 is a single lowercase letter: `type Weights = tensor[n, f32]` therefore emits
 `(d-name {} n)`, not an implicit dimension binder. Signatures retain their
-separate implicit-quantification rule from P4/§5.8.
+separate explicit binder-list rule from P4/§5.8.
 
 Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's an ADT. Otherwise alias.
 
@@ -1145,7 +1248,7 @@ SigDecl       <- 'sig' S Ident TypeBinders? S ':' S TypeExpr EffectClause?
 #  PROPERTY DECLARATIONS
 # ═══════════════════════════════════════════════════
 
-PropertyDecl  <- '@property' S Ident S 'forall' S Params
+PropertyDecl  <- '@property' S Ident TypeBinders? S 'forall' S Params
                  (S 'where' S Expr (S ',' S Expr)* (S ',')?)?
                  S ':' S Expr PropertyOption*
 PropertyOption <- S 'with' S ('tolerance' / 'seed' / 'samples') S '=' S Expr
@@ -1155,6 +1258,14 @@ The canonical property-option order is `tolerance`, `seed`, `samples`, then
 every `contract`. Repeatable contracts retain their authored relative order.
 The normal parser accepts another option order as a syntax-safe alias, and the
 formatter rewrites it to this one order.
+
+A property's optional `TypeBinders` is the declaration's complete explicit
+binder list under §P4b/§P4c. It scopes every quantifier type, `where`
+precondition, predicate body, and expression-valued property option. Duplicate
+or forbidden binder names and undeclared type, dimension, or rank variables
+reject exactly as they do for `def`; dtype-family bounds use the same
+representation and validity rules. Omitting the list preserves the existing
+monomorphic property spelling.
 
 The comma and colon delimiters bound each property precondition. A binary
 precondition therefore omits the redundant outer grouping pair used by the
@@ -1199,7 +1310,7 @@ Params        <- '(' S (Param (S ',' S Param)* (S ',')?)? S ')'
 Param         <- Ident (S ':' S TypeExpr)?
 ReturnType    <- S '->' S TypeExpr
 EffectClause  <- S '!' S '{' S (EffectExpr (S ',' S EffectExpr)* (S ',')?)? S '}'
-EffectExpr    <- 'Diff' / 'Random' / 'Accum' / 'IO' / 'Test'
+EffectExpr    <- 'Diff' / 'Accum' / 'IO' / 'Test'
                / 'Resource' S '(' S StringLit (S ',')? S ')'
 
 MacroDecl     <- 'macro' S Ident MacroParams S '=' S Expr
@@ -1236,8 +1347,8 @@ TypeArg       <- TypeExpr / IntLit
 TypeName      <- TypeIdent ('.' TypeIdent)*
 
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
-               / 'int8' / 'int16' / 'int32' / 'int64'
-               / 'bool' / 'string'
+               / 'i8' / 'i16' / 'i32' / 'i64'
+               / 'bool' / 'string' / 'key'
                # The reserved names of spec/04-type-system.md §1.1.1 are
                # rejected at check time:
                # f8e4m3, f8e5m2, uint8/uint16/uint32/uint64, int4/uint4,
@@ -1309,7 +1420,7 @@ BlockBody     <- (BlockBinding Newline)+ Expr
 BlockBinding  <- LetPattern S '=' S Expr
 DoExpr        <- 'do' S '{' S Expr (S ';' S Expr)* (S ';')? S '}'
 ParExpr       <- 'par' S '{' S Expr (S ';' S Expr)* (S ';')? S '}'
-WithHandler   <- 'with' S ('seed' / 'device') S '(' S Expr (S ',')? S ')'
+WithHandler   <- 'with' S 'device' S '(' S Expr (S ',')? S ')'
                   S HandlerBlock
 HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # The tail Expr, like a BlockBinding value, is Sep-bounded: a top-level
@@ -1377,9 +1488,11 @@ InfixOp       <- '|>' / '||' / '&&' / CmpOp
 Literal       <- FloatLit / IntLit / BoolLit / StringLit
 
 FloatLit      <- (DecimalFloat / ExponentFloat) FloatSuffix?
+               / IntFloatBody FloatSuffix
 BareFloatLit  <- DecimalFloat / ExponentFloat
-DecimalFloat  <- DecimalInt '.' DecDigitSeq
+DecimalFloat  <- DecDigitSeq '.' DecDigitSeq
 ExponentFloat <- DecDigitSeq ('.' DecDigitSeq)? [eE] [+-]? DecDigitSeq
+IntFloatBody  <- DecimalInt
 IntLit        <- IntBody IntSuffix?
 BareIntLit    <- IntBody
 IntBody       <- HexInt / BinInt / DecimalInt
@@ -1389,11 +1502,17 @@ HexInt        <- '0' [xX] [0-9a-fA-F] ('_'? [0-9a-fA-F])*
 BinInt        <- '0' [bB] [01] ('_'? [01])*
 FloatSuffix   <- 'f32' / 'f64' / 'bf16' / 'f16'
 IntSuffix     <- 'i8' / 'i16' / 'i32' / 'i64'
-# After lexical recognition, a non-exponent decimal MUST equal the canonical
-# literal spelling after digit separators are removed. Radices and exponent
-# forms MUST decode to the same finite typed value the canonical printer emits.
-# Radix forms accept only IntSuffix; integer-looking decimals with FloatSuffix
-# remain invalid (`42f32` must be written canonically as `42.0f32`).
+# After lexical recognition, a DECIMAL integer body MUST equal the canonical
+# literal spelling after digit separators are removed; that is what rejects a
+# redundant leading zero such as `007` or `007f64`. HexInt and BinInt are exempt
+# and MUST instead decode to the same finite typed value the canonical printer
+# emits. A float body carries neither constraint: every finite decimal body
+# decodes to the value its canonical spelling round-trips to, so exponent forms,
+# padded decimals, and bodies with digits past the shortest spelling are all
+# accepted and normalized by the printer. FloatLit admits no radix body:
+# IntFloatBody is decimal only, because an integer radix form carries no float
+# suffix (spec/04-type-system.md §5.5). An IntFloatBody whose exact value rounds
+# to infinity at its FloatSuffix width is rejected as non-finite (P10a).
 # Suffix must immediately follow the digit sequence (no whitespace, no comment).
 # Closed sets: any other identifier sequence directly adjacent to a numeric
 # literal (e.g. `1.0xyz`, `42u8`, `1.0f8e4m3`) is a parse error per P10a.
@@ -1461,10 +1580,15 @@ dim batch, seq                   ⟹  (defdim {} batch) (defdim {} seq)
 sig f: f32 -> f32 -> f32
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
 
+sig empty[p]: List[p]
+empty = Nil
+⟹  (defsig {} empty (p) (t-adt {} List (t-var {} p)))
+    (def {} empty (var {} Nil))
+
 def f(x: f32, y: f32) -> f32 = add(x, y)
 ⟹  (defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32)))
-    (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})
-                           (y {type: (t-prim {} f32)}))
+    (def {} f (fn {} (params {} (x {type: (t-var {} _)})
+                           (y {type: (t-var {} _)}))
                    (app {} (var {} add) (var {} x) (var {} y))))
 
 def f(x, y) = add(x, y)
@@ -1505,7 +1629,7 @@ type Weights = tensor[h, h, f32]
 ```
 -- Variables, literals
 x                                 ⟹  (var {} x)
-42                                ⟹  (lit {type: (t-prim {} int32)} 42)
+42                                ⟹  (lit {type: (t-prim {} i32)} 42)
 3.14                              ⟹  (lit {type: (t-prim {} f32)} 3.14)
 true                              ⟹  (lit {type: (t-prim {} bool)} true)
 "hello"                           ⟹  (lit {type: (t-prim {} string)} "hello")
@@ -1558,7 +1682,7 @@ match e with {                    ⟹  (match {} e'
 -- Tuples
 (a, b, c)                         ⟹  (tuple {} a' b' c')
 (a,)                              ⟹  (tuple {} a')
-pair.0                            ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} int32)} 0))
+pair.0                            ⟹  (tuple-get {} (var {} pair) (lit {type: (t-prim {} i32)} 0))
 
 -- Records
 Foo { x: e1, y: e2 }             ⟹  (record {} Foo (kv {} x e1') (kv {} y e2'))
@@ -1570,7 +1694,7 @@ e.field                           ⟹  (access {} e' field)
 grad(f)                           ⟹  (grad {} f')
 jit(f)                            ⟹  (jit {} f')
 vmap(f, axis=n)                   ⟹  (vmap {} f' n')
-vmap(f)                           ⟹  (vmap {} f' (lit {type: (t-prim {} int32)} 0))
+vmap(f)                           ⟹  (vmap {} f' (lit {type: (t-prim {} i32)} 0))
 cast(e, bf16)                     ⟹  (cast {} e' (t-prim {} bf16))
 realize(e)                        ⟹  (realize {} e')
 copy(e)                           ⟹  (copy {} e')

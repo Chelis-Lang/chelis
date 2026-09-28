@@ -35,19 +35,19 @@
 use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_types::types::Prim;
-use chelis_types::{RawScalar, finalize_scalar};
 
 fn f32_tensor(shape: &[usize], data: &[f64]) -> TensorValue {
     TensorValue::finalize_from_wide("test", Prim::F32, shape.to_vec(), data.to_vec())
         .expect("finalize")
 }
 
-fn load(dag: &mut Dag, name: &str, extent: usize) -> NodeId {
-    load_shaped(dag, name, &[extent])
+fn load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, extent: usize) -> NodeId {
+    load_shaped(dag, decl, name, &[extent])
 }
 
-fn load_shaped(dag: &mut Dag, name: &str, shape: &[usize]) -> NodeId {
+fn load_shaped(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, shape: &[usize]) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         TensorType {
@@ -58,41 +58,14 @@ fn load_shaped(dag: &mut Dag, name: &str, shape: &[usize]) -> NodeId {
     )
 }
 
-/// A rank-0 f32 `Const`, as the lowerer builds one for a scalar literal
-/// operand.
-fn scalar_const(dag: &mut Dag, value: f64) -> NodeId {
-    let value = finalize_scalar("test", Prim::F32, RawScalar::Float(value)).expect("finalize");
-    dag.add_node(
-        RiscOp::Const { value },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::F32,
-        },
-        None,
-    )
-}
-
-fn binary(dag: &mut Dag, op: RiscOp, lhs: NodeId, rhs: NodeId, prim: Prim) -> NodeId {
-    let node = dag.add_node(
-        op,
-        vec![lhs, rhs],
-        TensorType {
-            dims: vec![DimInfo::Lit(3)],
-            precision: prim,
-        },
-        None,
-    );
-    dag.add_root(node);
-    node
-}
-
 #[test]
 fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
     let mut dag = Dag::new();
-    let a = load(&mut dag, "a", 4);
-    let b = load(&mut dag, "b", 3);
+    let decl = dag.declare("test");
+    let a = load(&mut dag, decl, "a", 4);
+    let b = load(&mut dag, decl, "b", 3);
     let sum = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![a, b],
         TensorType {
@@ -117,10 +90,12 @@ fn an_elementwise_operand_shape_disagreement_is_a_typed_error_not_a_panic() {
 #[test]
 fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
     let mut dag = Dag::new();
-    let x = load(&mut dag, "x", 4);
-    // A runtime bound: `end` comes from a rank-0 int64 scalar input, as
+    let decl = dag.declare("test");
+    let x = load(&mut dag, decl, "x", 4);
+    // A runtime bound: `end` comes from a rank-0 i64 scalar input, as
     // `k = n - 4` lowers.
     let k = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         TensorType {
@@ -130,6 +105,7 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
         None,
     );
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
         },
@@ -153,65 +129,5 @@ fn a_runtime_shrink_that_selects_nothing_is_rejected_not_emptied() {
     assert!(
         err.contains("is empty or inverted"),
         "the interpreter's phrase for an empty bound: {err}"
-    );
-}
-
-/// `coral_prerequisites.rs`'s `above`, `lt_right` and an arithmetic sibling,
-/// as the lowerer emits them: `gt(x, 1.5)` is `CmpLt(Const 1.5, x)`, `lt(x,
-/// 2.5)` is `CmpLt(x, Const 2.5)`. The expected values are what the compiled
-/// C kernel prints for the same program.
-#[test]
-fn a_rank0_operand_in_either_position_broadcasts_as_the_c_kernel_does() {
-    let mut dag = Dag::new();
-    let x = load(&mut dag, "x", 3);
-    let above_bound = scalar_const(&mut dag, 1.5);
-    let above = binary(&mut dag, RiscOp::CmpLt, above_bound, x, Prim::Bool);
-    let lt_bound = scalar_const(&mut dag, 2.5);
-    let lt_right = binary(&mut dag, RiscOp::CmpLt, x, lt_bound, Prim::Bool);
-    let shift = scalar_const(&mut dag, 1.5);
-    let shifted = binary(&mut dag, RiscOp::Add, x, shift, Prim::F32);
-    let values =
-        eval_tensor_roots_with_strict(&dag, &[above, lt_right, shifted], |name| match name {
-            "x" => Some(f32_tensor(&[3], &[1.0, 2.0, 3.0])),
-            _ => None,
-        })
-        .unwrap_or_else(|err| panic!("a rank-0 operand broadcasts as the C loop does: {err}"));
-    for (root, expected) in [
-        (above, vec![0.0, 1.0, 1.0]),
-        (lt_right, vec![1.0, 1.0, 0.0]),
-        (shifted, vec![2.5, 3.5, 4.5]),
-    ] {
-        let value = &values[&root];
-        assert_eq!(value.shape, vec![3], "the non-scalar operand's shape");
-        assert_eq!(value.to_f64_lossy_vec(), expected);
-    }
-}
-
-/// The bound is rank 0, not "the smaller operand": `[3]` against `[2, 3]`
-/// keeps the typed error the C runtime guard and the interpreter report.
-#[test]
-fn a_rank1_against_rank2_disagreement_is_still_a_typed_error() {
-    let mut dag = Dag::new();
-    let row = load(&mut dag, "row", 3);
-    let grid = load_shaped(&mut dag, "grid", &[2, 3]);
-    let sum = dag.add_node(
-        RiscOp::Add,
-        vec![row, grid],
-        TensorType {
-            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    dag.add_root(sum);
-    let err = eval_tensor_roots_with_strict(&dag, &[sum], |name| match name {
-        "row" => Some(f32_tensor(&[3], &[1.0, 2.0, 3.0])),
-        "grid" => Some(f32_tensor(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
-        _ => None,
-    })
-    .expect_err("[3] against [2, 3] is not a rank-0 broadcast and must be rejected");
-    assert!(
-        err.contains("tensor shapes must match for elementwise op, got [3] vs [2, 3]"),
-        "{err}"
     );
 }

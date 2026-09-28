@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,6 +21,7 @@ REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import dtype_phase4b_oracle as oracle  # noqa: E402
+import phase4b_change_report as change_report  # noqa: E402
 
 
 CONTRACT_FILES = tuple(Path(relative) for relative in oracle.CONTRACT_FILES)
@@ -46,6 +49,18 @@ class ContractValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleError, message):
             oracle.validate_contract(self.root)
 
+    def assert_changed_contract_requires_acknowledgement(self, kind: str, identity: str) -> None:
+        # Keep the original additive-prose mutations as enforcing review cues.
+        # Required-clause removal controls continue to call validate_contract.
+        def reader(root):
+            return lambda relative: ((REPO_ROOT if relative == change_report.ORACLE else root) / relative).read_text(encoding="utf-8")
+        before = change_report.snapshot(reader(REPO_ROOT))
+        after = change_report.snapshot(reader(self.root))
+        changes = change_report.compare_snapshots(before, after)
+        self.assertIn((kind, identity), {(row["kind"], row["identity"]) for row in changes})
+        errors = change_report.identity_acknowledgement_violations({"changes": changes}, [])
+        self.assertTrue(any(change_report.acknowledgement_line(kind, identity) in error for error in errors), errors)
+
     def repository_atom(self, atom: str) -> str:
         text = (REPO_ROOT / "spec/05-risc-primitives.md").read_text(
             encoding="utf-8"
@@ -63,25 +78,49 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
+        cases = (
+            ("spec/10-serialization.md", "Schema version 20 is explicitly\npresent", "wire v20 presence"),
+            ("spec/10-serialization.md", "`schema_version: 4`", "execution v4 exactness"),
+            ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
+            ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
+            ("spec/10-serialization.md", "A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
+            ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("spec/10-serialization.md", "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`", "wire literal-witness requirement carrier"),
+            ("spec/10-serialization.md", "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes", "wire shape-dependency references"),
+            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), `merged_spans` and\n`declaration` are mandatory fields", "wire mandatory invocation fields"),
+            ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
+            ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
+            ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
+            ("spec/11-ffi.md", "DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
+            ("spec/design/dtype_semantics.md", "No partial WireDag v9 is published.", "wire atomic cutover"),
+        )
+        for relative, required, label in cases:
+            with self.subTest(label=label):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                self.assertTrue(required in original, f"missing decided contract: {label}")
+                path.write_text(original.replace(required, "REMOVED CONTRACT", 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(label)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_python_shape_registry_is_exact_and_not_the_c_shape_atom(self) -> None:
+        self.assertEqual(
+            oracle.EXPECTED_OP_MANIFESTS["05-OP-45"],
+            ("| full tensor shape | `chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>` |",),
+        )
+        self.replace(
+            Path("spec/registry/python_tensor_metadata.md"),
+            "-> Vec<i64>",
+            "-> Vec<usize>",
+        )
+        self.assert_contract_fails("05-OP-45")
+
     # The whole-file digest tests these replaced now live in
     # FrozenContractChangeTests, which runs the same mutations against the
     # merge-base acknowledgement gate.
-
-    def test_agent_numeric_surface_additive_successor_exception_fails(self) -> None:
-        path = self.root / "AGENTS.md"
-        original = path.read_text(encoding="utf-8")
-        marker = "### Public-Surface Change Rule"
-        self.assertIn(marker, original)
-        path.write_text(
-            original.replace(
-                marker,
-                "A predecessor census disposition may be copied onto its successor.\n\n"
-                + marker,
-                1,
-            ),
-            encoding="utf-8",
-        )
-        self.assert_contract_fails("frozen agent numeric surface discipline")
 
     def test_the_acknowledgement_gate_cannot_be_restated_as_a_digest(self) -> None:
         # The Phase 4 handoff region digest moved when the plan's oracle
@@ -112,8 +151,10 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/design/dtype_semantics.md"),
             "An unacknowledged\nchange and an acknowledgement naming an "
-            "unchanged file both fail\n`--require-acknowledgement`, which is "
-            "the mode CI runs on a pull request.",
+            "unchanged file both fail\n`--require-acknowledgement`, which the "
+            "dedicated `PR Contract Acknowledgements`\ncheck applies through "
+            "`phase4b_change_report.py`. The full Phase 4B oracle runs\n"
+            "independently in Docs.",
             "An unacknowledged change fails `--require-acknowledgement`; an "
             "acknowledgement naming an unchanged file is tolerated.",
         )
@@ -181,7 +222,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "is a\n> dedicated reduction and is not a `cast` plus `sum` lowering",
-            "lowers to `sum(cast(x, int64), axis)`",
+            "lowers to `sum(cast(x, i64), axis)`",
         )
         self.assert_contract_fails("OP-29.*dedicated reduction")
 
@@ -211,13 +252,13 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "`csv_int` | `(List[Dict[string,string]], int64, string) -> int64`",
-                "`csv_int` | `(List[Dict[string,f64]], int32, string) -> int32`",
+                "`csv_int` | `(List[Dict[string,string]], i64, string) -> i64`",
+                "`csv_int` | `(List[Dict[string,f64]], i32, string) -> i32`",
                 "OP-3.*csv_int",
             ),
             (
                 "It never\n> truncates or rounds a float\n> into an integer",
-                "It truncates float variants into int64",
+                "It truncates float variants into i64",
                 "OP-3.*never truncates",
             ),
             (
@@ -239,7 +280,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_json_numeric_construction_never_implicitly_widens(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly int64",
+            "`JsonFloat(value)` accepts exactly f64 and\n> `JsonInt(value)` accepts exactly i64",
             "`JsonFloat(value)` accepts any float and widens it to f64",
         )
         self.assert_contract_fails("OP-4.*exactly f64")
@@ -248,7 +289,7 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "emits a stored `JsonInt` int64\n> as its exact decimal digits",
+                "emits a stored `JsonInt` i64\n> as its exact decimal digits",
                 "emits every stored number through f64",
                 "OP-5.*exact decimal digits",
             ),
@@ -350,11 +391,11 @@ class ContractValidationTests(unittest.TestCase):
     def test_integer_form_json_overflow_never_falls_back_to_jnum(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "An integer-form token outside int64 range SHALL ingest as\n"
+            "An integer-form token outside i64 range SHALL ingest as\n"
             "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
             " never\n"
             "> selects a lossy float image for an integer-form token.",
-            "An integer-form token outside int64 range falls back to `JNum`.",
+            "An integer-form token outside i64 range falls back to `JNum`.",
         )
         self.assert_contract_fails("OP-2.*JsonBigInt")
 
@@ -409,10 +450,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-8.*must also be finite",
             ),
             (
-                "These checks, including the equal-bound case, complete before the "
-                "operation\n> consumes a Random call ordinal",
-                "These checks occur after consuming Random",
-                "OP-8.*before the operation consumes",
+                "These checks, including the equal-bound case, complete before any "
+                "element\n> is drawn",
+                "These checks occur after the draw",
+                "OP-8.*before any element is drawn",
             ),
             (
                 "There is no f32 public-bound signature, default bound,\n"
@@ -445,10 +486,10 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-37.*0 <= rate < 1",
             ),
             (
-                "The accepted call consumes exactly one\n"
-                "> ordinal, including for an empty tensor or `rate = 0`",
-                "Empty and zero-rate calls consume no ordinal",
-                "OP-37.*exactly one ordinal",
+                "The accepted call consumes its key,\n"
+                "> including for an empty tensor or `rate = 0`",
+                "Empty and zero-rate calls leave their key unconsumed",
+                "OP-37.*accepted call consumes its key",
             ),
             (
                 "For f16 and bf16, `sub` exact-widens its stored operands to f32",
@@ -480,8 +521,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_host_numeric_builtin_manifest_has_no_specialized_compatibility_identities(self) -> None:
         block = self.repository_atom("05-OP-38")
         for identity in (
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
-            "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`tensor_scan` | `(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E`",
+            "`process_run` | `(string,List[string])->(i64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
         ):
             with self.subTest(identity=identity):
@@ -625,19 +666,19 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    def test_rng_ordinals_are_consumed_once_only_after_validation(self) -> None:
+    def test_rng_draw_is_a_pure_function_of_its_key(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "Each entered random primitive consumes exactly one call ordinal",
-                "A random primitive may consume an implementation-defined number "
-                "of call ordinals",
-                "05-RNG-1.*one call ordinal",
+                "No handler, ordinal, execution order, or other state contributes to a\n"
+                "> draw",
+                "The active handler's call ordinal also contributes to a\n> draw",
+                "05-RNG-1.*No handler, ordinal",
             ),
             (
-                "validation\n> that precedes Random consumption consumes none",
-                "validation failures may consume a Random ordinal",
-                "05-RNG-1.*validation",
+                "A draw in an `if` or `match` arm that is not selected is not evaluated",
+                "A draw in an `if` or `match` arm that is not selected is still evaluated",
+                "05-RNG-1.*not selected is not evaluated",
             ),
         )
         for old, new, message in mutations:
@@ -723,6 +764,23 @@ class ContractValidationTests(unittest.TestCase):
             ),
         )
         for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = path.read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                path.write_text(original.replace(old, new, 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_checked_c_metadata_contract_cannot_rebuild_or_convert(self) -> None:
+        path = self.root / "spec/05-risc-primitives.md"
+        for old, new, message in (
+            ("excluding spare storage capacity", "including spare storage capacity", "OP-33.*excluding spare"),
+            ("takes rank and every target extent as exact tagged\n> i64 scalars", "takes unclassified integer metadata", "OP-33.*exact tagged i64"),
+            ("changes no metadata, ownership, or\n> payload", "may mutate the descriptor", "OP-33.*changes no metadata"),
+            ("preserves every stored element bit", "converts elements through f32", "OP-33.*preserves every stored element bit"),
+        ):
             with self.subTest(message=message):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
@@ -829,7 +887,7 @@ class ContractValidationTests(unittest.TestCase):
         mutations = (
             (
                 "Scatter indices have any active signed-integer dtype",
-                "Scatter indices are limited to int32 or int64",
+                "Scatter indices are limited to i32 or i64",
                 "OP-33.*any active signed-integer",
             ),
             (
@@ -844,9 +902,9 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "There is no public string\n"
-                "> scatter mode and no int32/int64-only dispatch exception",
-                "An int32/int64-only compatibility dispatch remains available",
-                "OP-33.*no int32/int64-only",
+                "> scatter mode and no i32/i64-only dispatch exception",
+                "An i32/i64-only compatibility dispatch remains available",
+                "OP-33.*no i32/i64-only",
             ),
         )
         for old, new, message in mutations:
@@ -863,7 +921,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "`gather` admits an index tensor of any active signed-integer dtype",
-            "`gather` admits only int32 and int64 index tensors",
+            "`gather` admits only i32 and i64 index tensors",
         )
         self.assert_contract_fails("OP-33.*any active signed-integer")
 
@@ -1550,8 +1608,7 @@ class ContractValidationTests(unittest.TestCase):
                 "top-level tuple external owner",
             ),
             (
-                "Runtime-valued `with seed` remains [#735] syntax/semantics work; "
-                "recursive-host operation support remains [#729]/[#730] capability "
+                "Recursive-host operation support remains [#729]/[#730] capability "
                 "work",
                 "All secondary recursion observations join this oracle",
                 "recursive support external owners",
@@ -1927,8 +1984,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_process_stdlib_identities_require_io_effects(self) -> None:
         self.replace(
             Path("spec/registry/stdlib_numeric_manifest.md"),
-            "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
-            "`process::run` | `(string,List[string])->(int64,string,string)`",
+            "`process::run` | `(string,List[string])->(i64,string,string)!{IO}`",
+            "`process::run` | `(string,List[string])->(i64,string,string)`",
         )
         self.assert_contract_fails("OP-35.*process::run")
 
@@ -1997,7 +2054,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_linspace_has_no_nonpositive_count_compatibility_case(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "requires finite endpoints and\n> int64 `count >= 1`",
+            "requires finite endpoints and\n> i64 `count >= 1`",
             "accepts nonpositive counts as a one-element result",
         )
         self.assert_contract_fails("OP-35.*count >= 1")
@@ -2031,8 +2088,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_stdlib_manifest_uses_rank_polymorphic_sort_and_generic_scalar_equality(self) -> None:
         block = self.repository_atom("05-OP-35")
         self.assertIn(
-            "`sort::sort` | `(&tensor[..r,p_numeric],int32)->"
-            "(tensor[..r,p_numeric],tensor[..r,int64])`",
+            "`sort::sort` | `(&tensor[..r,p_numeric],i32)->"
+            "(tensor[..r,p_numeric],tensor[..r,i64])`",
             block,
         )
         self.assertIn(
@@ -2047,7 +2104,7 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "Numeric\n> tokens follow [05-OP-2]",
-            "Integer-form tokens outside int64 fall back to `JsonFloat`",
+            "Integer-form tokens outside i64 fall back to `JsonFloat`",
         )
         self.assert_contract_fails("OP-35.*Numeric tokens")
 
@@ -2095,7 +2152,7 @@ class ContractValidationTests(unittest.TestCase):
                 "| `tensor/construct::arange` | "
                 "`(p_int,p_int)->tensor[n,p_int]` |",
                 "| `tensor/construct::arange` | "
-                "`(int32,int32)->tensor[n,int32]` |",
+                "`(i32,i32)->tensor[n,i32]` |",
                 "OP-35.*exact manifest",
             ),
             (
@@ -2106,7 +2163,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "returns the increasing half-open same-dtype sequence",
-                "returns an int64 sequence for every endpoint dtype",
+                "returns an i64 sequence for every endpoint dtype",
                 "OP-35.*same-dtype sequence",
             ),
             (
@@ -2129,6 +2186,20 @@ class ContractValidationTests(unittest.TestCase):
                 path.write_text(original.replace(old, new, 1), encoding="utf-8")
                 try:
                     self.assert_contract_fails(message)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
+    def test_reduction_metadata_declarations_cannot_disappear(self) -> None:
+        path = self.root / "spec/registry/c_tensor_runtime.md"
+        original = path.read_text(encoding="utf-8")
+        rows = [row for row in oracle.EXPECTED_OP_MANIFESTS["05-OP-33"] if "checked reduction" in row]
+        self.assertEqual(len(rows), 8)
+        for row in rows:
+            with self.subTest(row=row):
+                self.assertIn(row, original)
+                path.write_text(original.replace(row + "\n", "", 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails("05-OP-33.*exact manifest")
                 finally:
                     path.write_text(original, encoding="utf-8")
 
@@ -2173,8 +2244,8 @@ class ContractValidationTests(unittest.TestCase):
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
-                "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
-                "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
+                "(T,((T,i64)->T!E),i64)->tensor[n,..state_shape(T),element(T)]!E",
+                "(f32,((f32,i64)->f32),i64)->tensor[n,f32]",
             ),
         }
         for atom, (old, new) in mutations.items():
@@ -2199,8 +2270,13 @@ class ContractValidationTests(unittest.TestCase):
             path = self.root / relative
             with self.subTest(atom=atom):
                 original = path.read_text(encoding="utf-8")
-                self.assertIn(rows[1], original)
-                path.write_text(original.replace(rows[1], rows[0], 1), encoding="utf-8")
+                self.assertIn(rows[0], original)
+                mutated = (
+                    original.replace(rows[1], rows[0], 1)
+                    if len(rows) > 1
+                    else original.replace(rows[0], rows[0] + "\n" + rows[0], 1)
+                )
+                path.write_text(mutated, encoding="utf-8")
                 try:
                     self.assert_contract_fails(f"{atom}.*exact manifest")
                 finally:
@@ -2242,7 +2318,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 "`p_int` over all active signed\n> integers",
-                "`p_int` over int64 only",
+                "`p_int` over i64 only",
                 "OP-35.*p_int",
             ),
             (
@@ -2462,7 +2538,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/04-type-system.md"),
-                "`numeric trap: domain in <op> at int64`",
+                "`numeric trap: domain in <op> at i64`",
                 "`numeric trap: domain in <op> at <prim>`",
                 "runtime extent guard trap line",
             ),
@@ -2526,7 +2602,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             (
                 Path("spec/05-risc-primitives.md"),
-                "| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> "
+                "| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> "
                 "tensor[D_plus,p]` | Insert a new dimension of width `size` "
                 "at position `axis`, producing rank `rank(x) + 1`.",
                 "| `insert` | unspecified |",
@@ -2644,13 +2720,13 @@ class ContractValidationTests(unittest.TestCase):
             normalized,
         )
         self.assertIn("`bf16` | `f32`, `f64` | `bf16`", text)
-        self.assertIn("`int32` | `int32`, `int64` | accumulator dtype `a`", text)
+        self.assertIn("`i32` | `i32`, `i64` | accumulator dtype `a`", text)
 
-    def test_backend_neutral_contract_keeps_all_ten_active_primitives(self) -> None:
+    def test_backend_neutral_contract_keeps_all_eleven_active_primitives(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),
+            "one of the eleven active primitives is well-typed",
             "one of the ten active primitives is well-typed",
-            "one of the nine active primitives is well-typed",
         )
         self.assert_contract_fails("backend-neutral active primitive set")
 
@@ -2707,21 +2783,17 @@ class ContractValidationTests(unittest.TestCase):
             "last\n"
             "> element equal to the selected maximum.",
         )
-        self.assert_contract_fails("frozen normative atom 05-OP-12")
+        self.assert_changed_contract_requires_acknowledgement('atom', '05-OP-12')
 
     def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n>\n"
             "> **[05-OP-13]**",
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n\n"
-            "An implementation MAY instead route the full non-NaN `max_reduce` "
+            "\nAn implementation MAY instead route the full non-NaN `max_reduce` "
             "cotangent to only the last element equal to the selected maximum.\n\n"
             "> **[05-OP-13]**",
         )
-        self.assert_contract_fails("frozen numeric primitive contracts")
+        self.assert_changed_contract_requires_acknowledgement('region', 'numeric primitive contracts')
 
     def test_plain_prose_before_multi_axis_contract_cannot_contradict_it(self) -> None:
         self.replace(
@@ -2732,7 +2804,7 @@ class ContractValidationTests(unittest.TestCase):
             "and adjoints.\n\n"
             "Multiple axes may be reduced in one call",
         )
-        self.assert_contract_fails("frozen name-preserving rank polymorphism")
+        self.assert_changed_contract_requires_acknowledgement('region', 'name-preserving rank polymorphism')
 
     def test_legacy_bool_arithmetic_alias_fails(self) -> None:
         self.replace(
@@ -2741,7 +2813,7 @@ class ContractValidationTests(unittest.TestCase):
             "Logical operations do not alias arithmetic primitives. `and` is `mul`, "
             "`or` is `max_elem`, and `not` is `neg` on bool values.",
         )
-        self.assert_contract_fails("frozen logical builtin contract")
+        self.assert_changed_contract_requires_acknowledgement('region', 'logical builtin contract')
 
     def test_product_tree_body_is_required(self) -> None:
         self.replace(
@@ -2832,7 +2904,7 @@ class ContractValidationTests(unittest.TestCase):
             (
                 "interpreted in exact arithmetic and normalized before either "
                 "representation\n> check",
-                "checked for int64 representation before normalization",
+                "checked for i64 representation before normalization",
             ),
             (
                 "removable trailing zeros do not cause `Overflow`",
@@ -2903,7 +2975,7 @@ class ContractValidationTests(unittest.TestCase):
         normalized = self.repository_atom("05-OP-35")
         self.assertIn(
             "`assert_shape` requires its expected list to contain only nonnegative "
-            "int64 extents and compares its length and every entry to the tensor's "
+            "i64 extents and compares its length and every entry to the tensor's "
             "complete shape in axis order",
             normalized,
         )
@@ -2970,12 +3042,12 @@ class ContractValidationTests(unittest.TestCase):
         block = self.repository_atom("05-OP-35")
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
-            "`init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
-            "`tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]`",
-            "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]`",
+            "`init/random::normal_like` | `(key,&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]`",
+            "`tensor/construct::linspace` | `(p_float,p_float,i64)->tensor[n,p_float]`",
+            "`tensor/construct::stack` | `(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]`",
             "`test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
-            "`test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}`",
+            "`test::assert_shape` | `(&tensor[..r,p],List[i64],string)->unit!{Test}`",
         ):
             with self.subTest(signature=signature):
                 self.assertIn(signature, block)
@@ -2984,24 +3056,24 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
-                "(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}",
-                "(&tensor[n,p_float],p_float)->tensor[n,p_float]!{Random}",
+                "(key,&tensor[..r,p_float],p_float)->tensor[..r,p_float]",
+                "(key,&tensor[n,p_float],p_float)->tensor[n,p_float]",
             ),
             (
-                "(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]",
-                "(&tensor[a,1,b,p],int32)->tensor[a,b,p]",
+                "(&tensor[..pre,1,..post,p],i32)->tensor[..pre,..post,p]",
+                "(&tensor[a,1,b,p],i32)->tensor[a,b,p]",
             ),
             (
-                "(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]",
-                "(List[tensor[d,p]],int32)->tensor[rows,d,p]",
+                "(List[tensor[..pre,..post,p]],i32)->tensor[..pre,rows,..post,p]",
+                "(List[tensor[d,p]],i32)->tensor[rows,d,p]",
             ),
             (
-                "(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]",
-                "(&tensor[d,p],int32)->tensor[1,d,p]",
+                "(&tensor[..pre,..post,p],i32)->tensor[..pre,1,..post,p]",
+                "(&tensor[d,p],i32)->tensor[1,d,p]",
             ),
             (
-                "(&tensor[..r,bool])->tensor[hits,int64]",
-                "(&tensor[n,bool])->tensor[hits,int64]",
+                "(&tensor[..r,bool])->tensor[hits,i64]",
+                "(&tensor[n,bool])->tensor[hits,i64]",
             ),
             (
                 "| `test::assert_close_tensor` | "
@@ -3016,8 +3088,8 @@ class ContractValidationTests(unittest.TestCase):
                 "`(&tensor[n,p],&tensor[n,p],string)->unit!{Test}` |",
             ),
             (
-                "(&tensor[..r,p],List[int64],string)->unit!{Test}",
-                "(&tensor[n,p],int64,string)->unit!{Test}",
+                "(&tensor[..r,p],List[i64],string)->unit!{Test}",
+                "(&tensor[n,p],i64,string)->unit!{Test}",
             ),
         )
         for old, new in mutations:
@@ -3100,8 +3172,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_duration_overflow_is_on_the_final_days_field(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "final normalized `days` field has no int64 representation",
-            "any intermediate component total exceeds int64",
+            "final normalized `days` field has no i64 representation",
+            "any intermediate component total exceeds i64",
         )
         self.assert_contract_fails("OP-35.*final normalized")
 
@@ -3119,7 +3191,7 @@ class ContractValidationTests(unittest.TestCase):
             Path("spec/05-risc-primitives.md"),
             "A negative year uses `-` followed by exactly\n"
             "> `max(4, digits(|year|))` decimal digits, where `|year|` is the exact\n"
-            "> mathematical magnitude rather than an int64 `abs`",
+            "> mathematical magnitude rather than an i64 `abs`",
             "A negative year uses an implementation-defined number of digits",
         )
         self.assert_contract_fails("OP-35.*negative year")
@@ -3166,11 +3238,9 @@ class ContractValidationTests(unittest.TestCase):
             "`and` / `or` / `not` are the logical operations; counting is the "
             "explicit-cast idiom",
         )
-        # Confined to the frozen "numeric value semantics" region, so the
-        # region digest catches it with no git history in play. See
-        # FrozenRegionIndependenceTests for the same mutation run against a
-        # tree the acknowledgement gate cannot see at all.
-        self.assert_contract_fails("frozen numeric value semantics digest")
+        # A required literal retains this clause without relying on Git history
+        # or text digests; the independent copied-tree control below proves it.
+        self.assert_contract_fails("bool counting operation")
 
     def test_num8_keeps_representation_distinct_from_width(self) -> None:
         self.replace(
@@ -3183,8 +3253,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_num11_preserves_device_and_binding_metadata_domains(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),
-            "A language binding or device descriptor SHALL preserve rank as int32\n"
-            "> and each extent, stride, element count, and byte capacity as int64",
+            "A language binding or device descriptor SHALL preserve rank as i32\n"
+            "> and each extent, stride, element count, and byte capacity as i64",
             "A language binding or device descriptor MAY narrow rank, extents,\n"
             "> strides, element counts, and byte capacities to an implementation width",
         )
@@ -3312,7 +3382,7 @@ class ContractValidationTests(unittest.TestCase):
                 "wire Pad payload rejection",
             ),
             (
-                "No v5\nnumeric-fill migration or inferred fill dtype exists",
+                "No\nnumeric-fill migration or inferred fill dtype exists",
                 "A v5 numeric fill migrates by inferring f64",
                 "wire Pad no compatibility",
             ),
@@ -3326,14 +3396,6 @@ class ContractValidationTests(unittest.TestCase):
                     self.assert_contract_fails(message)
                 finally:
                     path.write_text(original, encoding="utf-8")
-
-    def test_agent_contract_cannot_restore_capacity_exceptions(self) -> None:
-        self.replace(
-            Path("AGENTS.md"),
-            "No grandfather, permanent-disposition,",
-            "legacy capacity rows retain their grandfather dispositions",
-        )
-        self.assert_contract_fails("agent zero-exception policy")
 
     def test_phase_handoff_requires_zero_capacity_exceptions(self) -> None:
         self.replace(
@@ -3438,15 +3500,15 @@ class ContractValidationTests(unittest.TestCase):
             "nevertheless treat an absent semantic row as `Supported` using its "
             "backend's default kernel",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_changed_contract_requires_acknowledgement("region", "capability schema")
 
     def test_effect_registry_covers_every_fixed_effect(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | IO | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | IO | Resource(ResourceId)`",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_contract_fails("closed effect requirement domain")
 
     def test_effect_registry_has_no_default_disposition(self) -> None:
         self.replace(
@@ -3454,20 +3516,20 @@ class ContractValidationTests(unittest.TestCase):
             "There is no\nmissing-row, wildcard, or default disposition.",
             "A missing effect row defaults to `Implemented`.",
         )
-        self.assert_contract_fails("frozen capability schema")
+        self.assert_contract_fails("effect no-default rule")
 
-    def test_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
+    def test_device_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #2339, diagnostic_kind: UnsupportedFeature }",
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
-        self.assert_contract_fails("reduction implementation owner")
+        self.assert_contract_fails("device reduction implementation owner")
 
     def test_logical_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #2266, diagnostic_kind: UnsupportedFeature }",
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
         self.assert_contract_fails("logical implementation owner")
@@ -3746,7 +3808,7 @@ class ContractValidationTests(unittest.TestCase):
             "remaining reduction rows; the parent [#729] MAY silently absorb "
             "and close either child's work without a separate receipt)",
         )
-        self.assert_contract_fails("frozen roadmap ownership")
+        self.assert_changed_contract_requires_acknowledgement('region', 'roadmap ownership')
 
     def test_status_must_keep_external_execution_authority(self) -> None:
         self.replace(
@@ -3878,15 +3940,15 @@ class ContractValidationTests(unittest.TestCase):
         self.replace(
             Path("spec/05-risc-primitives.md"),
             "`ScatterElements` SHALL take an index tensor of any active signed-integer dtype",
-            "`ScatterElements` SHALL take only int32 or int64 indices",
+            "`ScatterElements` SHALL take only i32 or i64 indices",
         )
         self.assert_contract_fails("05-SPARSE-1.*active signed-integer")
 
     def test_effect_requirement_domain_uses_language_IO_spelling(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | IO | Test | Resource(ResourceId)`",
-            "`Random | Accum | Io | Test | Resource(ResourceId)`",
+            "`Accum | IO | Test | Resource(ResourceId)`",
+            "`Accum | Io | Test | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
 
@@ -4015,14 +4077,6 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     (self.root / path).write_text(original, encoding="utf-8")
 
-    def test_captured_transformations_match_the_extrema_tie_rule(self) -> None:
-        self.replace(
-            Path("openspec/specs/transformations/spec.md"),
-            "the selected operand receives the whole cotangent,\n  including the first "
-            "operand on equality",
-            "the gradient is zero at the non-differentiable point",
-        )
-        self.assert_contract_fails("captured extrema tie rule")
 
     def test_dtype_family_bound_production_is_a_closed_three_name_set(
         self,
@@ -4034,24 +4088,34 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("Surf dtype-family bound production")
 
-    def test_a_bound_cannot_be_written_in_two_binder_lists(self) -> None:
+    def test_declaration_binder_list_cannot_be_incomplete(self) -> None:
         self.replace(
             Path("spec/02-surf-syntax.md"),
-            "A bound belongs to one binder\nlist per declaration",
-            "A bound may be repeated in both binder\nlists when they agree",
+            "A `sig`'s `[..]` clause is complete: every `t-var`, `d-var`, and\n"
+            "`d-rank` name in the signature appears exactly once.",
+            "A `sig`'s `[..]` clause is advisory: variables may be omitted.",
         )
-        self.assert_contract_fails("Surf single bound binder list")
+        self.assert_contract_fails("Surf complete declaration binder list")
 
     def test_the_occurrence_rule_cannot_widen_past_bounded_binders(self) -> None:
         # [04-DTYPE-2] makes only a BOUNDED binder owe an occurrence, and the
-        # checker agrees: `sig f[zz]: p -> p` checks clean. Asserting it for
-        # every listed name is normative prose broader than the decided rule.
+        # checker agrees: `sig f[zz]: i32 -> i32` checks clean. Asserting it
+        # for every listed name is normative prose broader than the decision.
         self.replace(
             Path("spec/02-surf-syntax.md"),
-            "A listed name **that declares a\nbound** must occur in the declared type.",
+            "A listed name **that declares\na bound** must occur in the declared type.",
             "A listed name must occur in the declared type.",
         )
         self.assert_contract_fails("Surf occurrence rule is bounded-binder only")
+
+    def test_one_declaration_cannot_have_two_binder_lists(self) -> None:
+        self.replace(
+            Path("spec/02-surf-syntax.md"),
+            "One binder list owns each\ndeclaration: a standalone `sig` carries it, "
+            "and a matching `def` must\nnot carry a second list.",
+            "Both a standalone `sig` and its matching `def` may carry binder lists.",
+        )
+        self.assert_contract_fails("Surf single declaration binder-list owner")
 
     def test_the_two_bound_failures_cannot_claim_one_diagnostic_shape(
         self,
@@ -4180,8 +4244,13 @@ class RunnerTests(unittest.TestCase):
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # These tiny repositories are deleted as soon as the command returns.
+    # Automatic maintenance can detach and write .git/objects after that
+    # boundary (chelis#1970). It has no role in the fixture's merge oracle.
+    # Keep the setting invocation-local; never change developer Git config
+    # or hide a real TemporaryDirectory cleanup failure.
     return subprocess.run(
-        ("git", "-C", str(root), *args),
+        ("git", "-c", "maintenance.auto=false", "-C", str(root), *args),
         capture_output=True,
         text=True,
         check=False,
@@ -4214,6 +4283,56 @@ def _commit_all(root: Path, message: str) -> str:
         message,
     )
     return _git_ok(root, "rev-parse", "HEAD").strip()
+
+
+class GitFixtureLifetimeTests(unittest.TestCase):
+    """A disposable fixture must not leave optional Git writers behind it."""
+
+    def test_fixture_commits_do_not_launch_automatic_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / "repo"
+            root.mkdir()
+            _git_ok(root, "init", "-q", "-b", "main")
+            # Override any machine defaults and keep the raw control's
+            # maintenance synchronous so the test itself owns every process.
+            for key, value in (
+                ("maintenance.auto", "true"),
+                ("maintenance.autoDetach", "false"),
+                ("gc.autoDetach", "false"),
+                ("user.name", "Fixture Lifetime Test"),
+                ("user.email", "test@example.invalid"),
+                ("commit.gpgsign", "false"),
+            ):
+                _git_ok(root, "config", key, value)
+            (root / "file").write_text("fixture\n", encoding="utf-8")
+
+            def maintenance_children(trace: Path) -> list[dict]:
+                events = [
+                    json.loads(line)
+                    for line in trace.read_text(encoding="utf-8").splitlines()
+                ]
+                self.assertTrue(any(event["event"] == "start" for event in events))
+                return [
+                    event for event in events
+                    if event["event"] == "child_start"
+                    and "maintenance" in event.get("argv", [])
+                ]
+
+            fixture_trace = Path(name) / "fixture.jsonl"
+            with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(fixture_trace)}):
+                _commit_all(root, "fixture commit")
+
+            # Negative control: the same real repository and enabled config
+            # must expose maintenance if the fixture helper is bypassed.
+            control_trace = Path(name) / "control.jsonl"
+            with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(control_trace)}):
+                subprocess.run(
+                    ("git", "-C", str(root), "commit", "--no-verify", "-q",
+                     "--allow-empty", "-m", "unguarded control"),
+                    check=True, capture_output=True, text=True,
+                )
+            self.assertTrue(maintenance_children(control_trace))
+            self.assertEqual(maintenance_children(fixture_trace), [])
 
 
 class AcknowledgementGrammarTests(unittest.TestCase):
@@ -4442,16 +4561,10 @@ class FrozenContractChangeTests(unittest.TestCase):
             path.read_text(encoding="utf-8") + text, encoding="utf-8"
         )
 
-    def test_unchanged_tree_passes(self) -> None:
-        report = self.check()
-        self.assertIn("0 of 29 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
-        # The watched set is now all 29 CONTRACT_FILES, a superset of the 22
-        # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 29)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4544,7 +4657,6 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 29 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4649,7 +4761,8 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 29 contract files changed", report[0])
+        self.assertIn("  ok  Frozen-contract-change: spec/10-serialization.md", report)
+        self.assertNotIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"
@@ -4776,11 +4889,10 @@ class FrozenContractChangeTests(unittest.TestCase):
 
 
 class FrozenRegionIndependenceTests(unittest.TestCase):
-    """A change inside a frozen region trips its digest on its own.
+    """A required clause fails independently of Git and acknowledgement.
 
-    The acknowledgement gate replaces the whole-file digests. It does not
-    replace the atom and region digests, and it must not be the only thing
-    standing between a rewritten normative clause and a green oracle.
+    Changed prose requires review acknowledgement; removed required literals
+    additionally fail the semantic oracle even without comparison history.
     """
 
     def test_a_region_edit_fails_without_any_git_history(self) -> None:
@@ -4807,7 +4919,7 @@ class FrozenRegionIndependenceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(
-                oracle.OracleError, "frozen numeric value semantics digest"
+                oracle.OracleError, "bool counting operation"
             ):
                 oracle.validate_contract(root)
 

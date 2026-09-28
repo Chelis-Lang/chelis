@@ -11,8 +11,10 @@ chelis-vocab.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+stacker.workspace = true
 
 [dev-dependencies]
+bincode = "1"
 proptest = "1"
 serde_json = "1"
 

@@ -1,147 +1,236 @@
-//! Issue #309 — C-backend grad-tuple projection emits a correctly-typed
-//! receiver.
-//!
-//! A multi-`wrt` `grad` differentiates a scalar loss w.r.t. several
-//! tensor parameters, so its result is a TUPLE of gradient tensors (one
-//! per param), exactly as the IR/eval lane produces via
-//! `LoweredValue::Tuple`. When such a result is projected with a tuple
-//! index — `(grad(loss)(x, w)).0` — the host-lane C backend previously:
-//!
-//!   1. typed the grad-helper call as a single `chelis_tensor*`, then
-//!      emitted `chelis_tuple_get(t, i)` over that tensor receiver
-//!      (`chelis_tuple_get` expects a `chelis_tuple*`) — a mistyped
-//!      receiver that crashes at runtime; and
-//!   2. sized the helper output array to one slot and passed `n_out = 1`
-//!      even though the emitted grad helper writes two outputs and its
-//!      wrapper asserts `n_out == 2` — an arity-guard `abort()`.
-//!
-//! The fix types a multi-root tensor-helper call as a `Tuple` of the
-//! per-root tensor types (root order), sizes the output array and
-//! `n_out` from the helper's actual root count, and assembles a real
-//! `chelis_tuple` from the boxed output tensors so the projection's
-//! receiver is correctly typed.
-//!
-//! These tests pin the emitted-C structural invariants. Numerical
-//! evaluator-vs-backend parity for `grad` is covered by the autodiff
-//! parity suites; here we lock the shape of the host-lane emission.
+//! chelis#309: multi-target gradients preserve result order and ABI arity.
+//! spec/04 §6 tuple-get and spec/06 §§2.1–2.2 permit static projection;
+//! a projected result need not materialize a host tuple. Execute projections
+//! and retain the two-output host-carrier check on an unprojected gradient.
 
-use chelis_compiler_api::compiler::compile;
-use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use std::{collections::BTreeMap, fs, process::Command};
 
-fn compile_c(source: &str, entry: &str) -> String {
+use chelis_backend_c::GeneratedHeader;
+use chelis_compiler_api::compiler::{compile, eval};
+use chelis_compiler_api::schema::{
+    CompileRequest, CompileTarget, EvalRequest, ExecutionValue, SourceKind,
+};
+use chelis_types::types::Prim;
+
+const LOSS: &str = r#"
+def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
+  tensor_to_scalar(sum(mul(x, w), 0i32))
+"#;
+
+fn source(body: &str, result: &str) -> String {
+    format!("{LOSS}\ndef dloss(x: tensor[2, f32], w: tensor[2, f32]) -> {result} = {body}\n")
+}
+
+fn compile_c(source: &str) -> (String, String) {
     let result = compile(CompileRequest {
         source_kind: SourceKind::Surf,
-        source: source.to_string(),
+        source: source.into(),
         target: CompileTarget::C,
-        entry_name: Some(entry.to_string()),
+        entry_name: Some("repro".into()),
     })
     .unwrap_or_else(|err| panic!("compile failed: {err:?}"));
+    let file = |path: &str| {
+        result
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("missing {path}"))
+            .contents
+            .clone()
+    };
+    (file("repro.c"), file("repro.h"))
+}
+
+/// Compile the published function and use its generated declaration metadata.
+/// Native assertions check exact values, dtype, rank, extent, and element count.
+fn run_c(source: &str, driver: impl FnOnce(&str) -> String) -> String {
+    let (c, header) = compile_c(source);
+    let declarations = GeneratedHeader::parse(&header).unwrap();
+    declarations.validate_source(&c).unwrap();
+    let symbol = declarations.declaration("dloss").unwrap().symbol();
+    let dir = tempfile::tempdir().unwrap();
+    let staged = chelis_runtime_bundle::stage(dir.path()).unwrap();
+    fs::write(dir.path().join("repro.h"), &header).unwrap();
+    let program = format!(
+        "#define main unused_generated_main\n{c}\n#undef main\n{DRIVER_SUPPORT}\n{}",
+        driver(symbol)
+    );
+    let c_path = dir.path().join("probe.c");
+    fs::write(&c_path, program).unwrap();
+    let binary = dir.path().join("probe");
+    let mut cc = Command::new("cc");
+    cc.args(["-std=c11", "-O0", "-Werror=incompatible-pointer-types"])
+        .arg(c_path)
+        .arg("-I")
+        .arg(dir.path())
+        .arg(staged.archive)
+        .args(["-lm", "-lpthread"]);
+    if cfg!(target_os = "macos") {
+        cc.args([
+            "-framework",
+            "Accelerate",
+            "-framework",
+            "Security",
+            "-framework",
+            "CoreFoundation",
+        ]);
+    } else {
+        cc.arg("-ldl");
+    }
+    let output = cc.arg("-o").arg(&binary).output().expect("compile C");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(binary).output().expect("execute C");
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    c
+}
+
+fn eval_result(source: &str) -> ExecutionValue {
+    let result = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: format!("{source}\nx = to_tensor([2.0f32, 3.0f32])\nw = to_tensor([5.0f32, 7.0f32])\nout = dloss(x, w)\n"),
+        bindings: BTreeMap::new(),
+    }).unwrap();
     result
-        .files
+        .roots
         .into_iter()
-        .find(|file| file.path == format!("{entry}.c"))
-        .unwrap_or_else(|| panic!("missing {entry}.c"))
-        .contents
+        .find(|root| root.name.as_deref() == Some("out"))
+        .expect("out root")
+        .value
 }
 
-const MULTI_WRT_SOURCE: &str = r#"module Repro.GradTupleProj
-def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
-def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
-"#;
+fn assert_tensor(value: &ExecutionValue, expected: &[f64]) {
+    let ExecutionValue::Tensor { value } = value else {
+        panic!("expected tensor: {value:?}")
+    };
+    assert_eq!(value.shape, vec![2]);
+    assert_eq!(value.data.prim(), Prim::F32);
+    assert_eq!(value.data.to_f64_lossy_vec(), expected);
+}
 
-/// Positive: the projection's `chelis_tuple_get` receiver must be a real
-/// `chelis_tuple*` assembled from the helper outputs, NOT the raw
-/// `chelis_tensor*` output slot.
+fn assert_gradient(body: &str, expected: [f64; 2]) {
+    let source = source(body, "tensor[2, f32]");
+    assert_tensor(&eval_result(&source), &expected);
+    run_c(&source, |symbol| {
+        format!(
+            r#"
+int main(void) {{
+    chelis_tensor *x = input(2.0f, 3.0f), *w = input(5.0f, 7.0f);
+    chelis_tensor *result = {symbol}(x, w);
+    tensor_values(result, {:?}f, {:?}f);
+    chelis_tensor_release(result);
+    chelis_tensor_release(x);
+    chelis_tensor_release(w);
+    return 0;
+}}
+"#,
+            expected[0], expected[1]
+        )
+    });
+}
+
 #[test]
-fn issue309_multi_wrt_grad_projection_reads_from_real_tuple() {
-    let c = compile_c(MULTI_WRT_SOURCE, "repro");
-
-    // A `chelis_tuple` is built from the helper's boxed output tensors.
-    assert!(
-        c.contains("chelis_tuple_from_values"),
-        "multi-wrt grad projection must assemble a real tuple from helper \
-         outputs, got:\n{c}"
-    );
-    assert!(
-        c.contains("chelis_value_take_tensor"),
-        "each grad-helper output tensor must be boxed into a chelis_value \
-         before tuple assembly, got:\n{c}"
-    );
-
-    // The tuple-get receiver must be a chelis_value built from the tuple,
-    // not the bare tensor output slot. We assert the projection reads via
-    // chelis_tuple_get and that the result is unboxed back to a tensor.
-    assert!(
-        c.contains("chelis_tuple_get"),
-        "the `.0` projection must still go through chelis_tuple_get, got:\n{c}"
-    );
-    assert!(
-        c.contains("chelis_tensor_take_value"),
-        "the projected tuple element must be unboxed to a tensor, got:\n{c}"
-    );
+fn issue309_multi_wrt_grad_projections_match_native_and_eval() {
+    // Unequal derivatives catch swapped slots and accidental projection 0.
+    assert_gradient("(grad(loss)(x, w)).0", [5.0, 7.0]);
+    assert_gradient("(grad(loss)(x, w)).1", [2.0, 3.0]);
 }
 
-/// Negative-parity: the grad helper produces two outputs, so its call
-/// site must size the output array to two slots and pass `n_out = 2`.
-/// The pre-fix bug hard-coded a one-slot array and `n_out = 1`, which
-/// tripped the helper's `n_out == 2` arity guard.
-#[test]
-fn issue309_multi_wrt_grad_call_sizes_two_output_slots() {
-    let c = compile_c(MULTI_WRT_SOURCE, "repro");
-
-    // Two output slots, two-output call. (Whitespace-tolerant: assert the
-    // `[2]` output array and a call ending in `, 2);`.)
-    let has_two_slot_array = c.contains("chelis_tensor *__outputs")
-        && c.lines()
-            .any(|line| line.contains("__outputs") && line.contains("[2]"));
-    assert!(
-        has_two_slot_array,
-        "multi-wrt grad helper call must size its output array to two \
-         slots, got:\n{c}"
-    );
-
-    let calls_helper_with_two_outputs = c
-        .lines()
-        .any(|line| line.contains("__tensor_") && line.trim_end().ends_with(", 2);"));
-    assert!(
-        calls_helper_with_two_outputs,
-        "multi-wrt grad helper must be called with n_out = 2, got:\n{c}"
-    );
-
-    // Regression guard: the projection must NOT pass a bare tensor output
-    // slot directly into chelis_tuple_get (the pre-fix mistyped receiver).
-    assert!(
-        !c.contains("chelis_tuple_get(__outputs"),
-        "chelis_tuple_get must never receive a raw helper output slot \
-         (a chelis_tensor*), got:\n{c}"
-    );
-}
-
-/// Control: a single-output grad whose body keeps it on the host lane
-/// must still emit a plain single-tensor helper call (one output slot,
-/// `n_out = 1`) and must NOT wrap the result in a tuple. This guards the
-/// fix against over-firing on the common single-`wrt` case.
 #[test]
 fn issue309_single_wrt_grad_call_stays_single_tensor() {
-    // `wrt=x` selects only `x`, so the grad result is a single tensor;
-    // the function returns it directly (no projection).
-    let source = r#"module Repro.GradSingle
-def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, int32)))
-def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = grad(loss, wrt=x)(x, w)
-"#;
-    let c = compile_c(source, "single");
+    assert_gradient("grad(loss, wrt=x)(x, w)", [5.0, 7.0]);
+    assert_gradient("grad(loss, wrt=w)(x, w)", [2.0, 3.0]);
+}
 
-    let calls_helper_with_one_output = c
-        .lines()
-        .any(|line| line.contains("__tensor_") && line.trim_end().ends_with(", 1);"));
+#[test]
+fn issue309_multi_wrt_grad_projection_reads_from_real_tuple() {
+    let source = source("grad(loss)(x, w)", "(tensor[2, f32], tensor[2, f32])");
+    let c = run_c(&source, |symbol| {
+        format!(
+            r#"
+int main(void) {{
+    chelis_tensor *x = input(2.0f, 3.0f), *w = input(5.0f, 7.0f);
+    chelis_tuple *result = {symbol}(x, w);
+    chelis_tensor *dx = chelis_tensor_take_value(chelis_tuple_get(result, 0));
+    chelis_tensor *dw = chelis_tensor_take_value(chelis_tuple_get(result, 1));
+    tensor_values(dx, 5.0f, 7.0f);
+    tensor_values(dw, 2.0f, 3.0f);
+    chelis_tensor_release(dx);
+    chelis_tensor_release(dw);
+    chelis_tuple_release(result);
+    chelis_tensor_release(x);
+    chelis_tensor_release(w);
+    return 0;
+}}
+"#
+        )
+    });
+    // This fixture must actually exercise #309's multi-output host carrier.
+    assert!(c.contains("chelis_tuple_from_values"), "{c}");
+    assert!(c.contains("chelis_value_take_tensor"), "{c}");
+}
+
+#[test]
+fn issue309_multi_wrt_grad_call_sizes_two_output_slots() {
+    let source = source("grad(loss)(x, w)", "(tensor[2, f32], tensor[2, f32])");
+    let (c, _) = compile_c(&source);
+    // Keep the original host-helper arity check beside the executed receiver
+    // check above; a statically projected gradient legitimately has one root.
+    assert!(c.contains("if (n_out != 2)"), "{c}");
     assert!(
-        calls_helper_with_one_output,
-        "single-wrt grad helper must be called with n_out = 1, got:\n{c}"
+        c.lines()
+            .any(|line| line.contains("__outputs") && line.contains("[2]")),
+        "{c}"
     );
     assert!(
-        !c.contains("chelis_tuple_from_values"),
-        "single-wrt grad must NOT assemble a tuple, got:\n{c}"
+        c.lines().any(|line| line.contains("__tensor_")
+            && line
+                .rsplit(',')
+                .nth(1)
+                .is_some_and(|count| count.trim() == "2")),
+        "{c}"
     );
 }
+
+#[test]
+fn issue309_invalid_gradient_projections_are_rejected() {
+    for body in ["(grad(loss)(x, w)).2", "(grad(loss, wrt=x)(x, w)).0"] {
+        let result = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source(body, "tensor[2, f32]"),
+            target: CompileTarget::C,
+            entry_name: Some("repro".into()),
+        });
+        assert!(result.is_err(), "invalid projection accepted: {body}");
+    }
+}
+
+const DRIVER_SUPPORT: &str = r#"
+#include <assert.h>
+static chelis_tensor *input(float a, float b) {
+    int64_t n = 2;
+    chelis_tensor *t = chelis_alloc(1, &n, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(t);
+    float *data = chelis_tensor_write_view(guard).data;
+    data[0] = a;
+    data[1] = b;
+    chelis_tensor_end_write(guard);
+    return t;
+}
+static void tensor_values(const chelis_tensor *t, float a, float b) {
+    assert(chelis_tensor_rank(t) == 1);
+    assert(chelis_tensor_shape(t, 0) == 2);
+    chelis_read_view view = chelis_tensor_read_view(t);
+    assert(view.dtype == CHELIS_DTYPE_F32 && view.count == 2);
+    const float *data = view.data;
+    assert(data[0] == a && data[1] == b);
+}
+"#;

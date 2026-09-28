@@ -2,7 +2,7 @@
 //! `argmin_reduce`.
 //!
 //! Issue #230 widened the type-system result of these ops to
-//! `tensor[..., int64]` (see
+//! `tensor[..., i64]` (see
 //! `crates/chelis-types/src/infer.rs::check_reduction_signature`), but
 //! the host-runtime evaluator continued to tag the produced
 //! `RuntimeTensorValue` with the input tensor's precision (per the
@@ -11,13 +11,13 @@
 //! that branches on `RuntimeTensorValue::precision` — `eq`, `to_list`,
 //! `tensor_to_scalar` — saw the precision-mismatch error
 //! "tensor comparison expects matching tensor precision" or got a
-//! float scalar where an int64 scalar was contractually expected. This
+//! float scalar where an i64 scalar was contractually expected. This
 //! file pins the post-fix invariant that the storage label matches the
 //! type-system label.
 //!
 //! Owner: chelis#233. Acceptance-oracle pattern mirrors
 //! `crates/chelis-types/tests/issue_230_argmax_reduce_output_dtype.rs`
-//! (positive on each integer-input dtype, negative on a non-int64
+//! (positive on each integer-input dtype, negative on a non-i64
 //! comparator, plus a sibling regression guard implicit via the
 //! existing `issue_230_argmax_argmin_runtime.rs` tests).
 
@@ -68,12 +68,12 @@ fn root_tensor<'a>(
 
 // ---------------------------------------------------------------------
 // Positive: argmax / argmin output compares cleanly against the
-// canonical int64 to_tensor literal.
+// canonical i64 to_tensor literal.
 // ---------------------------------------------------------------------
 
-/// EXPECT: comparing `argmax_reduce(x, 1)` (typed `tensor[..., int64]`)
-/// against `to_tensor([cast(1, int64), cast(2, int64)])` (storage
-/// precision int64) succeeds and produces an all-true mask.
+/// EXPECT: comparing `argmax_reduce(x, 1)` (typed `tensor[..., i64]`)
+/// against `to_tensor([cast(1, i64), cast(2, i64)])` (storage
+/// precision i64) succeeds and produces an all-true mask.
 ///
 /// Before the fix this errored with
 /// "tensor comparison expects matching tensor precision" because the
@@ -83,7 +83,7 @@ fn issue233_argmax_reduce_eq_int64_literal_comparator_succeeds() {
     let src = r#"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 1)
-refs = to_tensor([cast(1, int64), cast(2, int64)])
+refs = to_tensor([cast(1, i64), cast(2, i64)])
 out = eq(preds, refs)
 "#;
     let result = eval_surf(src);
@@ -103,7 +103,7 @@ fn issue233_argmin_reduce_eq_int64_literal_comparator_succeeds() {
     let src = r#"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmin_reduce(&make, 1)
-refs = to_tensor([cast(0, int64), cast(1, int64)])
+refs = to_tensor([cast(0, i64), cast(1, i64)])
 out = eq(preds, refs)
 "#;
     let result = eval_surf(src);
@@ -116,15 +116,15 @@ out = eq(preds, refs)
     );
 }
 
-/// EXPECT: `argmax_reduce(x, 0)` along axis-0 produces an int64 tensor
-/// whose `eq` against `to_tensor([cast(1, int64), cast(0, int64),
-/// cast(1, int64)])` succeeds.
+/// EXPECT: `argmax_reduce(x, 0)` along axis-0 produces an i64 tensor
+/// whose `eq` against `to_tensor([cast(1, i64), cast(0, i64),
+/// cast(1, i64)])` succeeds.
 #[test]
 fn issue233_argmax_reduce_axis0_eq_int64_literal_comparator_succeeds() {
     let src = r#"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 preds = argmax_reduce(&make, 0)
-refs = to_tensor([cast(1, int64), cast(0, int64), cast(1, int64)])
+refs = to_tensor([cast(1, i64), cast(0, i64), cast(1, i64)])
 out = eq(preds, refs)
 "#;
     let result = eval_surf(src);
@@ -134,18 +134,18 @@ out = eq(preds, refs)
 }
 
 /// EXPECT: argmax over a cast-widened f64 input still produces an
-/// int64 storage tensor — the storage widening is independent of the
+/// i64 storage tensor — the storage widening is independent of the
 /// input precision. Mirrors the type-system test
 /// `issue230_argmax_reduce_int64_input_yields_int64`.
 #[test]
 fn issue233_argmax_reduce_f64_input_storage_is_int64() {
     // `cast(_, f64)` widens the f32 input to f64; the argmax storage
-    // tag must still be int64 regardless of the input's float width.
+    // tag must still be i64 regardless of the input's float width.
     let src = r#"
 make = pad_sequences([[1.0, 4.0, 2.0], [3.0, 0.5, 5.0]], 0.0)
 casted = cast(make, f64)
 preds = argmax_reduce(&casted, 1)
-refs = to_tensor([cast(1, int64), cast(2, int64)])
+refs = to_tensor([cast(1, i64), cast(2, i64)])
 out = eq(preds, refs)
 "#;
     let result = eval_surf(src);
@@ -155,11 +155,11 @@ out = eq(preds, refs)
 }
 
 // ---------------------------------------------------------------------
-// Positive: `to_list(argmax_reduce(...))` returns int64 scalars.
+// Positive: `to_list(argmax_reduce(...))` returns i64 scalars.
 // ---------------------------------------------------------------------
 
-/// EXPECT: `to_list` of an `argmax_reduce` result yields int64 scalars
-/// (ExecutionValue::Int64), not Float64. The Phase 3j-pre caveat said
+/// EXPECT: `to_list` of an `argmax_reduce` result yields i64 scalars
+/// (ExecutionValue::Scalar with i64 dtype). The Phase 3j-pre caveat said
 /// "we store integer-valued floats"; with the storage widening, the
 /// per-element schema dtype now matches the type-system label.
 #[test]
@@ -176,22 +176,27 @@ out = to_list(preds)
     assert_eq!(items.len(), 2, "to_list length");
     for (i, item) in items.iter().enumerate() {
         match item {
-            ExecutionValue::Int64 { value: _ } => {}
-            other => panic!("to_list element {i}: expected ExecutionValue::Int64, got {other:?}"),
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 => {}
+            other => panic!("to_list element {i}: expected scalar i64, got {other:?}"),
         }
     }
     // Pin the concrete values too.
     let values: Vec<i64> = items
         .iter()
         .map(|item| match item {
-            ExecutionValue::Int64 { value } => *value,
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+            {
+                value.get().as_i64_exact().unwrap()
+            }
             other => panic!("unexpected element kind: {other:?}"),
         })
         .collect();
     assert_eq!(values, vec![1, 2]);
 }
 
-/// EXPECT: `to_list` of an `argmin_reduce` result yields int64 scalars.
+/// EXPECT: `to_list` of an `argmin_reduce` result yields i64 scalars.
 #[test]
 fn issue233_argmin_reduce_to_list_returns_int64_scalars() {
     let src = r#"
@@ -206,7 +211,11 @@ out = to_list(preds)
     let values: Vec<i64> = items
         .iter()
         .map(|item| match item {
-            ExecutionValue::Int64 { value } => *value,
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+            {
+                value.get().as_i64_exact().unwrap()
+            }
             other => panic!("unexpected element kind: {other:?}"),
         })
         .collect();
@@ -218,8 +227,8 @@ out = to_list(preds)
 // ---------------------------------------------------------------------
 
 /// EXPECT: the school `metrics.ch::accuracy` deferred-case shape works
-/// end-to-end. `argmax_reduce` typed `tensor[..., int64]`, compared
-/// elementwise to a labels tensor also typed `tensor[..., int64]`, and
+/// end-to-end. `argmax_reduce` typed `tensor[..., i64]`, compared
+/// elementwise to a labels tensor also typed `tensor[..., i64]`, and
 /// the boolean mask reduces to integer hits via cast.
 #[test]
 fn issue233_school_accuracy_pattern_works() {
@@ -228,11 +237,11 @@ fn issue233_school_accuracy_pattern_works() {
     // labels    = [1, 0]           -> matches both -> accuracy = 1.0
     let src = r#"
 logits = pad_sequences([[0.1, 0.7, 0.2], [0.8, 0.1, 0.1]], 0.0)
-labels = to_tensor([cast(1, int64), cast(0, int64)])
+labels = to_tensor([cast(1, i64), cast(0, i64)])
 preds = argmax_reduce(&logits, 1)
 hits_mask = eq(preds, labels)
-hits = cast(hits_mask, int64)
-all_correct = eq(hits, to_tensor([cast(1, int64), cast(1, int64)]))
+hits = cast(hits_mask, i64)
+all_correct = eq(hits, to_tensor([cast(1, i64), cast(1, i64)]))
 "#;
     let result = eval_surf(src);
     let all_correct = root_tensor(&result, "all_correct");
@@ -249,12 +258,12 @@ all_correct = eq(hits, to_tensor([cast(1, int64), cast(1, int64)]))
 // dtype-mismatched comparators.
 // ---------------------------------------------------------------------
 
-/// EXPECT: comparing `argmax_reduce(...)` (int64) against a
-/// genuinely non-int64 tensor comparator still rejects with a
+/// EXPECT: comparing `argmax_reduce(...)` (i64) against a
+/// genuinely non-i64 tensor comparator still rejects with a
 /// precision-mismatch error somewhere in the pipeline (either the
-/// type-checker, since #230 widened the result to `int64`, or the
+/// type-checker, since #230 widened the result to `i64`, or the
 /// runtime, in any path that bypassed the checker). The fix widens
-/// the argmax storage to int64 but must not weaken precision-mismatch
+/// the argmax storage to i64 but must not weaken precision-mismatch
 /// detection for genuinely dtype-distinct comparators.
 #[test]
 fn issue233_argmax_reduce_eq_non_int64_comparator_rejects() {
@@ -270,17 +279,17 @@ out = eq(preds, flat_refs)
         err.to_lowercase().contains("precision") || err.to_lowercase().contains("mismatch"),
         "expected precision-mismatch error, got {err}"
     );
-    // Pin that the diagnostic mentions int64 — the post-fix argmax
+    // Pin that the diagnostic mentions i64 — the post-fix argmax
     // result type — so we know the mismatch was detected against the
     // widened storage, not some incidental rank/shape error.
     assert!(
-        err.contains("int64"),
-        "expected diagnostic to mention int64 (the argmax_reduce result dtype), got {err}"
+        err.contains("i64"),
+        "expected diagnostic to mention i64 (the argmax_reduce result dtype), got {err}"
     );
 }
 
-/// EXPECT: comparing `argmin_reduce(...)` (int64) against a
-/// genuinely non-int64 tensor comparator rejects with a
+/// EXPECT: comparing `argmin_reduce(...)` (i64) against a
+/// genuinely non-i64 tensor comparator rejects with a
 /// precision-mismatch error.
 #[test]
 fn issue233_argmin_reduce_eq_non_int64_comparator_rejects() {
@@ -297,7 +306,7 @@ out = eq(preds, flat_refs)
         "expected precision-mismatch error, got {err}"
     );
     assert!(
-        err.contains("int64"),
-        "expected diagnostic to mention int64 (the argmin_reduce result dtype), got {err}"
+        err.contains("i64"),
+        "expected diagnostic to mention i64 (the argmin_reduce result dtype), got {err}"
     );
 }

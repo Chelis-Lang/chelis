@@ -7,11 +7,11 @@ use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOAT_DTYPES: &[&str] = &["f16", "bf16", "f32", "f64"];
-const REJECTED_DTYPES: &[&str] = &["int8", "int16", "int32", "int64", "bool"];
+const REJECTED_DTYPES: &[&str] = &["i8", "i16", "i32", "i64", "bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
@@ -66,7 +66,7 @@ fn shared_precision_generic_wrapper_is_accepted_for_every_active_float_dtype() {
     for dtype in FLOAT_DTYPES {
         let source = format!(
             r#"
-def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+def close[p: Float](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
   test_assert_close_tensor(actual, expected, tol, "generic")
 
 def check(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
@@ -292,7 +292,7 @@ fn shared_precision_generic_wrapper_rejects_non_float_instantiations() {
     for dtype in REJECTED_DTYPES {
         let source = format!(
             r#"
-def close[p](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
+def close[p: Float](actual: &tensor[2, p], expected: &tensor[2, p], tol: p) -> unit ! {{ Test }} =
   test_assert_close_tensor(actual, expected, tol, "generic")
 
 def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
@@ -355,7 +355,7 @@ def check(actual: &tensor[2, f64], expected: &tensor[2, f64], tol: f32) -> unit 
 
 #[test]
 fn non_float_tolerance_is_rejected_at_check_time() {
-    for dtype in ["int32", "bool"] {
+    for dtype in ["i32", "bool"] {
         let source = format!(
             r#"
 def check(actual: &tensor[2, f32], expected: &tensor[2, f32], tol: {dtype}) -> unit =

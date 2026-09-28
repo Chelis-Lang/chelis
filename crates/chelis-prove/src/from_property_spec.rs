@@ -109,8 +109,8 @@ fn type_to_sort(ty: &ChelisTypeInput) -> SmtSort {
     match ty {
         // Single-source int-width -> sort decision (F3): the c-earchin
         // bridge converter shares the same prim->sort mapping as the opaque
-        // prove paths, so an int8/int16 bridge param can never be sorted
-        // differently from an int8/int16 opaque field/param.
+        // prove paths, so an i8/i16 bridge param can never be sorted
+        // differently from an i8/i16 opaque field/param.
         ChelisTypeInput::Prim(n) => crate::opaque::prim_to_smt_sort(n),
         ChelisTypeInput::Tensor(_, _) => SmtSort::Real,
     }
@@ -219,7 +219,7 @@ mod tests {
                     },
                     TypedParamInput {
                         name: "b".into(),
-                        ty: ChelisTypeInput::Prim("int32".into()),
+                        ty: ChelisTypeInput::Prim("i32".into()),
                     },
                 ],
                 return_type: ChelisTypeInput::Prim("f64".into()),
@@ -231,7 +231,7 @@ mod tests {
                 },
                 TypedParamInput {
                     name: "b".into(),
-                    ty: ChelisTypeInput::Prim("int32".into()),
+                    ty: ChelisTypeInput::Prim("i32".into()),
                 },
             ],
             preconditions: vec![],

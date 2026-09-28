@@ -603,8 +603,8 @@ For every dtype and every storable value:
 3. The probe corpus (`docs/investigations/probes/`) holds the byte-decode
    evidence for [#716]/[#723] if you need to re-derive what "faithful" must
    produce for those cells.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Gate with `scripts/gate.py --fast` before every push; macOS Smoke is the
+   workspace oracle.
 
 ---
 
@@ -737,16 +737,12 @@ the staged manual Decimal fixtures remain outside this oracle; no Phase 3
 value cell is hidden behind `#[ignore]`.
 
 **Continuous execution:** the authoritative Phase 2 command runs in the
-dedicated `Faithful Observation Phase 2 Oracle` CI job on every push and every
-PR that does not change only non-executable prose. This document is a
-structural input to the oracle, so `scripts/ci_detect_docs_only.py` explicitly
-classifies it as executable: a Markdown-only edit here runs the full matrix,
-while unrelated documentation-only changes retain the normal skip. The oracle
-is a separate blocking leg rather than an extra step hidden in the workspace
-or dtype job; the stable `Integration Tests (Linux)` context fails closed
-unless the workspace, dtype, and faithful-observation legs all succeed.
-`scripts/test_gate.py` locks the job boundary, workspace cache target,
-docs-only fail-safe, command, toolchain, managed Python, and aggregation edge.
+`Faithful Observation Phase 2 Oracle` job of `heavy-e2e.yml`, daily at
+03:17 UTC and on manual dispatch. It is absent from ordinary PR and main-push
+CI. The nightly report requires this independent worker and every other
+extended-validation worker to succeed. `scripts/test_ci_cadence.py` guards
+cadence and execution; `scripts/test_gate.py` retains the command, toolchain,
+managed Python, and workspace-cache checks.
 The Phase 2 corpus's constituent Rust cells also run under workspace nextest,
 but that supporting coverage does not replace this oracle's ledger equality,
 `FORMAT_CLASS_TABLE`, doc-citation parity, `B2_RULE_INSTRUMENTS` manifest, or
@@ -881,15 +877,79 @@ visible.
 `.venv/bin/python scripts/faithful_observation_phase3_oracle.py`, accepted at
 exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
 and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
-corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
-comparator adoption, forbidden legacy f64/epsilon paths, ignore ledger, and
-the exact reviewed definition of every required Rust test. The definition
-digests are a guard artifact: changing one requires independent evidence for
-the replacement behavior, and changing the digest merely to accept a test
-edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
-driver, or an eval test that emits a forged producer-authored receipt fail
-before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
-evidence; they are not trusted as evidence of their own free-form detail.
+corpus, and `eval_agreement.rs`. It retains required test identities,
+comparator adoption, forbidden legacy f64/epsilon paths and the ignore ledger.
+The standing `phase3_body_contract` Rust target checks every required body
+against call and result roles exported from the oracle's one required-identity
+inventory. There is no second stored identity list or per-definition checksum.
+
+Each body must retain its designated comparison or harness; evaluator canaries
+also name their receipt entrypoint. Parity drivers use the reviewed literal
+execution mode, including executable rows whose historical names still end in
+`library_only`. Result-returning roles use direct checked forms: success
+`unwrap`/`expect` or a directly panicking `unwrap_or_else`, the reviewed
+`assert!(call().is_ok()/is_err())` polarity, `expect_err`/`unwrap_err` for
+rejecting evaluator canaries, or an `assert_eq!` operand for the operation
+mapping. Parentheses are allowed. Discarded results, non-panicking fallbacks,
+wrong polarity and boolean inspection outside the assertion fail. Checking a
+result through an intermediate local/helper is outside the closed syntax
+contract and requires a reviewed extension.
+
+Only parsed eager expressions and standard assertion condition operands supply
+calls. Comments, literal payloads, unknown macros and deferred closures, async
+blocks or const bodies cannot substitute for them. Local items, conditional
+configuration and local patterns shadowing a required owner fail. Branches and
+loops are visited; the audit does not prove arbitrary control-flow reach,
+operand correctness or complete test semantics. The replacement tests execute
+every empty/removed definition, all parity-mode flips, the five former forged
+receipt witnesses, discarded comparison results and the original ignored
+completeness-result witness. Positive controls allow unrelated body edits and
+new tests without checksum updates. The full runtime suites and shared-helper
+canaries remain necessary. Eval/C receipts establish entry and multiplicity;
+their free-form detail is not trusted as proof of behavior.
+
+The required Docs job runs `scripts/phase3_test_change_report.py` on committed
+snapshots, computes the unique merge base, and publishes comparison commits,
+changed required identities, source locations and membership changes. Both
+revisions supply literal `REQUIRED_TESTS` inventories without executing
+historical Python. Removing a requirement cannot hide its old identity.
+Missing history, unreadable inventories, ambiguous definitions and missing
+candidate required definitions fail closed; restoring a missing base definition
+is reportable. An ordinary edit, including an emptied body, produces a review
+cue; the Rust audit owns the body rejection.
+
+Each changed identity owes one exact `Protected-test-change: <path>::<test name>`
+line in the contiguous opening block of the PR description, followed by a
+blank line and prose. Later example lines cannot acknowledge changes. Missing,
+duplicate, stale, unknown or malformed acknowledgements fail. Editing the body
+reruns CI. An acknowledgement cannot waive a missing test or another guard's
+rejection. Changing a guard merely to accept an edit is not a repair: review
+the behavior, its consumers and independent negative controls together.
+
+The parity completeness test compares executable root examples with inputs
+derived from the Rust syntax tree of test declarations. Direct parity/check
+helper calls accept literal root paths or immutable owned-path locals
+initialized by a root path or an owned-path move. Shared borrowing is permitted
+at the helper argument, not when establishing local input provenance. Local
+items in input-bearing tests fail; helpers belong at module scope. Each new
+example still needs its per-file test. `parity_corpus_contract` supplies standing
+CI controls for discovery and missing, hidden, conditional or unresolved inputs,
+including removal of every current example input. This is membership evidence;
+the body audit and complete acceptance command retain their separate roles.
+
+Chelis#1870 trials structured unsupported identity beside this frozen
+comparison rather than weakening it. The rejected-cell exact comparator and
+its mutations remain alongside the required body audit. The actual
+nonliteral-window lowering witness additionally compares C, HIP, and Metal CLI
+stderr byte-for-byte because all three entry paths reject before
+target-specific code generation. Wording evidence shared by the two
+chelis#1918 softmax sites is one generated reviewed snapshot from a canonical
+reviewed row, owned by `scripts/regen_all.py --tier 0`; it is not
+production-derived because that Python-only tier cannot execute the Rust
+renderer, and source parsing or re-rendering would duplicate the prose
+implementation. The in-process typed identity is the prospective semantic
+blocker. Unimplemented identities still lack an exact capability-table key, so
+this trial does not authorize retiring the old pins.
 
 PR #1204 adds `parity_recursive_generic` to this frozen inventory. Its independent evidence is the 22-case `recursive_generic_monomorphization` suite. Fresh-context red-team round 3 accepted its implementation and boundary controls. The corpus guard adds only `recursive_generic.ch`.
 
@@ -899,7 +959,54 @@ PR #1406 adds `parity_kinded_nominal_dimensions` and
 kinded nominal contract through `chelis check`, `chelis test`, Surf migration,
 evaluation, and generated C; the parity row remains the cross-lane receipt.
 
-Three digest-locked behavioral canaries perturb the compiled observation before
+PR #1638 adds `generic_explicit_shape.ch` and `parity_generic_explicit_shape`
+to the frozen inventory. The independently reviewed
+`issue_1621_scalar_surface_cli` suite requires the example's exact
+`[false, true, true]` result on eval/C and rejects implicit scalar/tensor
+mixing. The definition guard also rejects deleting or emptying the new row,
+changing it to library-only parity, or removing its corpus entry.
+
+PR #1647 adds `checked_reshape.ch` and `parity_checked_reshape` to the frozen
+inventory. Independent runtime and generated host/DAG UBSan controls exercise
+exact stored bits, wide empty shapes, invalid metadata rejection, and independent
+owned reshape storage. The parity row checks exact rendered eval/C observations;
+it does not establish empty-list dtype preservation in eval, whose pre-existing
+fallback is tracked in #1650. The definition guard retains executable admission
+and the corpus entry.
+
+PR #1299 adds `explicit_normalization.ch` and `parity_explicit_normalization`
+to the frozen inventory. The independently reviewed `issue_1294_normalize`
+suite requires the authored example to check and evaluate to exactly
+`result = 2.0`, and rejects undeclared `normalize` with `UnboundVariable`.
+The parity row additionally compiles and executes generated C and compares
+its output with eval. Corpus membership retains every existing example;
+mutation controls reject deleting or emptying the new row, changing it to
+library-only parity, or removing its corpus entry.
+
+PR #1668 adds `literal_extent_claim.ch` and `parity_literal_extent_claim`
+to the frozen inventory. The independent `literal_extent_example_contract`
+test requires its declared result type, exact shape `[4]` and four sevens on
+Eval/C, and a domain trap when the input has five elements. The 40-call literal
+claim matrix separately covers exported calls, top-level bindings, inlined
+roots, aliases, and discarded calls. Guard mutations reject deleting or emptying
+the new parity row, making it library-only, or removing its corpus entry.
+
+PR #1692 adds `checked_sparse_axes.ch` and `parity_checked_sparse_axes`
+to the frozen inventory. Independent native stored-bit and checked-boundary
+controls cover non-trailing Gather indices, exact wide integers, duplicates,
+empty domains, and invalid-index diagnostics. The example's parity row executes
+both evaluator and generated C. Guard mutations reject deleting or emptying the
+row, making it library-only, or removing its corpus entry; every previous corpus
+entry remains required.
+
+The checked-window metadata delivery adds `checked_window_geometry.ch` and
+`parity_checked_window_geometry`, preserving every prior corpus entry. Four f32
+forward reducers execute on a leading-axis input with valid padding and stride
+two. Empty/deleted/library-only parity rows and corpus removal remain rejected.
+Independent native tests cover gradient geometry and invalid runtime target or
+cotangent shapes; this example does not claim window arithmetic remediation.
+
+Three protected behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the
 evaluator is marked nonconforming; together with the exact operation-identity
@@ -909,9 +1016,9 @@ that chelis#897 blocks tolerance rather than relying on source-token presence.
 The expected-value canary closes chelis#1104: the source-level checks can only
 see that the comparator is NAMED in a suite, so a shared assertion helper
 neutered into a no-op used to delete the verbatim leg from every row at once
-while every frozen test definition, receipt, and comparator obligation stayed
+while every protected test definition, receipt, and comparator obligation stayed
 intact. Each leg of the comparison therefore owes a canary that runs the
-shipped helper, and the guard is behavioral: tampering with its digest does not
+shipped helper, and the guard is behavioral: changing a definition checksum did not
 make it pass.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
@@ -1036,7 +1143,7 @@ Every direct child of [#732] has one implementation owner in this design:
 | [#749] | §C1.5, §B2.4, and §C3.4: the nested renderer is a consumer of the canonical formatter, not a second dtype switch; closed |
 | [#775] | §C1.5 / [05-OBS-4]: scalar roots and rank-0 tensors use the bare form in both lanes; closed after re-verification on 2026-08-04 |
 | [#1078] | §B2.3 and the Phase 2 known-red ledger: repaired cells leave the ledger and the ordinary corpus atomically; closed |
-| [#1104] | Phase 3's definition-digest and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
+| [#1104] | Phase 3's protected-body and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
 | [#997] | §C1.6 and §B2.4, through the structural `FO-DIAG` package below; delivered 2026-08-21, no longer blocks class closure |
 | [#1059] | §C3's canonical formatter is the implementation dependency, but support for C-host tensor/list `to_string` is a separate capability package; open and does not weaken or reopen the existing loud-rejection contract |
 

@@ -11,12 +11,12 @@ use chelis_types::check_typed_program;
 use chelis_types::errors::{CheckError, CheckErrorKind};
 
 const FLOATS: &[&str] = &["f16", "bf16", "f32", "f64"];
-const INTS: &[&str] = &["int8", "int16", "int32", "int64"];
+const INTS: &[&str] = &["i8", "i16", "i32", "i64"];
 const NON_NUMERIC: &[&str] = &["bool"];
 
 fn diagnostics(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    match check_typed_program(&desugar_program(&decls)) {
+    match check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar")) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }
@@ -67,9 +67,9 @@ def probe(a: {dtype}, b: {dtype}) -> {dtype} = arange_like(a, b)
 fn linspace_shaped(dtype: &str) -> String {
     format!(
         r#"
-sig linspace_like[p: Float]: p -> p -> int64 -> p
+sig linspace_like[p: Float]: p -> p -> i64 -> p
 def linspace_like(start, stop, count) = start
-def probe(a: {dtype}, b: {dtype}) -> {dtype} = linspace_like(a, b, cast(3, int64))
+def probe(a: {dtype}, b: {dtype}) -> {dtype} = linspace_like(a, b, cast(3, i64))
 "#
     )
 }
@@ -187,7 +187,7 @@ fn a_bound_survives_a_generic_wrapper() {
         r#"
 sig only_ints[p: Int]: p -> p
 def only_ints(x) = x
-def wrap[q](x: q) -> q = only_ints(x)
+def wrap[q: Int](x: q) -> q = only_ints(x)
 def probe(x: f64) -> f64 = wrap(x)
 "#,
         "a generic wrapper over an `Int`-bounded function",
@@ -203,11 +203,11 @@ fn a_bound_survives_a_higher_order_call() {
 sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 def apply_to[q](f: q -> q, x: q) -> q = f(x)
-def probe(x: int32) -> int32 = apply_to(only_floats, x)
+def probe(x: i32) -> i32 = apply_to(only_floats, x)
 "#,
         "an `Float`-bounded function passed as a value",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
@@ -233,8 +233,8 @@ fn a_wrapper_of_a_bounded_function_still_accepts_its_own_family() {
         r#"
 sig only_ints[p: Int]: p -> p
 def only_ints(x) = x
-def wrap[q](x: q) -> q = only_ints(x)
-def probe(x: int16) -> int16 = wrap(x)
+def wrap[q: Int](x: q) -> q = only_ints(x)
+def probe(x: i16) -> i16 = wrap(x)
 "#,
         "a generic wrapper at an admitted dtype",
     );
@@ -250,25 +250,39 @@ sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 sig any_numeric[q: Numeric]: q -> q
 def any_numeric(x) = only_floats(x)
-def probe(x: int32) -> int32 = any_numeric(x)
+def probe(x: i32) -> i32 = any_numeric(x)
 "#,
         "a `Numeric` binder identified with a `Float` one",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
 #[test]
 fn a_narrowed_numeric_binder_still_accepts_its_intersection() {
-    assert_accepted(
-        r#"
+    // Intersection is valid for inference variables, not a license to narrow
+    // an authored Numeric contract. The declaration fails even with an f32 call.
+    let source = r#"
 sig only_floats[p: Float]: p -> p
 def only_floats(x) = x
 sig any_numeric[q: Numeric]: q -> q
 def any_numeric(x) = only_floats(x)
 def probe(x: f32) -> f32 = any_numeric(x)
-"#,
-        "a `Numeric` binder narrowed to `Float`, used at f32",
+"#;
+    let errors = diagnostics(source);
+    assert!(
+        errors.iter().any(
+            |error| matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                && error.message.contains("any_numeric")
+                && error.message.contains("Numeric")
+                && error.message.contains("Float")
+        ),
+        "{}",
+        rendered(&errors)
+    );
+    assert_accepted(
+        &source.replace("q: Numeric", "q: Float"),
+        "the explicitly sufficient contract admits f32",
     );
 }
 
@@ -300,13 +314,13 @@ def probe[r](x: r) -> r = only_ints(only_floats(x))
 fn a_bound_reaches_a_tensor_precision_slot() {
     assert_family_rejection(
         r#"
-sig scale[p: Float]: tensor[n, p] -> tensor[n, p]
+sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
 def scale(x) = x
-def probe(x: tensor[4, int32]) -> tensor[4, int32] = scale(x)
+def probe(x: tensor[4, i32]) -> tensor[4, i32] = scale(x)
 "#,
         "a `Float` bound occupying a tensor precision slot",
         "Float",
-        "int32",
+        "i32",
     );
 }
 
@@ -314,7 +328,7 @@ def probe(x: tensor[4, int32]) -> tensor[4, int32] = scale(x)
 fn a_precision_slot_bound_accepts_its_own_family() {
     assert_accepted(
         r#"
-sig scale[p: Float]: tensor[n, p] -> tensor[n, p]
+sig scale[n, p: Float]: tensor[n, p] -> tensor[n, p]
 def scale(x) = x
 def probe(x: tensor[4, f32]) -> tensor[4, f32] = scale(x)
 "#,
@@ -350,7 +364,7 @@ fn a_bounded_binder_cannot_name_a_rank_spread() {
 
 #[test]
 fn a_bound_must_name_a_binder_the_signature_uses() {
-    let errors = diagnostics("sig f[q: Float]: int32 -> int32");
+    let errors = diagnostics("sig f[q: Float]: i32 -> i32");
     assert!(
         errors
             .iter()
@@ -370,18 +384,18 @@ fn a_used_bound_is_accepted_where_the_absent_one_is_not() {
 
 #[test]
 fn a_def_may_not_bound_a_binder_its_sig_owns() {
-    let errors = diagnostics(
+    let error = parse_surf(
         r#"
 sig f[p: Float]: p -> p
 def f[p: Float](x: p) -> p = x
 "#,
-    );
+    )
+    .expect_err("duplicate bound ownership must reject before desugaring");
     assert!(
-        errors.iter().any(|error| error
-            .message
-            .contains("a declaration's `defsig` owns its binders")),
-        "a bound belongs to one binder list; got:\n{}",
-        rendered(&errors)
+        error
+            .to_string()
+            .contains("a declaration's `defsig` owns its binder list"),
+        "a bound belongs to one binder list; got: {error}"
     );
 }
 
@@ -405,9 +419,9 @@ fn a_def_declared_bound_accepts_its_own_family() {
     assert_accepted(
         r#"
 def only_ints[p: Int](x: p) -> p = x
-def probe(x: int64) -> int64 = only_ints(x)
+def probe(x: i64) -> i64 = only_ints(x)
 "#,
-        "a `def`-declared `Int` bound at int64",
+        "a `def`-declared `Int` bound at i64",
     );
 }
 
@@ -418,7 +432,7 @@ fn an_unbounded_binder_still_admits_a_non_dtype_type() {
     assert_accepted(
         r#"
 def pick[a](x: a, y: a) -> a = x
-def probe(x: List[int32], y: List[int32]) -> List[int32] = pick(x, y)
+def probe(x: List[i32], y: List[i32]) -> List[i32] = pick(x, y)
 "#,
         "an unbounded binder at a non-dtype type",
     );

@@ -12,8 +12,8 @@ use chelis_unord::UnordSet;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::{
-    DeepTag,
-    ast::{Atom, Expr, List, MetaMap},
+    DeepTag, ExprCarrier,
+    ast::{Atom, Expr, Metadata},
 };
 use chelis_types::known_tags::{LaneContribution, deep_tag_lane_contribution};
 use chelis_types::manifest::{HostReason, RootPathStep};
@@ -316,19 +316,16 @@ fn expr_needs_host(
     reasons: &mut Vec<HostReason>,
     inputs: &mut BTreeSet<String>,
 ) -> bool {
-    match expr {
-        Expr::Atom(Atom::Str(_), _) => {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Str(_)) => {
             // String literals force host (the host runtime handles strings).
             true
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) => false,
-        // chelis#1082: the stamped carrier is the production path. Observe
-        // its decoded tag, metadata, and children directly; reconstructing a
-        // legacy List here makes manifest correctness depend on #908 debt.
-        Expr::Node(node, _) => tagged_needs_host(
-            node.tag(),
-            Some(node.meta()),
-            node.children_slice(),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
+        ExprCarrier::DecodedNode(tag, metadata, children) => tagged_needs_host(
+            tag,
+            Some(metadata),
+            children,
             &LaneWalkContext {
                 lane_by_def,
                 target_prims,
@@ -346,19 +343,19 @@ fn expr_needs_host(
         // defensive alignment with the stated contract rather than a live
         // wrong-answer path — but a silent `false` here is exactly the
         // fail-open default those contracts exist to eliminate.
-        Expr::BareList(_, _) => {
+        ExprCarrier::StructuralList(_) => {
             reasons.push(HostReason::UnrecognizedTag {
                 tag: "<bare-list>".to_string(),
             });
             true
         }
-        Expr::UnknownForm(_) => {
+        ExprCarrier::UndecodableHead(_, _, _) => {
             reasons.push(HostReason::UnrecognizedTag {
                 tag: "<unknown-form>".to_string(),
             });
             true
         }
-        Expr::MetaExpr(meta, _) => expr_needs_host(
+        ExprCarrier::MetadataExpression(meta) => expr_needs_host(
             &meta.expr,
             lane_by_def,
             target_prims,
@@ -366,46 +363,7 @@ fn expr_needs_host(
             reasons,
             inputs,
         ),
-        Expr::List(list, _) => {
-            list_needs_host(list, lane_by_def, target_prims, type_env, reasons, inputs)
-        }
     }
-}
-
-fn list_needs_host(
-    list: &List,
-    lane_by_def: &BTreeMap<String, Lane>,
-    target_prims: &UnordSet<Prim>,
-    type_env: &BTreeMap<String, Expr>,
-    reasons: &mut Vec<HostReason>,
-    inputs: &mut BTreeSet<String>,
-) -> bool {
-    let tag = get_tag(list);
-    let Some(tag) = tag else {
-        // Fail-closed (#1086, #1080): an empty legacy List or a List whose head
-        // is not a decoded DeepTag has no typed disposition. Do not re-decode a
-        // raw Name here; ingress owns that boundary.
-        reasons.push(HostReason::UnrecognizedTag {
-            tag: list
-                .unknown_tag_symbol()
-                .unwrap_or("<untagged-list>")
-                .to_string(),
-        });
-        return true;
-    };
-
-    tagged_needs_host(
-        tag,
-        list_meta(list),
-        get_children(list),
-        &LaneWalkContext {
-            lane_by_def,
-            target_prims,
-            type_env,
-        },
-        reasons,
-        inputs,
-    )
 }
 
 struct LaneWalkContext<'a> {
@@ -416,7 +374,7 @@ struct LaneWalkContext<'a> {
 
 fn tagged_needs_host(
     tag: DeepTag,
-    meta: Option<&MetaMap>,
+    meta: Option<&Metadata>,
     children: &[Expr],
     context: &LaneWalkContext<'_>,
     reasons: &mut Vec<HostReason>,
@@ -528,40 +486,25 @@ fn tagged_needs_host(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn get_tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn get_children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 && matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
-        &list.elements[2..]
-    } else if list.elements.len() > 1 {
-        &list.elements[1..]
-    } else {
-        &[]
-    }
-}
-
-fn list_meta(list: &List) -> Option<&MetaMap> {
-    match list.elements.get(1) {
-        Some(Expr::Map(meta, _)) => Some(meta),
-        _ => None,
-    }
-}
-
 fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
-    match expr {
-        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        Expr::List(list, _) => list.tag().map(|tag| (tag, get_children(list))),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => Some((tag, children)),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
-fn tagged_meta(expr: &Expr) -> Option<&MetaMap> {
-    match expr {
-        Expr::Node(node, _) => Some(node.meta()),
-        Expr::List(list, _) => list_meta(list),
-        _ => None,
+fn tagged_meta(expr: &Expr) -> Option<&Metadata> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, metadata, _) => Some(metadata),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -721,8 +664,8 @@ fn collect_top_level_dependencies_scoped(
         return;
     }
 
-    match expr {
-        Expr::BareList(elements, _) => {
+    match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => {
             for child in elements {
                 collect_top_level_dependencies_scoped(
                     child,
@@ -734,16 +677,8 @@ fn collect_top_level_dependencies_scoped(
                 );
             }
         }
-        Expr::MetaExpr(meta, _) => collect_top_level_dependencies_scoped(
-            &meta.expr,
-            current_def,
-            top_level_names,
-            bound,
-            dependencies,
-            references_self,
-        ),
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::UndecodableHead(_, _, elements) => {
+            for child in elements {
                 collect_top_level_dependencies_scoped(
                     child,
                     current_def,
@@ -754,7 +689,15 @@ fn collect_top_level_dependencies_scoped(
                 );
             }
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) | Expr::Node(_, _) | Expr::List(_, _) => {}
+        ExprCarrier::MetadataExpression(meta) => collect_top_level_dependencies_scoped(
+            &meta.expr,
+            current_def,
+            top_level_names,
+            bound,
+            dependencies,
+            references_self,
+        ),
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
@@ -766,22 +709,14 @@ fn dependency_param_names(params_expr: &Expr) -> BTreeSet<String> {
 }
 
 fn dependency_param_name(param: &Expr) -> Option<String> {
-    match param {
-        Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
-        Expr::MetaExpr(meta, _) => dependency_param_name(&meta.expr),
-        Expr::BareList(elements, _) => elements.first().and_then(symbol_name).map(str::to_string),
-        Expr::List(list, _) => list
-            .elements
-            .first()
-            .and_then(symbol_name)
-            .map(str::to_string),
-        Expr::UnknownForm(data) => Some(data.head.clone()),
-        Expr::Node(node, _) => node
-            .children_slice()
-            .first()
-            .and_then(symbol_name)
-            .map(str::to_string),
-        Expr::Map(_, _) | Expr::Atom(_, _) => None,
+    match param.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => Some(name.clone()),
+        ExprCarrier::MetadataExpression(meta) => dependency_param_name(&meta.expr),
+        ExprCarrier::StructuralList(elements) | ExprCarrier::DecodedNode(_, _, elements) => {
+            elements.first().and_then(symbol_name).map(str::to_string)
+        }
+        ExprCarrier::UndecodableHead(head, _, _) => Some(head.to_string()),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => None,
     }
 }
 
@@ -813,33 +748,32 @@ fn dependency_binding_names(expr: &Expr, names: &mut BTreeSet<String>) {
         }
         return;
     }
-    match expr {
-        Expr::MetaExpr(meta, _) => dependency_binding_names(&meta.expr, names),
-        Expr::BareList(elements, _) => {
+    match expr.carrier() {
+        ExprCarrier::MetadataExpression(meta) => dependency_binding_names(&meta.expr, names),
+        ExprCarrier::StructuralList(elements) => {
             for child in elements {
                 dependency_binding_names(child, names);
             }
         }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::UndecodableHead(_, _, elements) => {
+            for child in elements {
                 dependency_binding_names(child, names);
             }
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) | Expr::Node(_, _) | Expr::List(_, _) => {}
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
 fn type_expr_contains_tensor(expr: &Expr) -> bool {
-    if expr.tag() == Some(DeepTag::TTensor) {
-        return true;
-    }
-    match expr {
-        Expr::Node(node, _) => node.children_slice().iter().any(type_expr_contains_tensor),
-        Expr::List(list, _) => get_children(list).iter().any(type_expr_contains_tensor),
-        Expr::BareList(elements, _) => elements.iter().any(type_expr_contains_tensor),
-        Expr::MetaExpr(meta, _) => type_expr_contains_tensor(&meta.expr),
-        Expr::UnknownForm(data) => data.children.iter().any(type_expr_contains_tensor),
-        Expr::Atom(_, _) | Expr::Map(_, _) => false,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TTensor, _, _) => true,
+        ExprCarrier::DecodedNode(_, _, children)
+        | ExprCarrier::StructuralList(children)
+        | ExprCarrier::UndecodableHead(_, _, children) => {
+            children.iter().any(type_expr_contains_tensor)
+        }
+        ExprCarrier::MetadataExpression(meta) => type_expr_contains_tensor(&meta.expr),
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
     }
 }
 
@@ -860,15 +794,9 @@ fn app_callee_name(children: &[Expr]) -> Option<String> {
 }
 
 /// Check if an app expression's type metadata indicates a scalar (t-prim) type.
-fn app_type_is_scalar(meta: Option<&MetaMap>) -> bool {
-    if let Some(meta) = meta {
-        for (key, value) in &meta.entries {
-            if key == "type" {
-                return value.tag() == Some(DeepTag::TPrim);
-            }
-        }
-    }
-    false
+fn app_type_is_scalar(meta: Option<&Metadata>) -> bool {
+    meta.and_then(Metadata::ty)
+        .is_some_and(|ty| ty.expression().tag() == Some(DeepTag::TPrim))
 }
 
 /// Extract a def's name and body from a top-level expression.
@@ -907,27 +835,21 @@ fn type_expr_has_primitive_result(expr: &Expr) -> bool {
 }
 
 fn extract_prims_recursive(expr: &Expr, out: &mut Vec<Prim>) {
-    match expr {
-        Expr::Atom(Atom::Name(s), _) => {
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(s)) => {
             if let Some(prim) = Prim::parse_name(s) {
                 out.push(prim);
             }
         }
-        Expr::List(list, _) => {
-            // Check for (t-prim {} <prim-name>) or (t-tensor {} dims... prim)
-            for elem in &list.elements {
+        ExprCarrier::DecodedNode(_, _, elements) | ExprCarrier::StructuralList(elements) => {
+            for elem in elements {
                 extract_prims_recursive(elem, out);
             }
         }
-        Expr::Node(node, _) => {
-            for elem in node.children_slice() {
-                extract_prims_recursive(elem, out);
-            }
-        }
-        Expr::MetaExpr(meta, _) => {
-            extract_prims_recursive(&meta.expr, out);
-        }
-        _ => {}
+        ExprCarrier::MetadataExpression(meta) => extract_prims_recursive(&meta.expr, out),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_) => {}
     }
 }
 
@@ -1024,12 +946,14 @@ fn collect_manifest_entries(
             )
         });
 
-    // Parameterized functions are declarations rather than observations.
+    // Function-typed entries, including aliases, are callable rather than
+    // observations. Only an actual nullary function declaration is applied.
     // A nullary arrow-form def is an owed root: evaluation applies its thunk
     // and surfaces the return value (chelis#947), so unwrap its sole return
     // type for dotted expansion.
+    let is_declaration = body.is_some_and(|body| body.tag() == Some(DeepTag::Fn));
     let (observation_ty, nullary_declaration) = match tagged_children(&ty) {
-        Some((DeepTag::TFn, [return_ty])) => {
+        Some((DeepTag::TFn, [return_ty])) if is_declaration => {
             // Auto-applying an effectful thunk merely to observe it would run
             // an effect that an unselected declaration otherwise runs zero
             // times. Only effect-free nullary definitions are value roots;
@@ -1089,7 +1013,6 @@ fn type_expr_has_unresolved_observation_parameter(expr: &Expr) -> bool {
     };
     match tag {
         DeepTag::TVar | DeepTag::DVar | DeepTag::DRank => true,
-        DeepTag::DName => children.first().and_then(symbol_name) == Some("*"),
         _ => children
             .iter()
             .any(type_expr_has_unresolved_observation_parameter),
@@ -1267,26 +1190,19 @@ fn static_adt_components<'a>(
 
 /// Extract type metadata from an expression's metadata map.
 fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
-    if let Some(meta) = tagged_meta(expr) {
-        for (key, value) in &meta.entries {
-            if key == "type" {
-                return Some(value);
-            }
-        }
-    }
-    None
+    tagged_meta(expr)?.ty().map(|ty| ty.expression())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::ast::MetaMap;
+    use chelis_deep::ast::Metadata;
     use chelis_types::types::Prim;
 
     fn check_program_from_source(source: &str) -> CheckedProgram {
         let decls = chelis_surf::parser::parse_str(source).expect("parse");
         let deep = chelis_macros::expand_program(
-            &chelis_surf::desugar::desugar_program(&decls),
+            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
             &chelis_macros::ExpansionOptions::default(),
         )
         .expect("desugar")
@@ -1316,7 +1232,7 @@ mod tests {
     #[test]
     fn host_only_builtin_routes_host() {
         let checked =
-            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(result.lane_by_def.get("result"), Some(&Lane::Host));
     }
@@ -1349,7 +1265,7 @@ mod tests {
     #[test]
     fn transitive_host_propagates() {
         let checked = check_program_from_source(
-            "a: List[int32] = [cast(1, int32)]\nb = concat(a, a)\nc = len(b)\n",
+            "a: List[i32] = [cast(1, i32)]\nb = concat(a, a)\nc = len(b)\n",
         );
         let result = infer_realizability(&checked, C_PRIMS);
         // concat is HostOnly → b is Host
@@ -1429,7 +1345,7 @@ mod tests {
     #[test]
     fn function_parameter_names_do_not_become_manifest_runtime_inputs() {
         let checked = check_program_from_source(
-            "value: List[int32] = [cast(1, int32)]\n\
+            "value: List[i32] = [cast(1, i32)]\n\
              def square(value: tensor[2, f32]) -> tensor[2, f32] = mul(value, value)\n",
         );
         let square_body = checked
@@ -1487,9 +1403,9 @@ mod tests {
     #[test]
     fn recursive_function_name_does_not_become_a_runtime_input() {
         let checked = check_program_from_source(
-            "def recur[n](x: tensor[n, f32], i: int64) -> tensor[n, f32] =\n\
-               if lte(i, cast(0, int64)) then x else recur(x, sub(i, cast(1, int64)))\n\
-             out = recur(to_tensor([1.0, 2.0]), cast(2, int64))\n",
+            "def recur[n](x: tensor[n, f32], i: i64) -> tensor[n, f32] =\n\
+               if lte(i, cast(0, i64)) then x else recur(x, sub(i, cast(1, i64)))\n\
+             out = recur(to_tensor([1.0, 2.0]), cast(2, i64))\n",
         );
         let result = infer_realizability(&checked, C_PRIMS);
         assert_eq!(
@@ -1506,7 +1422,7 @@ mod tests {
 
     #[test]
     fn module_wrapped_defs_receive_realizability_entries() {
-        let checked = check_program_from_source("module Demo.Root\nvalue = cast(7, int64)\n");
+        let checked = check_program_from_source("module Demo.Root\nvalue = cast(7, i64)\n");
         let result = infer_realizability(&checked, C_PRIMS);
         assert!(
             result.lane_by_def.contains_key("value"),
@@ -1520,7 +1436,7 @@ mod tests {
 
     #[test]
     fn nullary_observation_thunk_routes_to_the_host_value_path() {
-        let checked = check_program_from_source("def answer() -> int64 = cast(42, int64)\n");
+        let checked = check_program_from_source("def answer() -> i64 = cast(42, i64)\n");
         let result = infer_realizability(&checked, EVAL_PRIMS);
         assert_eq!(result.lane_by_def.get("answer"), Some(&Lane::Host));
         assert!(
@@ -1535,30 +1451,30 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let callee = Expr::node(
             DeepTag::Var,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("library_add".to_string()), span)],
             span,
         );
         let expression = Expr::node(
             DeepTag::App,
-            MetaMap::default(),
+            Metadata::default(),
             vec![callee, Expr::Atom(Atom::Int(1), span)],
             span,
         );
         let external_type = Expr::node(
             DeepTag::TFn,
-            MetaMap::default(),
+            Metadata::default(),
             vec![
                 Expr::node(
                     DeepTag::TPrim,
-                    MetaMap::default(),
-                    vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
                     span,
                 ),
                 Expr::node(
                     DeepTag::TPrim,
-                    MetaMap::default(),
-                    vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("i64".to_string()), span)],
                     span,
                 ),
             ],
@@ -1614,7 +1530,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_lists_value_roots_with_lanes() {
         let checked =
-            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+            check_program_from_source("a: List[i32] = [cast(1, i32)]\nresult = concat(a, a)\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1642,20 +1558,20 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let body = Expr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Int(42), span)],
             span,
         );
         let def = Expr::node(
             DeepTag::Def,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("answer".to_string()), span), body],
             span,
         );
         let ty = Expr::node(
             DeepTag::TPrim,
-            MetaMap::default(),
-            vec![Expr::Atom(Atom::Name("int32".to_string()), span)],
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("i32".to_string()), span)],
             span,
         );
         let type_env = BTreeMap::from([("answer".to_string(), ty)]);
@@ -1687,9 +1603,8 @@ mod tests {
     // something an individual runtime may rediscover after lowering.
     #[test]
     fn compute_root_manifest_expands_nested_tuple_roots_depth_first() {
-        let checked = check_program_from_source(
-            "result = (cast(1, int32), (cast(2, int32), cast(3, int32)))\n",
-        );
+        let checked =
+            check_program_from_source("result = (cast(1, i32), (cast(2, i32), cast(3, i32)))\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1707,8 +1622,8 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_static_record_adt_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair { left: int32, right: int32 }\n\
-             result = Pair { left: cast(1, int32), right: cast(2, int32) }\n",
+            "type Pair = | Pair { left: i32, right: i32 }\n\
+             result = Pair { left: cast(1, i32), right: cast(2, i32) }\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1725,8 +1640,8 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_static_positional_adt_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair(int32, int32)\n\
-             result = Pair(cast(1, int32), cast(2, int32))\n",
+            "type Pair = | Pair(i32, i32)\n\
+             result = Pair(cast(1, i32), cast(2, i32))\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1743,9 +1658,9 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_dynamic_adt_variant_as_bare_root() {
         let checked = check_program_from_source(
-            "type Choice = | First(int32) | Second(int32)\n\
+            "type Choice = | First(i32) | Second(i32)\n\
              def choose(flag: bool) -> Choice = \
-               if flag then First(cast(1, int32)) else Second(cast(2, int32))\n\
+               if flag then First(cast(1, i32)) else Second(cast(2, i32))\n\
              result = choose(true)\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
@@ -1763,7 +1678,7 @@ mod tests {
     #[test]
     fn compute_root_manifest_keeps_builtin_recursive_list_as_bare_root() {
         let checked =
-            check_program_from_source("result: List[int32] = [cast(1, int32), cast(2, int32)]\n");
+            check_program_from_source("result: List[i32] = [cast(1, i32), cast(2, i32)]\n");
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1793,7 +1708,7 @@ mod tests {
 
     #[test]
     fn compute_root_manifest_keeps_pure_nullary_thunks() {
-        let checked = check_program_from_source("def answer() -> int32 = cast(42, int32)\n");
+        let checked = check_program_from_source("def answer() -> i32 = cast(42, i32)\n");
         let realizability = infer_realizability(&checked, EVAL_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
         assert_eq!(
@@ -1809,9 +1724,9 @@ mod tests {
     #[test]
     fn compute_root_manifest_expands_pure_nullary_tuple_and_record_roots() {
         let checked = check_program_from_source(
-            "type Pair = | Pair { left: int32, right: int32 }\n\
-             def tupled() -> (int32, int32) = (cast(1, int32), cast(2, int32))\n\
-             def answer() -> Pair = Pair { left: cast(3, int32), right: cast(4, int32) }\n",
+            "type Pair = | Pair { left: i32, right: i32 }\n\
+             def tupled() -> (i32, i32) = (cast(1, i32), cast(2, i32))\n\
+             def answer() -> Pair = Pair { left: cast(3, i32), right: cast(4, i32) }\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1839,11 +1754,92 @@ mod tests {
         );
     }
 
+    /// chelis#1397 regression test. A nullary root whose result extent is a
+    /// runtime extent (`tensor[*, f32]`, spec/04 §4.7: a value with a claim,
+    /// not an unknown rank) is an owed root. Before this change the wildcard
+    /// arm of `type_expr_has_unresolved_observation_parameter` dropped it and
+    /// both lanes fell silent. Reverting `realizability.rs` to the base sha
+    /// makes this assertion fail with an empty manifest.
+    #[test]
+    fn compute_root_manifest_keeps_a_runtime_extent_nullary_root() {
+        let checked = check_program_from_source(
+            "def g[n, m](x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             def main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+        );
+        let realizability = infer_realizability(&checked, C_PRIMS);
+        let manifest = compute_root_manifest(&checked, &realizability);
+        assert!(
+            manifest.entries.iter().any(|entry| entry.name == "main"),
+            "a nullary root with a runtime result extent is observable: {:?}",
+            manifest
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// chelis#1397 regression test at the predicate. The `*` extent no longer
+    /// counts as an unresolved observation parameter. Red on the base sha,
+    /// where the removed `DeepTag::DName` arm returned true for `*`.
+    #[test]
+    fn a_runtime_extent_is_not_an_unresolved_observation_parameter() {
+        for (label, source) in [
+            ("rank one", "(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+            (
+                "beside a concrete axis",
+                "(t-tensor {} (d-lit {} 2) (d-name {} *) (t-prim {} f32))",
+            ),
+            (
+                "under a nullary function result",
+                "(t-fn {} (t-tensor {} (d-name {} *) (t-prim {} f32)))",
+            ),
+        ] {
+            let expr = chelis_deep::parser::parse_and_stamp_type(source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                !type_expr_has_unresolved_observation_parameter(&expr),
+                "{label} must be a resolved runtime extent"
+            );
+        }
+    }
+
+    /// Negative parity for the test above, and a disposition lock rather than
+    /// a regression test: every one of these already returned true on the base
+    /// sha and must keep doing so. An unknown rank or an uninstantiated type or
+    /// dim variable has no ABI, so such a nullary declaration stays unobserved;
+    /// only the unknown *extent* was reclassified.
+    #[test]
+    fn type_dim_and_rank_variables_remain_unresolved_observation_parameters() {
+        for (label, source) in [
+            (
+                "rank variable",
+                "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+            ),
+            (
+                "dim variable",
+                "(t-tensor {} (d-var {} d0) (t-prim {} f32))",
+            ),
+            ("type variable", "(t-tensor {} (d-lit {} 2) (t-var {} p))"),
+            (
+                "nested under a function result",
+                "(t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
+            ),
+        ] {
+            let expr = chelis_deep::parser::parse_and_stamp_type(source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                type_expr_has_unresolved_observation_parameter(&expr),
+                "{label} must stay an unresolved observation parameter"
+            );
+        }
+    }
+
     #[test]
     fn compute_root_manifest_keeps_dynamic_shape_value_roots() {
         let checked = check_program_from_source(
-            "rows: List[List[int64]] = [[cast(1, int64)], [cast(2, int64)]]\n\
-             padded = pad_sequences(rows, cast(0, int64))\n",
+            "rows: List[List[i64]] = [[cast(1, i64)], [cast(2, i64)]]\n\
+             padded = pad_sequences(rows, cast(0, i64))\n",
         );
         let realizability = infer_realizability(&checked, C_PRIMS);
         let manifest = compute_root_manifest(&checked, &realizability);
@@ -1883,10 +1879,10 @@ mod tests {
     // #1086: an unrecognized form must fail closed to Host with a reason.
     #[test]
     fn unknown_form_routes_host_fail_closed() {
-        use chelis_deep::ast::{MetaMap, UnknownFormData};
+        use chelis_deep::ast::{Metadata, UnknownFormData};
         let expr = Expr::UnknownForm(Box::new(UnknownFormData {
             head: "mystery".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: vec![],
             span: chelis_deep::Span::new(0, 0),
         }));
@@ -1908,6 +1904,13 @@ mod tests {
             !reasons.is_empty(),
             "UnknownForm Host routing must record a reason, not be silent"
         );
+        assert_eq!(
+            reasons,
+            [HostReason::UnrecognizedTag {
+                tag: "<unknown-form>".to_string(),
+            }],
+            "UnknownForm keeps its pre-carrier diagnostic instead of borrowing a raw List head"
+        );
     }
 
     // #1086 completeness: the same fail-open existed one level down in
@@ -1915,10 +1918,10 @@ mod tests {
     // fell through to Tensor with no reason. It must fail closed too.
     #[test]
     fn untagged_list_routes_host_fail_closed() {
-        let list = List {
-            elements: vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
-        };
-        let expr = Expr::List(list, chelis_deep::Span::new(0, 0));
+        let expr = Expr::BareList(
+            vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
+            chelis_deep::Span::new(0, 0),
+        );
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -1940,8 +1943,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_legacy_list_routes_host_fail_closed() {
-        let expr = Expr::List(List { elements: vec![] }, chelis_deep::Span::new(0, 0));
+    fn empty_bare_list_routes_host_with_the_bare_list_reason() {
+        let expr = Expr::BareList(vec![], chelis_deep::Span::new(0, 0));
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -1959,39 +1962,115 @@ mod tests {
         assert_eq!(
             reasons,
             [HostReason::UnrecognizedTag {
-                tag: "<untagged-list>".to_string(),
+                tag: "<bare-list>".to_string(),
             }]
         );
     }
 
     #[test]
-    fn raw_name_that_spells_a_known_tag_routes_host_fail_closed() {
+    fn undecodable_head_children_reach_dependency_traversal() {
         let span = chelis_deep::Span::new(0, 0);
-        let expr = Expr::List(
-            List {
-                elements: vec![Expr::Atom(Atom::Name("app".to_string()), span)],
-            },
+        let dependency = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("dep".into()), span)],
             span,
         );
-        let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
-        let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
-        let type_env: BTreeMap<String, Expr> = BTreeMap::new();
-        let mut reasons = Vec::new();
-        let mut inputs = BTreeSet::new();
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-wrapper".into(),
+            meta: Metadata::default(),
+            children: vec![dependency],
+            span,
+        }));
+        let top_level_names = BTreeSet::from(["dep".to_string()]);
 
-        assert!(expr_needs_host(
-            &expr,
-            &lane_by_def,
-            &target,
-            &type_env,
-            &mut reasons,
-            &mut inputs,
+        let collect = |expr: &Expr| {
+            let mut dependencies = BTreeSet::new();
+            let mut references_self = false;
+            collect_top_level_dependencies(
+                expr,
+                "",
+                &top_level_names,
+                &BTreeSet::new(),
+                &mut dependencies,
+                &mut references_self,
+            );
+            dependencies
+        };
+        assert_eq!(collect(&unknown), top_level_names);
+
+        let mut unknown_bindings = BTreeSet::new();
+        dependency_binding_names(&unknown, &mut unknown_bindings);
+        assert_eq!(unknown_bindings, BTreeSet::from(["dep".to_string()]));
+    }
+
+    #[test]
+    fn dependency_param_name_reads_typed_and_undecodable_params() {
+        let span = chelis_deep::Span::new(0, 0);
+        let typed = Expr::BareList(
+            vec![
+                Expr::Atom(Atom::Name("param".into()), span),
+                Expr::Map(Metadata::default(), span),
+            ],
+            span,
+        );
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "param".into(),
+            meta: Metadata::default(),
+            children: Vec::new(),
+            span,
+        }));
+
+        assert_eq!(dependency_param_name(&typed).as_deref(), Some("param"));
+        assert_eq!(dependency_param_name(&unknown).as_deref(), Some("param"));
+    }
+
+    #[test]
+    fn tagged_metadata_declines_unknown_forms() {
+        let span = chelis_deep::Span::new(0, 0);
+        let ty = chelis_deep::parse_and_stamp_type("(t-prim {} f64)").expect("type stamps");
+        let metadata = Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(ty).expect("type metadata"),
         ));
-        assert_eq!(
-            reasons,
-            [HostReason::UnrecognizedTag {
-                tag: "app".to_string(),
-            }]
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-wrapper".into(),
+            meta: metadata,
+            children: Vec::new(),
+            span,
+        }));
+
+        assert!(tagged_meta(&unknown).is_none());
+    }
+
+    #[test]
+    fn type_precision_reader_traverses_non_node_carriers_without_inventing_prims() {
+        let span = chelis_deep::Span::new(0, 0);
+        let f64_type = Expr::node(
+            DeepTag::TPrim,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("f64".into()), span)],
+            span,
+        );
+        let structural = Expr::BareList(vec![f64_type.clone()], span);
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-type-wrapper".into(),
+            meta: Metadata::default(),
+            children: vec![f64_type],
+            span,
+        }));
+
+        assert_eq!(extract_prims_from_type_expr(&structural), vec![Prim::F64]);
+        assert!(
+            extract_prims_from_type_expr(&unknown).is_empty(),
+            "UnknownForm was opaque to primitive extraction before carrier migration"
+        );
+        assert!(
+            extract_prims_from_type_expr(&Expr::BareList(
+                vec![Expr::Atom(Atom::Name("not-a-prim".into()), span)],
+                span,
+            ))
+            .is_empty(),
+            "structural traversal must not invent primitive identities"
         );
     }
 
@@ -2004,11 +2083,11 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let record = Expr::node(
             DeepTag::Record,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("R".to_string()), span)],
             span,
         );
-        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![record], span);
+        let expr = Expr::node(DeepTag::Block, Metadata::default(), vec![record], span);
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -2039,11 +2118,11 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let literal = Expr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Int(1), span)],
             span,
         );
-        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![literal], span);
+        let expr = Expr::node(DeepTag::Block, Metadata::default(), vec![literal], span);
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();

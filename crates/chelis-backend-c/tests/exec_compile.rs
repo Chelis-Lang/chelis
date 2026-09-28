@@ -4,38 +4,2094 @@
 //! The generated kernel signature is:
 //!   void func(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out)
 //! The kernel allocates output tensors internally via chelis_alloc.
-//! We link against the chelis_runtime .a to resolve those symbols.
+//! We link the carried runtime archive, staged into each probe directory.
 
 use chelis_backend_c::{CodegenOptions, MathLib};
+
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, ReduceWindowKind, RiscOp, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtentClaim, ExtentWitnessSite, ExtremaKind, ExtremaOperand,
+    LogicalKind, Owner, ReduceWindowKind, RiscOp, RtAxis, TensorType,
 };
+use chelis_ir::eval::{TensorValue, eval_tensor};
 use chelis_ir::fuse::fuse;
+use chelis_ir::grad::grad_dag_checked;
 use chelis_ir::host::{
     ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
     ConcreteHostFunction as HostFunction, ConcreteHostParam as HostParam,
     ConcreteHostProgram as HostProgram, HostFunctionOrigin,
 };
 use chelis_types::types::Prim;
+use chelis_types::{RawTensor, finalize_tensor};
+use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::{codegen, codegen_with_options, emit_host_program};
 
 mod common;
+
+fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
+    let probe = common::probe_dir("checked_c_indexing");
+    let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    fs::write(dir.join("kernel.c"), source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            needs_blas: source.contains("#include \"chelis_blas.h\""),
+            ..Default::default()
+        },
+    );
+    let binary = dir.join("probe");
+    let compiled = Command::new(toolchain.compiler)
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+        ])
+        .args(toolchain.compile_flags)
+        .arg("-I")
+        .arg(dir)
+        .arg(dir.join("kernel.c"))
+        .arg(dir.join("main.c"))
+        .arg(&staged.archive)
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}\n{source}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    Command::new(binary)
+        .env("ASAN_OPTIONS", "detect_leaks=0")
+        .output()
+        .unwrap()
+}
+
+/// Compile a group of checked C cases in one link. Generated kernels stay in
+/// separate translation units so their private helpers cannot collide; the
+/// harnesses have unique entry/helper names in one translation unit. Every
+/// case still runs in its own ASan/UBSan process.
+fn checked_indexing_run_batch(cases: &[(String, String)]) -> Vec<std::process::Output> {
+    assert!(!cases.is_empty());
+    let probe = common::probe_dir("checked_c_batch");
+    let dir = probe.path();
+    let staged = chelis_runtime_bundle::stage(dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
+    let mut main_source = String::new();
+    for (index, (source, harness)) in cases.iter().enumerate() {
+        fs::write(dir.join(format!("kernel_{index}.c")), source).unwrap();
+        main_source.push_str(harness);
+    }
+    main_source.push_str("#include <stdlib.h>\n");
+    main_source.push_str("int main(int argc, char **argv) {\n");
+    main_source.push_str("    if (argc != 2) return 97;\n");
+    main_source.push_str("    int (*const cases[])(void) = {");
+    for index in 0..cases.len() {
+        main_source.push_str(&format!("case_{index},"));
+    }
+    main_source.push_str("};\n");
+    main_source.push_str("    int index = atoi(argv[1]);\n");
+    main_source.push_str(
+        "    if (index < 0 || (size_t)index >= sizeof cases / sizeof cases[0]) return 98;\n",
+    );
+    main_source.push_str("    return cases[index]();\n}\n");
+    fs::write(dir.join("main.c"), main_source).unwrap();
+
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            needs_blas: cases
+                .iter()
+                .any(|(source, _)| source.contains("#include \"chelis_blas.h\"")),
+            ..Default::default()
+        },
+    );
+    let binary = dir.join("probe");
+    let mut compiler = Command::new(toolchain.compiler);
+    compiler
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+        ])
+        .args(toolchain.compile_flags)
+        .arg("-I")
+        .arg(dir);
+    for index in 0..cases.len() {
+        compiler.arg(dir.join(format!("kernel_{index}.c")));
+    }
+    let compiled = compiler
+        .arg(dir.join("main.c"))
+        .arg(&staged.archive)
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "checked C batch compile failed:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    (0..cases.len())
+        .map(|index| {
+            Command::new(&binary)
+                .arg(index.to_string())
+                .env("ASAN_OPTIONS", "detect_leaks=0")
+                .output()
+                .unwrap()
+        })
+        .collect()
+}
+
+fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, output: Prim) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    dag.add_node(
+        decl,
+        RiscOp::ConstTensor { data: storage },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(extent)],
+            precision: output,
+        },
+        None,
+    );
+    dag
+}
+#[test]
+fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
+    use chelis_types::{RawTensor, StorageView, finalize_tensor};
+    for dtype in [
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ] {
+        let raw = if dtype.is_float() {
+            RawTensor::Float(vec![-0.0, 1.5, f64::INFINITY, f64::NAN])
+        } else if dtype == Prim::Bool {
+            RawTensor::Int(vec![0, 1, 1, 0])
+        } else if dtype == Prim::Int64 {
+            RawTensor::Int(vec![i64::MIN, 9007199254740993, -1, i64::MAX])
+        } else {
+            RawTensor::Int(vec![-1, 0, 1, 127])
+        };
+        let storage = finalize_tensor("const", dtype, raw).unwrap();
+        let expected: Vec<u8> = match storage.view() {
+            StorageView::F64(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::Bf16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::I64(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I32(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I16(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I8(v) => v.iter().map(|x| *x as u8).collect(),
+            StorageView::Bool(v) => v.to_vec(),
+            StorageView::Key(_) => {
+                unreachable!("the dtype list above has no key: a key has no literal")
+            }
+        };
+        let source = codegen(
+            &checked_literal_dag(storage.clone(), 4, dtype),
+            "literal_probe",
+        )
+        .unwrap()
+        .c_source;
+        let bytes = expected
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <string.h>
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ chelis_tensor *out[1]={{0}};literal_probe(0,0,out,1);
+ unsigned char expected[]={{{bytes}}};
+ chelis_read_view v=chelis_tensor_read_view(out[0]);
+ if(v.dtype!={dtype} || v.count!=4 || memcmp(v.data,expected,sizeof expected))return 10;
+ chelis_tensor_release(out[0]);return 0;
+}}
+"#,
+            dtype = dtype.runtime_dtype().unwrap().c_macro()
+        );
+        let out = checked_indexing_run(&source, &harness);
+        assert!(out.status.success(), "{dtype:?}: {out:?}");
+
+        for extent in [3, 0] {
+            let error = chelis_ir::ownership::lower_dag_ownership(checked_literal_dag(
+                storage.clone(),
+                extent,
+                dtype,
+            ))
+            .expect_err("malformed literal cardinality must reject before codegen");
+            assert_eq!(
+                error,
+                chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                    unit: "dag".into(),
+                    detail: format!(
+                        "constant tensor at node 0 stores 4 values but its concrete shape requires {extent}"
+                    ),
+                },
+                "{dtype:?}/{extent}"
+            );
+        }
+        let empty = storage.reuse_gather(&[]);
+        let source = codegen(&checked_literal_dag(empty, 0, dtype), "literal_probe")
+            .unwrap()
+            .c_source;
+        let harness = r#"#include "chelis_runtime.h"
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void){chelis_tensor *out[1]={0};literal_probe(0,0,out,1);if(chelis_tensor_numel(out[0])!=0)return 1;chelis_tensor_release(out[0]);return 0;}"#;
+        let out = checked_indexing_run(&source, harness);
+        assert!(out.status.success(), "{dtype:?} empty: {out:?}");
+    }
+}
+#[test]
+fn checked_literals_reject_inconsistent_ir_storage_dtype() {
+    let value = chelis_types::finalize_tensor(
+        "const",
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![1.0]),
+    )
+    .unwrap();
+    let result = codegen(&checked_literal_dag(value, 1, Prim::Int32), "literal_probe");
+    assert!(
+        result.is_err(),
+        "inconsistent literal storage dtype must reject"
+    );
+}
+
+fn checked_window_dag(reducer: ReduceWindowKind, gradient: bool) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let input = TensorType {
+        dims: ["batch", "height", "width"]
+            .into_iter()
+            .map(|n| DimInfo::Named(n.into(), None))
+            .collect(),
+        precision: Prim::F32,
+    };
+    let result = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(2),
+            DimInfo::Lit(2),
+        ],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input.clone(),
+        None,
+    );
+    if gradient {
+        let gty = TensorType {
+            dims: ["gb", "gh", "gw"]
+                .into_iter()
+                .map(|n| DimInfo::Named(n.into(), None))
+                .collect(),
+            precision: Prim::F32,
+        };
+        let g = dag.add_node(decl, RiscOp::Load { name: "g".into() }, vec![], gty, None);
+        dag.add_node(
+            decl,
+            RiscOp::ReduceWindowGrad {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x, g],
+            input,
+            None,
+        );
+    } else {
+        dag.add_node(
+            decl,
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x],
+            result,
+            None,
+        );
+    }
+    dag
+}
+#[test]
+fn checked_windows_forward_and_gradient_execute_with_exact_geometry_under_sanitizers() {
+    for (kind, reducer) in [
+        ReduceWindowKind::Sum,
+        ReduceWindowKind::Mean,
+        ReduceWindowKind::Max,
+        ReduceWindowKind::Min,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for gradient in [false, true] {
+            let source = codegen(&checked_window_dag(reducer, gradient), "window_probe")
+                .unwrap()
+                .c_source;
+            for batch in [2, 0] {
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void window_probe(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {{
+    int64_t xs[3] = {{{batch},5,5}}, gs[3] = {{{batch},2,2}};
+    chelis_tensor *x = chelis_alloc(3,xs,CHELIS_DTYPE_F32);
+    chelis_tensor *g = chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+    chelis_tensor_write *w = chelis_tensor_begin_write(x);
+    float *xp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*25;i++) xp[i]=(float)(i+1);
+    chelis_tensor_end_write(w);
+    w = chelis_tensor_begin_write(g);
+    float *gp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*4;i++) gp[i]=(float)(4*(i+1));
+    chelis_tensor_end_write(w);
+    chelis_tensor *inputs[2]={{x,g}}, *out[1]={{0}};
+    window_probe(inputs,{ninputs},out,1);
+    if (chelis_tensor_numel(out[0]) != {batch}*{per_batch}) return 10;
+    if (chelis_tensor_shape(out[0],1) != {height} || chelis_tensor_shape(out[0],2) != {width}) return 11;
+    const float *actual=(const float*)chelis_tensor_read_view(out[0]).data;
+    float expected[60]={{0}};
+    for(int b=0;b<{batch};b++) for(int h=0;h<2;h++) for(int c=0;c<2;c++) {{
+        int first=b*25+h*10+c*2, group=b*4+h*2+c;
+        int slots[4]={{first,first+1,first+5,first+6}};
+        if ({gradient}) {{
+            for(int j=0;j<4;j++) if ({kind}<2 || ({kind}==2 && j==3) || ({kind}==3 && j==0)) expected[slots[j]]+=(float)(4*(group+1))/({kind}==1?4.0f:1.0f);
+        }} else {{
+            float value={kind}==2?(float)(first+7):{kind}==3?(float)(first+1):(float)(4*first+16);
+            expected[group]={kind}==1?value/4.0f:value;
+        }}
+    }}
+    for(int i=0;i<{batch}*{per_batch};i++) if(actual[i]!=expected[i]) {{ fprintf(stderr,"%d %g %g\n",i,actual[i],expected[i]);return 12; }}
+    chelis_tensor_release(out[0]);chelis_tensor_release(g);chelis_tensor_release(x);return 0;
+}}
+"#,
+                    ninputs = if gradient { 2 } else { 1 },
+                    per_batch = if gradient { 25 } else { 4 },
+                    height = if gradient { 5 } else { 2 },
+                    width = if gradient { 5 } else { 2 },
+                    gradient = usize::from(gradient)
+                );
+                let output = checked_indexing_run(&source, &harness);
+                assert!(
+                    output.status.success(),
+                    "{kind}/{gradient}/{batch}: {output:?}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn checked_windows_reject_incorrect_runtime_result_and_cotangent_shapes() {
+    for gradient in [false, true] {
+        let source = codegen(
+            &checked_window_dag(ReduceWindowKind::Sum, gradient),
+            "window_probe",
+        )
+        .unwrap()
+        .c_source;
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+extern void window_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ int64_t xs[3]={{1,{height},5}},gs[3]={{1,1,4}};
+ chelis_tensor *x=chelis_alloc(3,xs,CHELIS_DTYPE_F32), *g=chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+ chelis_tensor *inputs[2]={{x,g}},*out[1]={{0}};
+ window_probe(inputs,{ninputs},out,1);return 99;
+}}
+"#,
+            height = if gradient { 5 } else { 6 },
+            ninputs = if gradient { 2 } else { 1 }
+        );
+        let output = checked_indexing_run(&source, &harness);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let op = if gradient {
+            "reduce_window_grad"
+        } else {
+            "reduce_window_sum"
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|s| s == format!("numeric trap: domain in {op} at i64")),
+            "{output:?}"
+        );
+    }
+}
+
+fn checked_blas_dag(operand: Prim, output: Prim) -> Dag {
+    use chelis_ir::dag::DimExpr;
+    let ty = |names: &[&str], precision| TensorType {
+        dims: names
+            .iter()
+            .map(|n| DimInfo::Named((*n).into(), None))
+            .collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty(&["batch0", "batch1", "m", "k"], operand),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty(&["batch0", "batch1", "k", "n"], operand),
+        None,
+    );
+    let node = dag.add_node(
+        decl,
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+            m: DimExpr::Sym("m".into()),
+            n: DimExpr::Sym("n".into()),
+            k: DimExpr::Sym("k".into()),
+            accumulator: if operand == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            },
+        },
+        vec![a, b],
+        ty(&["batch0", "batch1", "m", "n"], output),
+        None,
+    );
+    dag.add_root(node);
+    dag
+}
+
+#[test]
+fn blas_vendor_dimension_contract_matches_actual_function_prototypes() {
+    let source = codegen_with_options(
+        &checked_blas_dag(Prim::F32, Prim::F32),
+        "vendor_contract",
+        CodegenOptions {
+            use_blas: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .c_source;
+    let preamble = source
+        .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */")
+        .next()
+        .unwrap();
+    let contract = &preamble[preamble.find("#ifndef CHELIS_C_BLAS_CONTRACT").unwrap()..];
+    let probe = common::probe_dir("blas_dimension_contract");
+    let compiler = chelis_backend_c::toolchain::c_compiler();
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(probe.path().join(name), contents).unwrap();
+    }
+    let compile = |text: &str| {
+        fs::write(probe.path().join("contract.c"), text).unwrap();
+        Command::new(&compiler)
+            .args(["-std=c11", "-Werror", "-c", "-I"])
+            .arg(probe.path())
+            .arg(probe.path().join("contract.c"))
+            .arg("-o")
+            .arg(probe.path().join("contract.o"))
+            .output()
+            .unwrap()
+    };
+    let actual = compile(preamble);
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    if cfg!(target_os = "macos") {
+        let ilp64 = compile(&format!("#define ACCELERATE_LAPACK_ILP64 1\n{preamble}"));
+        assert!(
+            ilp64.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ilp64.stderr)
+        );
+    }
+    for openblas in [false, true] {
+        for (declared, argument, want) in [
+            ("int32_t", "int32_t", None),
+            ("int64_t", "int64_t", None),
+            ("int32_t", "int64_t", Some("dimension contract mismatch")),
+            ("int64_t", "int32_t", Some("dimension contract mismatch")),
+            ("uint32_t", "uint32_t", Some("dimensions must be signed")),
+            (
+                "int16_t",
+                "int16_t",
+                Some("unsupported CBLAS dimension width"),
+            ),
+        ] {
+            let layout = if openblas {
+                "CBLAS_ORDER"
+            } else {
+                "CBLAS_LAYOUT"
+            };
+            let selector = if openblas {
+                format!("#define OPENBLAS_VERSION 1\ntypedef {declared} blasint;\n")
+            } else {
+                format!("#define CBLAS_INT {declared}\n")
+            };
+            let declarations=[("s","float"),("d","double")].iter().map(|(prefix,element)|format!("void cblas_{prefix}gemm(enum {layout}, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE, {argument}, {argument}, {argument}, {element}, const {element}*, {argument}, const {element}*, {argument}, {element}, {element}*, {argument});\n")).collect::<String>();
+            let fake = format!(
+                "#include <stdint.h>\n#undef __APPLE__\n{selector}typedef enum {layout} {{ CblasRowMajor=101 }} {layout};\nenum CBLAS_TRANSPOSE {{ CblasNoTrans=111 }};\n{declarations}{contract}"
+            );
+            let result = compile(&fake);
+            if let Some(reason) = want {
+                assert!(!result.status.success(), "{openblas}/{declared}/{argument}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains(reason),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            } else {
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
+    for (operand, output) in [
+        (Prim::F32, Prim::F32),
+        (Prim::F64, Prim::F64),
+        (Prim::F16, Prim::F16),
+        (Prim::Bf16, Prim::Bf16),
+        (Prim::F16, Prim::F32),
+        (Prim::Bf16, Prim::F32),
+    ] {
+        let source = codegen_with_options(
+            &checked_blas_dag(operand, output),
+            "checked_blas",
+            CodegenOptions {
+                use_blas: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .c_source;
+        // Existing selected nodes require their ABI declarations even when the
+        // caller did not request another specialization pass.
+        let default_options = codegen(&checked_blas_dag(operand, output), "checked_blas").unwrap();
+        assert!(default_options.requirements.needs_blas);
+        assert_eq!(default_options.c_source, source);
+        let mut sources = vec![source];
+        if operand == Prim::F32 && output == Prim::F32 {
+            use chelis_ir::dag::DimExpr;
+            use chelis_ir::host::{
+                HostBlasMatmulSummary, HostTensorHelper, HostTensorInput, HostTensorSpecialization,
+            };
+            let dag = checked_blas_dag(operand, output);
+            let a_ty = dag.nodes()[0].output_type.clone();
+            let b_ty = dag.nodes()[1].output_type.clone();
+            let out_ty = dag.nodes()[2].output_type.clone();
+            let inputs = vec![
+                HostTensorInput {
+                    name: "a".into(),
+                    ty: a_ty.clone(),
+                },
+                HostTensorInput {
+                    name: "b".into(),
+                    ty: b_ty.clone(),
+                },
+            ];
+            let params = inputs
+                .iter()
+                .map(|input| HostParam {
+                    name: input.name.clone(),
+                    ty: HostType::Tensor(input.ty.clone()),
+                })
+                .collect::<Vec<_>>();
+            let summary = HostBlasMatmulSummary {
+                lhs_input: 0,
+                rhs_input: 1,
+                input_tys: vec![a_ty, b_ty],
+                output: out_ty.clone(),
+                batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+                m: DimExpr::Sym("m".into()),
+                n: DimExpr::Sym("n".into()),
+                k: DimExpr::Sym("k".into()),
+            };
+            let body = HostExpr::new(HostExprKind::TensorCall {
+                helper: 0,
+                args: params
+                    .iter()
+                    .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
+                    .collect(),
+                ty: HostType::Tensor(out_ty.clone()),
+            });
+            let helper = HostTensorHelper {
+                name: "matmul_helper".into(),
+                dag,
+                inputs,
+                output: out_ty.clone(),
+                specialization: Some(HostTensorSpecialization::BlasMatmul(summary)),
+                summary_rejection: None,
+            };
+            let program = HostProgram {
+                globals: vec![],
+                global_tensor_helpers: vec![],
+                summary_rejections: vec![],
+                adt_layouts: Vec::new(),
+                functions: vec![HostFunction {
+                    helper_result_claim_axes: Vec::new(),
+                    name: "host_blas".into(),
+                    params,
+                    ret_ty: HostType::Tensor(out_ty),
+                    body,
+                    tensor_helpers: vec![helper],
+                    origin: HostFunctionOrigin::Authored,
+                    specialization: None,
+                    summary_rejections: vec![],
+                }],
+            };
+            let mut host_source =
+                support::emit_selected_host_program(program, "host_blas_probe").unwrap();
+            assert!(
+                host_source.contains("blas_plan_"),
+                "summary must execute instead of its helper"
+            );
+            host_source.push_str("\nvoid checked_blas(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=chelis_fn_686f73745f626c6173(in[0],in[1]); }\n");
+            sources.push(host_source);
+        }
+        let input_dtype = operand.runtime_dtype().unwrap().c_macro();
+        let output_dtype = output.runtime_dtype().unwrap().c_macro();
+        let store = match operand {
+            Prim::F32 => "((float*)v.data)[i]=value;",
+            Prim::F64 => "((double*)v.data)[i]=value;",
+            Prim::F16 => "((uint16_t*)v.data)[i]=chelis_f32_to_f16(value);",
+            Prim::Bf16 => "((uint16_t*)v.data)[i]=chelis_f32_to_bf16(value);",
+            _ => unreachable!(),
+        };
+        let read = match output {
+            Prim::F32 => "((const float*)v.data)[i]",
+            Prim::F64 => "((const double*)v.data)[i]",
+            Prim::F16 => "chelis_f16_to_f32(((const uint16_t*)v.data)[i])",
+            Prim::Bf16 => "chelis_bf16_to_f32(((const uint16_t*)v.data)[i])",
+            _ => unreachable!(),
+        };
+        for (batches, k) in [(2, 2), (0, 2), (2, 0)] {
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_blas(chelis_tensor **, int, chelis_tensor **, int);
+static void fill(chelis_tensor *t) {{
+    chelis_tensor_write *g=chelis_tensor_begin_write(t); chelis_write_view v=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<v.count;++i) {{ float value=(float)(i%3+1); {store} }}
+    chelis_tensor_end_write(g);
+}}
+int main(void) {{
+    chelis_tensor *a=chelis_alloc(4,(int64_t[]){{{batches},2,3,{k}}},{input_dtype});
+    chelis_tensor *b=chelis_alloc(4,(int64_t[]){{{batches},2,{k},4}},{input_dtype});
+    fill(a); fill(b); chelis_tensor *in[]={{a,b}},*out[1]={{0}};
+    checked_blas(in,2,out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if(v.count!={batches}*2*3*4 || v.dtype!={output_dtype}) return 2;
+    int64_t shape[4]={{{batches},2,3,4}};
+    for(int axis=0;axis<4;++axis) if(chelis_tensor_shape(out[0],axis)!=shape[axis]) return 3;
+    for(int64_t i=0;i<v.count;++i) {{
+        int64_t batch=i/12,row=(i%12)/4,col=i%4; double expected=0;
+        for(int64_t t=0;t<{k};++t) expected+=(double)((batch*3*{k}+row*{k}+t)%3+1)*(double)((batch*{k}*4+t*4+col)%3+1);
+        if ((double)({read})!=expected) return 4;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(a); chelis_tensor_release(b);
+    puts("MATMUL PASS"); return 0;
+}}
+"#
+            );
+            for source in &sources {
+                let result = checked_indexing_run(source, &harness);
+                assert!(
+                    result.status.success(),
+                    "{operand:?}/{output:?} {batches}/{k}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(result.stdout, b"MATMUL PASS\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f800000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0000000000000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 10),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
+        for (index_prim, index_dtype, index_type) in [
+            (Prim::Int32, "CHELIS_DTYPE_I32", "int32_t"),
+            (Prim::Int64, "CHELIS_DTYPE_I64", "int64_t"),
+        ] {
+            for (op, base_shape, output_shape, selected, map) in [
+                (
+                    RiscOp::Gather { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 2, 2, 2],
+                    "2,0,1,2",
+                    "4,5,0,1,2,3,4,5,10,11,6,7,8,9,10,11",
+                ),
+                // Negative map entries select unchanged base cells (-index-1).
+                (
+                    RiscOp::Scatter { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 3, 2],
+                    "2,0,2,0",
+                    "6,7,-3,-4,4,5,14,15,-9,-10,12,13",
+                ),
+                (
+                    RiscOp::ScatterElements { axis: 1 },
+                    vec![2, 3],
+                    vec![2, 3],
+                    "2,0,1,1",
+                    "1,-2,0,-4,3,-6",
+                ),
+            ] {
+                let gather = matches!(op, RiscOp::Gather { .. });
+                let elements = matches!(op, RiscOp::ScatterElements { .. });
+                let ty = |shape: &[usize], precision| TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                };
+                let mut dag = Dag::new();
+                let decl = dag.declare("test");
+                let base = dag.add_node(
+                    decl,
+                    RiscOp::Load {
+                        name: "base".into(),
+                    },
+                    vec![],
+                    ty(&base_shape, prim),
+                    None,
+                );
+                let indices = dag.add_node(
+                    decl,
+                    RiscOp::Load {
+                        name: "indices".into(),
+                    },
+                    vec![],
+                    ty(&[2, 2], index_prim),
+                    None,
+                );
+                let mut inputs = vec![base, indices];
+                let update_shape = if elements {
+                    vec![2, 2]
+                } else {
+                    vec![2, 2, 2, 2]
+                };
+                if !gather {
+                    inputs.push(dag.add_node(
+                        decl,
+                        RiscOp::Load {
+                            name: "updates".into(),
+                        },
+                        vec![],
+                        ty(&update_shape, prim),
+                        None,
+                    ));
+                }
+                let output = dag.add_node(decl, op, inputs, ty(&output_shape, prim), None);
+                dag.add_root(output);
+                let case_index = compiled_cases.len();
+                let function_name = format!("checked_sparse_{case_index}");
+                let generated = codegen(&dag, &function_name).unwrap();
+                let dimensions =
+                    |s: &[usize]| s.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                let base_dims = dimensions(&base_shape);
+                let update_dims = dimensions(&update_shape);
+                let output_dims = dimensions(&output_shape);
+                let base_rank = base_shape.len();
+                let update_rank = update_shape.len();
+                let output_rank = output_shape.len();
+                let input_count = if gather { 2 } else { 3 };
+                let gather = usize::from(gather);
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+static uint64_t bits_{case_index}(int64_t index, int update) {{
+    return {dtype} == CHELIS_DTYPE_BOOL ? (uint64_t)(((index/2+index)%2)^update) : UINT64_C({seed}) + (uint64_t)index + (update ? 32 : 0);
+}}
+static void fill_{case_index}(chelis_tensor *t, int update) {{
+    chelis_tensor_write *g = chelis_tensor_begin_write(t);
+    chelis_write_view v = chelis_tensor_write_view(g);
+    for (int64_t i=0;i<v.count;++i) {{ uint64_t value=bits_{case_index}(i,update); memcpy((unsigned char*)v.data+i*chelis_dtype_size({dtype}), &value, chelis_dtype_size({dtype})); }}
+    chelis_tensor_end_write(g);
+}}
+int case_{case_index}(void) {{
+    chelis_tensor *base=chelis_alloc({base_rank},(int64_t[]){{{base_dims}}},{dtype});
+    chelis_tensor *indices=chelis_alloc(2,(int64_t[]){{2,2}},{index_dtype});
+    chelis_tensor *updates=chelis_alloc({update_rank},(int64_t[]){{{update_dims}}},{dtype});
+    fill_{case_index}(base,0); fill_{case_index}(updates,1);
+    chelis_tensor_write *g=chelis_tensor_begin_write(indices);
+    {index_type} values[4]={{{selected}}};
+    memcpy(chelis_tensor_write_view(g).data,values,sizeof values); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}}, *out[1]={{0}};
+    {function_name}(in,{input_count},out,1);
+    int64_t shape[]={{{output_dims}}}; int expected[]={{{map}}};
+    if (chelis_tensor_rank(out[0])!={output_rank}) return 2;
+    for (int a=0;a<{output_rank};++a) if(chelis_tensor_shape(out[0],a)!=shape[a]) return 3;
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if (v.count != sizeof expected / sizeof expected[0]) return 4;
+    for(int64_t i=0;i<v.count;++i) {{
+        uint64_t got=0; memcpy(&got,(const unsigned char*)v.data+i*chelis_dtype_size({dtype}),chelis_dtype_size({dtype}));
+        int index=expected[i]; uint64_t want=bits_{case_index}(index<0 ? -index-1 : index, !{gather} && index>=0);
+        if(got!=want) return 5;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE PASS {case_index}"); return 0;
+}}
+"#
+                );
+                compiled_cases.push((generated.c_source, harness));
+                case_labels.push(format!("{prim:?}/{index_prim:?}"));
+            }
+        }
+        for (case_index, (label, result)) in case_labels
+            .into_iter()
+            .zip(checked_indexing_run_batch(&compiled_cases))
+            .enumerate()
+        {
+            assert!(
+                result.status.success(),
+                "{label}: {}\n{}",
+                String::from_utf8_lossy(&result.stderr),
+                compiled_cases[case_index].0
+            );
+            assert_eq!(
+                result.stdout,
+                format!("SPARSE PASS {case_index}\n").as_bytes()
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers() {
+    let ty = |shape: &[usize], precision| TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, diagnostic) in [
+        (RiscOp::Gather { axis: 1 }, "gather"),
+        (RiscOp::ScatterAdd { axis: 1 }, "scatter"),
+        (RiscOp::Scatter { axis: 1 }, "scatter_replace"),
+        (RiscOp::ScatterElements { axis: 1 }, "scatter_elements"),
+    ] {
+        for (empty, selected) in [(true, 0), (false, -1), (false, 3), (false, 2)] {
+            let gather = matches!(op, RiscOp::Gather { .. });
+            let elements = matches!(op, RiscOp::ScatterElements { .. });
+            let n = if empty { 0 } else { 2 };
+            let index_shape = if elements { vec![2, n] } else { vec![n] };
+            let output_shape = if gather { vec![2, n] } else { vec![2, 3] };
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let base = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "base".into(),
+                },
+                vec![],
+                ty(&[2, 3], Prim::F32),
+                None,
+            );
+            let indices = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "indices".into(),
+                },
+                vec![],
+                ty(&index_shape, Prim::Int64),
+                None,
+            );
+            let mut inputs = vec![base, indices];
+            if !gather {
+                inputs.push(dag.add_node(
+                    decl,
+                    RiscOp::Load {
+                        name: "updates".into(),
+                    },
+                    vec![],
+                    ty(&[2, n], Prim::F32),
+                    None,
+                ));
+            }
+            let output = dag.add_node(decl, op.clone(), inputs, ty(&output_shape, Prim::F32), None);
+            dag.add_root(output);
+            let source = codegen(&dag, "sparse_boundary").unwrap().c_source;
+            let index_rank = index_shape.len();
+            let index_dims = index_shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let input_count = if gather { 2 } else { 3 };
+            let check = if empty && gather {
+                "if (v.count != 0 || chelis_tensor_shape(out[0],0)!=2 || chelis_tensor_shape(out[0],1)!=0) return 2;".to_string()
+            } else {
+                let expected = if empty {
+                    "0,1,2,3,4,5"
+                } else if gather {
+                    "2,2,5,5"
+                } else if diagnostic == "scatter" {
+                    "0,1,5,3,4,12"
+                } else {
+                    "0,1,2,3,4,4"
+                };
+                format!(
+                    "float expected[]={{{expected}}}; if(v.count != sizeof expected / sizeof expected[0]) return 2; for(int64_t i=0;i<v.count;++i) if(((const float*)v.data)[i]!=expected[i]) return 3;"
+                )
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void sparse_boundary(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    chelis_tensor *base=chelis_alloc(2,(int64_t[]){{2,3}},CHELIS_DTYPE_F32);
+    chelis_tensor *indices=chelis_alloc({index_rank},(int64_t[]){{{index_dims}}},CHELIS_DTYPE_I64);
+    chelis_tensor *updates=chelis_alloc(2,(int64_t[]){{2,{n}}},CHELIS_DTYPE_F32);
+    chelis_tensor_write *g=chelis_tensor_begin_write(base); chelis_write_view w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)i; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(indices); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((int64_t*)w.data)[i]={selected}; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(updates); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)(i+1); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}},*out[1]={{0}}; sparse_boundary(in,{input_count},out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]); {check}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE BOUNDARY PASS"); return 0;
+}}
+"#
+            );
+            let mut sources = vec![source];
+            if diagnostic == "scatter" {
+                use chelis_ir::host::{
+                    HostTensorHelper, HostTensorInput, summarize_sparse_helper_for_test,
+                };
+                let inputs = vec![
+                    HostTensorInput {
+                        name: "base".into(),
+                        ty: ty(&[2, 3], Prim::F32),
+                    },
+                    HostTensorInput {
+                        name: "indices".into(),
+                        ty: ty(&index_shape, Prim::Int64),
+                    },
+                    HostTensorInput {
+                        name: "updates".into(),
+                        ty: ty(&[2, n], Prim::F32),
+                    },
+                ];
+                let output = ty(&output_shape, Prim::F32);
+                let specialization = summarize_sparse_helper_for_test(&dag, &inputs, &output);
+                assert!(matches!(
+                    specialization,
+                    Some(chelis_ir::host::HostTensorSpecialization::SparseScatterAdd(
+                        _
+                    ))
+                ));
+                let params = inputs
+                    .iter()
+                    .map(|input| HostParam {
+                        name: input.name.clone(),
+                        ty: HostType::Tensor(input.ty.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                let body = HostExpr::new(HostExprKind::TensorCall {
+                    helper: 0,
+                    args: params
+                        .iter()
+                        .map(|param| {
+                            HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()))
+                        })
+                        .collect(),
+                    ty: HostType::Tensor(output.clone()),
+                });
+                let helper = HostTensorHelper {
+                    name: "sparse_add_helper".into(),
+                    dag: dag.clone(),
+                    inputs,
+                    output: output.clone(),
+                    specialization,
+                    summary_rejection: None,
+                };
+                let program = HostProgram {
+                    globals: vec![],
+                    global_tensor_helpers: vec![],
+                    summary_rejections: vec![],
+                    adt_layouts: Vec::new(),
+                    functions: vec![HostFunction {
+                        helper_result_claim_axes: Vec::new(),
+                        name: "host_sparse_add".into(),
+                        params,
+                        ret_ty: HostType::Tensor(output),
+                        body,
+                        tensor_helpers: vec![helper],
+                        origin: HostFunctionOrigin::Authored,
+                        specialization: None,
+                        summary_rejections: vec![],
+                    }],
+                };
+                let mut host_source = emit_host_program(&program, "host_sparse_boundary").unwrap();
+                assert!(host_source.contains("CHELIS_SPARSE_ADD"));
+                host_source.push_str("\nvoid sparse_boundary(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=chelis_fn_686f73745f7370617273655f616464(in[0],in[1],in[2]); }\n");
+                sources.push(host_source);
+            }
+            for source in sources {
+                let result = checked_indexing_run(&source, &harness);
+                if !empty && selected != 2 {
+                    assert!(!result.status.success());
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    assert!(
+                        stderr.contains(&format!("numeric trap: domain in {diagnostic} at i64")),
+                        "{stderr}"
+                    );
+                    assert!(
+                        !stderr.contains("AddressSanitizer") && !stderr.contains("runtime error:"),
+                        "{stderr}"
+                    );
+                } else {
+                    assert!(
+                        result.status.success(),
+                        "{diagnostic}, empty={empty}: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                    assert_eq!(result.stdout, b"SPARSE BOUNDARY PASS\n");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_reduction_nontrailing_kernels_execute_under_sanitizers() {
+    let ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, precision, expected) in [
+        (
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            Prim::F32,
+            "9,12,27,30",
+        ),
+        (RiscOp::MaxReduce { axis: 1 }, Prim::F32, "5,6,11,12"),
+        (RiscOp::MinReduce { axis: 1 }, Prim::F32, "1,2,7,8"),
+        (RiscOp::ProdReduce { axis: 1 }, Prim::F32, "15,48,693,960"),
+        (RiscOp::Argmax { axis: 1 }, Prim::Int64, "2,2,2,2"),
+        (RiscOp::Argmin { axis: 1 }, Prim::Int64, "0,0,0,0"),
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let output = dag.add_node(decl, op, vec![input], ty(&[2, 2], precision), None);
+        dag.add_root(output);
+        let generated = codegen(&dag, "checked_reduce").unwrap();
+        let native = if precision == Prim::Int64 {
+            "int64_t"
+        } else {
+            "float"
+        };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void checked_reduce(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{2,3,2}};
+    chelis_tensor *x = chelis_alloc(3, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float*)chelis_tensor_write_view(guard).data;
+    for (int i=0;i<12;i++) data[i]=(float)(i+1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_reduce(inputs,1,outputs,1);
+    {native} expected[]={{ {expected} }};
+    const {native} *got = (const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    if (chelis_tensor_numel(outputs[0]) != 4) return 2;
+    for (int i=0;i<4;i++) if(got[i]!=expected[i]) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("REDUCTION PASS"); return 0;
+}}
+"#
+        );
+        let result = checked_indexing_run(&generated.c_source, &harness);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"REDUCTION PASS\n");
+    }
+}
+
+#[test]
+fn checked_c_reduction_sum_and_count_preserve_empty_groups_under_sanitizers() {
+    for count in [false, true] {
+        for (shape, result_shape, expected_count) in [
+            (vec![2, 0, 3], vec![2, 3], 6),
+            (vec![0, 3, 2], vec![0, 2], 0),
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let precision = if count { Prim::Bool } else { Prim::F64 };
+            let result_precision = if count { Prim::Int64 } else { Prim::F64 };
+            let input = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                },
+                None,
+            );
+            let op = if count {
+                RiscOp::Count { axes: vec![1] }
+            } else {
+                RiscOp::Sum {
+                    axis: 1,
+                    accumulator: Prim::F64,
+                }
+            };
+            let output = dag.add_node(
+                decl,
+                op,
+                vec![input],
+                TensorType {
+                    dims: result_shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: result_precision,
+                },
+                None,
+            );
+            dag.add_root(output);
+            let generated = codegen(&dag, "checked_empty_reduce").unwrap();
+            let dtype = if count {
+                "CHELIS_DTYPE_BOOL"
+            } else {
+                "CHELIS_DTYPE_F64"
+            };
+            let native = if count { "int64_t" } else { "double" };
+            let dimensions = shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_empty_reduce(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    int64_t shape[]={{ {dimensions} }};
+    chelis_tensor *x=chelis_alloc(3,shape,{dtype}), *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_empty_reduce(inputs,1,outputs,1);
+    if (chelis_tensor_numel(outputs[0])!={expected_count}) return 2;
+    const {native} *values=(const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    for(int i=0;i<{expected_count};i++) if(values[i]!=0) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); return 0;
+}}
+"#
+            );
+            let result = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                result.status.success(),
+                "count={count}, shape={shape:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    // Each expected map is explicit, independent of the production coordinate helpers.
+    let cases = [
+        // A three-cycle distinguishes a permutation from its inverse.
+        (
+            vec![2, 2, 2],
+            vec![2, 2, 2],
+            RiscOp::Permute {
+                axes: vec![1, 2, 0],
+            },
+            vec![0, 4, 1, 5, 2, 6, 3, 7],
+        ),
+        (
+            vec![2, 3],
+            vec![3, 2],
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 3],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0, 1, 1, 1],
+        ),
+        (
+            vec![2],
+            vec![3, 2],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 1, 0, 1, 0, 1],
+        ),
+        (vec![], vec![], RiscOp::Permute { axes: vec![] }, vec![0]),
+        (
+            vec![],
+            vec![3],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0],
+        ),
+        (
+            vec![2, 0, 3],
+            vec![3, 2, 0],
+            RiscOp::Permute {
+                axes: vec![2, 0, 1],
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 0],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(0),
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1, 1, 1, 1, 1, 1, 1, 3],
+            vec![3, 1, 1, 1, 1, 1, 1, 1, 2],
+            RiscOp::Permute {
+                axes: (0..9).rev().collect(),
+            },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+    ];
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f80_0000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0_0000_0000_0000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
+        for (input_shape, output_shape, op, expected) in &cases {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let input = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(input_shape),
+                None,
+            );
+            let output = dag.add_node(decl, op.clone(), vec![input], ty(output_shape), None);
+            dag.add_root(output);
+            let case_index = compiled_cases.len();
+            let function_name = if prim == Prim::Int64 {
+                "checked_movement".to_string()
+            } else {
+                format!("checked_movement_{case_index}")
+            };
+            let entry = if prim == Prim::Int64 {
+                "int main(void)".to_string()
+            } else {
+                format!("int case_{case_index}(void)")
+            };
+            let pass_line = if prim == Prim::Int64 {
+                "CHECKED MOVEMENT PASS".to_string()
+            } else {
+                format!("CHECKED MOVEMENT PASS {case_index}")
+            };
+            let generated = codegen(&dag, &function_name).unwrap();
+            assert!(generated.c_source.contains("chelis_movement_index("));
+            assert!(generated.c_source.contains("chelis_movement_plan_release("));
+            let spell = |values: &[usize]| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            let input_dims = spell(input_shape);
+            let output_dims = spell(output_shape);
+            let map = spell(expected);
+            let rank_in = input_shape.len();
+            let rank_out = output_shape.len();
+            let count_in = input_shape.iter().product::<usize>();
+            let count_out = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+{entry} {{
+    int64_t in_dims[] = {{ {input_dims} }}, out_dims[] = {{ {output_dims} }}, map[] = {{ {map} }};
+    chelis_tensor *x = chelis_alloc({rank_in}, in_dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = (unsigned char *)chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i = 0; i < {count_in}; ++i) {{
+        uint64_t bits = {bits}; memcpy(data + (size_t)i * width, &bits, width);
+    }}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[1] = {{NULL}};
+    {function_name}(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {count_out} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {rank_out}) return 2;
+    for (int32_t axis = 0; axis < {rank_out}; ++axis)
+        if (chelis_tensor_shape(outputs[0], axis) != out_dims[axis]) return 3;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (memcmp((const unsigned char *)out.data + (size_t)i * width,
+            (const unsigned char *)in.data + (size_t)map[i] * width, width)) return 4;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("{pass_line}"); return 0;
+}}
+"#
+            );
+            if prim == Prim::Int64 {
+                let run = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    run.status.success(),
+                    "{prim:?} {op:?}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&run.stdout),
+                    "CHECKED MOVEMENT PASS\n"
+                );
+            }
+            if prim == Prim::Int64
+                && (input_shape == &[2, 3] || input_shape == &[2, 1] && count_out > 0)
+            {
+                let check = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("chelis_movement_check_target("))
+                    .unwrap();
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("chelis_tensor *t1 = chelis_alloc("))
+                    .unwrap();
+                assert!(
+                    generated.c_source.find(check).unwrap()
+                        < generated.c_source.find(allocation).unwrap()
+                );
+                let invalid = check.replace("CHELIS_DTYPE_I64, 3)", "CHELIS_DTYPE_I64, 4)");
+                assert_ne!(invalid, check);
+                // Observe the real allocation site without allocating: malformed metadata
+                // must trap first. Removing or moving validation exposes that site.
+                let marker = format!("exit(78); /* allocation reached */\n{allocation}");
+                let instrumented = generated.c_source.replace(allocation, &marker);
+                let rejected =
+                    checked_indexing_run(&instrumented.replace(check, &invalid), &harness);
+                assert!(!rejected.status.success());
+                assert!(String::from_utf8_lossy(&rejected.stderr).contains("Domain"));
+                for replacement in [String::new(), invalid.clone()] {
+                    let bypass = instrumented.replace(check, "");
+                    let bypass = bypass.replace(&marker, &format!("{marker}\n{replacement}"));
+                    let run = checked_indexing_run(&bypass, &harness);
+                    assert_eq!(
+                        run.status.code(),
+                        Some(78),
+                        "missing or late validation reached allocation"
+                    );
+                }
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 2, 2] {
+                let axis_line = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("t1_axes[3]"))
+                    .unwrap();
+                let inverse = generated.c_source.replace(axis_line,
+                    "chelis_scalar t1_axes[3] = {chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1)};");
+                assert_ne!(inverse, generated.c_source);
+                let run = checked_indexing_run(&inverse, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "inverse permutation must corrupt the exact result"
+                );
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 3] {
+                let anchor = "chelis_movement_index(t1_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i))";
+                assert!(generated.c_source.contains(anchor));
+                let mutant = generated
+                    .c_source
+                    .replace(anchor, "0 /* unchecked coordinate bypass */");
+                let run = checked_indexing_run(&mutant, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "coordinate bypass must corrupt the exact result"
+                );
+            }
+            if prim != Prim::Int64 {
+                compiled_cases.push((generated.c_source, harness));
+                case_labels.push(format!("{prim:?} {op:?}"));
+            }
+        }
+        if prim != Prim::Int64 {
+            for (case_index, (label, run)) in case_labels
+                .into_iter()
+                .zip(checked_indexing_run_batch(&compiled_cases))
+                .enumerate()
+            {
+                assert!(
+                    run.status.success(),
+                    "{label}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    run.stdout,
+                    format!("CHECKED MOVEMENT PASS {case_index}\n").as_bytes()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    for (prim, dtype, seed, fill_bits) in [
+        (
+            Prim::F32,
+            "CHELIS_DTYPE_F32",
+            0x3f80_0000_u64,
+            0x3f80_0000_u64,
+        ),
+        (
+            Prim::F64,
+            "CHELIS_DTYPE_F64",
+            0x3ff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+        ),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00, 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80, 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993, 1),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100, 1),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100, 1),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100, 1),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0, 1),
+    ] {
+        let mut compiled_cases = Vec::new();
+        let mut case_labels = Vec::new();
+        let pairs = |v: &[(usize, usize)]| {
+            v.iter()
+                .map(|&(a, b)| (RtDim::Lit(a), RtDim::Lit(b)))
+                .collect()
+        };
+        let fill = chelis_types::scalar_from_i64("pad", prim, 1).unwrap();
+        let mut padded = vec![-1_i64; 18];
+        for (input, output) in [8, 9, 10, 14, 15, 16].into_iter().enumerate() {
+            padded[output] = input as i64;
+        }
+        let cases = [
+            (
+                vec![2, 3],
+                vec![3, 6],
+                RiscOp::Pad {
+                    padding: pairs(&[(1, 0), (2, 1)]),
+                    fill,
+                },
+                padded,
+            ),
+            (
+                vec![3, 4],
+                vec![2, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 3), (1, 4)]),
+                },
+                vec![5, 6, 7, 9, 10, 11],
+            ),
+            (
+                vec![3, 5],
+                vec![2, 2],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(3)],
+                },
+                vec![0, 3, 10, 13],
+            ),
+            (
+                vec![0, 3],
+                vec![1, 3],
+                RiscOp::Pad {
+                    padding: pairs(&[(0, 1), (0, 0)]),
+                    fill,
+                },
+                vec![-1; 3],
+            ),
+            (
+                vec![2, 3],
+                vec![0, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 1), (0, 3)]),
+                },
+                vec![],
+            ),
+            (
+                vec![2, 0],
+                vec![1, 0],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+                },
+                vec![],
+            ),
+            (
+                vec![],
+                vec![],
+                RiscOp::Pad {
+                    padding: vec![],
+                    fill,
+                },
+                vec![0],
+            ),
+            (
+                vec![1; 9],
+                vec![1; 9],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2); 9],
+                },
+                vec![0],
+            ),
+        ];
+        for (case_index, (input_shape, output_shape, op, expected)) in cases.into_iter().enumerate()
+        {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let x = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&input_shape),
+                None,
+            );
+            let y = dag.add_node(decl, op.clone(), vec![x], ty(&output_shape), None);
+            dag.add_root(y);
+            let function_name = format!("affine_movement_{case_index}");
+            let generated = codegen(&dag, &function_name).unwrap();
+            let spell = |values: Vec<i64>| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            };
+            let input_dims = spell(input_shape.iter().map(|&n| n as i64).collect());
+            let output_dims = spell(output_shape.iter().map(|&n| n as i64).collect());
+            let map = spell(expected.clone());
+            let input_rank = input_shape.len();
+            let output_rank = output_shape.len();
+            let input_count: usize = input_shape.iter().product();
+            let output_count = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void {function_name}(chelis_tensor **, int, chelis_tensor **, int);
+int case_{case_index}(void) {{
+    int64_t input_shape[] = {{{input_dims}}}, output_shape[] = {{{output_dims}}}, map[] = {{{map}}};
+    chelis_tensor *x = chelis_alloc({input_rank}, input_shape, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i=0; i<{input_count}; ++i) {{uint64_t bits = {bits}; memcpy(data + i*width, &bits, width);}}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
+    {function_name}(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {output_count} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {output_rank}) return 2;
+    for (int axis=0; axis<{output_rank}; ++axis) if (chelis_tensor_shape(outputs[0], axis) != output_shape[axis]) return 3;
+    uint64_t fill = UINT64_C({fill_bits});
+    for (int64_t i=0; i<out.count; ++i) {{
+        const void *expected = map[i] < 0 ? (const void*)&fill : (const unsigned char*)in.data + map[i]*width;
+        if (memcmp((const unsigned char*)out.data + i*width, expected, width)) return 4;
+    }}
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("AFFINE PASS {case_index}"); return 0;
+}}
+"#
+            );
+            compiled_cases.push((generated.c_source, harness));
+            case_labels.push(format!("{prim:?} {op:?}"));
+        }
+        for (case_index, (label, run)) in case_labels
+            .into_iter()
+            .zip(checked_indexing_run_batch(&compiled_cases))
+            .enumerate()
+        {
+            assert!(
+                run.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(run.stdout, format!("AFFINE PASS {case_index}\n").as_bytes());
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
+    use chelis_ir::dag::RtDim;
+    for (name, op, cases) in [
+        (
+            "pad",
+            RiscOp::Pad {
+                padding: vec![(RtDim::Node(1), RtDim::Lit(0))],
+                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+            },
+            vec![(2, Some(5)), (-1, None), (i64::MAX, None)],
+        ),
+        (
+            "shrink",
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+            },
+            vec![(2, Some(2)), (0, None), (-1, None), (4, None)],
+        ),
+        (
+            "stride",
+            RiscOp::Stride {
+                strides: vec![RtDim::Node(1)],
+            },
+            vec![(2, Some(2)), (i64::MAX, Some(1)), (0, None), (-1, None)],
+        ),
+    ] {
+        let ty = |dims| TensorType {
+            dims,
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(3)]),
+            None,
+        );
+        let n = dag.add_node(
+            decl,
+            RiscOp::Load { name: "n".into() },
+            vec![],
+            ty(vec![]),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            op,
+            vec![x, n],
+            ty(vec![DimInfo::Named("result".into(), None)]),
+            None,
+        );
+        dag.add_root(y);
+        let generated = codegen(&dag, "dynamic_affine").unwrap();
+        for (bound, expected) in cases {
+            let expected_count = expected.unwrap_or(0);
+            let padding = name == "pad";
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void dynamic_affine(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{3}};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_I64), *n = chelis_alloc(0, NULL, CHELIS_DTYPE_I64);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 7)); chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(n);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({bits}))); chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x,n}}, *outputs[] = {{NULL}};
+    dynamic_affine(inputs,2,outputs,1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {expected_count}) return 4;
+    for (int64_t i=0; i<out.count; ++i) if (((const int64_t*)out.data)[i] != ({pad} && i < {bound} ? 1 : 7)) return 5;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(n);
+    puts("DYNAMIC AFFINE PASS"); return 0;
+}}
+"#,
+                bits = bound as u64,
+                pad = i32::from(padding)
+            );
+            let source = if expected.is_none() {
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains(" = chelis_alloc("))
+                    .expect("output allocation");
+                generated.c_source.replacen(
+                    allocation,
+                    &format!("exit(78); /* allocation reached */\n{allocation}"),
+                    1,
+                )
+            } else {
+                generated.c_source.clone()
+            };
+            let run = checked_indexing_run(&source, &harness);
+            if expected.is_some() {
+                assert!(
+                    run.status.success(),
+                    "{name} {bound}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(run.stdout, b"DYNAMIC AFFINE PASS\n");
+            } else {
+                assert!(!run.status.success(), "{name} {bound}: {run:?}");
+                assert_ne!(
+                    run.status.code(),
+                    Some(78),
+                    "allocation preceded rejection: {name} {bound}"
+                );
+                let class = if bound == i64::MAX {
+                    "overflow"
+                } else {
+                    "domain"
+                };
+                assert!(
+                    String::from_utf8_lossy(&run.stderr)
+                        .ends_with(&format!("numeric trap: {class} in {name} at i64\n")),
+                    "{run:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
+    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+    for prim in [Prim::F32, Prim::F64] {
+        for shape in [vec![], vec![4], vec![0], vec![1; 9]] {
+            for fused in [false, true] {
+                let ty = TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: prim,
+                };
+                let scalar_ty = if fused {
+                    TensorType {
+                        dims: vec![],
+                        precision: prim,
+                    }
+                } else {
+                    ty.clone()
+                };
+                let mut dag = Dag::new();
+                let decl = dag.declare("test");
+                let input = dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    ty.clone(),
+                    None,
+                );
+                let scalar = dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "s".into() },
+                    vec![],
+                    scalar_ty,
+                    None,
+                );
+                let negated = dag.add_node(decl, RiscOp::Neg, vec![input], ty.clone(), None);
+                let op = if fused {
+                    RiscOp::FusedElem {
+                        ops: vec![FusedStep {
+                            op: FusedStepOp::Add,
+                            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                        }],
+                    }
+                } else {
+                    RiscOp::Add
+                };
+                let result = dag.add_node(decl, op, vec![negated, scalar], ty, None);
+                if fused {
+                    dag.set_reusable_input(result, negated);
+                }
+                dag.add_root(result);
+                let generated = codegen(&dag, "checked_indexing").unwrap();
+                assert!(
+                    generated
+                        .c_source
+                        .contains("chelis_tensor_elementwise_index_step_for_shape(")
+                );
+                if fused && !shape.contains(&0) {
+                    assert!(
+                        generated.c_source.contains("chelis_tensor_repurpose("),
+                        "fixture must exercise storage reuse"
+                    );
+                }
+                let inputs = generated
+                    .input_labels
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let elem = if prim == Prim::F32 { "float" } else { "double" };
+                let dtype = if prim == Prim::F32 {
+                    "CHELIS_DTYPE_F32"
+                } else {
+                    "CHELIS_DTYPE_F64"
+                };
+                let dims = if shape.is_empty() {
+                    "1".into()
+                } else {
+                    shape
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let rank = shape.len();
+                let count = shape.iter().product::<usize>();
+                let scalar_rank = if fused { 0 } else { rank };
+                let scalar_count = if fused { 1 } else { count };
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+void checked_indexing(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t dims[] = {{ {dims} }};
+    chelis_tensor *x = chelis_alloc({rank}, dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    {elem} *data = ({elem} *)chelis_tensor_write_view(guard).data;
+    for (int64_t i = 0; i < {count}; ++i) data[i] = ({elem})(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *s = chelis_alloc({scalar_rank}, dims, {dtype});
+    guard = chelis_tensor_begin_write(s);
+    for (int64_t i = 0; i < {scalar_count}; ++i) (({elem} *)chelis_tensor_write_view(guard).data)[i] = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{ {inputs} }}, *outputs[1] = {{NULL}};
+    checked_indexing(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.count != {count} || chelis_tensor_rank(outputs[0]) != {rank}) return 2;
+    for (int64_t i = 0; i < view.count; ++i)
+        if (((const {elem} *)view.data)[i] != 9 - i) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED INDEX PASS");
+    return 0;
+}}
+"#
+                );
+                let run = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    run.status.success(),
+                    "{prim:?} {shape:?} fused={fused}: {}\n{}",
+                    String::from_utf8_lossy(&run.stderr),
+                    generated.c_source
+                );
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED INDEX PASS\n");
+                if fused && prim == Prim::F32 && shape == vec![4] {
+                    // Execute the actual emitted fast-path condition with its
+                    // scalar protection removed. ASan must observe the scalar
+                    // read beyond its allocation; a source-only check is insufficient.
+                    let anchor = "t3_input1_step == 1";
+                    assert!(generated.c_source.contains(anchor));
+                    let bad_fast =
+                        checked_indexing_run(&generated.c_source.replace(anchor, "1"), &harness);
+                    assert!(!bad_fast.status.success());
+                    assert!(String::from_utf8_lossy(&bad_fast.stderr).contains("AddressSanitizer"));
+
+                    // A same-capacity header change must be rejected while the
+                    // original shape remains observable. Moving validation past
+                    // fused repurpose erases it and makes this witness return success.
+                    let lines: Vec<_> = generated
+                        .c_source
+                        .lines()
+                        .filter(|line| {
+                            line.contains("const int64_t t3_input") && line.contains("_step =")
+                        })
+                        .collect();
+                    assert_eq!(lines.len(), 2);
+                    let steps = format!("{}\n{}\n", lines[0], lines[1]);
+                    assert!(generated.c_source.contains(&steps));
+                    let change = r#"
+    chelis_tensor_end_write(t2_write_guard);
+    chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2),
+        (chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2)});
+    t2_write_guard = chelis_tensor_begin_write(t2);
+    t2_data = chelis_tensor_write_view(t2_write_guard).data;
+"#;
+                    let changed = generated
+                        .c_source
+                        .replace(&steps, &format!("{change}{steps}"));
+                    let run = checked_indexing_run(&changed, &harness);
+                    assert!(!run.status.success());
+                    assert!(
+                        String::from_utf8_lossy(&run.stderr)
+                            .contains("Domain: chelis_tensor_elementwise_index_step_for_shape")
+                    );
+                    let rebound = "t2_data = t3_data;";
+                    assert_eq!(changed.matches(rebound).count(), 1);
+                    let late = changed
+                        .replace(&steps, "")
+                        .replace(rebound, &format!("{rebound}\n{steps}"));
+                    let run = checked_indexing_run(&late, &harness);
+                    assert!(
+                        run.status.success(),
+                        "late-validation mutation did not erase the witness: {}",
+                        String::from_utf8_lossy(&run.stderr)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_sanitizers() {
+    for builtin in ["add", "max_elem"] {
+        for reversed in [false, true] {
+            let (lhs, rhs) = if reversed {
+                (vec![], vec![4])
+            } else {
+                (vec![4], vec![])
+            };
+            let source = emit_host_program(
+                &host_binary_program(builtin, lhs, rhs),
+                "checked_host_indexing",
+            )
+            .unwrap();
+            assert!(source.contains("chelis_tensor_elementwise_index_step("));
+            assert!(!source.contains("chelis_host_indices_to_flat"));
+            let args = if reversed { "s, x" } else { "x, s" };
+            let expected = if builtin == "add" { "i + 11" } else { "10" };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
+chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
+int main(void) {{
+    int64_t dim = 4;
+    chelis_tensor *x = chelis_alloc(1, &dim, CHELIS_DTYPE_F32);
+    chelis_tensor *s = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < 4; ++i) data[i] = i + 1;
+    chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(s);
+    *(float *)chelis_tensor_write_view(guard).data = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn({args});
+    chelis_read_view view = chelis_tensor_read_view(out);
+    if (view.count != 4) return 2;
+    for (int i = 0; i < 4; ++i) if (((const float *)view.data)[i] != {expected}) return 3;
+    chelis_tensor_release(out); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED HOST PASS");
+    return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&source, &harness);
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if reversed {
+                assert!(!run.status.success());
+                assert!(
+                    stderr.contains("Domain: chelis_tensor_elementwise_index_step"),
+                    "{stderr}"
+                );
+            } else {
+                assert!(run.status.success(), "{stderr}\n{source}");
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED HOST PASS\n");
+            }
+        }
+    }
+}
 
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::F32,
     }
-}
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
 }
 
 /// Host-arch SIMD ISA flag(s) for the compile-run probes.
@@ -57,129 +2113,6 @@ fn simd_isa_flags() -> Vec<String> {
     }
 }
 
-/// Locate `target/debug/` for this workspace by walking up from the test binary's
-/// own location. The test binary lives at `<target>/debug/deps/<binary>`, so
-/// the parent of its parent is the debug directory we want.
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    // exe = <target>/debug/deps/<test_bin>
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Ensure `target/debug/libchelis_runtime.a` exists. When `chelis-runtime` is built
-/// transitively as a dev-dependency (rather than as the top-level package), cargo
-/// only emits the staticlib to `target/debug/deps/libchelis_runtime-<hash>.a` and
-/// does not promote it to the conventional `target/debug/libchelis_runtime.a` path.
-/// The test gcc invocation links against the conventional path, so this helper
-/// copies the hashed artifact into place on first use. Idempotent and
-/// thread-safe.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    // First-pass scan of the deps dir.
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    // If cargo's incremental cache reused the rlib without re-emitting
-    // the staticlib (observed on CI cold-cache runs against
-    // `chelis-runtime` as a transitive dev-dep), force a rebuild of
-    // the lib target and rescan. `cargo build -p chelis-runtime --lib`
-    // emits both crate-types declared in chelis-runtime/Cargo.toml,
-    // producing the `libchelis_runtime-<hash>.a` artifact the
-    // gcc-link harness needs.
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            std::process::Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit `cargo build -p \
-                     chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    if canonical.exists() && canonical.metadata()?.modified()? >= hashed.metadata()?.modified()? {
-        return Ok(());
-    }
-    // Use a PID-suffixed tmp filename so concurrent test binaries (this
-    // file and dtype_matrix_bf16_f16.rs both call into this helper, and
-    // nextest runs them in parallel) do not race on a shared tmp path.
-    // Each process writes its own tmp and renames into the shared
-    // canonical location; last writer wins, but the content is
-    // identical so the race is harmless. Without the PID, two
-    // processes that interleave `fs::copy` and `fs::rename` produce an
-    // ENOENT on the second rename because the first rename moved the
-    // shared tmp away.
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    // The rename can still race with another process renaming its own
-    // unique tmp into the same canonical path. On POSIX, rename onto an
-    // existing file is atomic, so this is fine. If a peer beat us to
-    // it, treat NotFound from a follow-up cleanup as benign.
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = match fs::read_dir(deps_dir) {
-        Ok(it) => it,
-        // Truly cold target dirs may not have `deps/` yet; let the
-        // caller fall through to the explicit `cargo build` fallback.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
-
 /// Write generated C + harness, compile, run, return stdout. None = compile/run failure.
 /// Compile and run like [`compile_and_run_kernel`], but return the exit
 /// status and BOTH streams instead of `None` on failure.
@@ -188,7 +2121,7 @@ fn runtime_lib_path() -> PathBuf {
 /// with a trap line on stderr, which the success-only helper discards - it
 /// `eprintln!`s stderr and returns `None`, so a caller cannot assert on the
 /// trap it was testing for. This shares that helper's compile plumbing rather
-/// than duplicating the runtime-library discovery and include copying.
+/// than duplicating the runtime staging.
 fn compile_and_run_kernel_capturing(
     test_name: &str,
     c_source: &str,
@@ -201,17 +2134,8 @@ fn compile_and_run_kernel_capturing(
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("trap_bin");
     let compile = Command::new("gcc")
         .arg("-O2")
@@ -222,7 +2146,7 @@ fn compile_and_run_kernel_capturing(
             dir.to_str().unwrap(),
             dir.join("kernel.c").to_str().unwrap(),
             dir.join("main.c").to_str().unwrap(),
-            runtime_lib_path().to_str().unwrap(),
+            staged.archive.to_str().unwrap(),
             "-lm",
             "-o",
             bin.to_str().unwrap(),
@@ -251,20 +2175,11 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Opt
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
 
     let compile = Command::new("gcc")
         .arg("-O2")
@@ -328,8 +2243,15 @@ static chelis_tensor *make_view_1d(float* data, int64_t n) {
 #[test]
 fn exec_math_none_exp_kernel_correct_output() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(4), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -409,9 +2331,16 @@ int main() {{
 #[test]
 fn exec_sleef_kernel_scalar_fallback_correct() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(9), None);
-    let e = dag.add_node(RiscOp::Exp, vec![a], vec_f32(9), None);
-    dag.add_node(RiscOp::Neg, vec![e], vec_f32(9), None); // 2-op chain: fuses into FusedElem
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(9),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(9), None);
+    dag.add_node(decl, RiscOp::Neg, vec![e], vec_f32(9), None); // 2-op chain: fuses into FusedElem
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -476,22 +2405,24 @@ int main() {{
     );
 }
 
-// ---- Test 10: ReduceSum calls chelis_sum_f32 and produces correct result ----
+// ---- Test 10: Scalar ReduceSum preserves the canonical tree ----
 
 #[test]
 fn exec_reduce_sum_correct_output() {
     // Use TensorType::scalar_f32() (dims=[]) for the output — that is the correct
     // output type for a full-axis reduction producing a scalar.
-    // Using vec_f32(1) (dims=[Lit(1)]) is wrong and bypasses the chelis_sum_f32 fast path.
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(100),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -506,8 +2437,8 @@ fn exec_reduce_sum_correct_output() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("chelis_sum_f32("),
-        "ReduceSum must call chelis_sum_f32 for contiguous n=100 tensor:\n{src}"
+        !src.contains("chelis_sum_f32("),
+        "Scalar Sum must preserve the canonical tree, including contiguous input:\n{src}"
     );
 
     let harness = format!(
@@ -551,13 +2482,16 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
         precision,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(&[2, 3, 2], Prim::Bool),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Count { axes: vec![2, 0] },
         vec![input],
         tensor_ty(&[3], Prim::Int64),
@@ -625,13 +2559,16 @@ fn exec_count_selected_zero_extent_returns_zero() {
         precision,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(&[2, 0, 3], Prim::Bool),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::Count { axes: vec![1] },
         vec![input],
         tensor_ty(&[2, 3], Prim::Int64),
@@ -698,8 +2635,10 @@ fn reduce_window_3x3_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(decl, RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape: vec![2, 2],
@@ -813,14 +2752,17 @@ fn reduce_window_grad_dag(reducer: ReduceWindowKind, kernel: &str) -> String {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         x_ty.clone(),
         None,
     );
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
+    let g = dag.add_node(decl, RiscOp::Load { name: "g".into() }, vec![], g_ty, None);
     dag.add_node(
+        decl,
         RiscOp::ReduceWindowGrad {
             reducer,
             window_shape: vec![2, 2],
@@ -934,9 +2876,22 @@ int main() {{
 #[test]
 fn exec_div_ieee_corner_cases() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
-    dag.add_node(RiscOp::Div, vec![a, b], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Div, vec![a, b], vec_f32(4), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -988,8 +2943,15 @@ int main() {{
 #[test]
 fn exec_recip_ieee_corner_cases() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(3), None);
-    dag.add_node(RiscOp::Recip, vec![a], vec_f32(3), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(3),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Recip, vec![a], vec_f32(3), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -1062,7 +3024,7 @@ fn vec_int(n: usize, precision: Prim) -> TensorType {
 /// operand pairs `{7,2},{7,-2},{-7,2},{-7,-2}` exercise every sign
 /// combination so floor-vs-truncate rounding is distinguished on the
 /// mixed-sign cases. `precision` parametrizes the integer width (chelis#550
-/// F2: int8 / int16 / int64 in addition to the original int32).
+/// F2: i8 / i16 / i64 in addition to the original i32).
 fn run_int_div_op_exec(
     op: RiscOp,
     fn_name: &str,
@@ -1072,19 +3034,22 @@ fn run_int_div_op_exec(
 ) {
     let (c_type, dtype_macro) = int_c_type_and_dtype(precision);
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_int(4, precision),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_int(4, precision),
         None,
     );
-    dag.add_node(op, vec![a, b], vec_int(4, precision), None);
+    dag.add_node(decl, op, vec![a, b], vec_int(4, precision), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -1145,6 +3110,83 @@ int main() {{
     );
 }
 
+// [05-OP-64]: exact signed remainder, including the full-width trap boundary.
+#[test]
+fn checked_remainder_executes_and_traps_at_every_signed_width() {
+    for (prim, c_type, c_dtype, minimum) in [
+        (Prim::Int8, "int8_t", "CHELIS_DTYPE_I8", "INT8_MIN"),
+        (Prim::Int16, "int16_t", "CHELIS_DTYPE_I16", "INT16_MIN"),
+        (Prim::Int32, "int32_t", "CHELIS_DTYPE_I32", "INT32_MIN"),
+        (Prim::Int64, "int64_t", "CHELIS_DTYPE_I64", "INT64_MIN"),
+    ] {
+        run_int_div_op_exec(
+            RiscOp::Mod,
+            "checked_remainder",
+            prim.name(),
+            [1, 1, -1, -1],
+            prim,
+        );
+        let adjacent = format!("{minimum} + 1");
+        for (case, lhs, rhs, message) in [
+            ("zero", "7", "0", "division by zero"),
+            ("minimum", minimum, "-1", ""),
+            ("minimum_odd", adjacent.as_str(), "2", ""),
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let ty = vec_prim(1, prim);
+            let a = dag.add_node(
+                decl,
+                RiscOp::Load { name: "a".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let b = dag.add_node(
+                decl,
+                RiscOp::Load { name: "b".into() },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            dag.add_node(decl, RiscOp::Mod, vec![a, b], ty, None);
+            let function = format!("checked_remainder_{}_{case}", prim.name());
+            let src = codegen(&fuse(&dag), &function).unwrap().c_source;
+            let expected = if case == "minimum_odd" { -1 } else { 0 };
+            let harness = format!(
+                r#"{HARNESS_HEADER}
+#include <limits.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} av[1] = {{ {lhs} }}; {c_type} bv[1] = {{ {rhs} }};
+    chelis_tensor *inputs[2] = {{ make_view_typed_1d(av, 1, {c_dtype}), make_view_typed_1d(bv, 1, {c_dtype}) }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    return (({c_type} *)chelis_tensor_read_view(outputs[0]).data)[0] == {expected} ? 0 : 1;
+}}
+"#
+            );
+            let run = compile_and_capture_run(&function, &src, &harness);
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if message.is_empty() {
+                assert!(
+                    run.status.success(),
+                    "{function}: exact remainder must be {expected}: {stderr}"
+                );
+                continue;
+            }
+            assert!(!run.status.success(), "{function}: unexpected success");
+            assert!(
+                stderr.contains(&format!(
+                    "numeric trap: {message} in mod at {}",
+                    prim.name()
+                )),
+                "{function}: {stderr}"
+            );
+        }
+    }
+}
+
 // spec/05-risc-primitives.md §2.1: `trunc_div` uses C/Rust truncating
 // semantics (round toward zero). This is what chelis-std's
 // `Std.Decimal::normalize` / `decimal_div_nonzero` rely on for scale
@@ -1164,9 +3206,9 @@ fn exec_trunc_div_int32_truncates_toward_zero() {
 }
 
 // chelis#550 F2: the trunc_div / floor_div emit is width-independent (the
-// C backend promotes to int64 internally), but the repo's negative-parity
+// C backend promotes to i64 internally), but the repo's negative-parity
 // bar requires the narrower and wider integer widths be exercised
-// end-to-end, not just int32. Same operands / expected results as the int32
+// end-to-end, not just i32. Same operands / expected results as the i32
 // cases above; only the storage precision changes.
 #[test]
 fn exec_trunc_div_int8_truncates_toward_zero() {
@@ -1220,8 +3262,8 @@ fn exec_floor_div_int32_rounds_toward_neg_inf() {
 }
 
 // chelis#550 F2: floor_div across the remaining integer widths. The
-// round-toward-−∞ remainder-sign correction must hold at int8 / int16 /
-// int64 just as at int32.
+// round-toward-−∞ remainder-sign correction must hold at i8 / i16 /
+// i64 just as at i32.
 #[test]
 fn exec_floor_div_int8_rounds_toward_neg_inf() {
     run_int_div_op_exec(
@@ -1265,20 +3307,11 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let compile = Command::new("gcc")
         .arg("-O2")
         .args(simd_isa_flags())
@@ -1316,19 +3349,28 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
 #[test]
 fn exec_floor_div_int_zero_divisor_traps() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_int(2, Prim::Int64),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_int(2, Prim::Int64),
         None,
     );
-    dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_int(2, Prim::Int64), None);
+    dag.add_node(
+        decl,
+        RiscOp::FloorDiv,
+        vec![a, b],
+        vec_int(2, Prim::Int64),
+        None,
+    );
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -1409,8 +3451,16 @@ int main() {{
 fn exec_reduce_sum_issue_163_repro_is_bit_exact_with_evaluator() {
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(11), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(11),
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -1482,8 +3532,15 @@ int main() {{
 #[test]
 fn exec_zero_size_tensor_does_not_crash() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(0), None);
-    dag.add_node(RiscOp::Exp, vec![a], vec_f32(0), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(0),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Exp, vec![a], vec_f32(0), None);
     let dag = fuse(&dag);
 
     let result = codegen_with_options(
@@ -1532,19 +3589,11 @@ int main() {{
 
 #[test]
 fn exec_simd_nan_propagation_inconsistency_probe() {
-    let include_dir = runtime_include_dir();
     let probe = common::probe_dir("exec_nan_probe");
     let dir = probe.path().to_path_buf();
 
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
+    for (name, contents) in chelis_runtime_bundle::PUBLIC_HEADERS {
+        fs::write(dir.join(name), contents).unwrap();
     }
 
     let c_src = r#"
@@ -1641,13 +3690,15 @@ int main() {
 
 #[test]
 fn exec_simd_header_compiles_as_cxx() {
-    let include_dir = runtime_include_dir();
     let probe = common::probe_dir("cxx_probe");
     let dir = probe.path().to_path_buf();
 
     // Copy simd header
-    let simd_src = fs::read_to_string(include_dir.join("chelis_simd.h")).unwrap();
-    fs::write(dir.join("chelis_simd.h"), &simd_src).unwrap();
+    let (_, simd_src) = chelis_runtime_bundle::PUBLIC_HEADERS
+        .iter()
+        .find(|(name, _)| *name == "chelis_simd.h")
+        .expect("chelis_simd.h is a public runtime header");
+    fs::write(dir.join("chelis_simd.h"), simd_src).unwrap();
 
     // Write a minimal C++ file that includes it
     let cxx_src = r#"
@@ -1779,20 +3830,11 @@ fn compile_and_run_kernel_with_blas(
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let blas_flags = blas_link_flags().unwrap_or_default();
 
     let mut args: Vec<String> = vec!["-O2".into()];
@@ -1847,13 +3889,16 @@ fn compile_and_run_kernel_with_blas(
 fn ws_a1_exec_f64_reduce_sum_matches_reference() {
     let scalar_ty = scalar_f64();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f64(100),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -1872,17 +3917,15 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
     );
     assert!(
-        src.contains(
-            "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
-        ),
-        "f64 reduce_sum must zero through an exact tagged f64 scalar:\n{src}"
+        src.contains("__sum_level_"),
+        "f64 sum needs a tree at its accumulator width: {src}"
     );
     assert!(
         !src.contains("chelis_fill_f32(") && !src.contains("chelis_fill_f64("),
         "f64 reduce_sum must not retain dtype-specific compatibility fills:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "f64 reduce_sum accumulator must be a double, not float:\n{src}"
     );
     assert!(
@@ -1943,8 +3986,16 @@ int main() {{
 fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
     let scalar_ty = scalar_i32();
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(5), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i32(5),
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -1963,11 +4014,11 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
         "i32 reduce_sum must allocate an i32 output tensor:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i32 reduce_sum accumulator must be int32_t (integer-exact), not float:\n{src}"
     );
     assert!(
-        !src.contains("float acc"),
+        !src.contains("float *__sum_level_"),
         "i32 reduce_sum must NOT use a float accumulator (silent precision change):\n{src}"
     );
     assert!(
@@ -2030,13 +4081,16 @@ int main() {{
 #[test]
 fn ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         mat_f64(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         mat_f64(3, 4),
@@ -2050,7 +4104,7 @@ fn ws_a1_exec_f64_matmul_dispatches_dgemm_and_matches_reference() {
         Prim::F64,
     )
     .expect("f64 matmul default constructs (spec §5.7.1)");
-    dag.add_node(matmul_op, vec![a, b], mat_f64(2, 4), None);
+    dag.add_node(decl, matmul_op, vec![a, b], mat_f64(2, 4), None);
 
     let result = codegen_with_options(
         &dag,
@@ -2180,7 +4234,9 @@ int main() {{
 #[test]
 fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let f_values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "f_values".into(),
         },
@@ -2189,6 +4245,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
     let i_values = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "i_values".into(),
         },
@@ -2200,6 +4257,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
     // (default i32 accumulator). Both Stores so codegen marks both as
     // outputs.
     let f_sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -2209,6 +4267,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
     let i_sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -2218,6 +4277,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Store {
             name: "f_out".into(),
         },
@@ -2226,6 +4286,7 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Store {
             name: "i_out".into(),
         },
@@ -2246,11 +4307,11 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         "mixed-dtype program must use CHELIS_DTYPE_I32 for i32 tensors:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "mixed-dtype program must use a double accumulator for the f64 sum:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "mixed-dtype program must use an int32_t accumulator for the i32 sum:\n{src}"
     );
 
@@ -2382,6 +4443,7 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
     use chelis_ir::verify;
     for prim in [Prim::Bf16, Prim::F16] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
             precision: prim,
@@ -2394,8 +4456,20 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
             precision: prim,
         };
-        let a = dag.add_node(RiscOp::synth_const(ty.precision, 1.0), vec![], ty, None);
-        let b = dag.add_node(RiscOp::synth_const(ty_b.precision, 1.0), vec![], ty_b, None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty.precision, 1.0),
+            vec![],
+            ty,
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::synth_const(ty_b.precision, 1.0),
+            vec![],
+            ty_b,
+            None,
+        );
         let matmul_op = RiscOp::matmul_default(
             vec![],
             DimExpr::Concrete(2),
@@ -2404,7 +4478,7 @@ fn ws_a3_bf16_f16_matmul_admitted_at_ir_validation() {
             prim,
         )
         .unwrap_or_else(|e| panic!("{prim:?} matmul default constructs (per spec §5.7.1): {e}"));
-        let _ = dag.add_node(matmul_op, vec![a, b], ty_out, None);
+        let _ = dag.add_node(decl, matmul_op, vec![a, b], ty_out, None);
 
         let errors = verify::verify(&dag);
         assert!(
@@ -2446,9 +4520,22 @@ static chelis_tensor *make_view_1d_i16(int16_t* data, int n) {
 #[test]
 fn exec_i8_add_correct_output() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(8), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(8), None);
-    dag.add_node(RiscOp::Add, vec![a, b], vec_i8(8), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i8(8),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i8(8),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Add, vec![a, b], vec_i8(8), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i8_add").unwrap();
@@ -2508,9 +4595,22 @@ int main() {{
 #[test]
 fn exec_i8_add_overflow_traps() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
-    dag.add_node(RiscOp::Add, vec![a, b], vec_i8(2), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i8(2),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i8(2),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Add, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i8_add_wrap").unwrap();
@@ -2521,7 +4621,7 @@ fn exec_i8_add_overflow_traps() {
 extern void test_i8_add_wrap(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
-    // Both elements overflow int8 and must trap before store-back.
+    // Both elements overflow i8 and must trap before store-back.
     int8_t a_data[2] = {{ 100, 127 }};
     int8_t b_data[2] = {{ 50, 1 }};
     chelis_tensor *at = make_view_1d_i8(a_data, 2);
@@ -2541,7 +4641,7 @@ int main() {{
         "i8 add overflow must terminate unsuccessfully"
     );
     assert!(
-        stderr.contains("numeric trap: overflow in add at int8"),
+        stderr.contains("numeric trap: overflow in add at i8"),
         "i8 add overflow must use the canonical diagnostic; stderr={stderr:?}"
     );
 }
@@ -2551,9 +4651,22 @@ int main() {{
 #[test]
 fn exec_i8_mul_overflow_traps() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
-    dag.add_node(RiscOp::Mul, vec![a, b], vec_i8(2), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i8(2),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i8(2),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Mul, vec![a, b], vec_i8(2), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i8_mul").unwrap();
@@ -2566,7 +4679,7 @@ extern void test_i8_mul(chelis_tensor** inputs, int n_in, chelis_tensor** output
 int main() {{
     int8_t a_data[2] = {{ 12, 16 }};
     int8_t b_data[2] = {{ 10, 8 }};
-    // 12*10 = 120 fits; 16*8 = 128 overflows int8 and must trap.
+    // 12*10 = 120 fits; 16*8 = 128 overflows i8 and must trap.
     chelis_tensor *at = make_view_1d_i8(a_data, 2);
     chelis_tensor *bt = make_view_1d_i8(b_data, 2);
     chelis_tensor* in_ptrs[2] = {{ at, bt }};
@@ -2584,7 +4697,7 @@ int main() {{
         "i8 mul overflow must terminate unsuccessfully"
     );
     assert!(
-        stderr.contains("numeric trap: overflow in mul at int8"),
+        stderr.contains("numeric trap: overflow in mul at i8"),
         "i8 mul overflow must use the canonical diagnostic; stderr={stderr:?}"
     );
 }
@@ -2595,9 +4708,22 @@ int main() {{
 #[test]
 fn exec_i16_add_correct_output() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i16(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i16(4), None);
-    dag.add_node(RiscOp::Add, vec![a, b], vec_i16(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i16(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i16(4),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Add, vec![a, b], vec_i16(4), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i16_add").unwrap();
@@ -2655,13 +4781,20 @@ int main() {{
 #[test]
 fn exec_i8_reduce_sum_promotes_to_i32() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(200), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i8(200),
+        None,
+    );
     // Use the spec-default constructor so the IR carries the §5.7.1
     // i32 accumulator, not an inline `Prim::Int8` that would fail the
     // verifier's narrowness check.
     let sum_op =
         chelis_ir::dag::RiscOp::sum_default(0, Prim::Int8).expect("i8 sum_default must succeed");
-    dag.add_node(sum_op, vec![a], scalar_i32(), None);
+    dag.add_node(decl, sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i8_reduce_sum").unwrap();
@@ -2671,7 +4804,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     // this catches a regression where the codegen silently picks the
     // operand precision (the F1 footgun class for reductions).
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i8 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
     assert!(
@@ -2711,11 +4844,13 @@ int main() {{
 
 /// i16 reduce_sum into i32: same accumulator-promotion path as i8.
 /// 200 i16 values of 1000 each = 200000 — overflows i16 (max +32767)
-/// but fits in i32. Pin both the source-int16 path and the i32 result.
+/// but fits in i32. Pin both the source-i16 path and the i32 result.
 #[test]
 fn exec_i16_reduce_sum_promotes_to_i32() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_i16(200),
@@ -2723,14 +4858,14 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     );
     let sum_op =
         chelis_ir::dag::RiscOp::sum_default(0, Prim::Int16).expect("i16 sum_default must succeed");
-    dag.add_node(sum_op, vec![a], scalar_i32(), None);
+    dag.add_node(decl, sum_op, vec![a], scalar_i32(), None);
     let dag = fuse(&dag);
 
     let result = codegen(&dag, "test_i16_reduce_sum").unwrap();
     let src = &result.c_source;
 
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i16 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
 
@@ -2788,11 +4923,11 @@ fn ws_a4_i8_sum_with_narrower_accumulator_is_ir_error() {
 // element dtype, not the boolean (f32) output dtype. The cmplt
 // signature is `∀D,p. (tensor[D,p], tensor[D,p]) → tensor[D,bool]`,
 // so the operands carry the compared precision `p` while the result
-// is bool (stored f32). Reading a RUNTIME-PRODUCED int32 / int64 /
+// is bool (stored f32). Reading a RUNTIME-PRODUCED i32 / i64 /
 // f64 operand through a raw `float*` reinterprets the bit pattern
 // (the #347 / #476 bug class). The discriminator is a NEGATIVE
-// integer operand: as int32, `-7 < -3` is true; reinterpreting the
-// int32 bit pattern 0xFFFFFFF9 / 0xFFFFFFFD as `float` yields NaN, so
+// integer operand: as i32, `-7 < -3` is true; reinterpreting the
+// i32 bit pattern 0xFFFFFFF9 / 0xFFFFFFFD as `float` yields NaN, so
 // the buggy `float*` read returns false. eval-vs-C parity oracle.
 // ============================================================
 
@@ -2824,21 +4959,30 @@ fn run_cmplt_parity(
     assert_eq!(n, b_vals.len(), "operand length mismatch in {tag}");
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_prim(n, prim),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_prim(n, prim),
         None,
     );
-    let root = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_prim(n, Prim::Bool), None);
+    let root = dag.add_node(
+        decl,
+        RiscOp::Compare(ComparisonKind::CmpLt),
+        vec![a, b],
+        vec_prim(n, Prim::Bool),
+        None,
+    );
 
-    // Evaluator oracle: numeric `a < b` per element (eval.rs CmpLt).
+    // Evaluator oracle: direct numeric `cmplt(a, b)` per element.
     let mut inputs = UnordMap::new();
     inputs.insert(
         "a".to_string(),
@@ -2925,7 +5069,7 @@ int main() {{
     );
 }
 
-/// #517 primary oracle: runtime int32 operands, including the negative
+/// #517 primary oracle: runtime i32 operands, including the negative
 /// values that the `float*` bit-reinterpret gets wrong.
 #[test]
 fn exec_cmplt_int32_runtime_operands_match_evaluator() {
@@ -2939,7 +5083,7 @@ fn exec_cmplt_int32_runtime_operands_match_evaluator() {
     );
 }
 
-/// #517 sweep: int64 operands. The buggy `float*` read also misaligns
+/// #517 sweep: i64 operands. The buggy `float*` read also misaligns
 /// the 8-byte stride; reading as `int64_t*` is required.
 #[test]
 fn exec_cmplt_int64_runtime_operands_match_evaluator() {
@@ -2967,6 +5111,946 @@ fn exec_cmplt_f64_runtime_operands_match_evaluator() {
     );
 }
 
+fn typed_storage(prim: Prim, raw: chelis_types::RawTensor) -> chelis_types::TensorStorage {
+    chelis_types::finalize_tensor("typed C nonnumeric test", prim, raw).unwrap()
+}
+
+fn typed_value(storage: chelis_types::TensorStorage) -> TensorValue {
+    TensorValue::from_storage(vec![storage.len()], storage)
+}
+
+fn typed_value_with_shape(shape: Vec<usize>, storage: chelis_types::TensorStorage) -> TensorValue {
+    TensorValue::from_storage(shape, storage)
+}
+
+fn c_storage_case(storage: &chelis_types::TensorStorage) -> (&'static str, &'static str, String) {
+    use chelis_types::StorageView;
+
+    let values = match storage.view() {
+        StorageView::F64(values) => values
+            .iter()
+            .map(|value| format!("test_f64(UINT64_C(0x{:016x}))", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::F32(values) => values
+            .iter()
+            .map(|value| format!("test_f32(UINT32_C(0x{:08x}))", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::F16(values) => values
+            .iter()
+            .map(|value| format!("UINT16_C(0x{:04x})", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::Bf16(values) => values
+            .iter()
+            .map(|value| format!("UINT16_C(0x{:04x})", value.to_bits()))
+            .collect::<Vec<_>>(),
+        StorageView::I64(values) => values
+            .iter()
+            .map(|value| {
+                if *value == i64::MIN {
+                    "INT64_MIN".to_string()
+                } else {
+                    format!("INT64_C({value})")
+                }
+            })
+            .collect::<Vec<_>>(),
+        StorageView::I32(values) => values
+            .iter()
+            .map(|value| format!("INT32_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::I16(values) => values
+            .iter()
+            .map(|value| format!("INT16_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::I8(values) => values
+            .iter()
+            .map(|value| format!("INT8_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::Bool(values) => values
+            .iter()
+            .map(|value| format!("UINT8_C({value})"))
+            .collect::<Vec<_>>(),
+        StorageView::Key(keys) => keys
+            .iter()
+            .map(|key| format!("UINT64_C(0x{:016x})", key.bits()))
+            .collect::<Vec<_>>(),
+    };
+    let (c_type, c_dtype) = match storage.prim() {
+        Prim::F64 => ("double", "CHELIS_DTYPE_F64"),
+        Prim::F32 => ("float", "CHELIS_DTYPE_F32"),
+        Prim::F16 => ("uint16_t", "CHELIS_DTYPE_F16"),
+        Prim::Bf16 => ("uint16_t", "CHELIS_DTYPE_BF16"),
+        Prim::Int64 => ("int64_t", "CHELIS_DTYPE_I64"),
+        Prim::Int32 => ("int32_t", "CHELIS_DTYPE_I32"),
+        Prim::Int16 => ("int16_t", "CHELIS_DTYPE_I16"),
+        Prim::Int8 => ("int8_t", "CHELIS_DTYPE_I8"),
+        Prim::Bool => ("uint8_t", "CHELIS_DTYPE_BOOL"),
+        Prim::Key => ("uint64_t", "CHELIS_DTYPE_KEY"),
+        other => panic!("unsupported C test dtype {other:?}"),
+    };
+    (c_type, c_dtype, values.join(", "))
+}
+
+const TYPED_NONNUMERIC_HARNESS: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "chelis_runtime.h"
+
+static float test_f32(uint32_t bits) {
+    float value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+static double test_f64(uint64_t bits) {
+    double value;
+    memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+static chelis_tensor *test_view(void *data, int64_t count, chelis_dtype dtype) {
+    int64_t shape[1] = { count };
+    return chelis_tensor_entry_borrow(
+        1, shape, dtype, data, count * chelis_dtype_size(dtype)
+    );
+}
+"#;
+
+#[test]
+fn typed_comparison_c_matrix_matches_evaluator_for_every_identity_and_dtype() {
+    use chelis_unord::UnordMap;
+
+    let kinds = [
+        ComparisonKind::CmpLt,
+        ComparisonKind::Lt,
+        ComparisonKind::Eq,
+        ComparisonKind::Neq,
+        ComparisonKind::Gt,
+        ComparisonKind::Gte,
+        ComparisonKind::Lte,
+    ];
+    for prim in [
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+    ] {
+        let (lhs, rhs) = if prim.is_float() {
+            (
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0xfff8_1234_5678_9abc),
+                        -0.0,
+                        f64::INFINITY,
+                        -2.0,
+                        4.0,
+                    ]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![0.0, 0.0, f64::INFINITY, -1.0, 4.0]),
+                ),
+            )
+        } else {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![-2, 0, 3, 4, 5])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![-1, 0, 2, 4, 6])),
+            )
+        };
+        let n = lhs.len();
+        let operand_ty = vec_prim(n, prim);
+        let bool_ty = vec_prim(n, Prim::Bool);
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let left = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "left".into(),
+            },
+            vec![],
+            operand_ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "right".into(),
+            },
+            vec![],
+            operand_ty,
+            None,
+        );
+        let outputs = kinds
+            .iter()
+            .map(|kind| {
+                let output = dag.add_node(
+                    decl,
+                    RiscOp::Compare(*kind),
+                    vec![left, right],
+                    bool_ty.clone(),
+                    None,
+                );
+                dag.add_root(output);
+                output
+            })
+            .collect::<Vec<_>>();
+        let evaluated = eval_tensor(
+            &dag,
+            &UnordMap::from([
+                ("left".into(), typed_value(lhs.clone())),
+                ("right".into(), typed_value(rhs.clone())),
+            ]),
+        )
+        .unwrap();
+        let expected = outputs
+            .iter()
+            .flat_map(|output| {
+                evaluated[output]
+                    .storage()
+                    .to_i64_exact_vec()
+                    .unwrap()
+                    .into_iter()
+                    .map(|value| value.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let function = format!("typed_compare_{}", prim.name());
+        let source = codegen(&dag, &function).unwrap().c_source;
+        assert!(
+            !source.contains("FusedStepOp"),
+            "typed comparisons must not rely on fused vocabulary"
+        );
+        let (c_type, c_dtype, lhs_init) = c_storage_case(&lhs);
+        let (_, _, rhs_init) = c_storage_case(&rhs);
+        let harness = format!(
+            r#"{TYPED_NONNUMERIC_HARNESS}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} left_data[{n}] = {{ {lhs_init} }};
+    {c_type} right_data[{n}] = {{ {rhs_init} }};
+    uint8_t expected[{output_count}][{n}] = {{ {expected} }};
+    chelis_tensor *left = test_view(left_data, {n}, {c_dtype});
+    chelis_tensor *right = test_view(right_data, {n}, {c_dtype});
+    chelis_tensor *inputs[2] = {{ left, right }};
+    chelis_tensor *outputs[{output_count}] = {{ 0 }};
+    {function}(inputs, 2, outputs, {output_count});
+    for (int output = 0; output < {output_count}; ++output) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[output]);
+        if (view.dtype != CHELIS_DTYPE_BOOL) return 10 + output;
+        if (memcmp(view.data, expected[output], {n}) != 0) return 30 + output;
+        chelis_tensor_release(outputs[output]);
+    }}
+    return 0;
+}}
+"#,
+            output_count = kinds.len()
+        );
+        let (ok, output) = compile_and_run_kernel_capturing(&function, &source, &harness);
+        assert!(ok, "{prim:?}: {output}\n{source}");
+    }
+}
+
+#[test]
+fn typed_logical_c_truth_tables_are_bool8() {
+    let ty = vec_prim(4, Prim::Bool);
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let left = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    for op in [
+        RiscOp::Logical(LogicalKind::And),
+        RiscOp::Logical(LogicalKind::Or),
+        RiscOp::Logical(LogicalKind::Not),
+    ] {
+        let inputs = if matches!(op, RiscOp::Logical(LogicalKind::Not)) {
+            vec![left]
+        } else {
+            vec![left, right]
+        };
+        let output = dag.add_node(decl, op, inputs, ty.clone(), None);
+        dag.add_root(output);
+    }
+    let source = codegen(&dag, "typed_logical").unwrap().c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void typed_logical(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t left_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t right_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[3][4] = {{ {{0,0,0,1}}, {{0,1,1,1}}, {{1,1,0,0}} }};
+    chelis_tensor *inputs[2] = {{
+        test_view(left_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(right_data, 4, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[3] = {{ 0 }};
+    typed_logical(inputs, 2, outputs, 3);
+    for (int i = 0; i < 3; ++i) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[i]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || memcmp(view.data, expected[i], 4)) return 10 + i;
+        chelis_tensor_release(outputs[i]);
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("typed_logical", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn typed_bool_eq_neq_c_match_exact_bool_identity() {
+    let ty = vec_prim(4, Prim::Bool);
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let left = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "left".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let right = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "right".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    for kind in [ComparisonKind::Eq, ComparisonKind::Neq] {
+        let output = dag.add_node(
+            decl,
+            RiscOp::Compare(kind),
+            vec![left, right],
+            ty.clone(),
+            None,
+        );
+        dag.add_root(output);
+    }
+    let source = codegen(&dag, "typed_bool_compare").unwrap().c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void typed_bool_compare(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t left_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t right_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[2][4] = {{ {{1,0,0,1}}, {{0,1,1,0}} }};
+    chelis_tensor *inputs[2] = {{
+        test_view(left_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(right_data, 4, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[2] = {{ 0 }};
+    typed_bool_compare(inputs, 2, outputs, 2);
+    for (int i = 0; i < 2; ++i) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[i]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || memcmp(view.data, expected[i], 4)) return 10 + i;
+        chelis_tensor_release(outputs[i]);
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("typed_bool_compare", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn typed_where_c_copies_selected_storage_bits_for_every_admitted_dtype() {
+    use chelis_unord::UnordMap;
+
+    for prim in [
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ] {
+        let (then_storage, else_storage) = if prim.is_float() {
+            (
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0xfff8_1234_5678_9abc),
+                        -0.0,
+                        4.0,
+                        -7.0,
+                    ]),
+                ),
+                typed_storage(
+                    prim,
+                    chelis_types::RawTensor::Float(vec![
+                        f64::from_bits(0x7ff8_abcd_1234_5678),
+                        0.0,
+                        2.0,
+                        9.0,
+                    ]),
+                ),
+            )
+        } else if prim == Prim::Bool {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, 1, 0])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 0, 1])),
+            )
+        } else {
+            (
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![1, 0, -2, 7])),
+                typed_storage(prim, chelis_types::RawTensor::Int(vec![0, 1, 3, -9])),
+            )
+        };
+        let condition = typed_storage(Prim::Bool, chelis_types::RawTensor::Int(vec![1, 0, 1, 0]));
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let condition_id = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "condition".into(),
+            },
+            vec![],
+            vec_prim(4, Prim::Bool),
+            None,
+        );
+        let then_id = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "then".into(),
+            },
+            vec![],
+            vec_prim(4, prim),
+            None,
+        );
+        let else_id = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "else".into(),
+            },
+            vec![],
+            vec_prim(4, prim),
+            None,
+        );
+        let output = dag.add_node(
+            decl,
+            RiscOp::Where,
+            vec![condition_id, then_id, else_id],
+            vec_prim(4, prim),
+            None,
+        );
+        dag.add_root(output);
+        let evaluated = eval_tensor(
+            &dag,
+            &UnordMap::from([
+                ("condition".into(), typed_value(condition.clone())),
+                ("then".into(), typed_value(then_storage.clone())),
+                ("else".into(), typed_value(else_storage.clone())),
+            ]),
+        )
+        .unwrap();
+        let expected_storage = evaluated[&output].storage();
+        let function = format!("typed_where_{}", prim.name());
+        let source = codegen(&dag, &function).unwrap().c_source;
+        let (c_type, c_dtype, then_init) = c_storage_case(&then_storage);
+        let (_, _, else_init) = c_storage_case(&else_storage);
+        let (_, _, expected_init) = c_storage_case(expected_storage);
+        let harness = format!(
+            r#"{TYPED_NONNUMERIC_HARNESS}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t condition_data[4] = {{ 1, 0, 1, 0 }};
+    {c_type} then_data[4] = {{ {then_init} }};
+    {c_type} else_data[4] = {{ {else_init} }};
+    {c_type} expected[4] = {{ {expected_init} }};
+    chelis_tensor *inputs[3] = {{
+        test_view(condition_data, 4, CHELIS_DTYPE_BOOL),
+        test_view(then_data, 4, {c_dtype}),
+        test_view(else_data, 4, {c_dtype})
+    }};
+    chelis_tensor *outputs[1] = {{ 0 }};
+    {function}(inputs, 3, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.dtype != {c_dtype}) return 10;
+    if (memcmp(view.data, expected, sizeof expected)) return 11;
+    chelis_tensor_release(outputs[0]);
+    return 0;
+}}
+"#
+        );
+        let (ok, output_text) = compile_and_run_kernel_capturing(&function, &source, &harness);
+        assert!(ok, "{prim:?}: {output_text}\n{source}");
+    }
+}
+
+#[test]
+fn typed_nonnumeric_c_permuted_stepped_views_match_evaluator_and_preserve_bits() {
+    use chelis_ir::dag::RtDim;
+    use chelis_types::StorageView;
+    use chelis_unord::UnordMap;
+
+    let matrix = |rows, cols, precision| TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(cols)],
+        precision,
+    };
+    let input_f32 = matrix(2, 4, Prim::F32);
+    let input_bool = matrix(2, 4, Prim::Bool);
+    let permuted_f32 = matrix(4, 2, Prim::F32);
+    let permuted_bool = matrix(4, 2, Prim::Bool);
+    let stepped_f32 = matrix(2, 2, Prim::F32);
+    let stepped_bool = matrix(2, 2, Prim::Bool);
+
+    let lhs_storage = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![
+            f64::from_bits(0x7ff8_2468_a000_0000),
+            11.0,
+            -0.0,
+            13.0,
+            5.0,
+            15.0,
+            0.0,
+            17.0,
+        ]),
+    );
+    let rhs_storage = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![0.0, 21.0, 0.0, 23.0, 4.0, 25.0, -0.0, 27.0]),
+    );
+    let logical_lhs_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 1, 0, 1, 0, 1, 1, 0]),
+    );
+    let logical_rhs_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 0, 0, 1, 1, 0, 0, 1]),
+    );
+    let condition_storage = typed_storage(
+        Prim::Bool,
+        chelis_types::RawTensor::Int(vec![1, 0, 1, 0, 0, 1, 0, 1]),
+    );
+
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let add_stepped_view =
+        |dag: &mut Dag, input, permuted_ty: &TensorType, stepped_ty: &TensorType| {
+            let permuted = dag.add_node(
+                decl,
+                RiscOp::Permute { axes: vec![1, 0] },
+                vec![input],
+                permuted_ty.clone(),
+                None,
+            );
+            dag.add_node(
+                decl,
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+                },
+                vec![permuted],
+                stepped_ty.clone(),
+                None,
+            )
+        };
+    let load = |dag: &mut Dag, name: &str, ty: &TensorType| {
+        dag.add_node(
+            decl,
+            RiscOp::Load { name: name.into() },
+            vec![],
+            ty.clone(),
+            None,
+        )
+    };
+
+    let lhs_load = load(&mut dag, "lhs", &input_f32);
+    let rhs_load = load(&mut dag, "rhs", &input_f32);
+    let logical_lhs_load = load(&mut dag, "logical_lhs", &input_bool);
+    let logical_rhs_load = load(&mut dag, "logical_rhs", &input_bool);
+    let condition_load = load(&mut dag, "condition", &input_bool);
+    let lhs = add_stepped_view(&mut dag, lhs_load, &permuted_f32, &stepped_f32);
+    let rhs = add_stepped_view(&mut dag, rhs_load, &permuted_f32, &stepped_f32);
+    let logical_lhs = add_stepped_view(&mut dag, logical_lhs_load, &permuted_bool, &stepped_bool);
+    let logical_rhs = add_stepped_view(&mut dag, logical_rhs_load, &permuted_bool, &stepped_bool);
+    let condition = add_stepped_view(&mut dag, condition_load, &permuted_bool, &stepped_bool);
+
+    let mut bool_outputs = Vec::new();
+    for kind in [
+        ComparisonKind::Eq,
+        ComparisonKind::Neq,
+        ComparisonKind::Gte,
+        ComparisonKind::Lte,
+    ] {
+        let output = dag.add_node(
+            decl,
+            RiscOp::Compare(kind),
+            vec![lhs, rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+        bool_outputs.push(output);
+    }
+    for kind in [LogicalKind::And, LogicalKind::Or] {
+        let output = dag.add_node(
+            decl,
+            RiscOp::Logical(kind),
+            vec![logical_lhs, logical_rhs],
+            stepped_bool.clone(),
+            None,
+        );
+        dag.add_root(output);
+        bool_outputs.push(output);
+    }
+    let not = dag.add_node(
+        decl,
+        RiscOp::Logical(LogicalKind::Not),
+        vec![logical_lhs],
+        stepped_bool,
+        None,
+    );
+    dag.add_root(not);
+    bool_outputs.push(not);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![condition, lhs, rhs],
+        stepped_f32,
+        None,
+    );
+    dag.add_root(selected);
+
+    let evaluated = eval_tensor(
+        &dag,
+        &UnordMap::from([
+            (
+                "lhs".into(),
+                typed_value_with_shape(vec![2, 4], lhs_storage.clone()),
+            ),
+            (
+                "rhs".into(),
+                typed_value_with_shape(vec![2, 4], rhs_storage.clone()),
+            ),
+            (
+                "logical_lhs".into(),
+                typed_value_with_shape(vec![2, 4], logical_lhs_storage.clone()),
+            ),
+            (
+                "logical_rhs".into(),
+                typed_value_with_shape(vec![2, 4], logical_rhs_storage.clone()),
+            ),
+            (
+                "condition".into(),
+                typed_value_with_shape(vec![2, 4], condition_storage.clone()),
+            ),
+        ]),
+    )
+    .unwrap();
+    let expected_bool = bool_outputs
+        .iter()
+        .map(|output| evaluated[output].storage().to_i64_exact_vec().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected_bool,
+        vec![
+            vec![0, 0, 1, 1],
+            vec![1, 1, 0, 0],
+            vec![0, 1, 1, 1],
+            vec![0, 0, 1, 1],
+            vec![1, 0, 0, 0],
+            vec![1, 1, 0, 1],
+            vec![0, 1, 1, 0],
+        ],
+        "the fixture must retain NaN-false ordered comparisons, NaN-true neq, \
+         signed-zero equality, and both logical outcomes after permutation/stride"
+    );
+    let expected_where = evaluated[&selected].storage();
+    let (
+        StorageView::F32(lhs_values),
+        StorageView::F32(rhs_values),
+        StorageView::F32(where_values),
+    ) = (
+        lhs_storage.view(),
+        rhs_storage.view(),
+        expected_where.view(),
+    )
+    else {
+        unreachable!("f32 fixture")
+    };
+    assert_eq!(
+        where_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![
+            lhs_values[0].to_bits(),
+            rhs_values[4].to_bits(),
+            lhs_values[2].to_bits(),
+            rhs_values[6].to_bits(),
+        ],
+        "where must copy the selected stored image, including the NaN payload and -0"
+    );
+
+    let function = "typed_nonnumeric_permuted_stepped";
+    let source = codegen(&dag, function).unwrap().c_source;
+    let (_, _, lhs_init) = c_storage_case(&lhs_storage);
+    let (_, _, rhs_init) = c_storage_case(&rhs_storage);
+    let (_, _, logical_lhs_init) = c_storage_case(&logical_lhs_storage);
+    let (_, _, logical_rhs_init) = c_storage_case(&logical_rhs_storage);
+    let (_, _, condition_init) = c_storage_case(&condition_storage);
+    let (_, _, expected_where_init) = c_storage_case(expected_where);
+    let expected_bool_init = expected_bool
+        .iter()
+        .map(|row| {
+            format!(
+                "{{ {} }}",
+                row.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+static chelis_tensor *test_matrix(void *data, chelis_dtype dtype) {{
+    int64_t shape[2] = {{ 2, 4 }};
+    return chelis_tensor_entry_borrow(
+        2, shape, dtype, data, 8 * chelis_dtype_size(dtype)
+    );
+}}
+
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float lhs_data[8] = {{ {lhs_init} }};
+    float rhs_data[8] = {{ {rhs_init} }};
+    uint8_t logical_lhs_data[8] = {{ {logical_lhs_init} }};
+    uint8_t logical_rhs_data[8] = {{ {logical_rhs_init} }};
+    uint8_t condition_data[8] = {{ {condition_init} }};
+    uint8_t expected_bool[7][4] = {{ {expected_bool_init} }};
+    float expected_where[4] = {{ {expected_where_init} }};
+    chelis_tensor *inputs[5] = {{
+        test_matrix(lhs_data, CHELIS_DTYPE_F32),
+        test_matrix(rhs_data, CHELIS_DTYPE_F32),
+        test_matrix(logical_lhs_data, CHELIS_DTYPE_BOOL),
+        test_matrix(logical_rhs_data, CHELIS_DTYPE_BOOL),
+        test_matrix(condition_data, CHELIS_DTYPE_BOOL)
+    }};
+    chelis_tensor *outputs[8] = {{ 0 }};
+    {function}(inputs, 5, outputs, 8);
+    for (int output = 0; output < 7; ++output) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[output]);
+        if (view.dtype != CHELIS_DTYPE_BOOL || view.count != 4) return 10 + output;
+        if (memcmp(view.data, expected_bool[output], 4) != 0) return 30 + output;
+    }}
+    chelis_read_view where_view = chelis_tensor_read_view(outputs[7]);
+    if (where_view.dtype != CHELIS_DTYPE_F32 || where_view.count != 4) return 50;
+    if (memcmp(where_view.data, expected_where, sizeof expected_where) != 0) return 51;
+    for (int output = 0; output < 8; ++output) chelis_tensor_release(outputs[output]);
+    for (int input = 0; input < 5; ++input) chelis_tensor_release(inputs[input]);
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing(function, &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn issue_630_eq_neq_owned_copied_and_borrowed_tensors_match_ieee() {
+    let values = typed_storage(
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![f64::from(f32::from_bits(0x7fc5_4321)), -0.0, 3.5]),
+    );
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = vec_prim(3, Prim::F32);
+    let bool_ty = vec_prim(3, Prim::Bool);
+    let borrowed = dag.add_node(
+        decl,
+        RiscOp::Load {
+            name: "borrowed".into(),
+        },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![borrowed], ty.clone(), None);
+    let owned = dag.add_node(
+        decl,
+        RiscOp::ConstTensor {
+            data: values.clone(),
+        },
+        vec![],
+        ty,
+        None,
+    );
+    for (left, right) in [(borrowed, borrowed), (copied, borrowed), (owned, owned)] {
+        for kind in [ComparisonKind::Eq, ComparisonKind::Neq] {
+            let output = dag.add_node(
+                decl,
+                RiscOp::Compare(kind),
+                vec![left, right],
+                bool_ty.clone(),
+                None,
+            );
+            dag.add_root(output);
+        }
+    }
+    let source = codegen(&dag, "issue_630_native_forms").unwrap().c_source;
+    let (c_type, c_dtype, init) = c_storage_case(&values);
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void issue_630_native_forms(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} data[3] = {{ {init} }};
+    uint8_t eq[3] = {{ 0, 1, 1 }};
+    uint8_t neq[3] = {{ 1, 0, 0 }};
+    chelis_tensor *inputs[1] = {{ test_view(data, 3, {c_dtype}) }};
+    chelis_tensor *outputs[6] = {{ 0 }};
+    issue_630_native_forms(inputs, 1, outputs, 6);
+    for (int form = 0; form < 3; ++form) {{
+        if (memcmp(chelis_tensor_read_view(outputs[form * 2]).data, eq, 3)) return 10 + form;
+        if (memcmp(chelis_tensor_read_view(outputs[form * 2 + 1]).data, neq, 3)) return 20 + form;
+    }}
+    return 0;
+}}
+"#
+    );
+    let (ok, output) =
+        compile_and_run_kernel_capturing("issue_630_native_forms", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
+#[test]
+fn issue_666_typed_gte_where_forward_and_gradient_match_selected_branch() {
+    let scalar_f32 = TensorType {
+        dims: vec![],
+        precision: Prim::F32,
+    };
+    let scalar_bool = TensorType {
+        dims: vec![],
+        precision: Prim::Bool,
+    };
+    let vector_f32 = vec_prim(2, Prim::F32);
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector_f32.clone(),
+        None,
+    );
+    let zero_a = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let zero_b = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let nan = dag.add_node(
+        decl,
+        RiscOp::Div,
+        vec![zero_a, zero_b],
+        scalar_f32.clone(),
+        None,
+    );
+    let zero_c = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, 0.0),
+        vec![],
+        scalar_f32.clone(),
+        None,
+    );
+    let condition = dag.add_node(
+        decl,
+        RiscOp::Compare(ComparisonKind::Gte),
+        vec![nan, zero_c],
+        scalar_bool,
+        None,
+    );
+    let then_value = dag.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![x],
+        scalar_f32.clone(),
+        None,
+    );
+    let squared = dag.add_node(decl, RiscOp::Mul, vec![x, x], vector_f32, None);
+    let else_value = dag.add_node(
+        decl,
+        RiscOp::Sum {
+            axis: 0,
+            accumulator: Prim::F32,
+        },
+        vec![squared],
+        scalar_f32.clone(),
+        None,
+    );
+    let output = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![condition, then_value, else_value],
+        scalar_f32,
+        None,
+    );
+    let differentiated = grad_dag_checked(&dag, output, &[x]).unwrap();
+    let source = codegen(&differentiated.dag, "issue_666_native_grad")
+        .unwrap()
+        .c_source;
+    let harness = format!(
+        r#"{TYPED_NONNUMERIC_HARNESS}
+extern void issue_666_native_grad(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float data[2] = {{ 3.0f, 4.0f }};
+    chelis_tensor *inputs[1] = {{ test_view(data, 2, CHELIS_DTYPE_F32) }};
+    chelis_tensor *outputs[2] = {{ 0 }};
+    issue_666_native_grad(inputs, 1, outputs, 2);
+    float forward = ((const float *)chelis_tensor_read_view(outputs[0]).data)[0];
+    const float *gradient = (const float *)chelis_tensor_read_view(outputs[1]).data;
+    if (forward != 25.0f) return 10;
+    if (gradient[0] != 6.0f || gradient[1] != 8.0f) return 11;
+    return 0;
+}}
+"#
+    );
+    let (ok, output) = compile_and_run_kernel_capturing("issue_666_native_grad", &source, &harness);
+    assert!(ok, "{output}\n{source}");
+}
+
 fn direct_int_sub_case(
     tag: &str,
     prim: Prim,
@@ -2977,10 +6061,23 @@ fn direct_int_sub_case(
     expected: &str,
 ) {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_prim(4, prim);
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-    dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
     let function = format!("direct_sub_{tag}");
     let src = codegen(&dag, &function)
         .expect("direct subtraction codegen")
@@ -3089,10 +6186,23 @@ fn direct_checked_subtraction_traps_true_overflow_at_every_signed_width() {
         ),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec_prim(1, prim);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
         let function = format!("direct_sub_overflow_{tag}");
         let src = codegen(&dag, &function).unwrap().c_source;
         let harness = format!(
@@ -3123,6 +6233,188 @@ int main(void) {{
 }
 
 #[test]
+fn direct_float_subtraction_finalizes_canonical_nan_bits_at_every_width() {
+    for (
+        tag,
+        prim,
+        c_type,
+        c_dtype,
+        uint_type,
+        from_bits,
+        lhs_nan,
+        infinity,
+        one,
+        signaling_nan,
+        canonical_nan,
+    ) in [
+        (
+            "f32",
+            Prim::F32,
+            "float",
+            "CHELIS_DTYPE_F32",
+            "uint32_t",
+            "chelis_f32_from_bits",
+            "UINT32_C(0xffc54321)",
+            "UINT32_C(0x7f800000)",
+            "UINT32_C(0x3f800000)",
+            "UINT32_C(0x7f812345)",
+            "UINT32_C(0x7fc00000)",
+        ),
+        (
+            "f64",
+            Prim::F64,
+            "double",
+            "CHELIS_DTYPE_F64",
+            "uint64_t",
+            "chelis_f64_from_bits",
+            "UINT64_C(0xfff8abcd12345678)",
+            "UINT64_C(0x7ff0000000000000)",
+            "UINT64_C(0x3ff0000000000000)",
+            "UINT64_C(0x7ff0123456789abc)",
+            "UINT64_C(0x7ff8000000000000)",
+        ),
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let ty = vec_prim(3, prim);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
+        dag.add_root(out);
+        let function = format!("direct_sub_canonical_nan_{tag}");
+        let source = codegen(&dag, &function)
+            .expect("wide direct subtraction codegen")
+            .c_source;
+        assert!(
+            source.contains(canonical_nan),
+            "{tag} subtraction source lacks exact canonical NaN: {source}"
+        );
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+#include <string.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} a_data[3] = {{
+        {from_bits}({lhs_nan}),
+        {from_bits}({infinity}),
+        {from_bits}({one})
+    }};
+    {c_type} b_data[3] = {{
+        {from_bits}({one}),
+        {from_bits}({infinity}),
+        {from_bits}({signaling_nan})
+    }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 3, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 3, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    const {c_type} *got = (const {c_type} *)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < 3; ++i) {{
+        {uint_type} bits = 0;
+        memcpy(&bits, &got[i], sizeof(bits));
+        if (bits != {canonical_nan}) return 10 + i;
+    }}
+    puts("PASS");
+    return 0;
+}}
+"#
+        );
+        let output = compile_and_run_kernel(&function, &source, &harness)
+            .unwrap_or_else(|| panic!("{tag} canonical-NaN subtraction did not run"));
+        assert!(output.contains("PASS"), "{tag}: {output}");
+    }
+
+    for (tag, prim, c_dtype, lhs_nan, infinity, one, signaling_nan, canonical_nan) in [
+        (
+            "f16",
+            Prim::F16,
+            "CHELIS_DTYPE_F16",
+            "UINT16_C(0xfe55)",
+            "UINT16_C(0x7c00)",
+            "UINT16_C(0x3c00)",
+            "UINT16_C(0x7c01)",
+            "UINT16_C(0x7e00)",
+        ),
+        (
+            "bf16",
+            Prim::Bf16,
+            "CHELIS_DTYPE_BF16",
+            "UINT16_C(0xffe5)",
+            "UINT16_C(0x7f80)",
+            "UINT16_C(0x3f80)",
+            "UINT16_C(0x7f81)",
+            "UINT16_C(0x7fc0)",
+        ),
+    ] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let ty = vec_prim(3, prim);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
+        dag.add_root(out);
+        let function = format!("direct_sub_canonical_nan_{tag}");
+        let source = codegen(&dag, &function)
+            .expect("reduced-float direct subtraction codegen")
+            .c_source;
+        assert!(
+            source.contains(canonical_nan),
+            "{tag} subtraction source lacks exact canonical NaN: {source}"
+        );
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint16_t a_data[3] = {{ {lhs_nan}, {infinity}, {one} }};
+    uint16_t b_data[3] = {{ {one}, {infinity}, {signaling_nan} }};
+    chelis_tensor *a = make_view_typed_1d(a_data, 3, {c_dtype});
+    chelis_tensor *b = make_view_typed_1d(b_data, 3, {c_dtype});
+    chelis_tensor *inputs[2] = {{ a, b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    const uint16_t *got = (const uint16_t *)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < 3; ++i) {{
+        if (got[i] != {canonical_nan}) return 10 + i;
+    }}
+    puts("PASS");
+    return 0;
+}}
+"#
+        );
+        let output = compile_and_run_kernel(&function, &source, &harness)
+            .unwrap_or_else(|| panic!("{tag} canonical-NaN subtraction did not run"));
+        assert!(output.contains("PASS"), "{tag}: {output}");
+    }
+}
+
+#[test]
 fn direct_signed_integer_extrema_chains_survive_fusion_and_execute_at_every_width() {
     for (tag, prim, c_type, c_dtype) in [
         ("i8", Prim::Int8, "int8_t", "CHELIS_DTYPE_I8"),
@@ -3131,12 +6423,31 @@ fn direct_signed_integer_extrema_chains_survive_fusion_and_execute_at_every_widt
         ("i64", Prim::Int64, "int64_t", "CHELIS_DTYPE_I64"),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec_prim(4, prim);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
-        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
-        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let c = dag.add_node(
+            decl,
+            RiscOp::Load { name: "c".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let maximum = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(decl, RiscOp::MinElem, vec![maximum, c], ty, None);
         dag.add_root(minimum);
 
         let fused = fuse(&dag);
@@ -3182,10 +6493,23 @@ int main(void) {{
 #[test]
 fn direct_bool_max_elem_compiles_without_float_classification() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_prim(4, Prim::Bool);
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-    let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty, None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let maximum = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty, None);
     dag.add_root(maximum);
 
     let function = "direct_bool_max_elem";
@@ -3229,23 +6553,26 @@ fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n_ty = runtime_vec("n");
     let m_ty = runtime_vec("m");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         n_ty.clone(),
         None,
     );
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], m_ty, None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], m_ty, None);
     let c = dag.add_node(
+        decl,
         RiscOp::Load { name: "c".into() },
         vec![],
         n_ty.clone(),
         None,
     );
-    let difference = dag.add_node(RiscOp::Sub, vec![a, b], n_ty.clone(), None);
-    let minimum = dag.add_node(RiscOp::MinElem, vec![difference, c], n_ty, None);
+    let difference = dag.add_node(decl, RiscOp::Sub, vec![a, b], n_ty.clone(), None);
+    let minimum = dag.add_node(decl, RiscOp::MinElem, vec![difference, c], n_ty, None);
     dag.add_root(minimum);
 
     let fused = fuse(&dag);
@@ -3309,23 +6636,26 @@ int main(void) {{
 #[test]
 fn direct_positive_rank_mismatch_traps_before_indexing() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let vector = TensorType {
         dims: vec![DimInfo::Named("n".into(), None)],
         precision: Prim::F32,
     };
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vector.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vector.clone(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![a, b], vector, None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![a, b], vector, None);
     dag.add_root(out);
 
     let function = "direct_positive_rank_shape_guard";
@@ -3376,6 +6706,239 @@ int main(void) {{
     );
 }
 
+/// #2530/#2531: the executable DAG entry checks rank zero, then validates
+/// every supplied input in its ABI slot order with one typed trap line.
+#[test]
+fn direct_interface_guards_use_slot_order_and_typed_traps() {
+    let mut scalar = Dag::new();
+    let scalar_decl = scalar.declare("test");
+    let x = scalar.add_node(
+        scalar_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    scalar.add_root(x);
+
+    let mut pair = Dag::new();
+    let pair_decl = pair.declare("test");
+    for name in ["z", "a"] {
+        let value = pair.add_node(
+            pair_decl,
+            RiscOp::Load { name: name.into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        pair.add_root(value);
+    }
+
+    let mut failures = Vec::new();
+    for (case, dag, first_rank, first_extent, first_dtype, second_extent, second_dtype, expected) in [
+        (
+            "scalar_rank_bad",
+            &scalar,
+            1,
+            4,
+            "F32",
+            0,
+            "F32",
+            Some(("input `x` expected rank 0, got 1", "i64")),
+        ),
+        ("scalar_rank_good", &scalar, 0, 0, "F32", 0, "F32", None),
+        (
+            "slot_dtype_bad",
+            &pair,
+            1,
+            2,
+            "F64",
+            2,
+            "I32",
+            Some(("input `z` expected dtype f32, got f64", "f32")),
+        ),
+        (
+            "slot_dtype_before_later_extent",
+            &pair,
+            1,
+            2,
+            "F64",
+            3,
+            "F32",
+            Some(("input `z` expected dtype f32, got f64", "f32")),
+        ),
+        (
+            "slot_extent_bad",
+            &pair,
+            1,
+            3,
+            "F32",
+            3,
+            "F32",
+            Some(("input `z` axis 0 expected 2, got 3", "i64")),
+        ),
+        ("slot_good", &pair, 1, 2, "F32", 2, "F32", None),
+    ] {
+        let function = format!("entry_{case}");
+        let src = codegen(dag, &function)
+            .expect("direct entry codegen")
+            .c_source;
+        let input_count = if std::ptr::eq(dag, &scalar) { 1 } else { 2 };
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[2] = {{
+        chelis_alloc({first_rank}, (int64_t[]){{{first_extent}}}, CHELIS_DTYPE_{first_dtype}),
+        chelis_alloc(1, (int64_t[]){{{second_extent}}}, CHELIS_DTYPE_{second_dtype})
+    }};
+    chelis_tensor *outputs[2] = {{ NULL, NULL }};
+    {function}(inputs, {input_count}, outputs, {input_count});
+    for (int i = 0; i < {input_count}; ++i) {{
+        if (outputs[i] == NULL || chelis_tensor_rank(outputs[i]) != {first_rank}
+            || chelis_tensor_numel(outputs[i]) != ({first_rank} == 0 ? 1 : 2)
+            || chelis_tensor_read_view(outputs[i]).dtype != CHELIS_DTYPE_F32
+            || ((float*)chelis_tensor_read_view(outputs[i]).data)[0] != 0.0f) {{
+            puts("wrong output"); return 2;
+        }}
+    }}
+    puts("completed");
+    return 0;
+}}
+"#
+        );
+        let run = compile_and_capture_run(&function, &src, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if let Some((context, dtype)) = expected {
+            let trap = format!("numeric trap: domain in load at {dtype}");
+            let trap_lines = stderr
+                .lines()
+                .filter(|line| line.starts_with("numeric trap:"))
+                .collect::<Vec<_>>();
+            let exact = format!("{function}: {context}\n{trap}\n");
+            if run.status.success()
+                || stderr != exact
+                || trap_lines != [trap.as_str()]
+                || stderr.contains("input `a`")
+            {
+                failures.push(format!(
+                    "{case}: stderr={stderr:?}, trap lines={trap_lines:?}"
+                ));
+            }
+        } else {
+            if !run.status.success() || !String::from_utf8_lossy(&run.stdout).contains("completed")
+            {
+                failures.push(format!(
+                    "{case}: stdout={:?}, stderr={stderr:?}",
+                    String::from_utf8_lossy(&run.stdout)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// chelis#2490, [04-NUM-11]: the four-argument public entry `x + x` over one
+/// input declared at `declared`, run on a zero-filled tensor of `supplied`.
+fn direct_entry_dtype_run(declared: Prim, supplied: &str) -> (String, std::process::Output) {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(3)],
+        precision: declared,
+    };
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Add, vec![x, x], ty, None);
+    dag.add_root(out);
+    let function = format!("direct_entry_dtype_{}", declared.name());
+    let src = codegen(&dag, &function)
+        .expect("direct entry codegen")
+        .c_source;
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[1] = {{ chelis_alloc(1, (int64_t[]){{3}}, {supplied}) }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 1, outputs, 1);
+    puts("completed");
+    return 0;
+}}
+"#
+    );
+    let name = format!("{function}_{}", supplied.to_lowercase());
+    let run = compile_and_capture_run(&name, &src, &harness);
+    (src, run)
+}
+
+/// chelis#2490 REGRESSION TEST: on the pre-fix tree every mismatched row ran
+/// to completion, reading the supplied storage at the declared dtype. The
+/// guard now traps before the load reads the input.
+#[test]
+fn direct_entry_dtype_mismatch_traps_before_the_load_reads() {
+    let mut failures = Vec::new();
+    for (declared, supplied, actual) in [
+        (Prim::Int64, "CHELIS_DTYPE_F64", "f64"),
+        (Prim::Int64, "CHELIS_DTYPE_I32", "i32"),
+        (Prim::F64, "CHELIS_DTYPE_I64", "i64"),
+        (Prim::F32, "CHELIS_DTYPE_BOOL", "bool"),
+        (Prim::F32, "CHELIS_DTYPE_F16", "f16"),
+    ] {
+        let (src, run) = direct_entry_dtype_run(declared, supplied);
+        let guard = src
+            .find("chelis_tensor_read_view(inputs[0]).dtype != ")
+            .unwrap_or(usize::MAX);
+        let load = src.find("chelis_tensor_read_view(t0)").expect("load");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let declared = declared.name();
+        if guard > load
+            || run.status.success()
+            || output.contains("completed")
+            || !output.contains(&format!(
+                "input `x` expected dtype {declared}, got {actual}"
+            ))
+            || !output.contains(&format!("numeric trap: domain in load at {declared}\n"))
+        {
+            failures.push(format!("{declared} <- {supplied}: {output}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn direct_entry_matching_dtypes_complete() {
+    for (declared, supplied) in [
+        (Prim::Int64, "CHELIS_DTYPE_I64"),
+        (Prim::F64, "CHELIS_DTYPE_F64"),
+        (Prim::F32, "CHELIS_DTYPE_F32"),
+    ] {
+        let (_, run) = direct_entry_dtype_run(declared, supplied);
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(run.status.success(), "{supplied}: {output}");
+        assert!(output.contains("completed"), "{supplied}: {output}");
+    }
+}
+
 // ---- chelis#1484: the HOST-VALUE lane's elementwise operand guard -------
 //
 // `direct_positive_rank_mismatch_traps_before_indexing` above covers the
@@ -3419,6 +6982,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![
                 HostParam {
@@ -3438,6 +7002,7 @@ fn host_binary_program(builtin: &str, lhs: Vec<usize>, rhs: Vec<usize>) -> HostP
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -3452,6 +7017,7 @@ const HOST_GUARD_HARNESS: &str = r#"
 #include <string.h>
 #include <math.h>
 #include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
 
 static chelis_tensor *make_ranked_view(
     float *data, int32_t rank, const int64_t *shape, const int64_t *strides, int64_t size
@@ -3481,8 +7047,11 @@ fn host_lane_positive_rank_mismatch_traps_before_indexing() {
         src.contains("chelis_host_require_elementwise_agreement(__arg0_"),
         "host-lane rank guard must call the shared opaque-tensor guard:\n{src}"
     );
+    let reads_tensor_rank_field = src.lines().any(|line| {
+        line.contains("->rank") && (line.contains("__arg0_") || line.contains("__arg1_"))
+    });
     assert!(
-        !src.contains("->rank"),
+        !reads_tensor_rank_field,
         "host-lane rank guard must not reopen the opaque tensor descriptor:\n{src}"
     );
 
@@ -3661,9 +7230,11 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let output_matrix_ty = matrix("rows", "columns");
     let other_matrix_ty = matrix("other_rows", "other_columns");
     let scalar = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "scalar".into(),
         },
@@ -3672,25 +7243,34 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         output_matrix_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         other_matrix_ty,
         None,
     );
-    let shifted = dag.add_node(RiscOp::Add, vec![scalar, a], output_matrix_ty.clone(), None);
-    let product = dag.add_node(RiscOp::Mul, vec![shifted, b], output_matrix_ty, None);
+    let shifted = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![scalar, a],
+        output_matrix_ty.clone(),
+        None,
+    );
+    let product = dag.add_node(decl, RiscOp::Mul, vec![shifted, b], output_matrix_ty, None);
     let output_ty = TensorType {
         dims: vec![DimInfo::Named("rows".into(), None)],
         precision: Prim::F32,
     };
     let reduced = match reduce_kind {
         "sum" => dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: Prim::F32,
@@ -3700,6 +7280,7 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
             None,
         ),
         "max" => dag.add_node(
+            decl,
             RiscOp::MaxReduce { axis: 1 },
             vec![product],
             output_ty,
@@ -3749,9 +7330,10 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     );
     assert_eq!(
         function_body.matches("chelis_alloc(").count(),
-        1,
-        "reduction-inlined FusedElem must not allocate an intermediate:\n{src}"
+        if reduce_kind == "sum" { 2 } else { 1 },
+        "fused reduction allocates its result and Sum's checked tree scratch:\n{src}"
     );
+    assert!(!function_body.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
 
     let expected = if reduce_kind == "sum" {
         "29.0f, 110.0f"
@@ -3891,10 +7473,23 @@ fn direct_extrema_bit_case(
         ("min", RiscOp::MinElem, expected_min),
     ] {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let ty = vec_prim(n, prim);
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        dag.add_node(op, vec![a, b], ty, None);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(decl, op, vec![a, b], ty, None);
         let function = format!("direct_{op_name}_{tag}");
         let src = codegen(&dag, &function).unwrap().c_source;
         assert!(!src.contains("fmaxf("), "{tag}/{op_name}: {src}");
@@ -4048,10 +7643,29 @@ fn direct_extrema_adjoint_bit_case(
     };
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_prim(n, prim);
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
     for (kind, operand) in [
         (ExtremaKind::Max, ExtremaOperand::Left),
         (ExtremaKind::Max, ExtremaOperand::Right),
@@ -4059,6 +7673,7 @@ fn direct_extrema_adjoint_bit_case(
         (ExtremaKind::Min, ExtremaOperand::Right),
     ] {
         let node = dag.add_node(
+            decl,
             RiscOp::ExtremaAdjoint { kind, operand },
             vec![a, b, g],
             ty.clone(),
@@ -4105,6 +7720,7 @@ fn direct_extrema_adjoint_bit_case(
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
 int main(void) {{
@@ -4264,6 +7880,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -4277,6 +7894,7 @@ fn host_scalar_relu_program(ty: HostType) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
@@ -4294,6 +7912,7 @@ fn host_scalar_relu_reduced_bits_case(tag: &str, ty: HostType, inputs: &[u16], e
     let harness = format!(
         r#"{HARNESS_HEADER}
 #include <stdint.h>
+#define the_fn chelis_fn_7468655f666e
 #define N {n}
 extern uint16_t the_fn(uint16_t);
 int main(void) {{
@@ -4379,11 +7998,24 @@ fn direct_relu_bit_case(case: DirectExtremaBitCase<'_>, expected: [&[u64]; 2]) {
     };
 
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_prim(n, prim);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
-    let relu = dag.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
-    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let relu = dag.add_node(decl, RiscOp::Relu, vec![x], ty.clone(), None);
+    let adjoint = dag.add_node(decl, RiscOp::ReluAdjoint, vec![x, g], ty, None);
     dag.add_root(relu);
     dag.add_root(adjoint);
     let function = format!("direct_relu_{tag}");
@@ -4543,6 +8175,121 @@ fn direct_relu_preserves_input_bits_and_adjoint_uses_strict_positive_mask() {
 /// so consuming `p` in the body does not let the elementwise operand check
 /// preempt it - which the disagreeing case below measures rather than
 /// assumes.
+fn runtime_branch_local_ascription_c() -> chelis_backend_c::CodegenResult {
+    let source = "def f(flag: bool, x: tensor[*, f32]) -> tensor[*, f32] = \
+                  if flag then {\n  \
+                    y: tensor[2, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n  \
+                    y\n\
+                  } else x\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let generated = codegen_with_options(
+        &dag,
+        "runtime_branch_local_ascription",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("runtime branch codegen");
+    assert_eq!(generated.input_labels, ["flag", "x"]);
+    // The claim is checked under its carrier's owner activation, read from
+    // that Bool's storage row by row (any row active runs the guard).
+    assert!(
+        generated
+            .c_source
+            .contains("__local_guard_active |= (((const "),
+        "the claim's guard reads its carrier's owner activation"
+    );
+    generated
+}
+
+fn runtime_branch_local_ascription_harness(flag: bool) -> String {
+    let flag = u8::from(flag);
+    format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void runtime_branch_local_ascription(
+    chelis_tensor **inputs,
+    int n_in,
+    chelis_tensor **outputs,
+    int n_out
+);
+
+int main(void) {{
+    uint8_t flag_data[1] = {{{flag}}};
+    float x_data[3] = {{1.0f, 2.0f, 3.0f}};
+    int64_t x_shape[1] = {{3}};
+    chelis_tensor *flag = chelis_tensor_entry_borrow(
+        0, NULL, CHELIS_DTYPE_BOOL, flag_data, sizeof(flag_data)
+    );
+    chelis_tensor *x = chelis_tensor_entry_borrow(
+        1, x_shape, CHELIS_DTYPE_F32, x_data, sizeof(x_data)
+    );
+    chelis_tensor *inputs[2] = {{flag, x}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    runtime_branch_local_ascription(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    printf("RAN %lld %.1f %.1f %.1f\n",
+           (long long)chelis_tensor_shape(outputs[0], 0),
+           ((const float*)view.data)[0],
+           ((const float*)view.data)[1],
+           ((const float*)view.data)[2]);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(x);
+    chelis_tensor_release(flag);
+    return 0;
+}}
+"#
+    )
+}
+
+#[test]
+fn an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c() {
+    let generated = runtime_branch_local_ascription_c();
+    let run = compile_and_capture_run(
+        "local_ascription_runtime_branch_untaken",
+        &generated.c_source,
+        &runtime_branch_local_ascription_harness(false),
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "RAN 3 1.0 2.0 3.0\n");
+}
+
+#[test]
+fn a_selected_runtime_branch_emits_its_local_ascription_guard_on_c() {
+    let generated = runtime_branch_local_ascription_c();
+    let run = compile_and_capture_run(
+        "local_ascription_runtime_branch_selected",
+        &generated.c_source,
+        &runtime_branch_local_ascription_harness(true),
+    );
+    assert!(!run.status.success(), "the selected local claim must trap");
+    let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    assert!(
+        text.contains("extent `2`: claimed = 2, pad axis 0 = 3"),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "numeric trap: domain in pad at i64"),
+        "{text}"
+    );
+    assert!(!text.contains("RAN "), "{text}");
+}
+
 fn two_witness_dag() -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
     let named = || TensorType {
@@ -4550,10 +8297,23 @@ fn two_witness_dag() -> chelis_ir::dag::Dag {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
-    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], named(), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![x], named(), None);
-    let out = dag.add_node(RiscOp::Add, vec![negated, p], named(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        named(),
+        None,
+    );
+    let p = dag.add_node(
+        decl,
+        RiscOp::Load { name: "p".into() },
+        vec![],
+        named(),
+        None,
+    );
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![x], named(), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![negated, p], named(), None);
     dag.add_root(out);
     dag
 }
@@ -4595,11 +8355,11 @@ int main() {{
         "the guard runs at ENTRY, before any other operation: {out}"
     );
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "section 4.7 makes this an [04-NUM-9] guard naming the `load`: {out}"
     );
     // NOT `out.contains('n')`. That was satisfied by "numeric", "domain in"
-    // and "int64" in the trap line itself, so it asserted nothing about the
+    // and "i64" in the trap line itself, so it asserted nothing about the
     // context line it was meant to check: round 1 replaced the whole context
     // `fprintf` with a literal and both driven rows still passed. Section 4.7
     // requires the disagreeing SOURCE NAMES, the AXIS and each OBSERVED
@@ -4678,7 +8438,9 @@ int main() {{
 fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -4688,6 +8450,7 @@ fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> ch
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(size),
@@ -4716,7 +8479,7 @@ fn same_rank_expand_over_symbolic_operand_dag(x_dim: DimInfo, size: usize) -> ch
 /// witness in signature order". The operand's axis IS the only witness and it
 /// is an input tensor's axis, so the class is all-interface.
 ///
-/// The `<prim>` slot is `int64` because the guarded result is an extent under
+/// The `<prim>` slot is `i64` because the guarded result is an extent under
 /// [05-DIM-1] rather than a tensor element, which is why it does not track the
 /// tensor's own `f32`.
 ///
@@ -4765,7 +8528,7 @@ int main() {{
     let (ok, out) = run("bcast_entry_trap", 2);
     assert!(!ok, "an operand extent of 2 refutes the unit claim: {out}");
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "the trap renders [04-NUM-9] at the extent's dtype, and `<op>` is \
          `load` because the operand's axis is an interface value: {out}"
     );
@@ -4789,12 +8552,20 @@ int main() {{
 fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let scalar = TensorType {
         dims: vec![],
         precision: Prim::F32,
     };
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], scalar, None);
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        scalar,
+        None,
+    );
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -4804,6 +8575,7 @@ fn expand_reading_own_axis_dag(x_dim: DimInfo, out_dim: DimInfo) -> chelis_ir::d
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -4867,7 +8639,7 @@ fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
         "the class guards the same axis against the same literal: {src}"
     );
     assert!(
-        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at int64\")"),
+        src.contains("chelis_numeric_trap(\"numeric trap: domain in load at i64\")"),
         "and renders [04-NUM-9]: {src}"
     );
 }
@@ -4888,12 +8660,19 @@ fn a_literal_class_guard_replaces_the_abi_static_dim_check_on_that_axis() {
 fn the_abi_static_dim_check_survives_where_no_literal_class_guards_the_axis() {
     use chelis_ir::dag::{Dag, RiscOp, TensorType};
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::F32,
     };
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let out = dag.add_node(RiscOp::Neg, vec![x], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Neg, vec![x], ty, None);
     dag.add_root(out);
     let src = codegen(&dag, "noclass").expect("codegen").c_source;
     assert!(
@@ -4931,7 +8710,9 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -4940,9 +8721,22 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
         },
         None,
     );
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named(), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], named(), None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        named(),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        named(),
+        None,
+    );
     let widened = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -4954,7 +8748,7 @@ fn one_axis_reached_by_two_member_spellings_is_guarded_once() {
         named(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![widened, x], named(), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![widened, x], named(), None);
     dag.add_root(out);
 
     let src = codegen(&dag, "dedupe").expect("codegen").c_source;
@@ -4997,27 +8791,43 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let zz = dag.add_node(
+        decl,
         RiscOp::Load { name: "zz".into() },
         vec![],
         dim("zdim"),
         None,
     );
     let aa = dag.add_node(
+        decl,
         RiscOp::Load { name: "aa".into() },
         vec![],
         dim("adim"),
         None,
     );
-    let p = dag.add_node(RiscOp::Load { name: "p".into() }, vec![], dim("zdim"), None);
-    let q = dag.add_node(RiscOp::Load { name: "q".into() }, vec![], dim("adim"), None);
+    let p = dag.add_node(
+        decl,
+        RiscOp::Load { name: "p".into() },
+        vec![],
+        dim("zdim"),
+        None,
+    );
+    let q = dag.add_node(
+        decl,
+        RiscOp::Load { name: "q".into() },
+        vec![],
+        dim("adim"),
+        None,
+    );
     // All four witnesses are READ, and both classes still have to reach one
     // result, so the `adim` pair is reduced to a scalar and broadcast back
     // over `zdim`. The unread form is section 4.7's stronger case and is not
     // testable here; see `two_witness_dag`.
-    let zsum = dag.add_node(RiscOp::Add, vec![zz, p], dim("zdim"), None);
-    let asum = dag.add_node(RiscOp::Add, vec![aa, q], dim("adim"), None);
+    let zsum = dag.add_node(decl, RiscOp::Add, vec![zz, p], dim("zdim"), None);
+    let asum = dag.add_node(decl, RiscOp::Add, vec![aa, q], dim("adim"), None);
     let folded = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
@@ -5030,6 +8840,7 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         None,
     );
     let spread = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::InputAxis {
@@ -5041,7 +8852,7 @@ fn entry_guards_run_in_assigned_slot_order_not_claim_name_order() {
         dim("zdim"),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![zsum, spread], dim("zdim"), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![zsum, spread], dim("zdim"), None);
     dag.add_root(out);
 
     let result = codegen_with_options(
@@ -5087,7 +8898,7 @@ int main() {{
         "`adim` sorts first by name but its guard runs second: {out}"
     );
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "an all-interface class renders [04-NUM-9]: {out}"
     );
 }
@@ -5150,7 +8961,7 @@ int main() {{
     let (ok, out) = run("lit_entry", 5);
     assert!(!ok, "a declared tensor[4] over a read of 5: {out}");
     assert!(
-        out.contains("numeric trap: domain in load at int64"),
+        out.contains("numeric trap: domain in load at i64"),
         "section 4.7 renders this [04-NUM-9], not the ABI check's abort: {out}"
     );
     assert!(
@@ -5181,6 +8992,7 @@ int main() {{
 ///
 /// EVIDENTIARY STATUS: regression test for the RENDERING - `main` emits
 /// `chelis: runtime dim `n` mismatch at node 3 axis 0` followed by `abort()`
+/// (the legacy rendering; the shipped context names the operation)
 /// at this site, which [04-NUM-9] does not permit - and a disposition lock
 /// for the position, which `main` already gets right through chelis#616's
 /// `runtime_dim_sites`.
@@ -5191,8 +9003,16 @@ fn local_class_dag() -> chelis_ir::dag::Dag {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], named("n"), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        named("n"),
+        None,
+    );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -5202,6 +9022,7 @@ fn local_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -5210,6 +9031,7 @@ fn local_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5246,7 +9068,7 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
     assert!(
         result
             .c_source
-            .contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+            .contains("chelis_numeric_trap(\"numeric trap: domain in insert at i64\")"),
         "and `<op>` names the operation introducing the extent: {}",
         result.c_source
     );
@@ -5277,11 +9099,11 @@ int main() {{
     };
 
     // `stride(x, 2)` yields `ceil(n / 2)`, so the claim `n` and the extent
-    // the `expand` actually reads agree only at n = 1.
+    // the rank-inserting operation actually reads agree only at n = 1.
     let (ok, out) = run("local_guard", 3);
     assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
     assert!(
-        out.contains("numeric trap: domain in expand at int64"),
+        out.contains("numeric trap: domain in insert at i64"),
         "the local guard renders [04-NUM-9]: {out}"
     );
     assert!(
@@ -5301,153 +9123,234 @@ int main() {{
     );
 }
 
-/// A LOCAL member whose own dim the checker resolved is not a guard site.
-///
-/// The rule keys on PROVENANCE, the same axis section 4.7 uses to place a
-/// guard at entry or at the introducing operation. A local member's extent is
-/// the shape of a tensor THIS function computed, so when the checker resolved
-/// its dim to a literal the read equals that literal by construction and the
-/// comparison could only catch a compiler bug - which C2.4 already declines
-/// for a literal claim matching a literal size. An INTERFACE member's
-/// resolved size is a claim about what the caller must pass and proves
-/// nothing, so it is guarded and never exempted: that is chelis#1377's entry
-/// row, and `an_interface_member_of_a_mixed_class_is_still_checked` measures
-/// it for the mixed case where the class as a whole is Local.
-///
-/// EVIDENTIARY STATUS: regression test, measured both ways - reverting the
-/// predicate emits this site. It is NOT a disposition lock: `main` forms no
-/// class here at all, so there is nothing for a lock to hold.
+/// [04] section 4.7: a declared number is a claim, not evidence about
+/// the independent size carrier. Exercise live Expand/Reshape sites with
+/// computed scalar sizes and reads of computed tensors, on both host lanes.
 #[test]
-fn a_local_member_the_checker_resolved_is_not_a_guard_site() {
-    use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
-    let resolved = || TensorType {
-        dims: vec![DimInfo::Named("n".into(), Some(4))],
-        precision: Prim::F32,
-    };
-    let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
-    let b = dag.add_node(
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let strided = dag.add_node(
-        RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
-        },
-        vec![x],
-        TensorType {
-            dims: vec![DimInfo::Named("s".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let out = dag.add_node(
-        RiscOp::Expand {
-            axis: 0,
-            size: RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-        },
-        vec![b, strided],
-        resolved(),
-        None,
-    );
-    dag.add_root(out);
-
-    let src = codegen(&dag, "resolved_local").expect("codegen").c_source;
-
-    // The POSITIVE half, in the same shape with the claim left unresolved, so
-    // neither assertion is satisfiable by an empty file and the pair
-    // discriminates the predicate rather than the presence of output.
-    let mut open = Dag::new();
-    let unresolved = || TensorType {
-        dims: vec![DimInfo::Named("n".into(), None)],
-        precision: Prim::F32,
-    };
-    let ox = open.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        unresolved(),
-        None,
-    );
-    let ob = open.add_node(
-        RiscOp::Load { name: "b".into() },
-        vec![],
-        TensorType {
-            dims: vec![],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let ostrided = open.add_node(
-        RiscOp::Stride {
-            strides: vec![RtDim::Lit(2)],
-        },
-        vec![ox],
-        TensorType {
-            dims: vec![DimInfo::Named("s".into(), None)],
-            precision: Prim::F32,
-        },
-        None,
-    );
-    let oout = open.add_node(
-        RiscOp::Expand {
-            axis: 0,
-            size: RtDim::InputAxis {
-                tensor: 1,
-                axis: RtAxis::Lit(0),
-            },
-        },
-        vec![ob, ostrided],
-        unresolved(),
-        None,
-    );
-    open.add_root(oout);
-    let open_src = codegen(&open, "open_local").expect("codegen").c_source;
-    assert!(
-        open_src.contains("node 3 axis 0 = %lld"),
-        "an unresolved Local member is still a guard site: {open_src}"
-    );
-    // The discriminating assertion names the SITE, not a bare absence of
-    // `extent`: the input preamble's static-dim check and chelis#616's
-    // `emit_static_dim_guard` also compare against 4 in this program, and an
-    // earlier draft asserting `!= 4)` passed on those with and without the
-    // predicate, saying nothing about the guard under test.
-    assert!(
-        !src.contains("node 3 axis 0 = %lld"),
-        "a local member the checker resolved is the compiler's own proof and \
-         owes no runtime self-check: {src}"
-    );
-    // And the interface half is untouched: `x`'s own axis still carries the
-    // ABI check, so the narrowing did not widen into deleting the caller's
-    // obligation.
-    assert!(
-        src.contains("input `x` axis 0 expected 4"),
-        "an interface member's resolved size is a caller claim and stays checked: {src}"
-    );
+fn numeric_local_extent_claims_execute_exactly() {
+    use chelis_ir::dag::{RtAxis, RtDim};
+    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    let mut failures = Vec::new();
+    let mut executions = 0;
+    for resolved_name in [false, true] {
+        for reshape in [false, true] {
+            for tensor_size in [false, true] {
+                let mut dag = Dag::new();
+                let decl = dag.declare("test");
+                let claim = if resolved_name {
+                    DimInfo::Named("n".into(), Some(4))
+                } else {
+                    DimInfo::Lit(4)
+                };
+                let x = dag.add_node(
+                    decl,
+                    RiscOp::Load { name: "x".into() },
+                    vec![],
+                    TensorType {
+                        dims: vec![claim.clone()],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+                let integer = TensorType {
+                    dims: vec![],
+                    precision: Prim::Int64,
+                };
+                let delta = dag.add_node(
+                    decl,
+                    RiscOp::Load {
+                        name: "delta".into(),
+                    },
+                    vec![],
+                    integer.clone(),
+                    None,
+                );
+                let (size, carrier) = if tensor_size {
+                    let strided = dag.add_node(
+                        decl,
+                        RiscOp::Stride {
+                            strides: vec![RtDim::Node(1)],
+                        },
+                        vec![x, delta],
+                        TensorType {
+                            dims: vec![DimInfo::Named("computed".into(), None)],
+                            precision: Prim::F32,
+                        },
+                        None,
+                    );
+                    (
+                        strided,
+                        RtDim::InputAxis {
+                            tensor: 1,
+                            axis: RtAxis::Lit(0),
+                        },
+                    )
+                } else {
+                    let read = dag.add_node(
+                        decl,
+                        RiscOp::Shape { axis: 0 },
+                        vec![x],
+                        integer.clone(),
+                        None,
+                    );
+                    let sum = dag.add_node(decl, RiscOp::Add, vec![read, delta], integer, None);
+                    (sum, RtDim::Node(1))
+                };
+                let operand = if reshape {
+                    x
+                } else {
+                    dag.add_node(
+                        decl,
+                        RiscOp::Sum {
+                            axis: 0,
+                            accumulator: Prim::F32,
+                        },
+                        vec![x],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::F32,
+                        },
+                        None,
+                    )
+                };
+                let op = if reshape {
+                    RiscOp::Reshape {
+                        new_shape: vec![carrier],
+                    }
+                } else {
+                    RiscOp::Expand {
+                        axis: 0,
+                        size: carrier,
+                    }
+                };
+                let root = dag.add_node(
+                    decl,
+                    op,
+                    vec![operand, size],
+                    TensorType {
+                        dims: vec![claim],
+                        precision: Prim::F32,
+                    },
+                    None,
+                );
+                dag.add_root(root);
+                let generated = codegen_with_options(
+                    &dag,
+                    "numeric_claim",
+                    CodegenOptions {
+                        use_blas: false,
+                        math_lib_override: Some(MathLib::None),
+                        static_entry: false,
+                    },
+                )
+                .expect("the runtime carrier is supported");
+                assert_eq!(generated.input_labels, ["x", "delta"]);
+                for good in [true, false] {
+                    let delta_value = if tensor_size {
+                        if good { 1 } else { 2 }
+                    } else if good {
+                        0
+                    } else {
+                        1
+                    };
+                    let observed = if good {
+                        4
+                    } else if tensor_size {
+                        2
+                    } else {
+                        5
+                    };
+                    let name =
+                        format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
+                    let op = if reshape { "reshape" } else { "insert" };
+                    let trap = format!("numeric trap: domain in {op} at i64");
+                    // Section 4.7's context names the OPERATION that
+                    // introduces the extent, not the node id: a node id is not
+                    // a source name and does not survive `spec/06` section
+                    // 5.2-5.4's renumbering passes.
+                    let _ = root;
+                    let context = format!("{op} axis 0 = {observed}");
+                    let expected = if reshape {
+                        vec![1.0, 2.0, 3.0, 4.0]
+                    } else {
+                        vec![10.0; 4]
+                    };
+                    let evaluation = eval_tensor_with(&dag, |input| match input {
+                        "x" => Some(TensorValue::from_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0])),
+                        "delta" => Some(TensorValue::scalar(f64::from(delta_value))),
+                        _ => None,
+                    });
+                    match evaluation {
+                        Ok(values) if good => {
+                            let actual = &values[&root];
+                            if actual.shape != [4] || actual.to_f64_lossy_vec() != expected {
+                                failures
+                                    .push(format!("{name}.eval: wrong shape/value: {actual:?}"));
+                            }
+                        }
+                        Err(error)
+                            if !good
+                                && error.lines().any(|line| line == trap)
+                                && error.contains("claimed = 4")
+                                && error.contains(&context) => {}
+                        other => failures.push(format!(
+                            "{name}.eval: expected good={good}, observed {other:?}"
+                        )),
+                    }
+                    let expected_c = if reshape {
+                        "{1,2,3,4}"
+                    } else {
+                        "{10,10,10,10}"
+                    };
+                    let harness = format!(
+                        r#"{HARNESS_HEADER}
+extern void numeric_claim(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+int main(void) {{
+    float xd[4] = {{1,2,3,4}};
+    int64_t delta = {delta_value};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 4), chelis_tensor_entry_borrow(0, NULL, CHELIS_DTYPE_I64, &delta, sizeof(delta))}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    numeric_claim(inputs, 2, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 1 || chelis_tensor_shape(outputs[0], 0) != 4) return 41;
+    chelis_tensor* dense = chelis_contiguous(outputs[0]);
+    chelis_read_view view = chelis_tensor_read_view(dense);
+    float expected[4] = {expected_c};
+    if (view.dtype != CHELIS_DTYPE_F32 || view.count != 4) return 42;
+    for (int i = 0; i < 4; i++) if (((const float*)view.data)[i] != expected[i]) return 43;
+    puts("EXACT SHAPE AND VALUES");
+    return 0;
+}}
+"#
+                    );
+                    let (ok, output) =
+                        compile_and_run_kernel_capturing(&name, &generated.c_source, &harness);
+                    if good {
+                        if !ok || output.trim() != "EXACT SHAPE AND VALUES" {
+                            failures.push(format!(
+                                "{name}.c: expected exact execution, ok={ok}: {output}"
+                            ));
+                        }
+                    } else if ok
+                        || !output.lines().any(|line| line == trap)
+                        || !output.contains("claimed = 4")
+                        || !output.contains(&context)
+                    {
+                        failures.push(format!(
+                            "{name}.c: expected {trap} with {context}, ok={ok}: {output}"
+                        ));
+                    }
+                    executions += 2;
+                }
+            }
+        }
+    }
+    assert_eq!(executions, 32, "every pair must execute both lanes");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// P2-2's measurement, kept as a row. A class MIXING an interface member with
-/// a local one is `Local` as a whole, because `placement` returns `Entry`
-/// only when every member is an interface value. The question that raises: is
-/// the INTERFACE member still checked, given that the entry path skips Local
-/// classes and the local path applies the resolved-dim skip?
-///
-/// It is, and by the ABI static-dim check rather than by a class guard. The
-/// b2.4 narrowing that drops that check is built from `entry_dim_classes()`
-/// alone, so it never fires for a member of a Local class, and the caller's
-/// obligation on `x` axis 0 survives. Driving the kernel with the wrong
-/// extent for `x` aborts on it.
-///
-/// EVIDENTIARY STATUS: regression test for the narrowing's boundary. It fails
-/// if the ABI narrowing is ever widened from `entry_dim_classes()` to every
-/// class, which is the change that would leave this axis unchecked.
+/// A mixed class keeps the static ABI check on its resolved declaring input.
+/// The entry-class narrowing must not erase it merely because the class also
+/// has local carrier members.
 #[test]
 fn an_interface_member_of_a_mixed_class_is_still_checked() {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
@@ -5456,8 +9359,16 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], resolved(), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        resolved(),
+        None,
+    );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -5468,6 +9379,7 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
     );
     // Interface member: an `expand` sized by a folded read of the INPUT `x`.
     let from_input = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5481,6 +9393,7 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
     );
     // Local member: an `expand` sized by a folded read of a COMPUTED tensor.
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -5492,6 +9405,7 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
         None,
     );
     let from_computed = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5504,6 +9418,7 @@ fn an_interface_member_of_a_mixed_class_is_still_checked() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![from_input, from_computed],
         resolved(),
@@ -5555,29 +9470,9 @@ int main() {{
     );
 }
 
-/// The narrow case round 2 asked to be measured: an INTERFACE member carrying
-/// a literal claim on an input whose own declared dim is SYMBOLIC, in a class
-/// a computed co-member places `Local`.
-///
-/// Every check that could cover `x` axis 0 is out of the way by construction:
-/// the ABI static-dim preamble needs a `known_dim_size` and `n` has none; the
-/// entry path takes `entry_dim_classes()` and this class is Local; and the
-/// local path takes `Name` claims only, so a `Literal` claim contributes no
-/// site at all. The question is whether anything traps when the caller passes
-/// the wrong extent.
-///
-/// **Nothing traps, and `main` does not either.** Measured both ways by
-/// running this exact DAG on a tree built from `6b00299b6`: no ABI check, no
-/// entry guard, no local guard, and the kernel runs to `shape=4` on a caller
-/// that passed 5. So this is a PRE-EXISTING gap that this slice neither
-/// introduces nor worsens, not a regression, and closing it needs per-MEMBER
-/// placement - an interface member guarded at entry regardless of what its
-/// class's other members are - which is a mechanism change and belongs with
-/// B2b's derivation work rather than here.
-///
-/// EVIDENTIARY STATUS: disposition lock on a pre-existing gap, not a
-/// regression test. It goes red when someone closes the gap, which is the
-/// point: the row names the case so the closure is deliberate.
+/// A literal claim reading a symbolic input, in a class placed Local by a
+/// computed co-member. No static ABI check covers the input; the local
+/// carrier consumer must check its independently supplied extent.
 fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
     let four = || TensorType {
@@ -5585,7 +9480,9 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -5595,6 +9492,7 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -5604,6 +9502,7 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let from_input = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5616,6 +9515,7 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -5627,6 +9527,7 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         None,
     );
     let from_computed = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5638,13 +9539,19 @@ fn symbolic_input_mixed_class_dag() -> chelis_ir::dag::Dag {
         four(),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![from_input, from_computed], four(), None);
+    let out = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![from_input, from_computed],
+        four(),
+        None,
+    );
     dag.add_root(out);
     dag
 }
 
 #[test]
-fn a_literal_claim_on_a_symbolic_input_in_a_local_class_is_unguarded() {
+fn a_literal_claim_on_a_symbolic_input_in_a_local_class_traps() {
     let dag = symbolic_input_mixed_class_dag();
     let result = codegen_with_options(
         &dag,
@@ -5656,17 +9563,9 @@ fn a_literal_claim_on_a_symbolic_input_in_a_local_class_is_unguarded() {
         },
     )
     .expect("codegen");
-    // Every check that could cover the interface member is absent, and each
-    // for its own reason: no `known_dim_size` on a symbolic `n`, the entry
-    // path takes Entry classes only, and the local path takes `Name` claims
-    // only.
+    // The symbolic input supplies no static ABI size check. The operation
+    // still owes its local literal claim before allocation or indexing.
     assert!(!result.c_source.contains("input `x` axis 0 expected"));
-    assert_eq!(
-        result.c_source.matches("numeric trap: domain in").count(),
-        0,
-        "no guard of any kind covers this axis: {}",
-        result.c_source
-    );
     let harness = format!(
         r#"{HARNESS_HEADER}
 extern void sym_mixed(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
@@ -5685,33 +9584,20 @@ int main() {{
 "#
     );
     let (ok, out) = compile_and_run_kernel_capturing("sym_mixed", &result.c_source, &harness);
-    assert!(ok, "the gap is silent rather than trapping: {out}");
+    assert!(!ok, "the local literal claim must trap: {out}");
     assert!(
-        out.contains("NO TRAP shape=4"),
-        "a caller passing 5 for a claimed 4 runs to completion, as it does on \
-         `main`: {out}"
+        out.lines()
+            .any(|line| line == "numeric trap: domain in insert at i64")
+            && out.contains("claimed = 4")
+            && out.contains("insert axis 0 = 5")
+            && !out.contains("NO TRAP"),
+        "the failure must identify the literal claim and observed carrier: {out}"
     );
 }
 
-/// The row that fails without the local-member narrowing, and the `Name`
-/// sibling of the unguarded-gap row above.
-///
-/// A `Name` class over an INTERFACE member reading `y`'s axis and a LOCAL
-/// co-member reading a strided tensor. Both declaring inputs are symbolic, so
-/// no ABI static-dim check covers either; the co-member places the class
-/// `Local`, so the entry path skips it; and the claim is a `Name`, so the
-/// local path does take it. The interface member's own dim is RESOLVED, which
-/// is exactly the shape the resolved-dim proof would exempt if it were
-/// applied to every member of a Local class instead of to local members only.
-///
-/// With the narrowing the interface member keeps its site and a caller
-/// passing disagreeing extents traps. Without it the member is skipped and
-/// the kernel is silent - and nothing else catches it, which is what makes
-/// this the coverage the narrowing was missing.
-///
-/// EVIDENTIARY STATUS: regression test for the narrowing, measured both ways.
-/// It also shows the narrowing buys a check `main` never had: `main` forms no
-/// class here at all.
+/// An unresolved symbolic input supplies an independently observed extent
+/// under a resolved named claim. A computed co-member places the class Local;
+/// the resolved result metadata must not exempt its interface member either.
 #[test]
 fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
     use chelis_ir::dag::{Dag, RiscOp, RtAxis, RtDim, TensorType};
@@ -5724,9 +9610,23 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], open("n"), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], open("m"), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        open("n"),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        open("m"),
+        None,
+    );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         TensorType {
@@ -5739,6 +9639,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
     // claim `n` is declared from `x`, so the comparison is between two
     // different inputs rather than a value with itself.
     let from_input = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5751,6 +9652,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         None,
     );
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -5759,6 +9661,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         None,
     );
     let from_computed = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -5771,6 +9674,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![from_input, from_computed],
         resolved(),
@@ -5794,8 +9698,2365 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("node 3 axis 0 = %lld"),
+        result.c_source.contains("insert axis 0 = %lld"),
         "the interface member of a Local class keeps its site: {}",
         result.c_source
     );
+}
+
+/// Spec/04 section 4.7: simultaneous local guards follow declaration order,
+/// even when reshape reverses the claimed axes. Each lane owes the exact first
+/// failure independently; the matching control must preserve shape and values.
+#[test]
+fn local_reshape_guards_follow_declaration_order() {
+    use chelis_ir::dag::RtDim;
+    use chelis_ir::eval::{TensorValue, eval_tensor_with};
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let n = DimInfo::Named("n".into(), Some(4));
+    let m = DimInfo::Named("m".into(), Some(2));
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![n.clone(), m.clone()],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let int = TensorType {
+        dims: vec![],
+        precision: Prim::Int64,
+    };
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        int.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        int.clone(),
+        None,
+    );
+    let ashape = dag.add_node(decl, RiscOp::Shape { axis: 1 }, vec![x], int.clone(), None);
+    let bshape = dag.add_node(decl, RiscOp::Shape { axis: 0 }, vec![x], int.clone(), None);
+    let ac = dag.add_node(decl, RiscOp::Add, vec![ashape, a], int.clone(), None);
+    let bc = dag.add_node(decl, RiscOp::Add, vec![bshape, b], int, None);
+    let root = dag.add_node(
+        decl,
+        RiscOp::Reshape {
+            new_shape: vec![RtDim::Node(1), RtDim::Node(2)],
+        },
+        vec![x, ac, bc],
+        TensorType {
+            dims: vec![m, n],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(root);
+    let generated = codegen_with_options(
+        &dag,
+        "order_probe",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(generated.input_labels, ["x", "a", "b"]);
+    for (delta_a, delta_b) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let good = delta_a == 0 && delta_b == 0;
+        let eval = eval_tensor_with(&dag, |name| match name {
+            "x" => Some(TensorValue::from_vec(
+                vec![4, 2],
+                (1..=8).map(f64::from).collect(),
+            )),
+            "a" => Some(TensorValue::scalar(f64::from(delta_a))),
+            "b" => Some(TensorValue::scalar(f64::from(delta_b))),
+            _ => None,
+        });
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+extern void order_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{ float x[8]={{1,2,3,4,5,6,7,8}}; int64_t sh[2]={{4,2}},da={delta_a},db={delta_b};
+chelis_tensor* inputs[3]={{chelis_tensor_entry_borrow(2,sh,CHELIS_DTYPE_F32,x,sizeof(x)),chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_I64,&da,sizeof(da)),chelis_tensor_entry_borrow(0,NULL,CHELIS_DTYPE_I64,&db,sizeof(db))}};
+chelis_tensor* outputs[1]={{NULL}}; order_probe(inputs,3,outputs,1);
+if(chelis_tensor_rank(outputs[0])!=2 || chelis_tensor_shape(outputs[0],0)!=2 || chelis_tensor_shape(outputs[0],1)!=4) return 41;
+chelis_read_view v=chelis_tensor_read_view(outputs[0]); if(v.count!=8) return 42;
+for(int i=0;i<8;i++) if(((const float*)v.data)[i]!=i+1) return 43;
+puts("EXACT"); return 0; }}"#
+        );
+        let (ok, c) = compile_and_run_kernel_capturing(
+            "local_reshape_guard_order",
+            &generated.c_source,
+            &harness,
+        );
+        if good {
+            let v = eval.unwrap();
+            assert_eq!(v[&root].shape, [2, 4]);
+            assert_eq!(
+                v[&root].to_f64_lossy_vec(),
+                (1..=8).map(f64::from).collect::<Vec<_>>()
+            );
+            assert!(ok, "{c}");
+            assert_eq!(c.trim(), "EXACT");
+        } else {
+            let e = eval.unwrap_err();
+            assert!(!ok, "mismatching claims must fail: {c}");
+            let (claim, required, axis, observed) = if delta_b != 0 {
+                ("n", 4, 1, 5)
+            } else {
+                ("m", 2, 0, 3)
+            };
+            let _ = root;
+            let context =
+                format!("extent {claim}: claimed = {required}, reshape axis {axis} = {observed}");
+            for (lane, diagnostic) in [("eval", e), ("c", c)] {
+                let diagnostic = diagnostic.replace('`', "");
+                assert!(
+                    diagnostic
+                        .lines()
+                        .any(|line| line == "numeric trap: domain in reshape at i64"),
+                    "{lane}: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.lines().any(|line| line == context),
+                    "{lane}: expected {context}, observed {diagnostic}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_snapshot_shape_capture_survives_submission_repurpose() {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(1)],
+        precision: Prim::Int64,
+    };
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let owned = dag.add_node(decl, RiscOp::Copy, vec![x], ty, None);
+    let out = dag.add_node(
+        decl,
+        RiscOp::Shape { axis: 0 },
+        vec![owned],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_root(out);
+    let generated = codegen_with_options(
+        &dag,
+        "snapshot_shape",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .unwrap();
+    let source = &generated.c_source;
+    let capture = "const int64_t t2_shape_extent = chelis_tensor_shape(t1, 0);";
+    assert!(source.contains(capture), "{source}");
+    let harness = r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void snapshot_shape(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {
+    int64_t data = 91, shape = 1;
+    chelis_tensor *input = chelis_tensor_entry_borrow(1, &shape, CHELIS_DTYPE_I64, &data, sizeof(data));
+    chelis_tensor *outputs[1] = {NULL};
+    snapshot_shape(&input, 1, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (chelis_tensor_rank(outputs[0]) != 0 || view.dtype != CHELIS_DTYPE_I64 || view.count != 1 || ((const int64_t*)view.data)[0] != 1) return 43;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(input);
+    puts("EXTENT BEFORE REUSE"); return 0;
+}
+"#;
+    let valid = checked_indexing_run(source, harness);
+    assert!(valid.status.success(), "{valid:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&valid.stdout),
+        "EXTENT BEFORE REUSE\n"
+    );
+    // The current planner keeps a last-use input live through submission. Also
+    // exercise the emitter's capture order with a legal same-capacity submitter
+    // that repurposes this owned source; this is an explicit fixture variant.
+    let allocation = "chelis_tensor *t2 = chelis_alloc(0, NULL, CHELIS_DTYPE_I64);";
+    assert_eq!(source.matches(allocation).count(), 1);
+    let resubmitted = source
+        .replace("chelis_tensor_end_write(t1_write_guard);", "")
+        .replace("chelis_tensor_release(t1);", "")
+        .replace(allocation, "chelis_tensor_end_write(t1_write_guard); chelis_tensor_repurpose(t1, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), NULL); chelis_tensor *t2 = t1;");
+    let reused = checked_indexing_run(&resubmitted, harness);
+    assert!(reused.status.success(), "{reused:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reused.stdout),
+        "EXTENT BEFORE REUSE\n"
+    );
+    let removed = resubmitted.replace(capture, "");
+    let marker = "chelis_fill_scalar(t2_write_guard,";
+    assert_eq!(removed.matches(marker).count(), 1);
+    let mutated = removed.replacen(marker, &format!("{capture}\n    {marker}"), 1);
+    let invalid = checked_indexing_run(&mutated, harness);
+    assert_eq!(
+        invalid.status.code(),
+        Some(1),
+        "late shape observation must fail after rank-zero repurpose: {invalid:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("axis"),
+        "{invalid:?}"
+    );
+}
+
+/// A one-parameter host function `the_fn(a) = diagonal(a, 0, 1)` whose declared
+/// result carries `declared` on its single axis (chelis#1739).
+fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
+    let operand_ty = host_tensor(operand);
+    let result_ty = TensorType {
+        dims: vec![DimInfo::Lit(declared)],
+        precision: Prim::F32,
+    };
+    let axis = |value: i64| HostExpr::new(HostExprKind::Int(value));
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "diagonal".to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(operand_ty.clone()),
+            )),
+            axis(0),
+            axis(1),
+        ],
+        ty: HostType::Tensor(result_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "a".to_string(),
+                ty: HostType::Tensor(operand_ty),
+            }],
+            ret_ty: HostType::Tensor(result_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
+    }
+}
+
+/// chelis#1739, driven under the sanitizers. A host-lane function whose declared
+/// result extent the body cannot produce aborts at its return boundary with the
+/// `[04-NUM-9]` `Domain` rendering, and the same function with an agreeing
+/// declaration returns its exact result.
+///
+/// The host lane has no `ExtentWitness`, so this guard is the only thing between
+/// a wrong declaration and a silent wrong answer. Driven here rather than only
+/// through the CLI so the added shape read and `fprintf` run under
+/// `-fsanitize=address,undefined`.
+#[test]
+fn host_declared_result_extent_guard_traps_and_executes_under_sanitizers() {
+    for (rows, declared, expect_trap) in [(2usize, 3usize, true), (3, 3, false), (5, 4, false)] {
+        let source = emit_host_program(
+            &host_diagonal_program(vec![rows, 4], declared),
+            "host_result_extent",
+        )
+        .unwrap();
+        let harness = format!(
+            r#"
+#include <stdio.h>
+#include "chelis_runtime.h"
+#define the_fn chelis_fn_7468655f666e
+chelis_tensor *the_fn(chelis_tensor *);
+int main(void) {{
+    int64_t dims[2] = {{{rows}, 4}};
+    chelis_tensor *a = chelis_alloc(2, dims, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(a);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < {rows} * 4; ++i) data[i] = (float)(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn(a);
+    chelis_read_view view = chelis_tensor_read_view(out);
+    printf("RETURNED %lld\n", (long long)view.count);
+    chelis_tensor_release(out);
+    chelis_tensor_release(a);
+    return 0;
+}}
+"#
+        );
+        let run = checked_indexing_run(&source, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        if expect_trap {
+            assert!(
+                !run.status.success(),
+                "a declared {declared} over min({rows}, 4) must abort: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains("numeric trap: domain in diagonal at i64"),
+                "the frozen [04-NUM-9] line: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "extent `{declared}`: claimed = {declared}, diagonal axis 0 = {}",
+                    rows.min(4)
+                )),
+                "the accompanying context line: {stderr}"
+            );
+            assert!(
+                !stdout.contains("RETURNED"),
+                "the guard runs BEFORE the result reaches the caller: {stdout}"
+            );
+        } else {
+            assert!(
+                run.status.success(),
+                "an agreeing declaration must execute: {stdout}{stderr}"
+            );
+            assert_eq!(
+                stdout,
+                format!("RETURNED {}\n", rows.min(4)),
+                "and return its exact result: {stderr}"
+            );
+        }
+    }
+}
+
+/// chelis#1775 C-lane receipt: a runtime extent shared by two reshapes is
+/// declared ONCE in the emitted C and re-checked at the second carrier.
+///
+/// The PR that keyed a computed reshape extent by its producing scalar rests a
+/// safety argument on this: two reshapes sized from one scalar now carry the
+/// same dim symbol, and the emitter must declare that symbol at the first site
+/// and emit a runtime equality abort at the later one rather than redeclaring
+/// it. Nothing else in that change set reaches the C lane, so this is the
+/// fixture that proves the argument instead of asserting it.
+///
+/// REGRESSION TEST for the shared-name build (it cannot even be constructed
+/// before the repair: the two rows disagree, `concat` falls to its rank-0 host
+/// placeholder and there is no `Pad` cascade to emit).
+/// DISPOSITION LOCK for the mutation arm: the later carrier's guard is live on
+/// both sides of the repair, and this pins that it aborts rather than reading
+/// a second, silently different extent.
+#[test]
+fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
+    use chelis_unord::UnordMap;
+
+    // `let m = cast(shape(x, 0), i64) in concat([reshape(x, [1, m]),
+    //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
+    let row = "(app {} (var {} reshape) (var {} x) \
+       (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} i64)) \
+         (app {} (var {} Cons) (var {} m) (var {} Nil))))";
+    let src = format!(
+        "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))) (t-prim {{}} i64))) \
+         (app {{}} (var {{}} concat) \
+           (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} i32))))"
+    );
+    let mut exprs = chelis_deep::parser::parse_str(&src).expect("deep parse");
+    assert_eq!(exprs.len(), 1);
+    let expr = exprs.pop().unwrap();
+    let mut scoped = UnordMap::new();
+    scoped.insert(
+        "x".to_string(),
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+    );
+    let dag =
+        chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
+
+    // The premise: one shared symbol across both rows, and the differentiable
+    // Pad+Add cascade rather than the rank-0 host `concat` placeholder.
+    let axis_names: Vec<String> = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+        .map(|node| match &node.output_type.dims[1] {
+            DimInfo::Named(name, None) => name.clone(),
+            other => panic!("expected a generated runtime dim, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
+    assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
+            .count(),
+        2,
+        "the concat must be the Pad cascade: {dag:?}"
+    );
+
+    let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
+
+    // The symbol is declared once. Every later mention is a use or a guard.
+    let declarations = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("int64_t {};", axis_names[0])))
+        .count()
+        + generated
+            .c_source
+            .lines()
+            .filter(|line| line.contains(&format!("int64_t {} =", axis_names[0])))
+            .count();
+    assert_eq!(
+        declarations, 1,
+        "the shared runtime extent is declared exactly once:\n{}",
+        generated.c_source
+    );
+
+    // 1.0f as its exact IEEE-754 binary32 image; the runtime takes scalar
+    // bits, never an untagged double ([04-NUM-11]).
+    let harness = r#"
+#include "chelis_runtime.h"
+void shared_extent(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {
+    int64_t shape[] = {4};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0x3F800000)));
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {x}, *outputs[] = {NULL};
+    shared_extent(inputs, 1, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 2) return 4;
+    if (chelis_tensor_shape(outputs[0], 0) != 2) return 5;
+    if (chelis_tensor_shape(outputs[0], 1) != 4) return 6;
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != 8) return 7;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (((const float *)out.data)[i] != 1.0f) return 8;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("SHARED EXTENT PASS"); return 0;
+}
+"#;
+
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent", &generated.c_source, harness);
+    assert!(ok, "shared-extent kernel must build, link and run: {text}");
+    assert!(
+        text.contains("SHARED EXTENT PASS"),
+        "the stack must materialize as [2, 4]: {text}"
+    );
+
+    // The later carrier's guard is LIVE, not decorative. Make the second
+    // reshape read a different extent than the declared symbol and the binary
+    // must trap instead of sizing an axis from a second, unequal value. The
+    // guard's own `fprintf` names the node, so find its read by that line and
+    // perturb the read the comparison performs.
+    let guard_line = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("extent `{}`: claimed", axis_names[0])))
+        .nth(1)
+        .expect("the later carrier carries its own equality guard")
+        .to_owned();
+    let carrier = guard_line
+        .split("(long long)(")
+        .nth(2)
+        .and_then(|rest| rest.strip_suffix("));"))
+        .expect("the guard prints the carrier read it compared")
+        .to_owned();
+    assert!(
+        carrier.contains("_data)[0]"),
+        "expected a carrier read, got {carrier}"
+    );
+    let comparison = format!("if (({carrier}) != {})", axis_names[0]);
+    assert!(
+        generated.c_source.contains(&comparison),
+        "the later guard compares the carrier against the declared symbol:\n{}",
+        generated.c_source
+    );
+    let mutated = generated.c_source.replacen(
+        &comparison,
+        &format!("if ((({carrier}) + 1) != {})", axis_names[0]),
+        1,
+    );
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
+    assert!(!ok, "a disagreeing later carrier must abort: {text}");
+    assert!(
+        text.contains("numeric trap: domain in reshape at i64"),
+        "the abort must be the typed reshape domain trap: {text}"
+    );
+}
+
+/// NEGATIVE CONTROL for the per-scope rename's freshness rule, chelis#1788.
+///
+/// `<name>__s<k>` is a legal Chelis dimension name, so a graph can already
+/// carry the spelling the rename would mint. Renaming onto it would recreate
+/// the very collision the pass exists to remove, one name meaning two extents
+/// in one emitted function, and it would do so silently.
+///
+/// Three roots: `seq` is declared by two of them, and a third independently
+/// declares `seq__s1`. The second `seq` scope must therefore take `seq__s2`,
+/// and all three extents must stay independent at run time. Without the
+/// freshness check this test emits two declarations of `seq__s1` and the third
+/// root reads the second root's extent.
+///
+/// EVIDENTIARY STATUS: regression test for the freshness rule specifically. The
+/// sibling row above covers the rename itself.
+#[test]
+fn issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares() {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let ty = |dims: Vec<DimInfo>| TensorType {
+        dims,
+        precision: Prim::F32,
+    };
+    let named = |name: &str| DimInfo::Named(name.into(), None);
+
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![named("seq")]),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    // The occupant. A third, independent signature that already spells the
+    // identity the rename would otherwise mint for `y`'s scope.
+    let w = dag.add_node(
+        decl,
+        RiscOp::Load { name: "w".into() },
+        vec![],
+        ty(vec![named("seq__s1")]),
+        None,
+    );
+    let from_x = dag.add_node(decl, RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+    let from_y = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    let from_w = dag.add_node(decl, RiscOp::Neg, vec![w], ty(vec![named("seq__s1")]), None);
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+    dag.add_root(from_w);
+
+    let result = codegen_with_options(
+        &dag,
+        "three_scopes",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("a merged three-scope kernel still emits");
+    let emitted = &result.c_source;
+    for declaration in ["int64_t seq = ", "int64_t seq__s1 = ", "int64_t seq__s2 = "] {
+        assert_eq!(
+            emitted.matches(declaration).count(),
+            1,
+            "exactly one `{declaration}` declaration, so no identity means two extents: {emitted}"
+        );
+    }
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor *make_view_2d_b(float* data, int64_t rows, int64_t cols) {{
+    int64_t shape[2] = {{rows, cols}};
+    return chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data,
+        rows * cols * chelis_dtype_size(CHELIS_DTYPE_F32)
+    );
+}}
+
+extern void three_scopes(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[3] = {{1.0f, 2.0f, 3.0f}};
+    float yd[4] = {{1.0f, 2.0f, 3.0f, 4.0f}};
+    float wd[4] = {{5.0f, 6.0f, 7.0f, 8.0f}};
+    chelis_tensor* inputs[3] = {{make_view_1d(xd, 3), make_view_2d_b(yd, 2, 2), make_view_1d(wd, 4)}};
+    chelis_tensor* outputs[3] = {{NULL, NULL, NULL}};
+    three_scopes(inputs, 3, outputs, 3);
+    printf("RAN %lld %lld %lld\n",
+           (long long)chelis_tensor_numel(outputs[0]),
+           (long long)chelis_tensor_numel(outputs[1]),
+           (long long)chelis_tensor_numel(outputs[2]));
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("three_scopes", emitted, &harness);
+    assert!(ok, "three independent scopes run: {out}");
+    assert!(
+        out.contains("RAN 3 4 4"),
+        "and each root keeps its own extent, 3, 2x2 and 4: {out}"
+    );
+}
+
+/// chelis#1788: two scopes of one binder, lowered into ONE emitted function,
+/// each get their own declaration and their own input.
+///
+/// chelis#1536 scoped a claim's identity so no entry guard pairs axes from
+/// different scopes, and chelis#665 moved declarations onto axis sources. The
+/// declarations were still keyed by NAME across the whole graph, so when both
+/// scopes landed in one emitted function the second read the first's
+/// declaration and nothing compared them. Reaching this needs the codegen
+/// API: `chelis build` gives each root its own function, where `seq` is then
+/// declared per function from the right input.
+///
+/// The repair is the per-scope rename in `prepare_dag_for_codegen`: a name a
+/// `Load` axis declares in more than one scope keeps its spelling in the first
+/// scope and becomes `<name>__s<k>` in the later ones, so the prologue emits
+/// one declaration per scope and each root sizes its work from its own input.
+/// It renames only scopes that share no node, because a shared node cannot
+/// carry two names for one axis.
+///
+/// EVIDENTIARY STATUS: **regression test.** Measured on `0820ee28e`, the
+/// emitted function declared `seq` once from `inputs[0]` and the second root
+/// sized its work from the first root's extent, so this program aborted inside
+/// `chelis_tensor_elementwise_index_step_for_shape` at run time. The row
+/// asserts both halves the repair owes: the emitted declarations, and that the
+/// kernel now RUNS and produces both outputs.
+#[test]
+fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let ty = |dims: Vec<DimInfo>| TensorType {
+        dims,
+        precision: Prim::F32,
+    };
+    let named = |name: &str| DimInfo::Named(name.into(), None);
+
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![named("seq")]),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    let from_x = dag.add_node(decl, RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+    let from_y = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let result = codegen_with_options(
+        &dag,
+        "two_scopes",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("a merged two-scope kernel still emits");
+    let emitted = &result.c_source;
+    assert!(
+        emitted.contains("int64_t seq = chelis_tensor_shape(inputs[0], 0);"),
+        "the first scope declares `seq` from its own input slot: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t seq__s1 = chelis_tensor_shape(inputs[1], 1);"),
+        "and the second scope declares its own identity from ITS input slot: {emitted}"
+    );
+    assert_eq!(
+        emitted.matches("int64_t seq = ").count(),
+        1,
+        "exactly one declaration per scope, not a redeclaration: {emitted}"
+    );
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor *make_view_2d(float* data, int64_t rows, int64_t cols) {{
+    int64_t shape[2] = {{rows, cols}};
+    return chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data,
+        rows * cols * chelis_dtype_size(CHELIS_DTYPE_F32)
+    );
+}}
+
+extern void two_scopes(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[3] = {{1.0f, 2.0f, 3.0f}};
+    float yd[4] = {{1.0f, 2.0f, 3.0f, 4.0f}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 3), make_view_2d(yd, 2, 2)}};
+    chelis_tensor* outputs[2] = {{NULL, NULL}};
+    two_scopes(inputs, 2, outputs, 2);
+    const float* a = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    const float* b = (const float*)chelis_tensor_read_view(outputs[1]).data;
+    printf("RAN %.1f %.1f %.1f | %.1f %.1f %.1f %.1f\n",
+           a[0], a[1], a[2], b[0], b[1], b[2], b[3]);
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("two_scopes", emitted, &harness);
+    assert!(
+        ok,
+        "each scope sizes its own work, so the merged kernel runs: {out}"
+    );
+    assert!(
+        out.contains("RAN -1.0 -2.0 -3.0 | -1.0 -2.0 -3.0 -4.0"),
+        "and both roots produce their exact negated inputs: {out}"
+    );
+
+    // The same unequal extents must fail if an entry guard accidentally pairs
+    // the scopes. Keep this mutation control alongside the successful execution
+    // so the runtime oracle cannot silently stop detecting that regression.
+    let second_scope_declaration = "int64_t seq__s1 = chelis_tensor_shape(inputs[1], 1);";
+    let paired_emitted = emitted.replacen(
+        second_scope_declaration,
+        &format!(
+            "{second_scope_declaration}\n    if (seq != seq__s1) {{ \
+             chelis_numeric_trap(\"numeric trap: domain in load at i64\"); }}"
+        ),
+        1,
+    );
+    assert_ne!(paired_emitted, *emitted, "the pair guard was inserted");
+    let (paired_ok, paired_out) =
+        compile_and_run_kernel_capturing("two_scopes_paired", &paired_emitted, &harness);
+    assert!(
+        !paired_ok && paired_out.contains("numeric trap: domain in load at i64"),
+        "an erroneous cross-scope entry comparison must reject this input: {paired_out}"
+    );
+}
+
+// #1767: retain checked top-level input contracts and derive disconnected
+// cotangents from each actual's physical axes, including cached composition.
+fn gradient_geometry_checked(source: &str) -> chelis_types::CheckedProgram {
+    let deep = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str(source).expect("gradient fixture parses"),
+    )
+    .unwrap();
+    let checked = chelis_types::check_typed_program(&deep).expect("gradient fixture checks");
+    let checked = chelis_effects::check_program(&checked).unwrap();
+    chelis_types::check_linearity(&checked).unwrap()
+}
+
+fn assert_zero_geometry_both_lanes(
+    mut dag: Dag,
+    inputs: &[(&str, &[usize])],
+    expected: &[&[usize]],
+    reject_input: bool,
+) {
+    use chelis_ir::eval::eval_tensor_roots_with_strict;
+    let evaluated = eval_tensor_roots_with_strict(&dag, dag.roots(), |name| {
+        inputs
+            .iter()
+            .find(|(label, _)| *label == name)
+            .map(|(_, shape)| {
+                TensorValue::from_storage(
+                    shape.to_vec(),
+                    chelis_types::finalize_tensor(
+                        "test",
+                        Prim::F32,
+                        chelis_types::RawTensor::Float(vec![1.0; shape.iter().product()]),
+                    )
+                    .unwrap(),
+                )
+            })
+    });
+    if reject_input {
+        let error = evaluated.expect_err("disconnected input claim must still execute");
+        assert!(
+            error.contains("numeric trap: domain in load at i64"),
+            "{error}"
+        );
+    } else {
+        let evaluated = evaluated.unwrap();
+        assert_eq!(dag.roots().len(), expected.len());
+        for (root, shape) in dag.roots().iter().zip(expected) {
+            assert_eq!(dag.get(*root).unwrap().output_type.dims.len(), shape.len());
+            let value = &evaluated[root];
+            assert_eq!(value.shape, *shape);
+            assert_eq!(value.prim(), Prim::F32);
+            assert_eq!(value.to_f64_lossy_vec(), vec![0.0; shape.iter().product()]);
+        }
+    }
+    // Restrict the native entry to the same roots the evaluator executed.
+    dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let generated = codegen_with_options(
+        &dag,
+        "gradient_geometry",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("gradient C is publishable");
+    let mut harness = String::from(
+        "#include \"chelis_runtime.h\"\n#include <stdio.h>\nvoid gradient_geometry(chelis_tensor **, int, chelis_tensor **, int);\nint main(void) {\n",
+    );
+    let spell = |shape: &[usize]| {
+        if shape.is_empty() {
+            "0".into()
+        } else {
+            shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    };
+    for (i, name) in generated.input_labels.iter().enumerate() {
+        let shape = inputs
+            .iter()
+            .find(|(label, _)| *label == name.as_str())
+            .unwrap_or_else(|| panic!("unexpected input {name}"))
+            .1;
+        let rank = shape.len();
+        let count = shape.iter().product::<usize>();
+        harness.push_str(&format!("int64_t shape_{i}[] = {{{}}};\nfloat data_{i}[{}] = {{0}};\nchelis_tensor *input_{i} = chelis_tensor_entry_borrow({rank}, shape_{i}, CHELIS_DTYPE_F32, data_{i}, {count} * sizeof(float));\n", spell(shape), count.max(1)));
+    }
+    let input_names = (0..generated.input_labels.len())
+        .map(|i| format!("input_{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let input_names = if input_names.is_empty() {
+        "NULL".into()
+    } else {
+        input_names
+    };
+    harness.push_str(&format!("chelis_tensor *inputs[] = {{{input_names}}}, *outputs[{}] = {{NULL}};\ngradient_geometry(inputs, {}, outputs, {});\n", expected.len(), generated.input_labels.len(), expected.len()));
+    for (i, shape) in expected.iter().enumerate() {
+        let rank = shape.len();
+        let count = shape.iter().product::<usize>();
+        harness.push_str(&format!("int64_t expected_{i}[] = {{{}}};\nchelis_read_view result_{i} = chelis_tensor_read_view(outputs[{i}]);\nif (result_{i}.dtype != CHELIS_DTYPE_F32 || result_{i}.count != {count} || chelis_tensor_rank(outputs[{i}]) != {rank}) return 10;\nfor (int a=0; a<{rank}; ++a) if (chelis_tensor_shape(outputs[{i}],a) != expected_{i}[a]) return 11;\nfor (int a=0; a<{count}; ++a) if (((const float*)result_{i}.data)[a] != 0.0f) return 12;\nchelis_tensor_release(outputs[{i}]);\n", spell(shape)));
+    }
+    for i in 0..generated.input_labels.len() {
+        harness.push_str(&format!("chelis_tensor_release(input_{i});\n"));
+    }
+    harness.push_str("puts(\"GRADIENT GEOMETRY PASS\"); return 0; }\n");
+    let (ok, out) =
+        compile_and_run_kernel_capturing("gradient_geometry", &generated.c_source, &harness);
+    assert_eq!(ok, !reject_input, "{out}");
+    if reject_input {
+        // The direct kernel ABI validates static input contracts in its
+        // preamble; an extent witness can instead own the same check.
+        assert!(
+            out.contains("numeric trap: domain in load at i64")
+                || (out.contains("input `") && out.contains("expected")),
+            "{out}"
+        );
+    } else {
+        assert_eq!(out, "GRADIENT GEOMETRY PASS\n");
+    }
+}
+
+#[test]
+fn issue_1767_disconnected_actual_geometry_executes_on_eval_and_c() {
+    for shape in [vec![3], vec![], vec![2, 0, 3], vec![2, 3]] {
+        let dimensions = shape.iter().map(|n| format!("{n}, ")).collect::<String>();
+        let source = format!(
+            "x: tensor[{dimensions}f32] = x\ndef loss(z: tensor[{dimensions}f32]) -> f32 = 1.0f32\nderivative = grad(loss)(x)\n"
+        );
+        let checked = gradient_geometry_checked(&source);
+        let library = chelis_ir::lower::try_lower_program_to_library(&checked).unwrap();
+        assert_eq!(
+            library.program_types()["derivative"].dims,
+            shape.iter().copied().map(DimInfo::Lit).collect::<Vec<_>>()
+        );
+        let mut dag = library.dag().clone();
+        dag.set_roots(vec![library.symbol_table()["derivative"]]);
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &shape)], &[&shape], false);
+        let mut wrong_shape = shape.clone();
+        if !wrong_shape.is_empty() {
+            wrong_shape[0] += 1;
+            assert_zero_geometry_both_lanes(dag, &[("x", &wrong_shape)], &[&shape], true);
+        }
+    }
+}
+
+#[test]
+fn issue_1767_symbolic_actual_axes_are_read_for_each_execution() {
+    let source = "x: tensor[*, *, f32] = x\ndef loss[rows, cols](z: tensor[rows, cols, f32]) -> f32 = 1.0f32\nderivative = grad(loss)(x)\n";
+    let library =
+        chelis_ir::lower::try_lower_program_to_library(&gradient_geometry_checked(source)).unwrap();
+    let mut dag = library.dag().clone();
+    dag.set_roots(vec![library.symbol_table()["derivative"]]);
+    for shape in [vec![2, 3], vec![3, 2], vec![0, 4], vec![4, 0]] {
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &shape)], &[&shape], false);
+    }
+}
+
+#[test]
+fn issue_1767_parameter_and_ordered_multiple_actuals_execute_on_eval_and_c() {
+    let source = "def loss[rows, cols, other, extra](x: tensor[rows, cols, f32], y: tensor[other, extra, f32]) -> f32 = 1.0f32\n\
+        def derivative(theta: tensor[2, 3, f32], eta: tensor[2, 3, f32]) = grad(loss, wrt=(y, x, y))(permute(theta, 1i32, 0i32), eta)\n";
+    let library =
+        chelis_ir::lower::try_lower_program_to_library(&gradient_geometry_checked(source)).unwrap();
+    let mut dag = library.dag().clone();
+    dag.set_roots(dag.roots()[dag.roots().len() - 3..].to_vec());
+    assert_zero_geometry_both_lanes(
+        dag.clone(),
+        &[("theta", &[2, 3]), ("eta", &[2, 3])],
+        &[&[2, 3], &[3, 2], &[2, 3]],
+        false,
+    );
+    assert_zero_geometry_both_lanes(
+        dag,
+        &[("theta", &[3, 2]), ("eta", &[2, 3])],
+        &[&[2, 3], &[3, 2], &[2, 3]],
+        true,
+    );
+}
+
+#[test]
+fn issue_1767_live_and_decoded_helper_contexts_execute_on_eval_and_c() {
+    let source = "x: tensor[2, 3, f32] = x\ndef loss[rows, cols](z: tensor[rows, cols, f32]) -> f32 = 1.0f32\ndef helper[rows, cols](theta: tensor[rows, cols, f32]) = grad(loss)(theta)\n";
+    let checked = gradient_geometry_checked(source);
+    let library = chelis_ir::lower::try_lower_program_to_library(&checked).unwrap();
+    let decoded =
+        serde_json::from_slice::<chelis_ir::LoweredLibrary>(&serde_json::to_vec(&library).unwrap())
+            .unwrap();
+    let library_deep =
+        chelis_surf::desugar::desugar_program(&chelis_surf::parser::parse_str(source).unwrap())
+            .unwrap();
+    let env = chelis_types::build_type_env_from_library(&library_deep).unwrap();
+    let new = chelis_surf::desugar::desugar_program(
+        &chelis_surf::parser::parse_str("derivative = helper(copy(x))\n").unwrap(),
+    )
+    .unwrap();
+    let new = chelis_types::check_ir_with_context(&env, &new).unwrap();
+    let new = chelis_effects::check_program(&new).unwrap();
+    let new = chelis_types::check_linearity(&new).unwrap();
+    for context in [&library, &decoded] {
+        let mut dag = chelis_ir::lower::try_lower_program_with_context(context, &new)
+            .unwrap()
+            .dag;
+        dag.set_roots(vec![*dag.roots().last().unwrap()]);
+        assert_zero_geometry_both_lanes(dag.clone(), &[("x", &[2, 3])], &[&[2, 3]], false);
+        assert_zero_geometry_both_lanes(dag, &[("x", &[3, 2])], &[&[2, 3]], true);
+    }
+}
+
+/// One input of [`gated_check_graph`]: its rank-1 extent (`None` for rank
+/// 0), dtype and one fill value for every element.
+struct GatedInput {
+    name: &'static str,
+    extent: Option<usize>,
+    prim: Prim,
+    fill: i64,
+}
+
+/// A hand-built graph whose root is one check-carrying node under the
+/// rank-0 activation `a` (decisions section 11): `x` is `tensor[3, i64]` of
+/// sevens, `n` a rank-0 `i64` bound, `y` a `tensor[k, i64]` of runtime
+/// extent. Returns the graph and its inputs besides `a`.
+fn gated_check_graph(kind: &str, bound: i64) -> (Dag, Vec<GatedInput>) {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let ty = |dims: Vec<DimInfo>, precision| TensorType { dims, precision };
+    let load = |dag: &mut Dag, name: &str, dims, precision| {
+        dag.add_node(
+            decl,
+            RiscOp::Load { name: name.into() },
+            vec![],
+            ty(dims, precision),
+            None,
+        )
+    };
+    let x = load(&mut dag, "x", vec![DimInfo::Lit(3)], Prim::Int64);
+    let n = load(&mut dag, "n", vec![], Prim::Int64);
+    let a = load(&mut dag, "a", vec![], Prim::Bool);
+    let owner = Owner {
+        decl,
+        activation: Some(a),
+    };
+    let x_input = GatedInput {
+        name: "x",
+        extent: Some(3),
+        prim: Prim::Int64,
+        fill: 7,
+    };
+    let n_input = GatedInput {
+        name: "n",
+        extent: None,
+        prim: Prim::Int64,
+        fill: bound,
+    };
+    let movement = |dag: &mut Dag, op| {
+        dag.add_node(
+            owner,
+            op,
+            vec![x, n],
+            ty(vec![DimInfo::Named("result".into(), None)], Prim::Int64),
+            None,
+        )
+    };
+    let root = match kind {
+        "shrink" => movement(
+            &mut dag,
+            RiscOp::Shrink {
+                bounds: vec![(
+                    chelis_ir::dag::RtDim::Lit(0),
+                    chelis_ir::dag::RtDim::Node(1),
+                )],
+            },
+        ),
+        "stride" => movement(
+            &mut dag,
+            RiscOp::Stride {
+                strides: vec![chelis_ir::dag::RtDim::Node(1)],
+            },
+        ),
+        "pad" => movement(
+            &mut dag,
+            RiscOp::Pad {
+                padding: vec![(
+                    chelis_ir::dag::RtDim::Node(1),
+                    chelis_ir::dag::RtDim::Lit(0),
+                )],
+                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+            },
+        ),
+        "extent witness" => {
+            // A call `g[k](y: tensor[k], x: tensor[k])`: `y`'s witness
+            // declares `k`, `x`'s claims it.
+            let y = load(
+                &mut dag,
+                "y",
+                vec![DimInfo::Named("k".into(), None)],
+                Prim::Int64,
+            );
+            let declares = dag.add_node(
+                owner,
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::Caller,
+                    parameter: "y".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![y],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            let root = dag.add_node(
+                owner,
+                RiscOp::ExtentWitness {
+                    site: ExtentWitnessSite::Caller,
+                    parameter: "x".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: vec![ExtentClaim {
+                        claim: "k".into(),
+                        requirement_declares: true,
+                    }],
+                },
+                vec![x, declares],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            dag.add_root(root);
+            let y_input = GatedInput {
+                name: "y",
+                extent: Some(usize::try_from(bound).unwrap()),
+                prim: Prim::Int64,
+                fill: 5,
+            };
+            return (dag, vec![x_input, n_input, y_input]);
+        }
+        "checked reshape" => {
+            // The target extent `n` against the claimed extent 3.
+            let required = dag.add_node(
+                owner,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 3).unwrap(),
+                },
+                vec![],
+                ty(vec![], Prim::Int64),
+                None,
+            );
+            dag.add_node(
+                owner,
+                RiscOp::CheckedReshapeExtent {
+                    claims: vec!["rows".into()],
+                    axis: RtAxis::Lit(0),
+                },
+                vec![n, required],
+                ty(vec![], Prim::Int64),
+                None,
+            )
+        }
+        other => panic!("{other}"),
+    };
+    dag.add_root(root);
+    (dag, vec![x_input, n_input])
+}
+
+/// Decisions section 11 in the C lane for the checks a Tensor-lane C entry
+/// cannot reach from source, because a runtime-extent result has no C
+/// representation there (chelis#600): runtime `shrink`, `stride` and `pad`
+/// bounds, a call's extent claim (`ExtentWitness`) and a checked reshape
+/// target (`CheckedReshapeExtent`), each under a rank-0 activation `a`. The
+/// DAG evaluator and the compiled C run the same graph. With `a` false both
+/// return the same value (a movement's zeros of its operand's extent; a
+/// claim's unchanged value) and trap nothing; with `a` true both trap, with
+/// the typed trap each kind raises.
+///
+/// Evidentiary status: REGRESSION TEST for the inactive rows (at
+/// 224414e1f both lanes trap them: neither gates these kinds); the active
+/// rows are a disposition lock.
+#[test]
+fn a_gated_movement_or_extent_claim_checks_only_where_its_activation_holds_in_eval_and_c() {
+    // (kind, bound, the evaluator's trap, the C lane's trap). `pad`'s
+    // evaluator trap is its bound's untyped report, not a NumericTrap.
+    let cases = [
+        (
+            "shrink",
+            4,
+            "domain in shrink at i64",
+            "numeric trap: domain in shrink at i64",
+        ),
+        (
+            "stride",
+            0,
+            "domain in stride at i64",
+            "numeric trap: domain in stride at i64",
+        ),
+        (
+            "pad",
+            -1,
+            "must be a non-negative integer",
+            "numeric trap: domain in pad at i64",
+        ),
+        (
+            "extent witness",
+            2,
+            "domain in load at i64",
+            "numeric trap: domain in load at i64",
+        ),
+        (
+            "checked reshape",
+            2,
+            "domain in reshape at i64",
+            "numeric trap: domain in reshape at i64",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, bound, eval_trap, c_trap) in cases {
+        let (dag, inputs) = gated_check_graph(kind, bound);
+        let generated =
+            codegen(&dag, "gated_check").unwrap_or_else(|error| panic!("{kind}: {error}"));
+        for active in [false, true] {
+            let mut values = UnordMap::new();
+            let mut allocations = String::new();
+            let mut slots = Vec::new();
+            let mut all = inputs.iter().collect::<Vec<_>>();
+            let activation = GatedInput {
+                name: "a",
+                extent: None,
+                prim: Prim::Bool,
+                fill: i64::from(active),
+            };
+            all.push(&activation);
+            for input in &all {
+                let shape = input.extent.map_or_else(Vec::new, |extent| vec![extent]);
+                let count = input.extent.unwrap_or(1);
+                values.insert(
+                    input.name.to_string(),
+                    TensorValue::from_storage(
+                        shape.clone(),
+                        finalize_tensor(
+                            input.name,
+                            input.prim,
+                            RawTensor::Int(vec![input.fill; count]),
+                        )
+                        .unwrap(),
+                    ),
+                );
+                let (dtype, bits) = if input.prim == Prim::Bool {
+                    ("CHELIS_DTYPE_BOOL", input.fill as u64)
+                } else {
+                    ("CHELIS_DTYPE_I64", input.fill as u64)
+                };
+                allocations.push_str(&format!(
+                    "    int64_t {name}_shape[] = {{{extent}}};\n    chelis_tensor *{name} = chelis_alloc({rank}, {name}_shape, {dtype});\n    chelis_tensor_write *{name}_guard = chelis_tensor_begin_write({name});\n    chelis_fill_scalar({name}_guard, chelis_scalar_from_bits({dtype}, UINT64_C({bits})));\n    chelis_tensor_end_write({name}_guard);\n",
+                    name = input.name,
+                    extent = input.extent.unwrap_or(1),
+                    rank = usize::from(input.extent.is_some()),
+                ));
+            }
+            for label in &generated.input_labels {
+                assert!(
+                    all.iter().any(|input| input.name == label),
+                    "{kind}: slot {label}"
+                );
+                slots.push(label.clone());
+            }
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void gated_check(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+{allocations}    chelis_tensor *inputs[] = {{{slots}}}, *outputs[] = {{NULL}};
+    gated_check(inputs, {count}, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%d", chelis_tensor_rank(outputs[0]));
+    for (int64_t i = 0; i < out.count; ++i) printf(" %lld", (long long)((const int64_t *)out.data)[i]);
+    printf("\n");
+    return 0;
+}}
+"#,
+                slots = slots.join(", "),
+                count = slots.len(),
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            let c = if run.status.success() {
+                Ok(String::from_utf8_lossy(&run.stdout).trim().to_string())
+            } else {
+                Err(String::from_utf8_lossy(&run.stderr).to_string())
+            };
+            let root = dag.roots()[0];
+            let eval = eval_tensor(&dag, &values).map(|result| {
+                let value = &result[&root];
+                let mut text = value.shape.len().to_string();
+                for element in value.to_f64_lossy_vec() {
+                    text.push_str(&format!(" {element}"));
+                }
+                text
+            });
+            match (active, &eval, &c) {
+                (false, Ok(eval), Ok(c)) if eval == c => {}
+                (true, Err(eval), Err(c)) if eval.contains(eval_trap) && c.contains(c_trap) => {}
+                _ => failures.push(format!("{kind}, active {active}: eval {eval:?}, C {c:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// `f` of `source` (one input `x: tensor[n, f32]` of ones, a rank-0 `f32`
+/// result) lowered as a tensor entry, run by the DAG evaluator and by its
+/// compiled C: each lane's value, or its trap text (for C, the emitter's
+/// refusal where it refuses the graph).
+fn tensor_entry_lanes(source: &str, n: usize) -> (Result<f64, String>, Result<f64, String>) {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let mut values = UnordMap::new();
+    values.insert(
+        "x".to_string(),
+        TensorValue::from_storage(
+            vec![n],
+            finalize_tensor("x", Prim::F32, RawTensor::Float(vec![1.0; n])).unwrap(),
+        ),
+    );
+    let root = *dag.roots().last().expect("a root");
+    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+    let generated = match codegen(&dag, "claim_arm") {
+        Ok(generated) => generated,
+        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+    };
+    assert_eq!(generated.input_labels, ["x"]);
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float x_data[{n}];
+    for (int i = 0; i < {n}; ++i) x_data[i] = 1.0f;
+    int64_t x_shape[1] = {{{n}}};
+    chelis_tensor *x = chelis_tensor_entry_borrow(1, x_shape, CHELIS_DTYPE_F32, x_data, sizeof(x_data));
+    chelis_tensor *inputs[1] = {{x}}, *outputs[1] = {{NULL}};
+    claim_arm(inputs, 1, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%.1f\n", (double)((const float *)out.data)[0]);
+    return 0;
+}}
+"#
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let c = if run.status.success() {
+        String::from_utf8_lossy(&run.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run.stderr).to_string())
+    };
+    (eval, c)
+}
+
+/// Decisions section 11 for a callee's result claim: a call in a runtime
+/// `if` arm inlines its callee under the arm's activation, and the claim its
+/// declared result makes (a named `tensor[n, f32]` over a `shrink`, and a
+/// literal `tensor[2, 2, f32]` over a `reshape` whose target folds to 3) is
+/// checked under its carrier's owner activation. Untaken, the DAG evaluator
+/// and the compiled C both return the `else` value; taken, both trap with
+/// the claim's typed trap.
+///
+/// Evidentiary status: REGRESSION TEST for both untaken rows (at eaa5f3306
+/// and 224414e1f the evaluator traps each claim in the untaken arm); the
+/// taken rows are a disposition lock.
+#[test]
+fn a_callees_result_claim_checks_only_in_a_taken_arm_in_eval_and_c() {
+    let cases = [
+        (
+            "named result claim",
+            "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\ndef f(x: tensor[4, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(g(copy(x)), 0i32) else sum(x, 0i32)\n}\n",
+            4,
+            "numeric trap: domain in shrink at i64",
+        ),
+        (
+            "literal result claim",
+            "def g[n](y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\ndef f(x: tensor[6, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(sum(g(copy(x)), 0i32), 0i32) else sum(x, 0i32)\n}\n",
+            6,
+            "numeric trap: domain in reshape at i64",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (kind, source, n, trap) in cases {
+        let untaken = tensor_entry_lanes(&source.replace("{c}", "50.0f32"), n);
+        let expected = n as f64;
+        if !matches!(untaken, (Ok(eval), Ok(c)) if eval == expected && c == expected) {
+            failures.push(format!("untaken {kind}: {untaken:?}"));
+        }
+        let taken = tensor_entry_lanes(&source.replace("{c}", "-5.0f32"), n);
+        if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
+            failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// `f` of `source` lowered as a tensor entry over `inputs` (each a rank-1
+/// `f32` tensor of ones of the given extent), with a rank-0 `f32` result,
+/// run by the DAG evaluator and by its compiled C: each lane's value, or its
+/// trap text (for C, the emitter's refusal where it refuses the graph).
+fn tensor_entry_lanes_over(
+    source: &str,
+    inputs: &[(&str, usize)],
+) -> (Result<f64, String>, Result<f64, String>) {
+    let decls = chelis_surf::parser::parse_str(source).expect("Surf parse");
+    let checked = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+    )
+    .unwrap_or_else(|report| panic!("type check failed: {:?}", report.errors));
+    let dag = chelis_ir::host::lower_named_tensor_entry_dag(&checked, "f")
+        .expect("named tensor entry lowers");
+    let mut values = UnordMap::new();
+    for (name, n) in inputs {
+        values.insert(
+            name.to_string(),
+            TensorValue::from_storage(
+                vec![*n],
+                finalize_tensor("input", Prim::F32, RawTensor::Float(vec![1.0; *n])).unwrap(),
+            ),
+        );
+    }
+    let root = *dag.roots().last().expect("a root");
+    let eval = eval_tensor(&dag, &values).map(|result| result[&root].to_f64_lossy_vec()[0]);
+    let generated = match codegen(&dag, "claim_arm") {
+        Ok(generated) => generated,
+        Err(refusal) => return (eval, Err(format!("codegen refused: {refusal:?}"))),
+    };
+    let mut allocations = String::new();
+    for label in &generated.input_labels {
+        let (_, n) = inputs
+            .iter()
+            .find(|(name, _)| name == label)
+            .unwrap_or_else(|| panic!("entry slot {label}"));
+        allocations.push_str(&format!(
+            "    float {label}_data[{n}];\n    for (int i = 0; i < {n}; ++i) {label}_data[i] = 1.0f;\n    int64_t {label}_shape[1] = {{{n}}};\n    chelis_tensor *{label} = chelis_tensor_entry_borrow(1, {label}_shape, CHELIS_DTYPE_F32, {label}_data, sizeof({label}_data));\n"
+        ));
+    }
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void claim_arm(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+{allocations}    chelis_tensor *inputs[] = {{{slots}}}, *outputs[1] = {{NULL}};
+    claim_arm(inputs, {count}, outputs, 1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    printf("%.1f\n", (double)((const float *)out.data)[0]);
+    return 0;
+}}
+"#,
+        slots = generated.input_labels.join(", "),
+        count = generated.input_labels.len(),
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let c = if run.status.success() {
+        String::from_utf8_lossy(&run.stdout)
+            .trim()
+            .parse::<f64>()
+            .map_err(|error| error.to_string())
+    } else {
+        Err(String::from_utf8_lossy(&run.stderr).to_string())
+    };
+    (eval, c)
+}
+
+/// #2586 round 2b, decisions section 25: an arm whose extent rests on a
+/// claim, (a) a callee's result claim, (b) a guarded broadcast's unit claim
+/// on a local, (c) a local ascription, and a parameter's unit refinement.
+/// Untaken (`{c}` 50), the claim is not checked and the claim-sized nodes
+/// are zeros, so the DAG evaluator and the compiled C both return the
+/// `else` value, 32; taken (`{c}` -5) with the claim false, both trap with
+/// the claim's typed trap. `x` is 32 ones and `t` 3 ones.
+///
+/// Evidentiary status: REGRESSION TEST for every untaken row at 096daea8c
+/// (each lane traps or fails there); DISPOSITION LOCK for the taken rows.
+#[test]
+fn an_untaken_claimed_arm_checks_nothing_and_a_taken_one_traps_in_eval_and_c() {
+    let cases = [
+        (
+            "(a) callee's result claim",
+            "def g(y: tensor[*, f32]) -> tensor[3, f32] = shrink(y, [[0i64, sub(shape(&y, 0i32), 1i64)]])\n\ndef f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(add(g(copy(x)), to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32) else sum(x, 0i32)\n}\n",
+            "extent `3`: claimed = 3, shrink axis 0 = 31",
+        ),
+        (
+            "(b) guarded broadcast of a local",
+            "def f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  t = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 29i64)]])\n  if gt(s, {c}) then sum(add(x, expand(t, 0i32, 32i64)), 0i32) else sum(x, 0i32)\n}\n",
+            "numeric trap: domain in expand at i64",
+        ),
+        (
+            "(c) local ascription",
+            "def f(x: tensor[32, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then {\n    y: tensor[3, f32] = shrink(copy(x), [[0i64, sub(shape(&x, 0i32), 1i64)]])\n    sum(add(y, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n  } else sum(x, 0i32)\n}\n",
+            "extent `3`: claimed = 3, shrink axis 0 = 31",
+        ),
+        (
+            "parameter's unit refinement",
+            "def f[n](x: tensor[32, f32], t: tensor[n, f32]) -> tensor[f32] = {\n  s = tensor_to_scalar(sum(&x, 0i32))\n  if gt(s, {c}) then sum(add(x, expand(t, 0i32, 32i64)), 0i32) else sum(x, 0i32)\n}\n",
+            "extent `1`: claimed = 1, t axis 0 = 3",
+        ),
+    ];
+    let inputs = [("x", 32), ("t", 3)];
+    let mut failures = Vec::new();
+    for (kind, source, trap) in cases {
+        let untaken = tensor_entry_lanes_over(&source.replace("{c}", "50.0f32"), &inputs);
+        if !matches!(untaken, (Ok(eval), Ok(c)) if eval == 32.0 && c == 32.0) {
+            failures.push(format!("untaken {kind}: {untaken:?}"));
+        }
+        let taken = tensor_entry_lanes_over(&source.replace("{c}", "-5.0f32"), &inputs);
+        if !matches!(&taken, (Err(eval), Err(c)) if eval.contains(trap) && c.contains(trap)) {
+            failures.push(format!("taken {kind}: {taken:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// One kind [`a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c`]
+/// covers: the declarations before `f`, the dead `let` (with `{v}` for the
+/// value that decides the check), the value that traps and the one that
+/// does not, `x`'s extent, and each lane's trap.
+struct DeadLetKind {
+    name: &'static str,
+    callee: &'static str,
+    dead: &'static str,
+    traps: &'static str,
+    total: &'static str,
+    n: usize,
+    eval_trap: &'static str,
+    c_trap: &'static str,
+}
+
+/// The kinds the trap seed gained on this branch (decisions sections 6.2
+/// and 11: a potentially trapping node of an entered declaration is seeded,
+/// so a discarded `let` initializer runs its check): an integer sum and
+/// product, an empty reduced axis, runtime `shrink`, `stride` and `pad`
+/// bounds, a call's named extent claim, and a callee's named and literal
+/// result claims. The integer sum row is the spec/03 section 4.4 oracle
+/// (`dead_sum`).
+const DEAD_LET_KINDS: [DeadLetKind; 10] = [
+    DeadLetKind {
+        name: "integer sum (dead_sum)",
+        callee: "",
+        dead: "dead = sum(to_tensor([{v}]), 0i32)",
+        traps: "2000000000i32, 2000000000i32",
+        total: "2i32, 2i32",
+        n: 1,
+        eval_trap: "numeric trap: overflow in sum at i32",
+        c_trap: "numeric trap: overflow in sum at i32",
+    },
+    DeadLetKind {
+        name: "integer product",
+        callee: "",
+        dead: "dead = prod_reduce(to_tensor([{v}]), 0i32)",
+        traps: "100000i32, 100000i32",
+        total: "2i32, 3i32",
+        n: 4,
+        eval_trap: "numeric trap: overflow in prod_reduce at i32",
+        // The C DAG emitter refuses an integer product outright (#729).
+        c_trap: "`i32` tensors in the C DAG emitter",
+    },
+    DeadLetKind {
+        name: "empty max_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = max_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in max_reduce at f32",
+        c_trap: "numeric trap: domain in max_reduce at f32",
+    },
+    DeadLetKind {
+        name: "empty argmax_reduce",
+        callee: "",
+        dead: "e = insert(scalar_to_tensor(2.0f32), 0i32, sub(shape(&x, 0i32), {v}))\n  dead = argmax_reduce(e, 0i32)",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in argmax_reduce at i64",
+        c_trap: "numeric trap: domain in argmax_reduce at i64",
+    },
+    DeadLetKind {
+        name: "shrink past the end",
+        callee: "",
+        dead: "dead = shrink(&x, [[1i64, add(shape(&x, 0i32), {v})]])",
+        traps: "3i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "stride of zero",
+        callee: "",
+        dead: "dead = stride(&x, sub(shape(&x, 0i32), {v}))",
+        traps: "4i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in stride at i64",
+        c_trap: "numeric trap: domain in stride at i64",
+    },
+    DeadLetKind {
+        name: "negative pad",
+        callee: "",
+        dead: "dead = pad(&x, [[sub(shape(&x, 0i32), {v}), 0i64]], 0.0f32)",
+        traps: "5i64",
+        total: "3i64",
+        n: 4,
+        eval_trap: "must be a non-negative integer",
+        c_trap: "numeric trap: domain in pad at i64",
+    },
+    DeadLetKind {
+        name: "call's named extent claim",
+        callee: "def g[n](a: tensor[n, f32], b: tensor[n, f32]) -> tensor[f32] = sum(a, 0i32)\n\n",
+        dead: "dead = g(shrink(&x, [[0i64, sub(shape(&x, 0i32), {v})]]), copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in load at i64",
+        c_trap: "numeric trap: domain in load at i64",
+    },
+    DeadLetKind {
+        name: "callee's named result claim",
+        callee: "def g[n](x: tensor[n, f32]) -> tensor[n, f32] = shrink(x, [[{v}, shape(x, 0i32)]])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "1i64",
+        total: "0i64",
+        n: 4,
+        eval_trap: "numeric trap: domain in shrink at i64",
+        c_trap: "numeric trap: domain in shrink at i64",
+    },
+    DeadLetKind {
+        name: "callee's literal result claim",
+        callee: "def g[n](y: tensor[n, f32]) -> tensor[{v}, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n\n",
+        dead: "dead = g(copy(x))",
+        traps: "3",
+        total: "2",
+        n: 4,
+        eval_trap: "numeric trap: domain in reshape at i64",
+        c_trap: "numeric trap: domain in reshape at i64",
+    },
+];
+
+/// Decisions sections 6.2 and 11 for every kind the trap seed gained: a
+/// discarded `let` whose initializer can trap runs its check, in the DAG
+/// evaluator and in compiled C of the same lowered graph, and its total
+/// twin (the same program with a value the check accepts) returns `sum(x)`.
+/// The C emitter refuses an integer `prod_reduce` (#729), so that row's C
+/// lane pins the refusal, for both twins.
+/// `chelis-cli`'s `issue_2563_untaken_arm_eval_file` has the
+/// `chelis eval --file` rows of the same sources.
+///
+/// Evidentiary status: per row, in the report of ks5-h2f (REGRESSION TEST
+/// where the trapping row returns at 224414e1f, DISPOSITION LOCK where it
+/// traps there); the total twins are a disposition lock.
+#[test]
+fn a_dead_let_of_each_newly_seeded_kind_traps_in_eval_and_c() {
+    let mut failures = Vec::new();
+    for kind in &DEAD_LET_KINDS {
+        let source = |v: &str| {
+            format!(
+                "{}def f(x: tensor[{}, f32]) -> tensor[f32] = {{\n  {}\n  sum(x, 0i32)\n}}\n",
+                kind.callee.replace("{v}", v),
+                kind.n,
+                kind.dead.replace("{v}", v)
+            )
+        };
+        let dead = tensor_entry_lanes(&source(kind.traps), kind.n);
+        if !matches!(&dead, (Err(eval), Err(c)) if eval.contains(kind.eval_trap) && c.contains(kind.c_trap))
+        {
+            failures.push(format!("dead {}: {dead:?}", kind.name));
+        }
+        let total = tensor_entry_lanes(&source(kind.total), kind.n);
+        let expected = kind.n as f64;
+        let c_refused = kind.c_trap.starts_with('`');
+        if !matches!(&total, (Ok(eval), Ok(c)) if *eval == expected && *c == expected)
+            && !matches!(&total, (Ok(eval), Err(c)) if c_refused && *eval == expected && c.contains(kind.c_trap))
+        {
+            failures.push(format!("total {}: {total:?}", kind.name));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// chelis#2512, spec/04 section 4.7: `x: [n]` forwarded by `neg` under the
+/// name `m`, added to `z: [m]`. Nothing in the interface relates `x`'s axis
+/// to `z`'s; the equality comes only from `neg`'s output being stamped `[m]`,
+/// so the comparison is a guard owned by `neg`. It runs at `neg`'s source
+/// position, after an independent earlier trap and before `neg` allocates,
+/// and fails as `numeric trap: domain in neg at i64`.
+fn restamped_extent_dag(neg_first: bool, earlier_overflow: bool) -> Dag {
+    let named = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let load = |dag: &mut Dag, name: &str, ty: TensorType| {
+        dag.add_node(decl, RiscOp::Load { name: name.into() }, vec![], ty, None)
+    };
+    let mut roots = Vec::new();
+    if earlier_overflow {
+        let w = load(
+            &mut dag,
+            "w",
+            TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: Prim::Int64,
+            },
+        );
+        let overflow = dag.add_node(
+            decl,
+            RiscOp::Neg,
+            vec![w],
+            TensorType {
+                dims: vec![DimInfo::Lit(1)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        roots.push(overflow);
+    }
+    let (negated, loaded_z) = if neg_first {
+        let x = load(&mut dag, "x", named("n"));
+        let negated = dag.add_node(decl, RiscOp::Neg, vec![x], named("m"), None);
+        (negated, load(&mut dag, "z", named("m")))
+    } else {
+        let loaded_z = load(&mut dag, "z", named("m"));
+        let x = load(&mut dag, "x", named("n"));
+        (
+            dag.add_node(decl, RiscOp::Neg, vec![x], named("m"), None),
+            loaded_z,
+        )
+    };
+    roots.push(dag.add_node(decl, RiscOp::Add, vec![negated, loaded_z], named("m"), None));
+    dag.set_roots(roots);
+    dag
+}
+
+fn restamped_extent_eval(dag: &Dag, x: &[f64], z: &[f64]) -> Result<Vec<f64>, String> {
+    let mut inputs = chelis_unord::UnordMap::new();
+    inputs.insert(
+        "x".to_string(),
+        TensorValue::from_vec(vec![x.len()], x.to_vec()),
+    );
+    inputs.insert(
+        "z".to_string(),
+        TensorValue::from_vec(vec![z.len()], z.to_vec()),
+    );
+    inputs.insert(
+        "w".to_string(),
+        typed_value(typed_storage(
+            Prim::Int64,
+            chelis_types::RawTensor::Int(vec![i64::MIN]),
+        )),
+    );
+    let values = eval_tensor(dag, &inputs)?;
+    Ok(values[dag.roots().last().expect("sum root")].to_f64_lossy_vec())
+}
+
+fn restamped_extent_c(dag: &Dag, function: &str, x: &[f32], z: &[f32]) -> String {
+    let result = codegen(dag, function).expect("restamped extent codegen");
+    let slot = |name: &str| result.input_labels.iter().position(|label| label == name);
+    let values = |data: &[f32]| {
+        data.iter()
+            .map(|value| format!("{value:?}f"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let n_in = result.input_labels.len();
+    let n_out = dag.roots().len();
+    let w_input = match slot("w") {
+        Some(w_slot) => format!(
+            "static int64_t w_data[] = {{ INT64_MIN }};\n    inputs[{w_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ 1 }}, CHELIS_DTYPE_I64, w_data, sizeof w_data);"
+        ),
+        None => String::new(),
+    };
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    static float x_data[] = {{ {x_values} }};
+    static float z_data[] = {{ {z_values} }};
+    chelis_tensor *inputs[{n_in}];
+    {w_input}
+    inputs[{x_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {x_len} }}, CHELIS_DTYPE_F32, x_data, sizeof x_data);
+    inputs[{z_slot}] = chelis_tensor_entry_borrow(1, (int64_t[]){{ {z_len} }}, CHELIS_DTYPE_F32, z_data, sizeof z_data);
+    chelis_tensor *outputs[{n_out}] = {{ NULL }};
+    {function}(inputs, {n_in}, outputs, {n_out});
+    chelis_read_view view = chelis_tensor_read_view(outputs[{n_out} - 1]);
+    for (int64_t i = 0; i < view.count; ++i) printf("%g ", ((const float *)view.data)[i]);
+    puts("completed");
+    return 0;
+}}
+"#,
+        x_values = values(x),
+        z_values = values(z),
+        x_slot = slot("x").expect("x slot"),
+        z_slot = slot("z").expect("z slot"),
+        x_len = x.len(),
+        z_len = z.len(),
+    );
+    let name = format!("{function}_{}_{}", x.len(), z.len());
+    let run = compile_and_capture_run(&name, &result.c_source, &harness);
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    )
+}
+
+/// The trap and context lines a failing run printed, in order.
+fn extent_trap_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| line.starts_with("extent `") || line.starts_with("numeric trap:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// chelis#2512 REGRESSION TEST: at base neither lane compared the restamped
+/// axis at `neg`; compiled C trapped later in `add`'s operand check and the
+/// evaluator reported an untyped shape mismatch.
+#[test]
+fn issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation() {
+    let mut failures = Vec::new();
+    for neg_first in [true, false] {
+        for (x, z) in [
+            (&[1.0f32, 2.0][..], &[1.0f32, 2.0, 3.0][..]),
+            (&[1.0, 2.0, 3.0, 4.0][..], &[1.0, 2.0, 3.0][..]),
+        ] {
+            let dag = restamped_extent_dag(neg_first, false);
+            let expected = vec![
+                format!(
+                    "extent `m`: claimed = {}, neg axis 0 = {}",
+                    z.len(),
+                    x.len()
+                ),
+                "numeric trap: domain in neg at i64".to_string(),
+            ];
+            let function = if neg_first {
+                "restamped_extent_neg_first"
+            } else {
+                "restamped_extent_z_first"
+            };
+            let compiled = restamped_extent_c(&dag, function, x, z);
+            if compiled.contains("completed") || extent_trap_lines(&compiled) != expected {
+                failures.push(format!(
+                    "C, neg first {neg_first}, x {}, z {}: {compiled}",
+                    x.len(),
+                    z.len()
+                ));
+            }
+            let widen = |data: &[f32]| data.iter().map(|v| f64::from(*v)).collect::<Vec<_>>();
+            match restamped_extent_eval(&dag, &widen(x), &widen(z)) {
+                Err(error) if extent_trap_lines(&error) == expected => {}
+                other => failures.push(format!(
+                    "eval, neg first {neg_first}, x {}, z {}: {other:?}",
+                    x.len(),
+                    z.len()
+                )),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Negative parity: agreeing extents run on both lanes.
+#[test]
+fn issue_2512_an_agreeing_restamped_axis_runs() {
+    for neg_first in [true, false] {
+        let dag = restamped_extent_dag(neg_first, false);
+        let function = if neg_first {
+            "restamped_extent_ok_neg_first"
+        } else {
+            "restamped_extent_ok_z_first"
+        };
+        let compiled = restamped_extent_c(&dag, function, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]);
+        assert!(
+            compiled.contains("9 18 27 completed"),
+            "neg first {neg_first}: {compiled}"
+        );
+        assert_eq!(
+            restamped_extent_eval(&dag, &[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]),
+            Ok(vec![9.0, 18.0, 27.0]),
+            "neg first {neg_first}"
+        );
+    }
+}
+
+/// Placement (spec/04 section 4.7): the guard is `neg`'s, not an entry
+/// guard, so an independent overflow earlier in source order is observed
+/// first on both lanes.
+#[test]
+fn issue_2512_an_earlier_independent_trap_precedes_the_restamp_guard() {
+    let dag = restamped_extent_dag(true, true);
+    let expected = vec!["numeric trap: overflow in neg at i64".to_string()];
+    let compiled = restamped_extent_c(
+        &dag,
+        "restamped_extent_after_overflow",
+        &[1.0, 2.0],
+        &[1.0, 2.0, 3.0],
+    );
+    assert_eq!(extent_trap_lines(&compiled), expected, "{compiled}");
+    let evaluated = restamped_extent_eval(&dag, &[1.0, 2.0], &[1.0, 2.0, 3.0]);
+    assert_eq!(
+        evaluated
+            .as_ref()
+            .err()
+            .map(|error| extent_trap_lines(error)),
+        Some(expected),
+        "{evaluated:?}"
+    );
+}
+
+/// A restamping operation the untaken-arm tests below build: `op` over
+/// `x: [n]` of `input`, stamped `[m]` of `output`, trapping as `trap`.
+#[derive(Clone)]
+struct RestampUnderActivation {
+    op: RiscOp,
+    input: Prim,
+    output: Prim,
+    trap: &'static str,
+}
+
+/// The restamping operations: a float `neg`, whose class checks nothing
+/// else; an integer `neg`, whose operand values its class also gates; and a
+/// `copy`, whose guard sits at the restamping node itself because the
+/// producer it attributes the extent to, the `Load` of `x`, runs before the
+/// activation. (A `cast` cannot restamp: the verifier refuses a cast whose
+/// dims change.)
+fn restamps_under_activation() -> [RestampUnderActivation; 3] {
+    [
+        RestampUnderActivation {
+            op: RiscOp::Neg,
+            input: Prim::F32,
+            output: Prim::F32,
+            trap: "neg",
+        },
+        RestampUnderActivation {
+            op: RiscOp::Neg,
+            input: Prim::Int64,
+            output: Prim::Int64,
+            trap: "neg",
+        },
+        // A `copy` is administrative, so its guard names the operation
+        // behind it (spec/04 section 4.7), here the `load` of `x`.
+        RestampUnderActivation {
+            op: RiscOp::Copy,
+            input: Prim::F64,
+            output: Prim::F64,
+            trap: "load",
+        },
+    ]
+}
+
+fn restamp_named(name: &str, precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision,
+    }
+}
+
+fn restamp_scalar(precision: Prim) -> TensorType {
+    TensorType {
+        dims: Vec::new(),
+        precision,
+    }
+}
+
+/// The graph around a restamped value `restamped` of type `[m]`, built
+/// under the rank-0 activation `a` by `restamp`: it is added to `z: [m]` and
+/// summed under `a`, and that sum is selected by `a` against the sum of `z`,
+/// so `m`'s class holds the restamp and `z` in one scope. The restamped
+/// value is the second root, so its untaken-arm value is observed directly.
+fn restamp_under_activation_dag(
+    output: Prim,
+    restamp: impl FnOnce(&mut Dag, Owner) -> (chelis_ir::dag::NodeId, chelis_ir::dag::NodeId),
+) -> Dag {
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let z = dag.add_node(
+        decl,
+        RiscOp::Load { name: "z".into() },
+        vec![],
+        restamp_named("m", output),
+        None,
+    );
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        restamp_scalar(Prim::Bool),
+        None,
+    );
+    let under_a = Owner::new(decl, Some(a));
+    let (restamped, summand) = restamp(&mut dag, under_a);
+    let sum = |dag: &mut Dag, owner: Owner, input| {
+        dag.add_node(
+            owner,
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: output,
+            },
+            vec![input],
+            restamp_scalar(output),
+            None,
+        )
+    };
+    let plus = dag.add_node(
+        under_a,
+        RiscOp::Add,
+        vec![summand, z],
+        restamp_named("m", output),
+        None,
+    );
+    let taken = sum(&mut dag, under_a, plus);
+    let other = sum(&mut dag, Owner::unconditional(decl), z);
+    let selected = dag.add_node(
+        decl,
+        RiscOp::Where,
+        vec![a, taken, other],
+        restamp_scalar(output),
+        None,
+    );
+    dag.set_roots(vec![selected, restamped]);
+    dag
+}
+
+/// chelis#2512's restamp under an activation: `x: [n]` restamped `[m]` by
+/// `case.op` (spec/10 section 3.2), in [`restamp_under_activation_dag`].
+fn restamped_extent_under_activation_dag(case: &RestampUnderActivation) -> Dag {
+    restamp_under_activation_dag(case.output, |dag, under_a| {
+        let decl = under_a.decl;
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            restamp_named("n", case.input),
+            None,
+        );
+        let restamped = dag.add_node(
+            under_a,
+            case.op.clone(),
+            vec![x],
+            restamp_named("m", case.output),
+            None,
+        );
+        (restamped, restamped)
+    })
+}
+
+/// One output as `shape [..] bytes <hex>`, the bytes in memory order: the
+/// form both lanes' outputs are compared in, bit for bit.
+fn restamp_output_text(shape: &[usize], bytes: &[u8]) -> String {
+    let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!("shape {shape:?} bytes {hex}")
+}
+
+fn restamp_storage_bytes(storage: &chelis_types::TensorStorage) -> Vec<u8> {
+    use chelis_types::StorageView;
+    match storage.view() {
+        StorageView::F64(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        StorageView::F32(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        StorageView::I64(values) => values.iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        other => panic!("untested restamp output storage {other:?}"),
+    }
+}
+
+fn restamp_input_storage(prim: Prim, values: &[i32]) -> chelis_types::TensorStorage {
+    let raw = if prim.is_float() {
+        RawTensor::Float(values.iter().copied().map(f64::from).collect())
+    } else {
+        RawTensor::Int(values.iter().copied().map(i64::from).collect())
+    };
+    finalize_tensor("restamp test input", prim, raw).unwrap()
+}
+
+/// One lane's outputs ([`restamp_output_text`]), or its trap text.
+type RestampLane = Result<Vec<String>, String>;
+
+/// Both lanes' outputs for one row of named inputs (`(name, storage,
+/// rank)`), or their trap text: the evaluator's, then compiled C's under
+/// AddressSanitizer and UndefinedBehaviorSanitizer.
+fn restamp_under_activation_lanes(
+    dag: &Dag,
+    generated: &chelis_backend_c::CodegenResult,
+    inputs: &[(&str, chelis_types::TensorStorage, usize)],
+) -> (RestampLane, RestampLane) {
+    let mut values = UnordMap::new();
+    for (name, storage, rank) in inputs {
+        let shape = if *rank == 0 {
+            Vec::new()
+        } else {
+            vec![storage.len()]
+        };
+        values.insert(
+            name.to_string(),
+            typed_value_with_shape(shape, storage.clone()),
+        );
+    }
+    let eval = eval_tensor(dag, &values).map(|results| {
+        dag.roots()
+            .iter()
+            .map(|root| {
+                let value = &results[root];
+                restamp_output_text(&value.shape, &restamp_storage_bytes(value.storage()))
+            })
+            .collect::<Vec<_>>()
+    });
+    let declarations = inputs
+        .iter()
+        .map(|(name, storage, rank)| {
+            let (c_type, c_dtype, data) = c_storage_case(storage);
+            let shape = if *rank == 0 {
+                "NULL".to_string()
+            } else {
+                format!("(int64_t[]){{ {} }}", storage.len())
+            };
+            let slot = generated
+                .input_labels
+                .iter()
+                .position(|label| label == name)
+                .unwrap();
+            format!(
+                "{c_type} {name}_data[] = {{ {data} }};\n    inputs[{slot}] = chelis_tensor_entry_borrow({rank}, {shape}, {c_dtype}, {name}_data, sizeof {name}_data);"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n    ");
+    let n_in = inputs.len();
+    let harness = format!(
+        r#"
+#include "chelis_runtime.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static double test_f64(uint64_t bits) {{ double v; memcpy(&v, &bits, sizeof v); return v; }}
+static float test_f32(uint32_t bits) {{ float v; memcpy(&v, &bits, sizeof v); return v; }}
+void restamp_gate(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    chelis_tensor *inputs[{n_in}];
+    {declarations}
+    chelis_tensor *outputs[2] = {{ NULL, NULL }};
+    restamp_gate(inputs, {n_in}, outputs, 2);
+    for (int k = 0; k < 2; ++k) {{
+        chelis_read_view view = chelis_tensor_read_view(outputs[k]);
+        printf("shape [");
+        for (int d = 0; d < chelis_tensor_rank(outputs[k]); ++d)
+            printf("%s%lld", d ? ", " : "", (long long)chelis_tensor_shape(outputs[k], d));
+        printf("] bytes ");
+        const unsigned char *bytes = (const unsigned char *)view.data;
+        for (int64_t i = 0; i < chelis_tensor_byte_count(outputs[k]); ++i) printf("%02x", bytes[i]);
+        printf("\n");
+    }}
+    return 0;
+}}
+"#
+    );
+    let run = checked_indexing_run(&generated.c_source, &harness);
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let c = if run.status.success() && stderr.is_empty() {
+        Ok(stdout.lines().map(str::to_string).collect())
+    } else {
+        Err(stderr)
+    };
+    (eval, c)
+}
+
+/// Whether both lanes agree with `expected`: its outputs, or its trap
+/// lines.
+fn restamp_lanes_agree(
+    lanes: &(RestampLane, RestampLane),
+    expected: &Result<Vec<String>, Vec<String>>,
+) -> bool {
+    let agrees = |lane: &RestampLane| match (expected, lane) {
+        (Ok(expected), Ok(lane)) => lane == expected,
+        (Err(expected), Err(error)) => extent_trap_lines(error) == *expected,
+        _ => false,
+    };
+    agrees(&lanes.0) && agrees(&lanes.1)
+}
+
+/// spec/10 section 3.2 REGRESSION TEST: the restamp guard of chelis#2512 is
+/// checked under the restamping node's own activation. Where that is false
+/// the node produces zeros of its declared type `[m]`, reading nothing of
+/// its operand of extent `n`; where it holds, the guard traps before the
+/// node allocates, naming the operation that owns it; and agreeing extents
+/// give both lanes the same bits either way. At the merge of #2629 the guard
+/// was ungated, so every untaken row trapped on both lanes; gating the guard
+/// alone left compiled C refusing untyped in
+/// `chelis_tensor_elementwise_index_step_for_shape`, which sized the node by
+/// `m` over an operand of `n` elements.
+#[test]
+fn issue_2512_a_restamp_is_checked_under_its_own_activation_and_untaken_yields_zeros() {
+    let mut failures = Vec::new();
+    for case in restamps_under_activation() {
+        let dag = restamped_extent_under_activation_dag(&case);
+        assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+        let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
+        let bytes =
+            |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(case.output, values));
+        let mut row = |active: bool,
+                       x: &[i32],
+                       z: &[i32],
+                       expected: Result<Vec<String>, Vec<String>>| {
+            let inputs = [
+                ("x", restamp_input_storage(case.input, x), 1),
+                ("z", restamp_input_storage(case.output, z), 1),
+                (
+                    "a",
+                    restamp_input_storage(Prim::Bool, &[i32::from(active)]),
+                    0,
+                ),
+            ];
+            let lanes = restamp_under_activation_lanes(&dag, &generated, &inputs);
+            if !restamp_lanes_agree(&lanes, &expected) {
+                failures.push(format!(
+                    "{:?} {:?}, active {active}, x {}, z {}: expected {expected:?}\n  eval {:?}\n  c {:?}",
+                    case.op,
+                    case.output,
+                    x.len(),
+                    z.len(),
+                    lanes.0,
+                    lanes.1
+                ));
+            }
+        };
+        for (x, z) in [(vec![1, 2], vec![1, 2, 3]), (vec![1, 2, 3], vec![4, 5])] {
+            // Untaken: the other arm's value, and the restamp's zeros of `m`.
+            row(
+                false,
+                &x,
+                &z,
+                Ok(vec![
+                    restamp_output_text(&[], &bytes(&[z.iter().sum()])),
+                    restamp_output_text(&[z.len()], &vec![0u8; bytes(&z).len()]),
+                ]),
+            );
+            // Taken: the guard traps.
+            row(
+                true,
+                &x,
+                &z,
+                Err(vec![
+                    format!(
+                        "extent `m`: claimed = {}, {} axis 0 = {}",
+                        z.len(),
+                        case.trap,
+                        x.len()
+                    ),
+                    format!("numeric trap: domain in {} at i64", case.trap),
+                ]),
+            );
+        }
+        // Agreeing extents: taken computes, untaken still yields zeros.
+        let (x, z) = ([1, 2, 3], [10, 20, 30]);
+        let restamped: Vec<i32> = if matches!(case.op, RiscOp::Neg) {
+            x.iter().map(|v| -v).collect()
+        } else {
+            x.to_vec()
+        };
+        let plus: Vec<i32> = restamped.iter().zip(&z).map(|(r, z)| r + z).collect();
+        row(
+            true,
+            &x,
+            &z,
+            Ok(vec![
+                restamp_output_text(&[], &bytes(&[plus.iter().sum()])),
+                restamp_output_text(&[3], &bytes(&restamped)),
+            ]),
+        );
+        row(
+            false,
+            &x,
+            &z,
+            Ok(vec![
+                restamp_output_text(&[], &bytes(&[z.iter().sum()])),
+                restamp_output_text(&[3], &vec![0u8; bytes(&z).len()]),
+            ]),
+        );
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The restamp Surf lowering reaches (chelis#2512): an `expand` whose kept
+/// axis restates `x: [n]` as `[m]`, inserting an axis `k` sized by the
+/// scalar `s`, which the `expand` declares. Under a false activation it is
+/// zeros of `[m, k]` on both lanes, `k` read from `s`, with nothing trapped;
+/// under a true one the guard traps, naming the rank-increasing `expand` as
+/// the `insert` primitive it is.
+#[test]
+fn issue_2512_an_untaken_restamping_expand_declares_its_inserted_extent_and_yields_zeros() {
+    let dag = restamp_under_activation_dag(Prim::F32, |dag, under_a| {
+        let decl = under_a.decl;
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            restamp_named("n", Prim::F32),
+            None,
+        );
+        let s = dag.add_node(
+            decl,
+            RiscOp::Load { name: "s".into() },
+            vec![],
+            restamp_scalar(Prim::Int64),
+            None,
+        );
+        let expanded = dag.add_node(
+            under_a,
+            RiscOp::Expand {
+                axis: 1,
+                size: chelis_ir::dag::RtDim::Node(1),
+            },
+            vec![x, s],
+            TensorType {
+                dims: vec![
+                    DimInfo::Named("m".into(), None),
+                    DimInfo::Named("k".into(), None),
+                ],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let reduced = dag.add_node(
+            under_a,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![expanded],
+            restamp_named("m", Prim::F32),
+            None,
+        );
+        (expanded, reduced)
+    });
+    assert_eq!(chelis_ir::verify::verify(&dag), Vec::<String>::new());
+    let generated = codegen(&dag, "restamp_gate").expect("restamp codegen");
+    let f32_bytes =
+        |values: &[i32]| restamp_storage_bytes(&restamp_input_storage(Prim::F32, values));
+    let mut failures = Vec::new();
+    for (x, z) in [(vec![1, 2], vec![1, 2, 3]), (vec![1, 2, 3], vec![4, 5])] {
+        for active in [false, true] {
+            let inputs = [
+                ("x", restamp_input_storage(Prim::F32, &x), 1),
+                ("z", restamp_input_storage(Prim::F32, &z), 1),
+                (
+                    "a",
+                    restamp_input_storage(Prim::Bool, &[i32::from(active)]),
+                    0,
+                ),
+                ("s", restamp_input_storage(Prim::Int64, &[2]), 0),
+            ];
+            let expected = if active {
+                Err(vec![
+                    format!(
+                        "extent `m`: claimed = {}, insert axis 0 = {}",
+                        z.len(),
+                        x.len()
+                    ),
+                    "numeric trap: domain in insert at i64".to_string(),
+                ])
+            } else {
+                Ok(vec![
+                    restamp_output_text(&[], &f32_bytes(&[z.iter().sum()])),
+                    restamp_output_text(&[z.len(), 2], &vec![0u8; 2 * f32_bytes(&z).len()]),
+                ])
+            };
+            let lanes = restamp_under_activation_lanes(&dag, &generated, &inputs);
+            if !restamp_lanes_agree(&lanes, &expected) {
+                failures.push(format!(
+                    "active {active}, x {}, z {}: expected {expected:?}\n  eval {:?}\n  c {:?}",
+                    x.len(),
+                    z.len(),
+                    lanes.0,
+                    lanes.1
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

@@ -58,13 +58,13 @@
 //! rather than wrapping or saturating, mirroring the existing
 //! `chelis_int_div_guard` / `integer division or remainder by zero` precedent
 //! (`spec/05-risc-primitives.md`). It must trap identically at every integer
-//! width; today int8/int16/int32 silently wrap while int64 saturates, because
+//! width; today i8/i16/i32 silently wrap while i64 saturates, because
 //! Rust's int->int `as` truncates while float->int `as` saturates.
 //!
 //! ## chelis#729 Phase 0 note
 //!
 //! The lane drivers here (`eval_int`, `parse_out_binding`) parse printed
-//! values as exact `i64`, so they enforce the int64 value set (the §C1
+//! values as exact `i64`, so they enforce the i64 value set (the §C1
 //! domain column) by construction: a fractional, out-of-range, or
 //! float-formatted rendering fails the parse loudly. The shared checker
 //! for the string-shaped drivers in the sibling matrix files is
@@ -115,7 +115,7 @@ fn eval_lane(program: &str) -> (bool, String, String) {
     )
 }
 
-/// Evaluate a single `int64` expression under the evaluator lane and return the
+/// Evaluate a single `i64` expression under the evaluator lane and return the
 /// printed value parsed as an exact `i64`.
 ///
 /// Deliberately parses `i64`, never `f64`: parsing through `f64` is precisely
@@ -211,7 +211,7 @@ fn assert_lane_parity(expr: &str, expected: i64, name: &str) {
         return;
     }
     let dir = tempdir().expect("tempdir");
-    let program = format!("def run() -> int64 = {expr}\nout = run()\n");
+    let program = format!("def run() -> i64 = {expr}\nout = run()\n");
     let c_result = build_run_int(&dir, &program, name);
     assert_eq!(
         eval_result, c_result,
@@ -235,7 +235,7 @@ fn assert_lane_parity(expr: &str, expected: i64, name: &str) {
 #[test]
 fn add_at_two_pow_53_agrees_across_lanes() {
     assert_lane_parity(
-        &format!("add(cast({TWO_POW_53}, int64), cast(1, int64))"),
+        &format!("add(cast({TWO_POW_53}, i64), cast(1, i64))"),
         TWO_POW_53_PLUS_1,
         "add_two_pow_53",
     );
@@ -248,8 +248,8 @@ fn add_at_two_pow_53_agrees_across_lanes() {
 #[test]
 fn static_int_condition_selects_same_branch_across_lanes() {
     let expr = format!(
-        "if lt(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64)) \
-         then cast(111, int64) else cast(222, int64)"
+        "if lt(cast({TWO_POW_53}, i64), cast({TWO_POW_53_PLUS_1}, i64)) \
+         then cast(111, i64) else cast(222, i64)"
     );
     assert_lane_parity(&expr, 111, "static_cond_branch");
 }
@@ -261,7 +261,7 @@ fn mul_above_two_pow_53_agrees_across_lanes() {
     // Guards against a fix that clamps everything above 2^53 rather than
     // computing exactly.
     assert_lane_parity(
-        "mul(cast(94906266, int64), cast(94906266, int64))",
+        "mul(cast(94906266, i64), cast(94906266, i64))",
         9_007_199_326_062_756,
         "mul_above_2p53",
     );
@@ -278,9 +278,9 @@ fn mul_above_two_pow_53_agrees_across_lanes() {
 #[test]
 fn int64_literal_survives_the_front_end_exactly() {
     assert_eq!(
-        eval_int(&format!("cast({TWO_POW_53_PLUS_1}, int64)")),
+        eval_int(&format!("cast({TWO_POW_53_PLUS_1}, i64)")),
         TWO_POW_53_PLUS_1,
-        "an int64 literal above 2^53 must not be rounded by the front end"
+        "an i64 literal above 2^53 must not be rounded by the front end"
     );
 }
 
@@ -288,7 +288,7 @@ fn int64_literal_survives_the_front_end_exactly() {
 #[test]
 fn i64_max_literal_survives_the_front_end_exactly() {
     assert_eq!(
-        eval_int(&format!("cast({I64_MAX}, int64)")),
+        eval_int(&format!("cast({I64_MAX}, i64)")),
         I64_MAX,
         "i64::MAX must round-trip as a literal"
     );
@@ -304,7 +304,7 @@ fn i64_max_literal_survives_the_front_end_exactly() {
 fn lt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
-            "lt(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64))"
+            "lt(cast({TWO_POW_53}, i64), cast({TWO_POW_53_PLUS_1}, i64))"
         )),
         "lt(2^53, 2^53+1) must be true; f64 comparison collapses both operands"
     );
@@ -315,7 +315,7 @@ fn lt_is_exact_at_two_pow_53_boundary() {
 fn gt_is_exact_at_two_pow_53_boundary() {
     assert!(
         eval_bool(&format!(
-            "gt(cast({TWO_POW_53_PLUS_1}, int64), cast({TWO_POW_53}, int64))"
+            "gt(cast({TWO_POW_53_PLUS_1}, i64), cast({TWO_POW_53}, i64))"
         )),
         "gt(2^53+1, 2^53) must be true"
     );
@@ -326,31 +326,31 @@ fn gt_is_exact_at_two_pow_53_boundary() {
 fn eq_is_exact_at_two_pow_53_boundary() {
     assert!(
         !eval_bool(&format!(
-            "eq(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64))"
+            "eq(cast({TWO_POW_53}, i64), cast({TWO_POW_53_PLUS_1}, i64))"
         )),
         "eq(2^53, 2^53+1) must be false"
     );
 }
 
 /// Historical failure: the f64 closure returned the smaller operand after
-/// both int64 inputs collapsed to the same float image.
+/// both i64 inputs collapsed to the same float image.
 #[test]
 fn max_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
         eval_int(&format!(
-            "max_elem(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64))"
+            "max_elem(cast({TWO_POW_53}, i64), cast({TWO_POW_53_PLUS_1}, i64))"
         )),
         TWO_POW_53_PLUS_1,
         "max_elem must return the larger operand, not the f64-collapsed one"
     );
 }
 
-/// Sibling of `max_elem`; direct `min_elem` compares the stored int64 operands.
+/// Sibling of `max_elem`; direct `min_elem` compares the stored i64 operands.
 #[test]
 fn min_elem_is_exact_at_two_pow_53_boundary() {
     assert_eq!(
         eval_int(&format!(
-            "min_elem(cast({TWO_POW_53}, int64), cast({TWO_POW_53_PLUS_1}, int64))"
+            "min_elem(cast({TWO_POW_53}, i64), cast({TWO_POW_53_PLUS_1}, i64))"
         )),
         TWO_POW_53,
         "min_elem must return the smaller operand"
@@ -389,8 +389,8 @@ fn assert_overflow_traps(expr: &str, expected: &str, label: &str) {
 #[test]
 fn int64_add_overflow_traps() {
     assert_overflow_traps(
-        &format!("add(cast({I64_MAX}, int64), cast(1, int64))"),
-        "numeric trap: overflow in add at int64",
+        &format!("add(cast({I64_MAX}, i64), cast(1, i64))"),
+        "numeric trap: overflow in add at i64",
         "int64_add_overflow",
     );
 }
@@ -399,8 +399,8 @@ fn int64_add_overflow_traps() {
 #[test]
 fn int64_mul_overflow_traps() {
     assert_overflow_traps(
-        "mul(cast(4000000000, int64), cast(4000000000, int64))",
-        "numeric trap: overflow in mul at int64",
+        "mul(cast(4000000000, i64), cast(4000000000, i64))",
+        "numeric trap: overflow in mul at i64",
         "int64_mul_overflow",
     );
 }
@@ -409,8 +409,8 @@ fn int64_mul_overflow_traps() {
 #[test]
 fn int8_add_overflow_traps() {
     assert_overflow_traps(
-        "add(cast(127, int8), cast(1, int8))",
-        "numeric trap: overflow in add at int8",
+        "add(cast(127, i8), cast(1, i8))",
+        "numeric trap: overflow in add at i8",
         "int8_add_overflow",
     );
 }
@@ -419,8 +419,8 @@ fn int8_add_overflow_traps() {
 #[test]
 fn int16_add_overflow_traps() {
     assert_overflow_traps(
-        "add(cast(32767, int16), cast(1, int16))",
-        "numeric trap: overflow in add at int16",
+        "add(cast(32767, i16), cast(1, i16))",
+        "numeric trap: overflow in add at i16",
         "int16_add_overflow",
     );
 }
@@ -429,8 +429,8 @@ fn int16_add_overflow_traps() {
 #[test]
 fn int32_add_overflow_traps() {
     assert_overflow_traps(
-        "add(cast(2147483647, int32), cast(1, int32))",
-        "numeric trap: overflow in add at int32",
+        "add(cast(2147483647, i32), cast(1, i32))",
+        "numeric trap: overflow in add at i32",
         "int32_add_overflow",
     );
 }
@@ -440,10 +440,7 @@ fn int32_add_overflow_traps() {
 #[test]
 fn int64_add_at_max_minus_one_does_not_trap() {
     assert_eq!(
-        eval_int(&format!(
-            "add(cast({}, int64), cast(1, int64))",
-            I64_MAX - 1
-        )),
+        eval_int(&format!("add(cast({}, i64), cast(1, i64))", I64_MAX - 1)),
         I64_MAX,
         "i64::MAX - 1 + 1 == i64::MAX must not trap"
     );
@@ -453,9 +450,9 @@ fn int64_add_at_max_minus_one_does_not_trap() {
 #[test]
 fn int8_add_at_max_does_not_trap() {
     assert_eq!(
-        eval_int("add(cast(126, int8), cast(1, int8))"),
+        eval_int("add(cast(126, i8), cast(1, i8))"),
         127,
-        "126 + 1 == 127 fits in int8 and must not trap"
+        "126 + 1 == 127 fits in i8 and must not trap"
     );
 }
 
@@ -470,7 +467,7 @@ fn int8_add_at_max_does_not_trap() {
 fn int64_tensor_survives_to_tensor_round_trip() {
     let program = format!(
         "module Probe.Main\n\
-         xs: List[int64] = [cast({TWO_POW_53_PLUS_1}, int64)]\n\
+         xs: List[i64] = [cast({TWO_POW_53_PLUS_1}, i64)]\n\
          out = print(to_list(to_tensor(xs)))\n"
     );
     let (ok, stdout, stderr) = eval_lane(&program);
@@ -487,7 +484,7 @@ fn int64_tensor_survives_to_tensor_round_trip() {
 // ---------------------------------------------------------------------------
 // Group 6: Std.Decimal, the user-visible victim (chelis#680, chelis#681).
 //
-// Std.Decimal stores its coefficient as int64 and scales via repeated
+// Std.Decimal stores its coefficient as i64 and scales via repeated
 // `mul(coefficient, 10)`, so it inherits the f64 arithmetic bug directly.
 // These run through the staged-std harness rather than a bare file because
 // they need the Std.Decimal import to resolve.
@@ -551,43 +548,31 @@ fn decimal_mul_does_not_silently_saturate() {
 /// `bitand(12, 10) == 8` in both lanes.
 #[test]
 fn bitand_agrees_across_lanes() {
-    assert_lane_parity(
-        "bitand(cast(12, int64), cast(10, int64))",
-        8,
-        "bitand_parity",
-    );
+    assert_lane_parity("bitand(cast(12, i64), cast(10, i64))", 8, "bitand_parity");
 }
 
 /// `bitor(12, 10) == 14` in both lanes.
 #[test]
 fn bitor_agrees_across_lanes() {
-    assert_lane_parity(
-        "bitor(cast(12, int64), cast(10, int64))",
-        14,
-        "bitor_parity",
-    );
+    assert_lane_parity("bitor(cast(12, i64), cast(10, i64))", 14, "bitor_parity");
 }
 
 /// `bitxor(12, 10) == 6` in both lanes.
 #[test]
 fn bitxor_agrees_across_lanes() {
-    assert_lane_parity(
-        "bitxor(cast(12, int64), cast(10, int64))",
-        6,
-        "bitxor_parity",
-    );
+    assert_lane_parity("bitxor(cast(12, i64), cast(10, i64))", 6, "bitxor_parity");
 }
 
 /// `shl(1, 10) == 1024` in both lanes.
 #[test]
 fn shl_agrees_across_lanes() {
-    assert_lane_parity("shl(cast(1, int64), cast(10, int64))", 1024, "shl_parity");
+    assert_lane_parity("shl(cast(1, i64), cast(10, i64))", 1024, "shl_parity");
 }
 
 /// `shr(1024, 3) == 128` in both lanes.
 #[test]
 fn shr_agrees_across_lanes() {
-    assert_lane_parity("shr(cast(1024, int64), cast(3, int64))", 128, "shr_parity");
+    assert_lane_parity("shr(cast(1024, i64), cast(3, i64))", 128, "shr_parity");
 }
 
 /// The class-level guard, not just the five instances. `reject_host_only_builtins`
@@ -605,7 +590,7 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
         return;
     }
     let dir = tempdir().expect("tempdir");
-    let program = "def run() -> int64 = bitand(cast(12, int64), cast(10, int64))\nout = run()\n";
+    let program = "def run() -> i64 = bitand(cast(12, i64), cast(10, i64))\nout = run()\n";
     let path = dir.path().join("stub.ch");
     let out_dir = dir.path().join("stub-out");
     write_file(&path, program);
@@ -641,7 +626,7 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
 // Group 8: front-end literal range.
 // ---------------------------------------------------------------------------
 
-/// chelis#683, FIXED and un-ignored: `cast(-9223372036854775808, int64)` used
+/// chelis#683, FIXED and un-ignored: `cast(-9223372036854775808, i64)` used
 /// to die with `lex error: invalid number '9223372036854775808'`, because the
 /// Surf lexer read the bare magnitude and the parser applied negation
 /// separately, so `2^63` overflowed `i64` before the sign was known. The
@@ -649,7 +634,7 @@ fn unsupported_builtin_never_silently_emits_a_zero_stub() {
 /// magnitude is now carried to the negation site and folded into `i64::MIN`.
 #[test]
 fn i64_min_is_writable_as_a_literal() {
-    let program = "module Probe.Main\nout = print(cast(-9223372036854775808, int64))\n";
+    let program = "module Probe.Main\nout = print(cast(-9223372036854775808, i64))\n";
     let (ok, stdout, stderr) = eval_lane(program);
     assert!(ok, "i64::MIN must be writable as a literal, got: {stderr}");
     assert_eq!(
@@ -701,7 +686,7 @@ fn i64_min_is_writable_as_a_deep_literal() {
 #[test]
 fn i64_min_workaround_is_exact() {
     assert_eq!(
-        eval_int("sub(cast(-9223372036854775807, int64), cast(1, int64))"),
+        eval_int("sub(cast(-9223372036854775807, i64), cast(1, i64))"),
         i64::MIN,
         "i64::MIN + 1 - 1 must be exactly i64::MIN"
     );
@@ -738,7 +723,7 @@ fn f32_add_rounds_like_native_f32() {
 /// f64 addition at its own boundary. `2^53 + 1` is not representable in f64,
 /// so the correct f64 answer IS 2^53. This is the float-lane mirror of the
 /// integer bug and documents that the same numeric input is correct here and
-/// wrong for int64.
+/// wrong for i64.
 #[test]
 fn f64_add_rounds_like_native_f64() {
     let program = "module Probe.Main\n\
@@ -752,7 +737,7 @@ fn f64_add_rounds_like_native_f64() {
     assert_eq!(
         parsed, 9_007_199_254_740_992.0,
         "f64 add at 2^53 must round to 2^53; this is correct for f64 and is \
-         exactly why the same value is WRONG for int64"
+         exactly why the same value is WRONG for i64"
     );
 }
 

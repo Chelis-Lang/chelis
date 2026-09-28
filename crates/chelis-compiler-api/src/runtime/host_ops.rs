@@ -1,42 +1,64 @@
 use chelis_unord::UnordMap;
 
-use chelis_deep::ast::{Atom, Expr};
-use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_deep::ast::{Atom, Expr, ExprCarrier};
+use chelis_ir::dag::{Dag, DeclId, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
     ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
-    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalar_tensor,
-    compare_scalars, compare_tensor_scalar, compare_tensors, float_binop,
-    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
-    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
-    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
-    tensor_from_scalars, types::Prim, uniform_sample,
+    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
+    compare_tensors, float_binop, float_scalar_tensor_binop, float_tensor_binop,
+    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
+    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
+    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim,
 };
+use chelis_types::{PreparedUniformLike, RandomKey};
 
 use super::transforms::*;
 use super::*;
 
+#[cfg(test)]
 pub(super) fn pattern_matches(
     value: &RuntimeValue,
     pattern: &Expr,
-    bindings: &mut UnordMap<String, RuntimeValue>,
+    bindings: &mut Frame,
     adt_fields: &UnordMap<String, Vec<String>>,
 ) -> Result<bool, String> {
-    let Some(list) = as_list(pattern) else {
-        return Ok(false);
+    pattern_matches_with_result_producer(value, pattern, bindings, adt_fields, None)
+}
+
+pub(super) fn pattern_matches_with_result_producer(
+    value: &RuntimeValue,
+    pattern: &Expr,
+    bindings: &mut Frame,
+    adt_fields: &UnordMap<String, Vec<String>>,
+    producer: Option<&ResultProducer>,
+) -> Result<bool, String> {
+    let (tag, kids) = match pattern.carrier() {
+        ExprCarrier::DecodedNode(tag, _, children) => (tag, children),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return Ok(false),
     };
-    match tag(list) {
-        Some(DeepTag::PatVar) => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
-                bindings.insert(name.to_string(), value.clone());
+    match tag {
+        DeepTag::PatVar => {
+            if let Some(name) = kids.first().and_then(symbol_name) {
+                bindings.insert_with_result_producer(
+                    name.to_string(),
+                    value.clone(),
+                    producer
+                        .cloned()
+                        .filter(|producer| producer.matches_value(value)),
+                );
                 return Ok(true);
             }
             Ok(false)
         }
-        Some(DeepTag::PatWild) => Ok(true),
-        Some(DeepTag::PatLit) => {
-            let lit = children(list)
+        DeepTag::PatWild => Ok(true),
+        DeepTag::PatLit => {
+            let lit = kids
                 .first()
                 .ok_or_else(|| "pat-lit missing value".to_string())?;
             Ok(match (value, lit) {
@@ -48,18 +70,48 @@ pub(super) fn pattern_matches(
                 (RuntimeValue::Scalar(payload), Expr::Atom(Atom::Float(rhs), _))
                     if payload.dtype().is_float() =>
                 {
-                    payload.as_f64_lossy() == *rhs
+                    let pattern = scalar_from_f64("literal", payload.dtype(), *rhs)
+                        .map_err(|error| error.to_string())?;
+                    compare_scalars(CompareOp::Eq, payload.value(), pattern)
+                        .map_err(|error| error.to_string())?
                 }
                 (RuntimeValue::Bool(lhs), Expr::Atom(Atom::Bool(rhs), _)) => lhs == rhs,
                 (RuntimeValue::String(lhs), Expr::Atom(Atom::Str(rhs), _)) => lhs == rhs,
                 _ => false,
             })
         }
-        Some(DeepTag::PatCtor) => {
-            let kids = children(list);
+        DeepTag::PatCtor => {
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
+            if let RuntimeValue::List(items) = value {
+                return match ctor {
+                    "Nil" => Ok(kids.len() == 1 && items.is_empty()),
+                    "Cons" => {
+                        if kids.len() != 3 || items.is_empty() {
+                            return Ok(false);
+                        }
+                        let tail = RuntimeValue::List(items[1..].to_vec().into());
+                        let head_producer = producer.and_then(|producer| producer.child(0));
+                        let tail_producer =
+                            producer.and_then(|producer| producer.aggregate_suffix(1));
+                        Ok(pattern_matches_with_result_producer(
+                            &items[0],
+                            &kids[1],
+                            bindings,
+                            adt_fields,
+                            head_producer.as_ref(),
+                        )? && pattern_matches_with_result_producer(
+                            &tail,
+                            &kids[2],
+                            bindings,
+                            adt_fields,
+                            tail_producer.as_ref(),
+                        )?)
+                    }
+                    _ => Ok(false),
+                };
+            }
             let RuntimeValue::Adt {
                 ctor: got, fields, ..
             } = value
@@ -69,15 +121,21 @@ pub(super) fn pattern_matches(
             if ctor != got || kids.len().saturating_sub(1) != fields.len() {
                 return Ok(false);
             }
-            for (subpat, field) in kids.iter().skip(1).zip(fields) {
-                if !pattern_matches(field, subpat, bindings, adt_fields)? {
+            for (index, (subpat, field)) in kids.iter().skip(1).zip(fields).enumerate() {
+                let field_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    field,
+                    subpat,
+                    bindings,
+                    adt_fields,
+                    field_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        Some(DeepTag::PatRecord) => {
-            let kids = children(list);
+        DeepTag::PatRecord => {
             let Some(ctor) = kids.first().and_then(symbol_name) else {
                 return Ok(false);
             };
@@ -97,19 +155,27 @@ pub(super) fn pattern_matches(
                 return Ok(false);
             };
             for kv_expr in kids.iter().skip(1) {
-                let Some(kv_list) = as_list(kv_expr) else {
-                    continue;
+                let kv_kids = match kv_expr.carrier() {
+                    ExprCarrier::DecodedNode(DeepTag::Kv, _, children) => children,
+                    ExprCarrier::DecodedNode(_, _, _)
+                    | ExprCarrier::StructuralList(_)
+                    | ExprCarrier::UndecodableHead(_, _, _)
+                    | ExprCarrier::Atom(_)
+                    | ExprCarrier::MetadataMap(_)
+                    | ExprCarrier::MetadataExpression(_) => {
+                        return Err("pat-record field must be a decoded `kv` node".to_string());
+                    }
                 };
-                if tag(kv_list) != Some(DeepTag::Kv) {
-                    continue;
+                if kv_kids.len() != 2 {
+                    return Err("pat-record `kv` field must contain a name and pattern".to_string());
                 }
-                let kv_kids = children(kv_list);
-                let Some(field_name) = kv_kids.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let Some(pattern_expr) = kv_kids.get(1) else {
-                    continue;
-                };
+                let field_name = kv_kids
+                    .first()
+                    .and_then(symbol_name)
+                    .ok_or_else(|| "pat-record field name must be a symbol".to_string())?;
+                let pattern_expr = kv_kids
+                    .get(1)
+                    .ok_or_else(|| "pat-record field missing pattern".to_string())?;
                 let Some(index) = declared_fields
                     .iter()
                     .position(|declared| declared == field_name)
@@ -119,21 +185,58 @@ pub(super) fn pattern_matches(
                 let Some(field_value) = fields.get(index) else {
                     return Ok(false);
                 };
-                if !pattern_matches(field_value, pattern_expr, bindings, adt_fields)? {
+                let field_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    field_value,
+                    pattern_expr,
+                    bindings,
+                    adt_fields,
+                    field_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        Some(DeepTag::PatTuple) => {
+        DeepTag::PatAs => {
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                return Ok(false);
+            };
+            let Some(inner) = kids.get(1) else {
+                return Ok(false);
+            };
+            if pattern_matches_with_result_producer(value, inner, bindings, adt_fields, producer)? {
+                bindings.insert_with_result_producer(
+                    name.to_string(),
+                    value.clone(),
+                    producer
+                        .cloned()
+                        .filter(|producer| producer.matches_value(value)),
+                );
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        DeepTag::PatTuple => {
+            if kids.is_empty() && matches!(value, RuntimeValue::Unit) {
+                return Ok(true);
+            }
             let RuntimeValue::Tuple(items) = value else {
                 return Ok(false);
             };
-            if items.len() != children(list).len() {
+            if items.len() != kids.len() {
                 return Ok(false);
             }
-            for (subpat, item) in children(list).iter().zip(items) {
-                if !pattern_matches(item, subpat, bindings, adt_fields)? {
+            for (index, (subpat, item)) in kids.iter().zip(items).enumerate() {
+                let item_producer = producer.and_then(|producer| producer.child(index));
+                if !pattern_matches_with_result_producer(
+                    item,
+                    subpat,
+                    bindings,
+                    adt_fields,
+                    item_producer.as_ref(),
+                )? {
                     return Ok(false);
                 }
             }
@@ -146,33 +249,22 @@ pub(super) fn pattern_matches(
 pub(crate) fn collect_adt_ctor_fields(exprs: &[Expr]) -> UnordMap<String, Vec<String>> {
     let mut out = UnordMap::new();
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Deftype, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Deftype) {
-            continue;
-        }
-        let kids = children(list);
         for variant in kids.iter().skip(2) {
-            let Some(variant_list) = as_list(variant) else {
+            let Some((DeepTag::Variant, variant_kids)) = tagged_expr_children(variant) else {
                 continue;
             };
-            if tag(variant_list) != Some(DeepTag::Variant) {
-                continue;
-            }
-            let variant_kids = children(variant_list);
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
                 continue;
             };
             let mut fields = Vec::new();
             for field in variant_kids.iter().skip(1) {
-                let Some(field_list) = as_list(field) else {
+                let Some((DeepTag::Field, field_kids)) = tagged_expr_children(field) else {
                     continue;
                 };
-                if tag(field_list) != Some(DeepTag::Field) {
-                    continue;
-                }
-                if let Some(name) = children(field_list).first().and_then(symbol_name) {
+                if let Some(name) = field_kids.first().and_then(symbol_name) {
                     fields.push(name.to_string());
                 }
             }
@@ -188,7 +280,7 @@ pub(super) fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
 
-fn terminal_name(name: &str) -> &str {
+pub(super) fn terminal_name(name: &str) -> &str {
     name.rsplit_once("__")
         .map(|(_, tail)| tail)
         .or_else(|| name.rsplit_once('.').map(|(_, tail)| tail))
@@ -355,86 +447,19 @@ pub(super) fn eval_trunc_div(args: &[RuntimeValue]) -> Result<RuntimeValue, Stri
     numeric_binop(args, Some(IntBinOp::TruncDiv), None)
 }
 
-pub(super) fn bit_int_binop(
+pub(super) fn bitwise_binop(
     args: &[RuntimeValue],
-    op: impl Fn(i64, i64) -> i64,
+    op: chelis_types::BitwiseKind,
 ) -> Result<RuntimeValue, String> {
     match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            // Pre-WS-A0 stored every int as i64; preserve i64-precision
-            // arithmetic but pin the result dtype to the operand dtype
-            // when both sides agree, else widen to int64. Matches the
-            // §5.1 "no implicit precision promotion" rule for matched
-            // operands, and fails closed for mixed widths.
-            let (ldt, rdt) = (lp.dtype(), rp.dtype());
-            let result_dtype = if ldt == rdt { ldt } else { Prim::Int64 };
-            RuntimeValue::scalar_like_int(result_dtype, op(lp.as_i64(), rp.as_i64()))
+        (Some(RuntimeValue::Scalar(lhs)), Some(RuntimeValue::Scalar(rhs))) => {
+            let value = chelis_types::bitwise_scalar(op, lhs.value(), rhs.value())
+                .map_err(|error| error.to_string())?;
+            Ok(RuntimeValue::from_scalar_value(value))
         }
-        other => Err(format!("integer op expects int args, got {other:?}")),
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum IntShiftOp {
-    Left,
-    Right,
-}
-
-pub(super) fn int_shift_binop(
-    args: &[RuntimeValue],
-    op: IntShiftOp,
-) -> Result<RuntimeValue, String> {
-    match (args.first(), args.get(1)) {
-        (Some(RuntimeValue::Scalar(lp)), Some(RuntimeValue::Scalar(rp)))
-            if lp.dtype().is_integer() && rp.dtype().is_integer() =>
-        {
-            let rhs = rp.as_i64();
-            if rhs < 0 {
-                return Err(format!("shift amount must be non-negative, got {rhs}"));
-            }
-            let width = match lp.dtype() {
-                Prim::Int8 => 8_u32,
-                Prim::Int16 => 16,
-                Prim::Int32 => 32,
-                Prim::Int64 => 64,
-                _ => unreachable!("integer guard above excludes non-integer shift operands"),
-            };
-            // [04-NUM-13]: shifts are width-bounded, not host-language
-            // shifts. A count at or above the declared width produces the
-            // fully shifted-out value (zero for left shift/nonnegative right
-            // shift, all ones for negative arithmetic right shift). Avoid
-            // invoking Rust's debug-panic shift path for those counts.
-            let lhs = lp.as_i64();
-            let raw = if rhs >= i64::from(width) {
-                match op {
-                    IntShiftOp::Left => 0,
-                    IntShiftOp::Right if lhs < 0 => -1,
-                    IntShiftOp::Right => 0,
-                }
-            } else {
-                match op {
-                    IntShiftOp::Left => lhs.wrapping_shl(rhs as u32),
-                    IntShiftOp::Right => lhs.wrapping_shr(rhs as u32),
-                }
-            };
-            // [04-NUM-13] discards bits at the declared width. Narrow before
-            // the trapping finalizer so an in-spec shift such as `1i8 << 7`
-            // stores -128 instead of being misclassified as arithmetic
-            // overflow.
-            let wrapped = match lp.dtype() {
-                Prim::Int8 => (raw as i8) as i64,
-                Prim::Int16 => (raw as i16) as i64,
-                Prim::Int32 => (raw as i32) as i64,
-                other => {
-                    debug_assert_eq!(other, Prim::Int64);
-                    raw
-                }
-            };
-            RuntimeValue::scalar_like_int(lp.dtype(), wrapped)
-        }
-        other => Err(format!("shift op expects int args, got {other:?}")),
+        other => Err(format!(
+            "bitwise op expects integer scalar args, got {other:?}"
+        )),
     }
 }
 
@@ -484,36 +509,36 @@ pub(super) fn compare_runtime(
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             tensor_compare_value(lhs, rhs, op).map(RuntimeValue::Tensor)
         }
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
-            if comparison_scalar(scalar).is_some() =>
-        {
-            let storage = compare_tensor_scalar(
-                op,
-                tensor.value.storage(),
-                comparison_scalar(scalar).expect("comparison scalar guard"),
-            )
-            .map_err(|error| error.to_string())?;
-            match tensor_result(tensor, storage) {
-                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
-                _ => unreachable!("tensor_result always constructs a tensor"),
-            }
+        // A scalar beside a tensor. These two arms used to broadcast the
+        // scalar and return a `tensor[D, bool]`. chelis#1506 makes the form a
+        // type error under `[05-OP-36]`, so a CHECKED program can no longer
+        // reach here; this lane is also driven by API callers with unchecked
+        // input, which is why the arms become a named refusal rather than a
+        // deletion. Deleting them would fall through to the generic arm below,
+        // whose message names no rule and reads like an internal error, and
+        // `[05-UNS-4]` says a pre-codegen gate "SHALL NOT be the sole defense
+        // against an unsupported case reaching emission". Broadcasting here
+        // was itself the value substitution `[05-UNS-1]` forbids.
+        (Some(RuntimeValue::Tensor(_)), Some(scalar)) if comparison_scalar(scalar).is_some() => {
+            Err(mixed_comparison_surface_error())
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
-            if comparison_scalar(scalar).is_some() =>
-        {
-            let storage = compare_scalar_tensor(
-                op,
-                comparison_scalar(scalar).expect("comparison scalar guard"),
-                tensor.value.storage(),
-            )
-            .map_err(|error| error.to_string())?;
-            match tensor_result(tensor, storage) {
-                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
-                _ => unreachable!("tensor_result always constructs a tensor"),
-            }
+        (Some(scalar), Some(RuntimeValue::Tensor(_))) if comparison_scalar(scalar).is_some() => {
+            Err(mixed_comparison_surface_error())
         }
         other => Err(format!("comparison expects matching args, got {other:?}")),
     }
+}
+
+/// `[05-UNS-1]`: an unsupported case is refused, never substituted with a
+/// value. The checker rejects a scalar beside a tensor under `[05-OP-36]`
+/// (chelis#1506); this is the runtime backstop for input that did not come
+/// through it.
+fn mixed_comparison_surface_error() -> String {
+    "[05-UNS-1] comparison does not admit a scalar beside a tensor: \
+     spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error. \
+     Give the scalar the tensor's shape explicitly, as in \
+     `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`."
+        .to_string()
 }
 
 pub(super) fn ordered_compare(
@@ -626,8 +651,7 @@ pub(super) fn tensor_bool_unop(
 /// exactly when the expression is a `t-tensor` whose element type is an
 /// active tensor dtype.
 pub(super) fn declared_tensor_prim(expr: &Expr) -> Option<Prim> {
-    let list = as_list(expr)?;
-    if tag(list) != Some(DeepTag::TTensor) {
+    if expr.tag() != Some(DeepTag::TTensor) {
         return None;
     }
     extract_prim_from_type_expr(expr)
@@ -678,7 +702,7 @@ pub(super) fn expect_list_arg(
     index: usize,
 ) -> Result<Vec<RuntimeValue>, String> {
     match args.get(index) {
-        Some(RuntimeValue::List(items)) => Ok(items.clone()),
+        Some(RuntimeValue::List(items)) => Ok(items.to_vec()),
         other => Err(format!("expected list arg at index {index}, got {other:?}")),
     }
 }
@@ -688,7 +712,7 @@ pub(super) fn expect_dict_arg(
     index: usize,
 ) -> Result<Vec<(RuntimeValue, RuntimeValue)>, String> {
     match args.get(index) {
-        Some(RuntimeValue::Dict(entries)) => Ok(entries.clone()),
+        Some(RuntimeValue::Dict(entries)) => Ok(entries.to_vec()),
         other => Err(format!("expected dict arg at index {index}, got {other:?}")),
     }
 }
@@ -725,8 +749,9 @@ pub(super) fn ensure_dict_key_supported(value: &RuntimeValue) -> Result<(), Stri
     match value {
         RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => Ok(()),
         RuntimeValue::String(_) => Ok(()),
+        RuntimeValue::Bool(_) => Ok(()),
         other => Err(format!(
-            "dict keys must be int64 or string in 3d, got {other:?}"
+            "dict keys must be i64 or string in 3d, got {other:?}"
         )),
     }
 }
@@ -791,10 +816,8 @@ pub(super) fn dict_lookup<'a>(
 /// `crates/chelis-ir/src/verify.rs`: cast dims must not change).
 pub(super) fn cast_tensor_value(
     tensor: RuntimeTensorValue,
-    target: &str,
+    target_prim: Prim,
 ) -> Result<RuntimeValue, String> {
-    let target_prim = Prim::parse_name(target)
-        .ok_or_else(|| format!("unsupported cast target `{target}` for tensor input"))?;
     let RuntimeTensorValue {
         value: ir_value,
         precision: src_prim,
@@ -829,71 +852,58 @@ pub(super) fn cast_trunc_tensor_value(
 /// sub-lists at the same level must have matching length and matching
 /// precision.
 ///
-/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
-/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
-/// behaviour for compatibility).
+/// The checked leaf dtype and rank are required inputs. Empty Lists carry
+/// no payload evidence, and hidden trailing extents require checked witnesses
+/// rather than a guessed dtype or shape ([05-OP-57]).
 pub(super) fn nested_list_to_tensor_data(
     outer: &[RuntimeValue],
-) -> Result<(Prim, Vec<usize>, ListTensorData), String> {
+    precision: Prim,
+    expected_shape: &[Option<usize>],
+) -> Result<(Vec<usize>, ListTensorData), String> {
+    let Some((expected_extent, inner_extents)) = expected_shape.split_first() else {
+        return Err("to_tensor expected a positive-rank checked result".into());
+    };
+    if expected_extent.is_some_and(|extent| extent != outer.len()) {
+        return Err("to_tensor List length disagrees with its checked tensor extent".into());
+    }
     if outer.is_empty() {
-        return Ok((Prim::F32, vec![0], ListTensorData::Float(Vec::new())));
+        let mut shape = vec![0];
+        for extent in inner_extents {
+            shape.push(extent.ok_or(
+                "to_tensor cannot resolve an inner extent hidden by an empty List [05-OP-57]",
+            )?);
+        }
+        return Ok((shape, list_to_tensor_data(outer, precision)?));
+    }
+    if inner_extents.is_empty() {
+        let data = list_to_tensor_data(outer, precision)?;
+        return Ok((vec![outer.len()], data));
     }
 
-    // Decide whether this is a leaf level (numeric/bool elements) or a
-    // recursive level (List elements) based on the first element. The
-    // homogeneity check below catches the mixed case.
-    let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
-
-    if !first_is_list {
-        // Leaf level — same code path as the original list_to_tensor.
-        let (precision, data) = list_to_tensor_data(outer)?;
-        return Ok((precision, vec![data.len()], data));
-    }
-
-    let mut precision: Option<Prim> = None;
-    let mut inner_shape: Option<Vec<usize>> = None;
-    let mut data: Option<ListTensorData> = None;
-    for (idx, value) in outer.iter().enumerate() {
+    let mut rows = outer.iter().enumerate().map(|(index, value)| {
         let RuntimeValue::List(inner) = value else {
             return Err(format!(
-                "to_tensor expects homogeneous nested lists; element {idx} is not a List"
+                "to_tensor expects homogeneous nested lists; element {index} is not a List"
             ));
         };
-        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
-        match &precision {
-            None => precision = Some(sub_precision),
-            Some(p) if *p == sub_precision => {}
-            Some(p) => {
-                return Err(format!(
-                    "to_tensor requires homogeneous numeric or bool elements; expected {p:?}, got {sub_precision:?} at element {idx}"
-                ));
-            }
+        nested_list_to_tensor_data(inner, precision, inner_extents)
+    });
+    let (inner_shape, mut data) = rows.next().expect("nonempty List checked above")?;
+    for row in rows {
+        let (shape, row_data) = row?;
+        if shape != inner_shape {
+            return Err("to_tensor requires uniform inner shape".into());
         }
-        match &inner_shape {
-            None => inner_shape = Some(sub_shape),
-            Some(s) if *s == sub_shape => {}
-            Some(s) => {
-                return Err(format!(
-                    "to_tensor requires uniform inner shape; expected {s:?}, got {sub_shape:?} at element {idx}"
-                ));
-            }
-        }
-        match &mut data {
-            None => data = Some(sub_data),
-            Some(existing) => existing.extend(sub_data)?,
-        }
+        data.extend(row_data)?;
     }
-
     let mut shape = vec![outer.len()];
-    shape.extend(inner_shape.unwrap_or_default());
-    let precision = precision.unwrap_or(Prim::F32);
-    let data = data.unwrap_or(ListTensorData::Float(Vec::new()));
-    Ok((precision, shape, data))
+    shape.extend(inner_shape);
+    Ok((shape, data))
 }
 
 /// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
 /// families, exact f64 images for floats (chelis#729 Phase 1; ends the
-/// f64-collapse of exact int64 elements, chelis#684).
+/// f64-collapse of exact i64 elements, chelis#684).
 pub(super) enum ListTensorData {
     Int(Vec<i64>),
     Float(Vec<f64>),
@@ -932,61 +942,39 @@ impl ListTensorData {
     }
 }
 
-fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, ListTensorData), String> {
-    // Element classification: integer scalars carry exact i64 in the wide
-    // ingress buffer while retaining the ELEMENT's own dtype; floats carry
-    // their exact f64 image at their own dtype; bools carry 0/1 into a Bool
-    // tensor. The homogeneity check pins the precision to whatever the first
-    // typed element advertised. The wide buffer is not authority to widen
-    // the resulting tensor.
-    let mut precision: Option<Prim> = None;
-    let mut ints: Vec<i64> = Vec::new();
-    let mut floats: Vec<f64> = Vec::new();
+fn list_to_tensor_data(values: &[RuntimeValue], precision: Prim) -> Result<ListTensorData, String> {
+    // The declared dtype is authoritative even for zero elements. Nonempty
+    // payloads validate against it; they never choose or change that dtype.
+    let mut ints = Vec::new();
+    let mut floats = Vec::new();
     for value in values {
         match value {
-            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                let element_dtype = payload.dtype();
-                precision.get_or_insert(element_dtype);
-                if precision != Some(element_dtype) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
+            RuntimeValue::Scalar(payload)
+                if payload.dtype() == precision && precision.is_integer() =>
+            {
                 ints.push(payload.as_i64());
             }
-            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-                let element_dtype = payload.dtype();
-                precision.get_or_insert(element_dtype);
-                if precision != Some(element_dtype) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
+            RuntimeValue::Scalar(payload)
+                if payload.dtype() == precision && precision.is_float() =>
+            {
                 floats.push(payload.as_f64_lossy());
             }
-            RuntimeValue::Bool(value) => {
-                precision.get_or_insert(Prim::Bool);
-                if precision != Some(Prim::Bool) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
-                ints.push(if *value { 1 } else { 0 });
+            RuntimeValue::Bool(value) if precision == Prim::Bool => {
+                ints.push(i64::from(*value));
             }
-            other => {
-                return Err(format!(
-                    "to_tensor expects numeric or bool list elements, got {other:?}"
-                ));
-            }
+            _ => return Err(
+                "to_tensor requires homogeneous numeric or bool list elements at the checked dtype"
+                    .into(),
+            ),
         }
     }
-    let precision = precision.unwrap_or(Prim::F32);
-    let data = if precision.is_float() {
-        ListTensorData::Float(floats)
+    if precision.is_float() {
+        Ok(ListTensorData::Float(floats))
+    } else if precision.is_integer() || precision == Prim::Bool {
+        Ok(ListTensorData::Int(ints))
     } else {
-        ListTensorData::Int(ints)
-    };
-    Ok((precision, data))
+        Err("to_tensor requires an active numeric or bool element dtype".into())
+    }
 }
 
 pub(super) fn tensor_to_list_values(
@@ -999,7 +987,7 @@ pub(super) fn tensor_to_list_values(
         ));
     }
     // chelis#729 Phase 1: elements read the sealed per-dtype storage
-    // directly, so int64 lists stay exact above 2^53 and float elements
+    // directly, so i64 lists stay exact above 2^53 and float elements
     // carry their own width (the probe-2 to_list narrowing is gone).
     let mut values = Vec::with_capacity(tensor.value.len());
     for index in 0..tensor.value.len() {
@@ -1039,14 +1027,7 @@ fn pad_sequences_rows(
         let RuntimeValue::List(items) = sequence else {
             return Err(format!("{op} expects nested lists, got {sequence:?}"));
         };
-        let (row_precision, row) = list_to_tensor_data(items)?;
-        if row_precision != pad_precision && !items.is_empty() {
-            return Err(format!(
-                "{op} requires homogeneous numeric nested lists at `{}`; got `{}`",
-                pad_precision.name(),
-                row_precision.name()
-            ));
-        }
+        let row = list_to_tensor_data(items, pad_precision)?;
         lens.push(row.len());
         rows.push(row);
     }
@@ -1212,7 +1193,7 @@ pub(super) fn expect_int_list(values: &[RuntimeValue], op: &str) -> Result<Vec<u
                     Err(format!("{op} expects non-negative sizes, got {v}"))
                 }
             }
-            other => Err(format!("{op} expects int64 sizes, got {other:?}")),
+            other => Err(format!("{op} expects i64 sizes, got {other:?}")),
         })
         .collect()
 }
@@ -1353,54 +1334,52 @@ pub(super) fn tensor_permute_host(
     )))
 }
 
-/// 2D matmul: lhs is [m, k], rhs is [k, n], output is [m, n].
+/// Execute matrix multiplication through its typed, rank-generic lowering.
 pub(super) fn tensor_matmul_host(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
-    if lhs.value.shape.len() != 2 || rhs.value.shape.len() != 2 {
-        return Err(format!(
-            "matmul host runtime currently supports only rank-2 × rank-2; got ranks {} and {}",
-            lhs.value.shape.len(),
-            rhs.value.shape.len()
-        ));
+    let a = &lhs.value.shape;
+    let b = &rhs.value.shape;
+    if a.len() < 2 || b.len() < 2 {
+        return Err("matmul requires both operand ranks to be at least two".to_string());
     }
-    let m = lhs.value.shape[0];
-    let k_lhs = lhs.value.shape[1];
-    let k_rhs = rhs.value.shape[0];
-    let n = rhs.value.shape[1];
-    if k_lhs != k_rhs {
-        return Err(format!(
-            "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
-        ));
+    if lhs.precision != rhs.precision || !lhs.precision.is_float() {
+        return Err("matmul requires one matching active float dtype".to_string());
     }
-    // #170 (DO NOT "fix" this into the stride-4 cascade): matmul does NOT
-    // take the #163 `sum` cascade, and its f64 accumulator is intentional.
-    // torch's CPU f32 matmul is a BLAS GEMM whose rounding is bit-exact
-    // with a strict-f32 left-fold (verified k=20..257), NOT the cascade
-    // (which is `sum`'s order — applying it here would CREATE a k>=128
-    // divergence). The eval reference deliberately keeps a HIGHER-precision
-    // f64 accumulator: it is the reference, the shipped C backend trades
-    // precision for speed via `cblas_sgemm`, and the matmul eval-vs-C
-    // parity tests use a TOLERANCE (not bit-identity) for exactly this
-    // expected eval(f64)-vs-backend(BLAS) gap. Matching torch's f32-GEMM
-    // bit pattern by downcasting eval to strict-f32 would lower precision,
-    // couple the reference to torch's specific BLAS version, and still not
-    // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
-    // a documented, expected precision characteristic, not a divergence.
-    let a = lhs.value.to_f64_lossy_vec();
-    let b = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0_f64; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0_f64;
-            for kk in 0..k_lhs {
-                acc += a[i * k_lhs + kk] * b[kk * n + j];
-            }
-            out[i * n + j] = acc;
+    if a[a.len() - 1] != b[b.len() - 2] {
+        return Err("matmul shared-axis mismatch".to_string());
+    }
+    for (&a_extent, &b_extent) in a[..a.len() - 2]
+        .iter()
+        .rev()
+        .zip(b[..b.len() - 2].iter().rev())
+    {
+        if a_extent != b_extent && a_extent != 1 && b_extent != 1 {
+            return Err("matmul batch-axis mismatch".to_string());
         }
     }
-    RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
+    let mut dag = Dag::new();
+    let decl = dag.declare("matmul");
+    let lhs_ty = tensor_type_for(lhs);
+    let rhs_ty = tensor_type_for(rhs);
+    let lhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
+    let lhs_id = add_load(&mut dag, decl, lhs_name.clone(), lhs_ty.clone());
+    let rhs_id = add_load(&mut dag, decl, rhs_name.clone(), rhs_ty.clone());
+    let root = tier2::lower_matmul(
+        decl.into(),
+        &mut dag,
+        lhs_id,
+        rhs_id,
+        &lhs_ty,
+        &rhs_ty,
+        None,
+    );
+    let mut inputs = UnordMap::new();
+    inputs.insert(lhs_name, lhs.value.clone());
+    inputs.insert(rhs_name, rhs.value.clone());
+    extract_root(&dag, &inputs, root, "matmul")
 }
 
 /// `insert`: replicate a tensor along a NEW axis.
@@ -1471,9 +1450,9 @@ pub(super) fn tensor_insert_host(
 /// to hoist it.
 ///
 /// The trap renders through [`NumericTrap`], so the line is
-/// `numeric trap: domain in expand at int64` verbatim: the guarded result is
+/// `numeric trap: domain in expand at i64` verbatim: the guarded result is
 /// an extent under [05-DIM-1] and not a tensor element, which is why the
-/// dtype slot is `int64` rather than the tensor's precision
+/// dtype slot is `i64` rather than the tensor's precision
 /// (`spec/04-type-system.md` section 4.7).
 pub(super) fn tensor_expand_host(
     builtin: &str,
@@ -1924,8 +1903,7 @@ pub(super) fn tensor_softmax_host(
         //     exp mismatch remains) and would only lower the host lane's
         //     precision.
         // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
-        //     f64 fold reliably bit-matches it (same situation as matmul —
-        //     see `tensor_matmul_host`). So softmax is DOCUMENTED, not
+        //     f64 fold reliably bit-matches it. So softmax is DOCUMENTED, not
         //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
@@ -1951,7 +1929,7 @@ pub(super) fn tensor_softmax_host(
 // ---------------------------------------------------------------------------
 // Composed Tier-2 host-runtime delegation
 //
-// `mean` / `layer_norm` / `conv2d` are not single RISC ops; they
+// `mean` / `layer_norm` / `conv` are not single RISC ops; they
 // decompose into combinations of `RiscOp::Sum`, `RiscOp::Div`,
 // `RiscOp::Sqrt`, `RiscOp::Mul`, `RiscOp::Pad`, etc. The canonical
 // decomposition lives in `crates/chelis-ir/src/tier2.rs::lower_*`. To
@@ -1977,8 +1955,14 @@ fn tensor_type_for(tensor: &RuntimeTensorValue) -> TensorType {
     }
 }
 
-fn add_load(dag: &mut Dag, name: String, ty: TensorType) -> NodeId {
-    dag.add_node(RiscOp::Load { name: name.into() }, Vec::new(), ty, None)
+fn add_load(dag: &mut Dag, decl: DeclId, name: String, ty: TensorType) -> NodeId {
+    dag.add_node(
+        decl,
+        RiscOp::Load { name: name.into() },
+        Vec::new(),
+        ty,
+        None,
+    )
 }
 
 fn extract_root(
@@ -2020,13 +2004,14 @@ pub(super) fn eval_composed_unary<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, &TensorType) -> NodeId,
+    F: FnOnce(&mut Dag, DeclId, NodeId, &TensorType) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed unary");
     let ty = tensor_type_for(x);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
-    let x_id = add_load(&mut dag, x_name.clone(), ty.clone());
-    let root = build(&mut dag, x_id, &ty);
+    let x_id = add_load(&mut dag, decl, x_name.clone(), ty.clone());
+    let root = build(&mut dag, decl, x_id, &ty);
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     extract_root(&dag, &inputs, root, "composed unary tier2")
@@ -2042,19 +2027,27 @@ pub(super) fn eval_composed_triop<F>(
     build: F,
 ) -> Result<RuntimeTensorValue, String>
 where
-    F: FnOnce(&mut Dag, NodeId, NodeId, NodeId, (&TensorType, &TensorType, &TensorType)) -> NodeId,
+    F: FnOnce(
+        &mut Dag,
+        DeclId,
+        NodeId,
+        NodeId,
+        NodeId,
+        (&TensorType, &TensorType, &TensorType),
+    ) -> NodeId,
 {
     let mut dag = Dag::new();
+    let decl = dag.declare("composed triop");
     let x_ty = tensor_type_for(x);
     let g_ty = tensor_type_for(gamma);
     let b_ty = tensor_type_for(beta);
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let g_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let b_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}2");
-    let x_id = add_load(&mut dag, x_name.clone(), x_ty.clone());
-    let g_id = add_load(&mut dag, g_name.clone(), g_ty.clone());
-    let b_id = add_load(&mut dag, b_name.clone(), b_ty.clone());
-    let root = build(&mut dag, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
+    let x_id = add_load(&mut dag, decl, x_name.clone(), x_ty.clone());
+    let g_id = add_load(&mut dag, decl, g_name.clone(), g_ty.clone());
+    let b_id = add_load(&mut dag, decl, b_name.clone(), b_ty.clone());
+    let root = build(&mut dag, decl, x_id, g_id, b_id, (&x_ty, &g_ty, &b_ty));
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, x.value.clone());
     inputs.insert(g_name, gamma.value.clone());
@@ -2062,79 +2055,78 @@ where
     extract_root(&dag, &inputs, root, "composed triop tier2")
 }
 
-/// conv2d forward in the host runtime. `tier2::lower_conv2d` is shape-
-/// polymorphic via its `output_ty` parameter and panics if the spatial
-/// dims of `output_ty` disagree with the arithmetic derived from
-/// `(input_dims, kernel_dims, stride, padding)`. The host runtime does
-/// not have a downstream type-annotation source for the output type,
-/// so we compute it inline from the four spatial parameters: that's
-/// the same formula `lower_conv2d` reaches for via the
-/// `raw_h_out`/`raw_w_out` fallback at
-/// `crates/chelis-ir/src/tier2.rs:973-984`.
-pub(super) fn conv2d_host(
+/// Execute the same N-dimensional contraction graph as the compiled lane.
+pub(super) fn conv_host(
     input: &RuntimeTensorValue,
     kernel: &RuntimeTensorValue,
-    stride: usize,
-    padding: usize,
+    strides: &[usize],
+    padding: &[(usize, usize)],
 ) -> Result<RuntimeTensorValue, String> {
-    if input.value.shape.len() != 4 {
+    let shape = &input.value.shape;
+    let kernel_shape = &kernel.value.shape;
+    if shape.len() < 3 || kernel_shape.len() != shape.len() {
+        return Err("conv requires equal input/kernel ranks of at least 3".to_string());
+    }
+    let rank = shape.len() - 2;
+    if strides.len() != rank || padding.len() != rank {
         return Err(format!(
-            "conv2d input must be rank-4 (batch, channels, h, w), got shape {:?}",
-            input.value.shape
+            "conv requires exactly {rank} stride and padding entries"
         ));
     }
-    if kernel.value.shape.len() != 4 {
-        return Err(format!(
-            "conv2d kernel must be rank-4 (out_c, in_c, kh, kw), got shape {:?}",
-            kernel.value.shape
-        ));
+    if shape[1] != kernel_shape[1]
+        || input.precision != kernel.precision
+        || !input.precision.is_float()
+    {
+        return Err("conv requires matching channels and one active float dtype".to_string());
     }
-    let stride = stride.max(1);
-    let batch = input.value.shape[0];
-    let in_c = input.value.shape[1];
-    let h_in = input.value.shape[2];
-    let w_in = input.value.shape[3];
-    let out_c = kernel.value.shape[0];
-    let kernel_in_c = kernel.value.shape[1];
-    let kh = kernel.value.shape[2];
-    let kw = kernel.value.shape[3];
-    if kernel_in_c != in_c {
-        return Err(format!(
-            "conv2d kernel input channels ({kernel_in_c}) must match input channels ({in_c})"
-        ));
+    let mut output_shape = vec![shape[0], kernel_shape[0]];
+    for axis in 0..rank {
+        let padded = shape[axis + 2]
+            .checked_add(padding[axis].0)
+            .and_then(|n| n.checked_add(padding[axis].1))
+            .filter(|&n| i64::try_from(n).is_ok())
+            .ok_or("conv padded extent overflows i64")?;
+        let k = kernel_shape[axis + 2];
+        if strides[axis] == 0 || k == 0 || k > padded {
+            return Err(format!(
+                "conv invalid kernel/stride/padding at spatial axis {axis}"
+            ));
+        }
+        output_shape.push(
+            ((padded - k) / strides[axis])
+                .checked_add(1)
+                .filter(|&n| i64::try_from(n).is_ok())
+                .ok_or("conv output extent overflows i64")?,
+        );
     }
-    let padded_h = h_in + (2 * padding);
-    let padded_w = w_in + (2 * padding);
-    if padded_h < kh || padded_w < kw {
-        return Err(format!(
-            "conv2d kernel dims ({kh}, {kw}) exceed padded input dims ({padded_h}, {padded_w})"
-        ));
-    }
-    let h_out = ((padded_h - kh) / stride) + 1;
-    let w_out = ((padded_w - kw) / stride) + 1;
     let output_ty = TensorType {
-        dims: vec![
-            DimInfo::Lit(batch),
-            DimInfo::Lit(out_c),
-            DimInfo::Lit(h_out),
-            DimInfo::Lit(w_out),
-        ],
+        dims: output_shape.into_iter().map(DimInfo::Lit).collect(),
         precision: input.precision,
     };
     let input_ty = tensor_type_for(input);
     let kernel_ty = tensor_type_for(kernel);
     let mut dag = Dag::new();
+    let decl = dag.declare("conv");
     let x_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
     let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
-    let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
-    let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
-    let root = tier2::lower_conv2d(
-        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
+    let x_id = add_load(&mut dag, decl, x_name.clone(), input_ty.clone());
+    let k_id = add_load(&mut dag, decl, k_name.clone(), kernel_ty.clone());
+    let root = tier2::lower_conv(
+        decl.into(),
+        &mut dag,
+        x_id,
+        k_id,
+        &input_ty,
+        &kernel_ty,
+        &output_ty,
+        strides,
+        padding,
+        None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
     inputs.insert(k_name, kernel.value.clone());
-    extract_root(&dag, &inputs, root, "conv2d")
+    extract_root(&dag, &inputs, root, "conv")
 }
 
 pub(super) fn tensor_concat_value(
@@ -2173,13 +2165,27 @@ pub(super) fn tensor_concat_value(
         for dim in 0..tensor.value.shape.len() {
             if dim != axis && tensor.value.shape[dim] != first.value.shape[dim] {
                 return Err(format!(
-                    "concat expects matching non-concatenated axes; axis {dim} differed"
+                    "numeric trap: domain in concat at i64\nconcat expects matching non-concatenated axes; axis {dim} differed"
                 ));
             }
         }
     }
     let mut out_shape = first.value.shape.clone();
-    out_shape[axis] = tensors.iter().map(|tensor| tensor.value.shape[axis]).sum();
+    out_shape[axis] = tensors.iter().try_fold(0_i64, |sum, tensor| {
+        let extent = i64::try_from(tensor.value.shape[axis])
+            .map_err(|_| "numeric trap: overflow in concat at i64".to_string())?;
+        sum.checked_add(extent)
+            .ok_or_else(|| "numeric trap: overflow in concat at i64".to_string())
+    })? as usize;
+    // A zero element count does not waive canonical stride representability:
+    // [0, large, large] still needs the suffix product for axis 0.
+    out_shape.iter().rev().try_fold(1_i64, |stride, extent| {
+        let extent = i64::try_from(*extent)
+            .map_err(|_| "numeric trap: overflow in concat at i64".to_string())?;
+        stride
+            .checked_mul(extent)
+            .ok_or_else(|| "numeric trap: overflow in concat at i64".to_string())
+    })?;
     // reuse_* contract: concat moves existing elements only (section C3,
     // element-preserving). Seed a zero-filled buffer at the shared dtype,
     // then overwrite every slot from its owning part.
@@ -2207,6 +2213,41 @@ pub(super) fn tensor_concat_value(
         axis_offset += tensor.value.shape[axis];
     }
     Ok(RuntimeValue::Tensor(RuntimeTensorValue::new(out)))
+}
+
+#[cfg(test)]
+mod concat_extent_tests {
+    use super::*;
+
+    #[test]
+    fn zero_element_inputs_still_check_the_i64_concat_extent_sum() {
+        let width = 1usize << 62;
+        let empty = RuntimeTensorValue::from_wide("test", Prim::F32, vec![0, width], vec![])
+            .expect("zero elements need no large allocation");
+        let parts = [
+            RuntimeValue::Tensor(empty.clone()),
+            RuntimeValue::Tensor(empty),
+        ];
+        assert_eq!(
+            tensor_concat_value(&parts, 1).expect_err("the axis sum exceeds i64"),
+            "numeric trap: overflow in concat at i64"
+        );
+    }
+
+    #[test]
+    fn zero_element_inputs_still_check_the_output_canonical_stride() {
+        let width = 1usize << 61;
+        let empty = RuntimeTensorValue::from_wide("test", Prim::F32, vec![0, width, 2], vec![])
+            .expect("each input's canonical stride fits i64");
+        let parts = [
+            RuntimeValue::Tensor(empty.clone()),
+            RuntimeValue::Tensor(empty),
+        ];
+        assert_eq!(
+            tensor_concat_value(&parts, 1).expect_err("the output stride exceeds i64"),
+            "numeric trap: overflow in concat at i64"
+        );
+    }
 }
 
 pub(super) fn tensor_reshape_value(
@@ -2265,7 +2306,7 @@ pub(super) fn tensor_split_value(
             IrTensorValue::from_storage(shape, tensor.value.storage().reuse_gather(&picks)),
         )));
     }
-    Ok(RuntimeValue::List(parts))
+    Ok(RuntimeValue::List(parts.into()))
 }
 
 pub(super) fn tensor_gather_value(
@@ -2432,24 +2473,41 @@ pub(super) fn tensor_where_value(
     if cond.precision != Prim::Bool {
         return Err("where expects bool tensor condition".to_string());
     }
-    if cond.value.shape != then_tensor.value.shape
-        || then_tensor.value.shape != else_tensor.value.shape
-    {
-        return Err(
-            "where expects condition and both branches to have identical shape".to_string(),
-        );
-    }
     if then_tensor.precision != else_tensor.precision {
         return Err("where expects matching branch precision".to_string());
     }
-    // reuse_* contract: `where` selects existing elements from the two
-    // branches (section C3, element-preserving). Start from the then
-    // branch and overwrite else-selected slots.
     let cond_mask = cond
         .value
         .storage()
         .to_i64_exact_vec()
         .expect("bool tensor storage reads exactly");
+    // [05-OP-53]: the condition's shape equals the shape of every branch it
+    // selects. A branch selected nowhere is neither read nor shape-checked.
+    let then_selected = cond_mask.iter().any(|flag| *flag != 0);
+    let else_selected = cond_mask.contains(&0);
+    let shape_error =
+        || "where expects condition and both branches to have identical shape".to_string();
+    match (then_selected, else_selected) {
+        (true, false) if cond.value.shape != then_tensor.value.shape => return Err(shape_error()),
+        (true, false) => return Ok(then_tensor.clone()),
+        (false, true) if cond.value.shape != else_tensor.value.shape => return Err(shape_error()),
+        (false, true) => return Ok(else_tensor.clone()),
+        (false, false) => {
+            return Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                cond.value.shape.clone(),
+                tensor_from_scalars(then_tensor.precision, &[]),
+            )));
+        }
+        (true, true) => {}
+    }
+    if cond.value.shape != then_tensor.value.shape
+        || then_tensor.value.shape != else_tensor.value.shape
+    {
+        return Err(shape_error());
+    }
+    // reuse_* contract: `where` selects existing elements from the two
+    // branches (section C3, element-preserving). Start from the then
+    // branch and overwrite else-selected slots.
     let writes = cond_mask
         .iter()
         .enumerate()
@@ -2520,18 +2578,21 @@ pub(super) fn tensor_sort_value(
     // or spins an empty loop, matching the C runtime's guard in
     // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
     if tensor.value.is_empty() {
-        return Ok(RuntimeValue::Tuple(vec![
-            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
-                tensor.value.shape.clone(),
-                tensor.value.storage().reuse_gather(&[]),
-            ))),
-            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
-                "sort",
-                Prim::Int64,
-                tensor.value.shape.clone(),
-                Vec::new(),
-            )?),
-        ]));
+        return Ok(RuntimeValue::Tuple(
+            vec![
+                RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                    tensor.value.shape.clone(),
+                    tensor.value.storage().reuse_gather(&[]),
+                ))),
+                RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                    "sort",
+                    Prim::Int64,
+                    tensor.value.shape.clone(),
+                    Vec::new(),
+                )?),
+            ]
+            .into(),
+        ));
     }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
@@ -2564,19 +2625,22 @@ pub(super) fn tensor_sort_value(
         }
     }
     // reuse_* contract: the sorted values are a permutation of the input
-    // (section C3, element-preserving); the index tensor is exact int64.
-    Ok(RuntimeValue::Tuple(vec![
-        RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
-            tensor.value.shape.clone(),
-            tensor.value.storage().reuse_gather(&picks),
-        ))),
-        RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
-            "sort",
-            Prim::Int64,
-            tensor.value.shape.clone(),
-            indices,
-        )?),
-    ]))
+    // (section C3, element-preserving); the index tensor is exact i64.
+    Ok(RuntimeValue::Tuple(
+        vec![
+            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                tensor.value.shape.clone(),
+                tensor.value.storage().reuse_gather(&picks),
+            ))),
+            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                "sort",
+                Prim::Int64,
+                tensor.value.shape.clone(),
+                indices,
+            )?),
+        ]
+        .into(),
+    ))
 }
 
 pub(super) fn tensor_diagonal_value(
@@ -2848,8 +2912,8 @@ pub(super) fn tensor_einsum_value(
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
     // The host lane carries shapes as `usize`, but the language's extent
-    // domain is int64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
-    // count to trap `Overflow`. Fold in int64 so this lane agrees with the C
+    // domain is i64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
+    // count to trap `Overflow`. Fold in i64 so this lane agrees with the C
     // runtime about where the ceiling is instead of inheriting the host's, and
     // short-circuit a zero extent so the answer does not depend on axis order:
     // a zero anywhere means zero elements, whatever the other extents are.
@@ -2861,11 +2925,11 @@ pub(super) fn tensor_einsum_value(
             .iter()
             .try_fold(1_i64, |product, &extent| {
                 let extent = i64::try_from(extent).map_err(|_| {
-                    format!("Overflow: einsum {context} extent {extent} exceeds int64")
+                    format!("Overflow: einsum {context} extent {extent} exceeds i64")
                 })?;
                 product
                     .checked_mul(extent)
-                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds int64"))
+                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds i64"))
             })
             .and_then(|product| {
                 usize::try_from(product).map_err(|_| {
@@ -2877,14 +2941,9 @@ pub(super) fn tensor_einsum_value(
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;
-    // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
-    // same shape as matmul, and shares matmul's disposition. torch's f32
-    // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
-    // `sum` cascade. The eval reference keeps the higher-precision f64
-    // accumulator deliberately — same rationale as `tensor_matmul_host`:
-    // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
-    // covered precision characteristic, not a divergence. See the comment
-    // in `tensor_matmul_host`.
+    // This legacy host einsum still accumulates in f64. Unlike matmul,
+    // it does not yet delegate to the typed contraction implementation;
+    // #1290 owns alignment with [05-OP-33]'s exact tree and widths.
     let lhs_wide = lhs.value.to_f64_lossy_vec();
     let rhs_wide = rhs.value.to_f64_lossy_vec();
     let mut out = vec![0.0; output_total];
@@ -2947,26 +3006,26 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     // width), so the former f64-image bridge `render_tensor_element` and
     // its tag-vs-bits disagreement arm are structurally unreachable: the
     // storage variant IS the tag.
+    // A key has no numeric element; it renders as its 64 bits (spec/10
+    // section 3.1's key storage carrier spells the same 16 digits).
+    let keys = tensor.value.storage().keys();
+    let element = |index: usize| match keys {
+        Some(keys) => render_key(keys[index]),
+        None => chelis_types::format_element(
+            tensor.precision,
+            tensor.value.storage().element_ref(index),
+        ),
+    };
     if tensor.value.shape.is_empty() {
         assert!(
             !tensor.value.is_empty(),
             "render_tensor: rank-0 tensor with no element (IrTensorValue \
              guarantees numel(shape=[]) == 1 at construction)"
         );
-        return chelis_types::format_element(
-            tensor.precision,
-            tensor.value.storage().element_ref(0),
-        );
+        return element(0);
     }
     let visible = tensor.value.len().min(TENSOR_RENDER_LIMIT);
-    let mut elements: Vec<String> = (0..visible)
-        .map(|index| {
-            chelis_types::format_element(
-                tensor.precision,
-                tensor.value.storage().element_ref(index),
-            )
-        })
-        .collect();
+    let mut elements: Vec<String> = (0..visible).map(element).collect();
     if tensor.value.len() > visible {
         elements.push("...".to_string());
     }
@@ -2977,69 +3036,125 @@ fn render_tensor(tensor: &RuntimeTensorValue) -> String {
     )
 }
 
+/// One pending piece of [`render_value`]'s output.
+enum RenderStep<'a> {
+    Value(&'a RuntimeValue),
+    Text(&'static str),
+}
+
+/// Schedule a container's comma-separated parts and its closing text so they
+/// pop in output order.
+fn schedule_render<'a>(
+    steps: &mut Vec<RenderStep<'a>>,
+    parts: impl Iterator<Item = Vec<RenderStep<'a>>>,
+    close: &'static str,
+) {
+    let mut ordered = Vec::new();
+    for (index, part) in parts.enumerate() {
+        if index > 0 {
+            ordered.push(RenderStep::Text(", "));
+        }
+        ordered.extend(part);
+    }
+    ordered.push(RenderStep::Text(close));
+    steps.extend(ordered.into_iter().rev());
+}
+
 // pub(crate): compiler.rs pre-renders each evaluated root's display text
 // through this exact function (the [05-OBS-1] single renderer) while the
 // dtype tags still exist; see `EvaluatedRoot::display`.
+fn render_key(key: RandomKey) -> String {
+    chelis_types::format_key(key)
+}
+
 pub(crate) fn render_value(value: &RuntimeValue) -> String {
     use chelis_types::{ElementRef, format_element};
-    match value {
-        RuntimeValue::Tensor(tensor) => render_tensor(tensor),
-        RuntimeValue::Scalar(payload) => {
-            // Scalars carry their dtype in the sealed storage variant
-            // (the dtype/bits invariant holds by construction), so every
-            // scalar exit renders at its OWN width per [05-OBS-2].
-            format_element(payload.dtype(), payload.value().element_ref())
+    // A worklist rather than recursion, and one output buffer rather than a
+    // string per level: a value nested far deeper than the native stack
+    // renders in one pass (chelis#2567). Steps pop in output order.
+    let mut out = String::new();
+    let mut steps = vec![RenderStep::Value(value)];
+    while let Some(step) = steps.pop() {
+        let value = match step {
+            RenderStep::Text(text) => {
+                out.push_str(text);
+                continue;
+            }
+            RenderStep::Value(value) => value,
+        };
+        match value {
+            RuntimeValue::Tensor(tensor) => out.push_str(&render_tensor(tensor)),
+            RuntimeValue::Key(key) => out.push_str(&render_key(*key)),
+            RuntimeValue::Scalar(payload) => {
+                // Scalars carry their dtype in the sealed storage variant
+                // (the dtype/bits invariant holds by construction), so every
+                // scalar exit renders at its OWN width per [05-OBS-2].
+                out.push_str(&format_element(
+                    payload.dtype(),
+                    payload.value().element_ref(),
+                ));
+            }
+            RuntimeValue::Bool(value) => {
+                out.push_str(&format_element(Prim::Bool, ElementRef::Bool(*value)));
+            }
+            RuntimeValue::String(value) => out.push_str(value),
+            RuntimeValue::List(items) => {
+                out.push('[');
+                schedule_render(
+                    &mut steps,
+                    items.iter().map(|item| vec![RenderStep::Value(item)]),
+                    "]",
+                );
+            }
+            RuntimeValue::Dict(entries) => {
+                out.push_str("dict(");
+                schedule_render(
+                    &mut steps,
+                    entries.iter().map(|(key, value)| {
+                        vec![
+                            RenderStep::Value(key),
+                            RenderStep::Text(": "),
+                            RenderStep::Value(value),
+                        ]
+                    }),
+                    ")",
+                );
+            }
+            RuntimeValue::Tuple(items) => {
+                out.push('(');
+                schedule_render(
+                    &mut steps,
+                    items.iter().map(|item| vec![RenderStep::Value(item)]),
+                    ")",
+                );
+            }
+            // Show the user-facing (de-mangled) constructor name; a reef-linked
+            // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
+            // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
+            // builtin constructors.
+            RuntimeValue::Adt { ctor, fields, .. } => {
+                out.push_str(&chelis_types::demangle_ident(ctor));
+                if !fields.is_empty() {
+                    out.push('(');
+                    schedule_render(
+                        &mut steps,
+                        fields.iter().map(|field| vec![RenderStep::Value(field)]),
+                        ")",
+                    );
+                }
+            }
+            RuntimeValue::MappedFile(bytes) => {
+                out.push_str(&format!("<mapped-file:{}>", bytes.len()));
+            }
+            RuntimeValue::Closure { .. } => out.push_str("<closure>"),
+            RuntimeValue::Transform { kind, .. } => out.push_str(match kind {
+                TransformKind::Grad => "<grad>",
+                TransformKind::Vmap => "<vmap>",
+            }),
+            RuntimeValue::Unit => out.push_str("()"),
         }
-        RuntimeValue::Bool(value) => format_element(Prim::Bool, ElementRef::Bool(*value)),
-        RuntimeValue::String(value) => value.clone(),
-        RuntimeValue::List(items) => format!(
-            "[{}]",
-            items
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::Dict(entries) => format!(
-            "dict({})",
-            entries
-                .iter()
-                .map(|(key, value)| format!("{}: {}", render_value(key), render_value(value)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::Tuple(items) => format!(
-            "({})",
-            items
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        // Show the user-facing (de-mangled) constructor name; a reef-linked
-        // ADT carries the internal `Pkg__..__Ctor` form, which must not leak
-        // to eval output (chelis#399). `demangle_ident` is a no-op on bare /
-        // builtin constructors.
-        RuntimeValue::Adt { ctor, fields, .. } if fields.is_empty() => {
-            chelis_types::demangle_ident(ctor)
-        }
-        RuntimeValue::Adt { ctor, fields, .. } => format!(
-            "{}({})",
-            chelis_types::demangle_ident(ctor),
-            fields
-                .iter()
-                .map(render_value)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        RuntimeValue::MappedFile(bytes) => format!("<mapped-file:{}>", bytes.len()),
-        RuntimeValue::Closure { .. } => "<closure>".to_string(),
-        RuntimeValue::Transform { kind, .. } => match kind {
-            TransformKind::Grad => "<grad>".to_string(),
-            TransformKind::Vmap => "<vmap>".to_string(),
-        },
-        RuntimeValue::Unit => "()".to_string(),
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -3084,7 +3199,7 @@ fn truncate_for_diagnostic(full: String) -> String {
 /// on top is a KIND TAG on the outermost value, because a mismatch
 /// diagnostic ("expected an f64 value, got ...") has to name what arrived,
 /// and the canonical exit form deliberately does not: `5` alone cannot
-/// distinguish an int32 from an f64 whose shortest form has no fraction.
+/// distinguish an i32 from an f64 whose shortest form has no fraction.
 /// Nested structure is *not* re-tagged - it is `render_value`'s output
 /// verbatim, so the diagnostic and the exit channel agree byte-for-byte on
 /// every payload they both render.
@@ -3125,7 +3240,7 @@ pub(crate) fn describe_argument(slot: Option<&RuntimeValue>) -> String {
 }
 
 /// Render an ADT constructor's field list for a malformed-shape diagnostic.
-/// Fields ARE tagged individually: `malformed JNum fields [int32 5]` names
+/// Fields ARE tagged individually: `malformed JNum fields [i32 5]` names
 /// the reason the shape was rejected, which an untagged `[5]` does not.
 #[cfg(test)]
 pub(crate) fn describe_fields(fields: &[RuntimeValue]) -> String {
@@ -3144,46 +3259,81 @@ pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
-#[cfg(test)]
-fn dropout_sample(seed: u64, index: u64) -> f64 {
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+/// A random control argument as its own tagged scalar: no f64 funnel, no
+/// integer admission. The checker gives a dropout rate the input's dtype and
+/// the uniform bounds f32 (chelis#1295).
+pub(super) fn expect_float_control(
+    args: &[RuntimeValue],
+    index: usize,
+    op: &str,
+) -> Result<ScalarValue, String> {
+    match args.get(index) {
+        Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => Ok(payload.value()),
+        _ => Err(format!(
+            "{op} expects a float scalar control at index {index}"
+        )),
+    }
 }
 
+/// Validate `[05-OP-8]`'s bounds for `template` before the caller takes a
+/// draw key, so a failed validation consumes no ordinal.
+pub(super) fn prepare_uniform_like(
+    template: &RuntimeTensorValue,
+    low: ScalarValue,
+    high: ScalarValue,
+) -> Result<PreparedUniformLike, String> {
+    PreparedUniformLike::new(template.precision, template.value.len(), low, high)
+        .map_err(|error| error.to_string())
+}
+
+/// Fill `template`'s shape and dtype with the prepared `[05-OP-8]` draw keyed
+/// by `key`.
 pub(super) fn uniform_like_value(
     template: &RuntimeTensorValue,
-    low: f64,
-    high: f64,
-    seed: u64,
-) -> RuntimeTensorValue {
-    let low = low as f32;
-    let high = high as f32;
-    let values = (0..template.value.len())
-        .map(|index| {
-            uniform_sample(template.precision, low, high, seed, index as u64)
-                .expect("uniform_like checker admits only active float dtypes")
-        })
-        .collect::<Vec<_>>();
-    RuntimeTensorValue::new(IrTensorValue::from_storage(
+    prepared: &PreparedUniformLike,
+    key: RandomKey,
+) -> Result<RuntimeTensorValue, String> {
+    let storage = prepared.apply(key).map_err(|error| error.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
         template.value.shape.clone(),
-        tensor_from_scalars(template.precision, &values),
-    ))
+        storage,
+    )))
 }
 
 #[cfg(test)]
 mod uniform_like_affine_tests {
     //! chelis#770/#937: `uniform_like_value` routes through the shared
-    //! per-dtype sampler used by the IR evaluator. These pin the exact
-    //! widened-f32 output at seed=42 / shape=[8] and the 1-ULP gap the old
-    //! f64 affine left at elem[4] of [2,5), plus a negative range (unit-level
-    //! only: the C cross-lane path can't be driven with a bare negative
-    //! literal, a separate lowering gap).
+    //! per-dtype sampler used by the IR evaluator. These pin the draw keyed by
+    //! `key_from_seed(42)` over shape [12], at elements where the
+    //! single-rounding f32 FMA differs from the old f64 affine and from a
+    //! two-rounding f32 affine, plus a negative range. The pinned bits are
+    //! exact-rational evaluations of [05-RNG-2]'s word (`key_ref.py`) and
+    //! [05-OP-8] (`keys-b-h9-probes/port_ref.py`).
     use super::*;
+
+    // [05-RNG-1]'s splitmix64 transcribed from the spec text, never the kernel.
+    fn splitmix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// `[05-OP-69]`: `key_from_seed(42)`, whose bits are the seed's bits.
+    const KEY_BITS: u64 = 42;
+
+    fn draw(template: &RuntimeTensorValue, low: f64, high: f64) -> RuntimeTensorValue {
+        let bound = |value| scalar_from_f64("test", Prim::F32, value).unwrap();
+        let prepared = prepare_uniform_like(template, bound(low), bound(high)).unwrap();
+        let key = RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, 42).unwrap()).unwrap();
+        uniform_like_value(template, &prepared, key).unwrap()
+    }
+
+    /// [05-RNG-2]'s `word(k, i)` and [05-RNG-1]'s unit at `KEY_BITS`.
+    fn unit(index: u64) -> f64 {
+        let word = splitmix64(KEY_BITS ^ splitmix64(index).rotate_left(41));
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
 
     fn template_f32(n: usize) -> RuntimeTensorValue {
         RuntimeTensorValue::from_wide("test", Prim::F32, vec![n], vec![0.0; n])
@@ -3195,66 +3345,39 @@ mod uniform_like_affine_tests {
             .expect("zero template finalizes at f64")
     }
 
+    fn f32_bits(out: &RuntimeTensorValue, index: usize) -> u32 {
+        (out.value.to_f64_lossy_vec()[index] as f32).to_bits()
+    }
+
     #[test]
     fn affine_mirrors_c_f32_sampler_positive_range() {
-        let out = uniform_like_value(&template_f32(8), 2.0, 5.0, 42);
-        // Single correctly-rounded FMA, conforming to the compiled C sampler.
-        // elem[4]: where the pre-#770 f64 affine rounded to the adjacent f32
-        // (0x404215a9) instead of the sampler's 0x404215aa.
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[4].to_bits(),
-            (f32::from_bits(0x404215aa) as f64).to_bits(),
-            "elem[4] must be the C f32 sampler value (0x404215aa), got {} (f32 bits {:#010x})",
-            out.value.to_f64_lossy_vec()[4],
-            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
-        );
-        let old_f64_affine = 2.0 + (5.0 - 2.0) * dropout_sample(42, 4);
-        assert_eq!((old_f64_affine as f32).to_bits(), 0x404215a9);
-        assert_ne!(
-            (out.value.to_f64_lossy_vec()[4] as f32).to_bits(),
-            (old_f64_affine as f32).to_bits(),
-            "the fix must not reproduce the old f64-affine rounding",
-        );
-        // elem[6]/[7]: where a single-rounding FMA and a plain two-rounding
-        // affine disagree by 1 ULP — the exact bit the compiled C lane flips
-        // between `-ffp-contract=fast` (FMA, 0x408f5273) and `=off` (two
-        // roundings, 0x408f5274). Pin the FMA values; show two-rounding differs.
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[6].to_bits(),
-            (f32::from_bits(0x408f5273) as f64).to_bits(),
-            "elem[6] must be the single-rounding FMA value (0x408f5273)",
-        );
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[7].to_bits(),
-            (f32::from_bits(0x403ec1e7) as f64).to_bits(),
-            "elem[7] must be the single-rounding FMA value (0x403ec1e7)",
-        );
-        let unit6 = dropout_sample(42, 6) as f32;
-        let two_rounding_6 = 2.0f32 + (5.0f32 - 2.0f32) * unit6;
-        assert_eq!(two_rounding_6.to_bits(), 0x408f5274);
-        assert_ne!(
-            (out.value.to_f64_lossy_vec()[6] as f32).to_bits(),
-            two_rounding_6.to_bits(),
-        );
+        let out = draw(&template_f32(12), 2.0, 5.0);
+        // elem[11]: the single-rounding FMA gives 0x406d6dc6 where the old f64
+        // affine rounded to the adjacent f32.
+        assert_eq!(f32_bits(&out, 11), 0x406d_6dc6);
+        let old_f64_affine = 2.0 + (5.0 - 2.0) * unit(11);
+        assert_eq!((old_f64_affine as f32).to_bits(), 0x406d_6dc5);
+        // elem[10]: a plain two-rounding `low + span * unit` differs by 1 ULP,
+        // the bit the compiled C lane would flip between `-ffp-contract=fast`
+        // and `=off` without its explicit `fmaf`.
+        assert_eq!(f32_bits(&out, 10), 0x4034_fb45);
+        let two_rounding_10 = 2.0f32 + (5.0f32 - 2.0f32) * (unit(10) as f32);
+        assert_eq!(two_rounding_10.to_bits(), 0x4034_fb44);
+        assert_eq!(f32_bits(&out, 7), 0x408f_92d9);
     }
 
     #[test]
     fn affine_is_f32_for_negative_range() {
-        let out = uniform_like_value(&template_f32(8), -3.0, -1.0, 42);
-        assert_eq!(
-            out.value.to_f64_lossy_vec()[3].to_bits(),
-            (f32::from_bits(0xc010167a) as f64).to_bits(),
-            "elem[3] must be the C f32 sampler value for [-3,-1) (0xc010167a)",
-        );
+        let out = draw(&template_f32(8), -3.0, -1.0);
+        assert_eq!(f32_bits(&out, 3), 0xc027_e1a4);
     }
 
     #[test]
     fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
-        let out = uniform_like_value(&template_f64(8), 2.0, 5.0, 42);
+        let out = draw(&template_f64(8), 2.0, 5.0);
         assert_eq!(out.precision, Prim::F64);
-        let expected = uniform_sample(Prim::F64, 2.0, 5.0, 42, 4)
-            .expect("f64 sample")
-            .as_f64_lossy();
+        let expected = (5.0f64 - 2.0).mul_add(unit(4), 2.0);
+        assert_eq!(expected.to_bits(), 0x4005_8b85_e511_043a);
         assert_eq!(out.value.element_f64_lossy(4).to_bits(), expected.to_bits());
         assert_ne!(
             out.value.element_f64_lossy(4).to_bits(),
@@ -3317,8 +3440,8 @@ mod numeric_trap_forwarding_tests {
 
     #[test]
     fn composed_evaluation_forwards_the_raising_primitive_trap_without_plumbing() {
-        // int8 sum has an int32 default accumulator and therefore cannot
-        // overflow on this two-element input. Use an int32 accumulator-edge
+        // i8 sum has an i32 default accumulator and therefore cannot
+        // overflow on this two-element input. Use an i32 accumulator-edge
         // row so the test continues to exercise trap forwarding without
         // contradicting the §5.7.1 accumulator contract.
         let input = RuntimeTensorValue::from_wide_int(
@@ -3327,22 +3450,23 @@ mod numeric_trap_forwarding_tests {
             vec![2],
             vec![i64::from(i32::MAX), 1],
         )
-        .expect("input is representable at int32");
-        let err = eval_composed_unary(&input, |dag, x, ty| {
+        .expect("input is representable at i32");
+        let err = eval_composed_unary(&input, |dag, decl, x, ty| {
             let output_ty = TensorType {
                 dims: Vec::new(),
                 precision: ty.precision,
             };
             dag.add_node(
-                RiscOp::sum_default(0, ty.precision).expect("int8 sum is admitted"),
+                decl,
+                RiscOp::sum_default(0, ty.precision).expect("i8 sum is admitted"),
                 vec![x],
                 output_ty,
                 None,
             )
         })
-        .expect_err("the composed int32 sum must overflow");
+        .expect_err("the composed i32 sum must overflow");
 
-        assert_eq!(err, "numeric trap: overflow in sum at int32");
+        assert_eq!(err, "numeric trap: overflow in sum at i32");
         assert!(!err.contains("IR eval failed"));
         assert!(!err.contains("composed unary"));
     }

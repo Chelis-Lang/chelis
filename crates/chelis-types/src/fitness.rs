@@ -296,32 +296,49 @@ fn count_nodes(exprs: &[chelis_deep::Expr]) -> usize {
 fn count_node(expr: &chelis_deep::Expr) -> usize {
     match expr {
         chelis_deep::Expr::Atom(_, _) => 1,
-        chelis_deep::Expr::List(list, _) => 1 + list.elements.iter().map(count_node).sum::<usize>(),
-        chelis_deep::Expr::Map(map, _) => {
-            1 + map
-                .entries
-                .iter()
-                .map(|(_, v)| count_node(v))
-                .sum::<usize>()
-        }
+        chelis_deep::Expr::Map(map, _) => 1 + count_metadata(map),
         chelis_deep::Expr::MetaExpr(meta, _) => {
-            1 + count_node(&meta.expr)
-                + meta
-                    .entries
-                    .iter()
-                    .map(|(_, v)| count_node(v))
-                    .sum::<usize>()
+            1 + count_node(&meta.expr) + count_metadata(&meta.metadata)
         }
-        // Bridge: reconstruct List so all children (including meta) are counted (#908)
-        chelis_deep::Expr::Node(node, span) => {
-            let bridged = chelis_deep::Expr::List(node.to_list(*span), *span);
-            count_node(&bridged)
+        // The canonical `(tag {meta} children...)` form: the node, its tag
+        // and its metadata map count one each, then the metadata payload and
+        // every child.
+        chelis_deep::Expr::Node(node, _) => {
+            3 + count_metadata(node.meta())
+                + node.children_slice().iter().map(count_node).sum::<usize>()
         }
         chelis_deep::Expr::BareList(elems, _) => 1 + elems.iter().map(count_node).sum::<usize>(),
         chelis_deep::Expr::UnknownForm(data) => {
             1 + data.children.iter().map(count_node).sum::<usize>()
         }
     }
+}
+
+fn count_metadata(meta: &chelis_deep::Metadata) -> usize {
+    fn raw_count(expr: &chelis_deep::RawExpr) -> usize {
+        use chelis_deep::RawExpr;
+        match expr {
+            RawExpr::ExtensionData(_) => 1,
+            RawExpr::Atom(..) => 1,
+            RawExpr::List(values, _) => 1 + values.iter().map(raw_count).sum::<usize>(),
+            RawExpr::Map(values, _) => 1 + values.iter().map(|(_, v)| raw_count(v)).sum::<usize>(),
+            RawExpr::MetaExpr { entries, expr, .. } => {
+                1 + raw_count(expr) + entries.iter().map(|(_, v)| raw_count(v)).sum::<usize>()
+            }
+        }
+    }
+    let mut count = meta.values().count() + meta.extensions().iter().count();
+    meta.visit_syntax(&mut |_, value| count += count_node(value) - 1);
+    if let Some(source) = meta.source() {
+        count += 1 + source.arguments().iter().map(raw_count).sum::<usize>();
+    }
+    if let Some(bounds) = meta.dtype_bounds() {
+        count += bounds.bounds().count();
+    }
+    if meta.loc().is_some() {
+        count += 4;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -336,7 +353,7 @@ mod tests {
     #[test]
     fn accepted_analysis_uses_one_type_session() {
         let exprs =
-            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} int32)} 42))")
+            chelis_deep::parser::parse_str("(def {} answer (lit {type: (t-prim {} i32)} 42))")
                 .unwrap();
         crate::session::reset_type_analysis_session_count();
 
@@ -361,7 +378,7 @@ mod tests {
 
     #[test]
     fn correct_program_scores_1() {
-        let r = score("(def {} x (lit {type: (t-prim {} int32)} 42))");
+        let r = score("(def {} x (lit {type: (t-prim {} i32)} 42))");
         assert!(
             (r.score - 1.0).abs() < 1e-9,
             "expected score 1.0, got {}",
@@ -432,7 +449,7 @@ mod tests {
     #[test]
     fn partial_errors_give_intermediate_score() {
         let r = score(
-            "(def {} good (lit {type: (t-prim {} int32)} 42)) \
+            "(def {} good (lit {type: (t-prim {} i32)} 42)) \
              (def {} bad (var {} nope))",
         );
         assert!(
@@ -452,7 +469,7 @@ mod tests {
 
     #[test]
     fn typed_and_total_nodes_tracked() {
-        let r = score("(def {} x (lit {type: (t-prim {} int32)} 42))");
+        let r = score("(def {} x (lit {type: (t-prim {} i32)} 42))");
         assert!(r.total_nodes > 0, "should have visited some nodes");
         assert_eq!(
             r.typed_nodes, r.total_nodes,
@@ -462,8 +479,8 @@ mod tests {
 
     #[test]
     fn check_program_fn_works() {
-        let exprs = chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} int32)} 42))")
-            .unwrap();
+        let exprs =
+            chelis_deep::parser::parse_str("(def {} x (lit {type: (t-prim {} i32)} 42))").unwrap();
         let r = check_program(&exprs);
         assert!((r.score - 1.0).abs() < 1e-9);
     }
@@ -482,7 +499,7 @@ mod tests {
     #[test]
     fn ir_check_never_reports_perfect_score_with_errors() {
         let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
         let r = check_ir_program(&exprs);
@@ -546,7 +563,7 @@ mod tests {
     #[test]
     fn honesty_cap_leaves_coverage_scored_failures_untouched() {
         let exprs = chelis_deep::parser::parse_str(
-            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} bool)} true)))",
+            "(def {} f (app {} (var {} add) (lit {type: (t-prim {} i32)} 1) (lit {type: (t-prim {} bool)} true)))",
         )
         .unwrap();
         let r = check_ir_program(&exprs);

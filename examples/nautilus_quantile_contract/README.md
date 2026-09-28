@@ -5,7 +5,11 @@ This executable Reef project demonstrates a Tier-B proof over the released
 byte-for-byte function-level mirror of Nautilus 0.7.36 under
 `fixtures/nautilus`; keeping that fixture in-tree lets compiler release bumps
 regenerate an honest lock without depending on a not-yet-released downstream
-shell:
+shell. The schema-3 path dependency keeps the fixture local. Resolver 2 validates the package identity before graph construction.
+
+The manifest declares this README as package metadata. Reef includes its stable snapshot in the source archive.
+
+Run `chelis reef upgrade --inplace --manifest-to 3` to migrate an older copy of this example.
 
 ```sh
 chelis reef setup

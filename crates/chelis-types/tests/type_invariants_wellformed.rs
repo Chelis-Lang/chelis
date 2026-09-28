@@ -20,7 +20,7 @@ use chelis_types::infer_ir_program;
 
 fn deep_of_surf(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn deep_of_dp(source: &str) -> Vec<chelis_deep::Expr> {
@@ -129,13 +129,18 @@ fn simplex_tolerance_band_is_well_formed() {
 
 #[test]
 fn invariant_without_opaque_is_rejected() {
-    let deep = deep_of_dp(
+    let error = chelis_deep::parser::parse_str(
         "(deftype {invariant: (fn {} (params {} p) \
             (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
             invariant_amenability: \"linear\"} \
             Probability () (variant {} Probability (field {} value (t-prim {} f32))))",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("invariant") && error.contains("opaque"),
+        "{error}"
     );
-    assert_has_violation(&errors(&deep), "requires `@opaque`");
 }
 
 #[test]
@@ -391,7 +396,7 @@ fn integer_element_tensor_field_is_outside_the_value_class() {
     // not in the value class (it would otherwise be silently dropped).
     let deep = deep_of_surf(
         "module M\n@opaque\n@invariant(p) p.ok >= 0.0\n\
-         type T = | T { ok: f32, bad: tensor[4, int32] }",
+         type T = | T { ok: f32, bad: tensor[4, i32] }",
     );
     assert_has_violation(&errors(&deep), "value class");
 }

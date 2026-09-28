@@ -24,8 +24,10 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 RUNTIME_INCLUDE = REPO_ROOT / "crates" / "chelis-runtime" / "include"
 STAGE_NAME = "      - name: Stage tarball contents\n"
 LOCAL_INCLUDE = re.compile(r'^\s*#include\s+"(chelis_[^"]+\.h)"', re.MULTILINE)
+# Release tarballs ship the headers of the runtime their chelis carries, taken
+# from `chelis runtime export` (spec/08-backends.md §2.1).
 COPY_HEADER = re.compile(
-    r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
+    r'cp "\$runtime_export/(chelis_[^\s/"]+\.h)" '
     r'"\$staging/include/"'
 )
 
@@ -61,6 +63,11 @@ class ReleaseRuntimeHeaderManifestTests(unittest.TestCase):
             "release.yml must expose all three platform tarball manifests to this test",
         )
         for index, manifest in enumerate(manifests):
+            self.assertIn(
+                "chelis_runtime.h",
+                manifest,
+                f"release tarball staging block {index + 1} stages no runtime headers",
+            )
             required = local_dependency_closure(manifest)
             self.assertEqual(
                 manifest,

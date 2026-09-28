@@ -29,6 +29,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    // [05-OP-69]..[05-OP-72]: the random key operations (spec/05 section 2.7).
+    "key_from_seed",
+    "split_key",
+    "split_keys",
+    "fold_in",
     "cmplt",
     "sub",
     "div",
@@ -55,12 +60,11 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "silu",
     "gelu",
     "softmax",
-    "normalize",
     "mean",
     "matmul",
     "min_elem",
     "layer_norm",
-    "conv2d",
+    "conv",
     "sum",
     "count",
     "max_reduce",
@@ -89,6 +93,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "test_assert_eq",
     "test_assert_close_tensor",
     "test_assert_eq_tensor",
+    "char_code",
+    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
@@ -109,7 +115,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "append",
     "concat",
     "take",
-    "drop",
+    "skip",
     "chunk",
     "range",
     "map",
@@ -171,10 +177,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "diagonal",
     "trace",
     "clamp",
+    // Linearity, not a container operation: the explicit one-argument
+    // consume of [05-OP-67], paired with the `copy` keyword. The list
+    // slice that once shared this name is `skip` ([05-OP-54]).
+    "drop",
 ];
 
 /// Zero-based argument slots, after the callee, whose values name tensor
-/// axes and therefore carry the [05-DIM-3] `int32` contract.
+/// axes and therefore carry the [05-DIM-3] `i32` contract.
 ///
 /// This is semantic registration, not a name heuristic. A new axis-taking
 /// builtin must select a layout here; inference consults this table before
@@ -186,6 +196,439 @@ pub enum AxisArgumentLayout {
     NoAxes,
     Fixed(&'static [usize]),
     VariadicFrom(usize),
+}
+
+/// Target-independent capability domain selected by a builtin declaration.
+///
+/// This is prerequisite discovery metadata for chelis#1294, not a Phase 4C
+/// capability cell. It contains no support status, backend disposition, or
+/// fallback. Every [`BuiltinDecl`] states its exact domains so the atom-closure
+/// oracle can derive its source universe without a parallel allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BuiltinSemanticDomain {
+    Numeric,
+    Container,
+    Boundary,
+}
+
+/// Closed, builtin-owned sibling cases needed by the pre-4C atom-closure
+/// oracle. Numeric-only declarations have no sibling cases. A case is paired
+/// with its exact [`BuiltinSemanticDomain`] by [`BuiltinSiblingCaseDecl`].
+///
+/// These variants identify checked application shapes; they are not backend
+/// implementation receipts. Phase 4C consumes them when it authors the
+/// sibling cells, but chelis#1294 owns making the discovery universe explicit
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BuiltinSiblingCaseId {
+    PrintRecursive,
+    FailString,
+    DebugRecursive,
+    TestAssertBool,
+    TestAssertEq,
+    TestAssertEqTensor,
+    TestAssertCloseTensor,
+    ReadFile,
+    WriteFile,
+    ReadLines,
+    ReadBytes,
+    FileExists,
+    ListDir,
+    MmapFile,
+    MmapRead,
+    MmapLen,
+    ProcessRun,
+    ParseCsv,
+    ToCsv,
+    CsvF64s,
+    CsvInts,
+    CsvStrs,
+    CsvNrows,
+    CsvCols,
+    CsvF64,
+    CsvInt,
+    CsvStr,
+    CharCode,
+    CharFromCode,
+    StringLen,
+    StringConcat,
+    StringSlice,
+    StringContains,
+    StringStartsWith,
+    StringEndsWith,
+    StringTrim,
+    ToStringUnit,
+    ToStringScalar,
+    ToStringTensor,
+    ToStringList,
+    ToStringTuple,
+    ToStringDict,
+    ToStringOption,
+    ToStringAdt,
+    ToStringFunction,
+    ToInt,
+    ToFloat,
+    LenList,
+    LenDict,
+    IndexList,
+    AppendList,
+    ConcatList,
+    ConcatTensors,
+    TakeList,
+    SkipList,
+    DropValue,
+    ChunkList,
+    RangeList,
+    MapList,
+    FilterList,
+    FoldList,
+    ScanList,
+    TensorScan,
+    PartitionList,
+    FlatMapList,
+    FlattenList,
+    ZipList,
+    EnumerateList,
+    DictOf,
+    DictGet,
+    DictContains,
+    DictRemove,
+    DictInsert,
+    DictMerge,
+    DictKeys,
+    DictValues,
+    DictEntries,
+    ToTensorList,
+    ToListTensor,
+    PadSequences,
+    PadSequencesTo,
+    SplitTensor,
+    EqRecursive,
+    NeqRecursive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BuiltinSiblingCaseDecl {
+    pub domain: BuiltinSemanticDomain,
+    pub case: BuiltinSiblingCaseId,
+}
+
+/// Complete pre-4C semantic discovery declaration for one builtin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinCapabilityDecl {
+    pub domains: &'static [BuiltinSemanticDomain],
+    pub sibling_cases: &'static [BuiltinSiblingCaseDecl],
+}
+
+const NUMERIC_DOMAIN: &[BuiltinSemanticDomain] = &[BuiltinSemanticDomain::Numeric];
+const CONTAINER_DOMAIN: &[BuiltinSemanticDomain] = &[BuiltinSemanticDomain::Container];
+const BOUNDARY_DOMAIN: &[BuiltinSemanticDomain] = &[BuiltinSemanticDomain::Boundary];
+const NUMERIC_CONTAINER_DOMAINS: &[BuiltinSemanticDomain] = &[
+    BuiltinSemanticDomain::Numeric,
+    BuiltinSemanticDomain::Container,
+];
+
+impl BuiltinCapabilityDecl {
+    pub const NUMERIC_ONLY: Self = Self {
+        domains: NUMERIC_DOMAIN,
+        sibling_cases: &[],
+    };
+}
+
+const NUMERIC_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl::NUMERIC_ONLY;
+
+macro_rules! sibling_capability {
+    ($domains:ident, $domain:ident, $case:ident) => {
+        BuiltinCapabilityDecl {
+            domains: $domains,
+            sibling_cases: &[BuiltinSiblingCaseDecl {
+                domain: BuiltinSemanticDomain::$domain,
+                case: BuiltinSiblingCaseId::$case,
+            }],
+        }
+    };
+}
+
+const EQ_RECURSIVE_CASES: &[BuiltinSiblingCaseDecl] = &[BuiltinSiblingCaseDecl {
+    domain: BuiltinSemanticDomain::Container,
+    case: BuiltinSiblingCaseId::EqRecursive,
+}];
+const EQ_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
+    domains: NUMERIC_CONTAINER_DOMAINS,
+    sibling_cases: EQ_RECURSIVE_CASES,
+};
+
+const NEQ_RECURSIVE_CASES: &[BuiltinSiblingCaseDecl] = &[BuiltinSiblingCaseDecl {
+    domain: BuiltinSemanticDomain::Container,
+    case: BuiltinSiblingCaseId::NeqRecursive,
+}];
+const NEQ_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
+    domains: NUMERIC_CONTAINER_DOMAINS,
+    sibling_cases: NEQ_RECURSIVE_CASES,
+};
+
+const TO_STRING_CASES: &[BuiltinSiblingCaseDecl] = &[
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringFunction,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringUnit,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringScalar,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringTensor,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringList,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringTuple,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringDict,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringOption,
+    },
+    BuiltinSiblingCaseDecl {
+        domain: BuiltinSemanticDomain::Boundary,
+        case: BuiltinSiblingCaseId::ToStringAdt,
+    },
+];
+const TO_STRING_CAPABILITY: BuiltinCapabilityDecl = BuiltinCapabilityDecl {
+    domains: BOUNDARY_DOMAIN,
+    sibling_cases: TO_STRING_CASES,
+};
+
+/// [04-LIN-9], [04-LIN-10] and spec/04 section 1.1: what one builtin case's
+/// atom does with a key-carrying value, read by the allow-list
+/// ([`crate::key_admission::case_key_operand`]). A builtin in the Numeric
+/// domain alone has no sibling case and admits a key only as a key
+/// primitive's key operand ([`crate::key_admission::KeyPrimitive`]). Every
+/// Container and Boundary case declares its rule in [`case_keys`], which has
+/// no wildcard arm, so a new case must decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseKeys {
+    /// The atom fixes every operand type (strings, paths, i64 counts,
+    /// booleans, CSV tables, mapped files), so no operand carries a key.
+    NoKeyOperand,
+    /// The atom's domain names no `key` (a tensor element dtype domain, the
+    /// equality domain, the rendering domain). The listed zero-based
+    /// operands are the ones a key-carrying type can reach; like every
+    /// other operand of the case, each refuses it.
+    Refused(&'static [usize]),
+    /// The atom takes values of any checked type. Every type parameter is
+    /// declared at each operand that instantiates it, with how its values
+    /// are routed; an operand with no declared parameter admits no key.
+    Values(&'static [KeyParameter]),
+}
+
+/// One type parameter of a [`CaseKeys::Values`] case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyParameter {
+    /// The parameter's name in the atom's signature.
+    pub name: &'static str,
+    /// Where a call instantiates it.
+    pub site: KeyParameterSite,
+    /// How the case routes a value of this parameter.
+    pub routing: KeyRouting,
+}
+
+/// Where a call to a builtin instantiates one of its type parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyParameterSite {
+    /// The zero-based argument's own type.
+    Argument(usize),
+    /// The element type of the zero-based `List` argument.
+    ListElement(usize),
+    /// The result type of the zero-based callback argument.
+    CallbackResult(usize),
+}
+
+impl KeyParameterSite {
+    /// The zero-based argument the site reads.
+    pub const fn operand(self) -> usize {
+        match self {
+            Self::Argument(index) | Self::ListElement(index) | Self::CallbackResult(index) => index,
+        }
+    }
+}
+
+/// How a builtin case routes each value of one type parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyRouting {
+    /// Each value reaches at most one consumer: the callback, the drop, or
+    /// one place in the result. A key-carrying instantiation is affine-safe.
+    OneConsumer,
+    /// The case reads the value without consuming it. [04-LIN-9] refuses a
+    /// key-carrying instantiation because no read leaves a key live; the
+    /// linearity checker's borrowed operands are that refusal.
+    Borrowed,
+    /// A value reaches the callback and the result both, so a key-carrying
+    /// instantiation would use one key twice ([04-LIN-9]).
+    CallbackAndResult,
+}
+
+/// A `'static` slice of [`KeyParameter`]s, one per `(name, site, routing)`.
+macro_rules! key_parameters {
+    ($(($name:expr, $site:expr, $routing:expr)),+ $(,)?) => {{
+        const PARAMETERS: &[KeyParameter] = &[$(KeyParameter {
+            name: $name,
+            site: $site,
+            routing: $routing,
+        }),+];
+        PARAMETERS
+    }};
+}
+
+/// The key rule of every Container and Boundary builtin case. Exhaustive,
+/// with no wildcard arm: a new case is a compile error here until it decides.
+pub const fn case_keys(case: BuiltinSiblingCaseId) -> CaseKeys {
+    use BuiltinSiblingCaseId as Case;
+    use KeyParameterSite::{Argument, CallbackResult, ListElement};
+    use KeyRouting::{Borrowed, CallbackAndResult, OneConsumer};
+    match case {
+        Case::FailString
+        | Case::TestAssertBool
+        | Case::ReadFile
+        | Case::WriteFile
+        | Case::ReadLines
+        | Case::ReadBytes
+        | Case::FileExists
+        | Case::ListDir
+        | Case::MmapFile
+        | Case::MmapRead
+        | Case::MmapLen
+        | Case::ProcessRun
+        | Case::ParseCsv
+        | Case::ToCsv
+        | Case::CsvF64s
+        | Case::CsvInts
+        | Case::CsvStrs
+        | Case::CsvNrows
+        | Case::CsvCols
+        | Case::CsvF64
+        | Case::CsvInt
+        | Case::CsvStr
+        | Case::CharCode
+        | Case::CharFromCode
+        | Case::StringLen
+        | Case::StringConcat
+        | Case::StringSlice
+        | Case::StringContains
+        | Case::StringStartsWith
+        | Case::StringEndsWith
+        | Case::StringTrim
+        | Case::ToInt
+        | Case::ToFloat
+        | Case::RangeList => CaseKeys::NoKeyOperand,
+        // [05-OP-60]: observation borrows the value it renders.
+        Case::PrintRecursive | Case::DebugRecursive => {
+            CaseKeys::Values(key_parameters![("value", Argument(0), Borrowed)])
+        }
+        // [05-OP-38] and [05-OP-36]: the equality domain names no `key`.
+        Case::TestAssertEq
+        | Case::TestAssertEqTensor
+        | Case::TestAssertCloseTensor
+        | Case::EqRecursive
+        | Case::NeqRecursive => CaseKeys::Refused(&[0, 1]),
+        // [05-OP-25]: the rendering domain is the nine data element dtypes.
+        Case::ToStringUnit
+        | Case::ToStringScalar
+        | Case::ToStringTensor
+        | Case::ToStringList
+        | Case::ToStringTuple
+        | Case::ToStringDict
+        | Case::ToStringOption
+        | Case::ToStringAdt
+        | Case::ToStringFunction => CaseKeys::Refused(&[0]),
+        // [05-OP-54]: `len` and `index` borrow the collection.
+        Case::LenList | Case::LenDict => {
+            CaseKeys::Values(key_parameters![("collection", Argument(0), Borrowed)])
+        }
+        Case::IndexList => CaseKeys::Values(key_parameters![("T", ListElement(0), Borrowed)]),
+        // [05-OP-54]: each element moves to one place in the result.
+        Case::AppendList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", Argument(1), OneConsumer)
+        ]),
+        Case::ConcatList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("T", ListElement(1), OneConsumer)
+        ]),
+        Case::TakeList
+        | Case::SkipList
+        | Case::ChunkList
+        | Case::FlattenList
+        | Case::EnumerateList => {
+            CaseKeys::Values(key_parameters![("T", ListElement(0), OneConsumer)])
+        }
+        // [05-OP-62], [05-OP-53], [05-OP-57], [05-OP-9] and [05-OP-10]: a
+        // domain of every active tensor element dtype admits exactly the nine
+        // data element dtypes, never `key`.
+        Case::ConcatTensors | Case::SplitTensor | Case::ToTensorList | Case::ToListTensor => {
+            CaseKeys::Refused(&[0])
+        }
+        Case::PadSequences => CaseKeys::Refused(&[0, 1]),
+        Case::PadSequencesTo => CaseKeys::Refused(&[0, 2]),
+        // [05-OP-67]: `drop` is the value's one consumer.
+        Case::DropValue => CaseKeys::Values(key_parameters![("T", Argument(0), OneConsumer)]),
+        // [05-OP-55]: each element reaches the callback once, and `map` and
+        // `flat_map` keep only the callback's results.
+        Case::MapList | Case::FlatMapList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(1), OneConsumer),
+            ("U", CallbackResult(0), OneConsumer)
+        ]),
+        // [05-OP-55]: the callback reads each element and the result keeps it.
+        Case::FilterList | Case::PartitionList => {
+            CaseKeys::Values(key_parameters![("T", ListElement(1), CallbackAndResult)])
+        }
+        // [05-OP-55]: each accumulator feeds the next call once.
+        Case::FoldList => CaseKeys::Values(key_parameters![
+            ("A", Argument(1), OneConsumer),
+            ("T", ListElement(2), OneConsumer)
+        ]),
+        // [05-OP-55]: each accumulator feeds the next call and the result.
+        Case::ScanList => CaseKeys::Values(key_parameters![
+            ("A", Argument(1), CallbackAndResult),
+            ("T", ListElement(2), OneConsumer)
+        ]),
+        // [05-OP-38]: each state feeds the next call and the stacked result.
+        Case::TensorScan => {
+            CaseKeys::Values(key_parameters![("T", Argument(0), CallbackAndResult)])
+        }
+        Case::ZipList => CaseKeys::Values(key_parameters![
+            ("T", ListElement(0), OneConsumer),
+            ("U", ListElement(1), OneConsumer)
+        ]),
+        // [05-OP-56]: a dictionary keeps at most one value per key, and a
+        // value the result does not keep is dropped.
+        Case::DictOf => CaseKeys::Values(key_parameters![("(K, V)", ListElement(0), OneConsumer)]),
+        Case::DictGet
+        | Case::DictContains
+        | Case::DictRemove
+        | Case::DictKeys
+        | Case::DictValues
+        | Case::DictEntries => CaseKeys::Values(key_parameters![("V", Argument(0), OneConsumer)]),
+        Case::DictInsert => CaseKeys::Values(key_parameters![
+            ("V", Argument(0), OneConsumer),
+            ("V", Argument(2), OneConsumer)
+        ]),
+        Case::DictMerge => CaseKeys::Values(key_parameters![
+            ("V", Argument(0), OneConsumer),
+            ("V", Argument(1), OneConsumer)
+        ]),
+    }
 }
 
 /// Lane realizability declaration for a builtin. Part of `BuiltinDecl`.
@@ -240,7 +683,7 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
     "expand",
     "insert",
     "layer_norm",
-    "conv2d",
+    "conv",
     "scatter_elements",
 ];
 
@@ -260,6 +703,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "ceil",
     "round",
     "uniform_like",
+    "split_keys",
     "cmplt",
     "sub",
     "div",
@@ -286,7 +730,6 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "silu",
     "gelu",
     "softmax",
-    "normalize",
     "min_elem",
     "reduce_window_max",
     "reduce_window_min",
@@ -301,6 +744,8 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "fail",
     "debug",
     "test_assert_close_tensor",
+    "char_code",
+    "char_from_code",
     "string_len",
     "string_concat",
     "string_slice",
@@ -321,7 +766,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "append",
     "concat",
     "take",
-    "drop",
+    "skip",
     "chunk",
     "range",
     "map",
@@ -379,6 +824,10 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "diagonal",
     "trace",
     "clamp",
+    // Linearity, not a container operation: the explicit one-argument
+    // consume of [05-OP-67], paired with the `copy` keyword. The list
+    // slice that once shared this name is `skip` ([05-OP-54]).
+    "drop",
 ];
 
 /// True only when the declared rule is wired to the corresponding closed
@@ -390,16 +839,18 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
         BuiltinInferenceRule::Specialized => SPECIALIZED_INFERENCE_BUILTINS.contains(&name),
     }
 }
-/// A builtin's complete declaration: name, inference disposition,
-/// realizability, shape class, and axis-argument layout.
+
+/// A builtin's complete declaration: name, semantic discovery capability,
+/// inference disposition, realizability, shape class, and axis-argument layout.
 /// All fields are required — adding a builtin without any field is a
 /// compile error (missing struct field). No `Default` implementation.
 ///
 /// ```compile_fail
 /// // Omitting `realizability` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, ShapeClass};
+/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, ShapeClass};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     shape_class: ShapeClass::Rewriting,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
@@ -408,9 +859,10 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///
 /// ```compile_fail
 /// // Omitting `shape_class` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability};
+/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
@@ -419,9 +871,10 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///
 /// ```compile_fail
 /// // Omitting `inference` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, Realizability, ShapeClass};
+/// use chelis_types::{AxisArgumentLayout, BuiltinCapabilityDecl, BuiltinDecl, Realizability, ShapeClass};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     realizability: Realizability::Universal,
 ///     shape_class: ShapeClass::Rewriting,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
@@ -430,17 +883,31 @@ pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceR
 ///
 /// ```compile_fail
 /// // Omitting `axis_arguments` must fail to compile.
-/// use chelis_types::{BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// use chelis_types::{BuiltinCapabilityDecl, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     capability: BuiltinCapabilityDecl::NUMERIC_ONLY,
 ///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
 ///     shape_class: ShapeClass::Rewriting,
 /// };
 /// ```
+///
+/// ```compile_fail
+/// // Omitting `capability` must fail to compile.
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+///     realizability: Realizability::Universal,
+///     shape_class: ShapeClass::Rewriting,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinDecl {
     pub name: &'static str,
+    pub capability: BuiltinCapabilityDecl,
     pub inference: InferenceDisposition,
     pub realizability: Realizability,
     pub shape_class: ShapeClass,
@@ -448,13 +915,14 @@ pub struct BuiltinDecl {
 }
 
 /// The consolidated builtin table. Single source of truth for builtin
-/// metadata. Each entry declares name, inference disposition, realizability,
-/// shape class, and axis layout.
+/// metadata. Each entry declares name, semantic domains/cases, inference
+/// disposition, realizability, shape class, and axis layout.
 /// Omitting any field is a compile error.
 pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor elementwise (Universal, Identity) ────────────────────
     BuiltinDecl {
         name: "add",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -462,6 +930,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "mul",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -469,6 +938,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sub",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -476,6 +946,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "div",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -483,6 +954,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "floor_div",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -490,6 +962,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "trunc_div",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -497,6 +970,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "max_elem",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -504,6 +978,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "min_elem",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -511,6 +986,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "neg",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -518,6 +994,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "recip",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -525,6 +1002,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "exp",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -532,6 +1010,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "log",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -539,6 +1018,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sin",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -546,6 +1026,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sqrt",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -553,6 +1034,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "cos",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -562,6 +1044,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "tan",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -569,6 +1052,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "atan",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -576,6 +1060,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "abs",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -585,6 +1070,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "floor",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -592,6 +1078,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "ceil",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -599,6 +1086,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "round",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -606,6 +1094,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "relu",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -613,6 +1102,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sigmoid",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -620,6 +1110,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "tanh",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -627,6 +1118,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "silu",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -634,6 +1126,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "gelu",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -641,13 +1134,55 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "uniform_like",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
+    // [05-OP-69]..[05-OP-72]: schemes carry the scalar/tensor relation;
+    // the affine key rule ([04-LIN-9]) is the linearity checker's.
+    BuiltinDecl {
+        name: "key_from_seed",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the transported key-operation relation determines scalar and tensor forms",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::OrderedPrefix,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_key",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the transported key-operation relation determines scalar and tensor forms",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::OrderedPrefix,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "split_keys",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::OrderedPrefix,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "fold_in",
+        capability: NUMERIC_CAPABILITY,
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the transported key-operation relation determines scalar and tensor forms",
+        },
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::OrderedPrefix,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
     BuiltinDecl {
         name: "cmplt",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -655,6 +1190,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "eq",
+        capability: EQ_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -662,6 +1198,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "neq",
+        capability: NEQ_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -669,6 +1206,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "lt",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -676,6 +1214,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "gt",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -683,6 +1222,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "lte",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -690,6 +1230,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "gte",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -697,6 +1238,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "mod",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -704,6 +1246,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "bitand",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -711,6 +1254,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "bitor",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -718,6 +1262,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "bitxor",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -725,6 +1270,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "shl",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -732,6 +1278,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "shr",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
@@ -739,6 +1286,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "and",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -746,6 +1294,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "or",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -753,6 +1302,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "not",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -760,6 +1310,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "where",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -767,6 +1318,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "clamp",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
@@ -775,20 +1327,15 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Reductions (Universal, NameTracked) ─────────────────────────
     BuiltinDecl {
         name: "softmax",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
-        name: "normalize",
-        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
-        realizability: Realizability::Universal,
-        shape_class: ShapeClass::Rewriting,
-        axis_arguments: AxisArgumentLayout::NoAxes,
-    },
-    BuiltinDecl {
         name: "mean",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -796,6 +1343,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sum",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -803,6 +1351,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "count",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -810,6 +1359,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "max_reduce",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -817,6 +1367,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "min_reduce",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -824,6 +1375,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "prod_reduce",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -831,6 +1383,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "argmax_reduce",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -838,6 +1391,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "argmin_reduce",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -846,6 +1400,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Windowed reductions ─────────────────────────────────────────
     BuiltinDecl {
         name: "reduce_window_max",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -853,6 +1408,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "reduce_window_min",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -860,6 +1416,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "reduce_window_sum",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -867,6 +1424,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "reduce_window_mean",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -875,6 +1433,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Shape ops (Universal, Rewriting) ────────────────────────────
     BuiltinDecl {
         name: "matmul",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -882,13 +1441,15 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "layer_norm",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "conv2d",
+        name: "conv",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -896,6 +1457,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "reshape",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -903,6 +1465,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "permute",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -910,6 +1473,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "expand",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -917,6 +1481,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "insert",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -924,6 +1489,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "pad",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -931,6 +1497,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "shrink",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -938,6 +1505,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "stride",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -945,6 +1513,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "gather",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -952,6 +1521,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "scatter",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -959,6 +1529,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "scatter_replace",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -966,6 +1537,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "scatter_elements",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -973,6 +1545,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "einsum",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -980,6 +1553,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "split",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, SplitTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -987,6 +1561,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "cumsum",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -994,6 +1569,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sort",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1001,6 +1577,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "diagonal",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1008,6 +1585,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "trace",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1016,6 +1594,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── IO / effects (HostOnly) ─────────────────────────────────────
     BuiltinDecl {
         name: "print",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, PrintRecursive),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1023,6 +1602,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "fail",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, FailString),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1030,6 +1610,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "debug",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, DebugRecursive),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1037,6 +1618,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "read_file",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadFile),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1044,6 +1626,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "write_file",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, WriteFile),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1051,6 +1634,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "read_lines",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadLines),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1058,6 +1642,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "read_bytes",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ReadBytes),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1065,6 +1650,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "file_exists",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, FileExists),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1072,6 +1658,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "list_dir",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ListDir),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1079,6 +1666,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "mmap_file",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapFile),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1086,6 +1674,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "mmap_read",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapRead),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1093,6 +1682,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "mmap_len",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, MmapLen),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1100,6 +1690,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "process_run",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ProcessRun),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1107,6 +1698,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "round_to",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1115,6 +1707,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
     BuiltinDecl {
         name: "parse_csv",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ParseCsv),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1122,6 +1715,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "to_csv",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToCsv),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1129,6 +1723,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_f64s",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvF64s),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1136,6 +1731,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_ints",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvInts),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1143,6 +1739,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_strs",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvStrs),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1150,6 +1747,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_nrows",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvNrows),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1157,6 +1755,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_cols",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvCols),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1164,6 +1763,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_f64",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvF64),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1171,6 +1771,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_int",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvInt),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1178,6 +1779,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "csv_str",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, CsvStr),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1185,7 +1787,24 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     // ─── String ops (HostOnly) ───────────────────────────────────────
     BuiltinDecl {
+        name: "char_code",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharCode),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
+        name: "char_from_code",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, CharFromCode),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    BuiltinDecl {
         name: "string_len",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringLen),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1193,6 +1812,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_concat",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringConcat),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1200,6 +1820,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_slice",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringSlice),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1207,6 +1828,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_contains",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringContains),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1214,6 +1836,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_starts_with",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringStartsWith),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1221,6 +1844,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_ends_with",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringEndsWith),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1228,6 +1852,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "string_trim",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, StringTrim),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1235,6 +1860,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "to_string",
+        capability: TO_STRING_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1242,6 +1868,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "to_int",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToInt),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1249,6 +1876,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "to_float",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToFloat),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1257,6 +1885,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor introspection (HostOnly at scalar type) ──────────────
     BuiltinDecl {
         name: "rank",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1264,6 +1893,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "shape",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1271,6 +1901,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "numel",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1278,6 +1909,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "tensor_to_scalar",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1285,6 +1917,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "scalar_to_tensor",
+        capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
@@ -1293,6 +1926,19 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── List ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "len",
+        capability: BuiltinCapabilityDecl {
+            domains: CONTAINER_DOMAIN,
+            sibling_cases: &[
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::LenList,
+                },
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::LenDict,
+                },
+            ],
+        },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1300,6 +1946,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "index",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, IndexList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1307,6 +1954,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "append",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, AppendList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1314,6 +1962,19 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "concat",
+        capability: BuiltinCapabilityDecl {
+            domains: CONTAINER_DOMAIN,
+            sibling_cases: &[
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::ConcatList,
+                },
+                BuiltinSiblingCaseDecl {
+                    domain: BuiltinSemanticDomain::Container,
+                    case: BuiltinSiblingCaseId::ConcatTensors,
+                },
+            ],
+        },
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1321,13 +1982,31 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "take",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, TakeList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
+        name: "skip",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, SkipList),
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
+        realizability: Realizability::HostOnly,
+        shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
+    },
+    // `drop` is the one-argument linearity consume of [05-OP-67]. It kept
+    // `CONTAINER_DOMAIN` when [05-OP-54]'s list slice moved to `skip`: the
+    // closed domain vocabulary is Numeric/Container/Boundary and none of the
+    // three names linearity, so a fourth domain would change the identity
+    // strings in the normative registry, the discovery validator's
+    // Container/Boundary pairing loop, and the identity regex in
+    // `scripts/builtin_atom_registry.py`. That is a capability-system change,
+    // not part of separating the two operations.
+    BuiltinDecl {
         name: "drop",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DropValue),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1335,6 +2014,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "chunk",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, ChunkList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1342,6 +2022,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "range",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, RangeList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1349,6 +2030,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "map",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, MapList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1356,6 +2038,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "filter",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, FilterList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1363,6 +2046,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "fold",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, FoldList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1370,6 +2054,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "scan",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, ScanList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1377,6 +2062,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "tensor_scan",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TensorScan),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1384,6 +2070,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "partition",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, PartitionList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1391,6 +2078,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "flat_map",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, FlatMapList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1398,6 +2086,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "flatten",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, FlattenList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1405,6 +2094,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "zip",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, ZipList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1412,6 +2102,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "enumerate",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, EnumerateList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1420,6 +2111,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Dict ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "dict_of",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictOf),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1427,6 +2119,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_get",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictGet),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1434,6 +2127,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_contains",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictContains),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1441,6 +2135,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_remove",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictRemove),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1448,6 +2143,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_insert",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictInsert),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1455,6 +2151,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_merge",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictMerge),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1462,6 +2159,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_keys",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictKeys),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1469,6 +2167,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_values",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictValues),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1476,6 +2175,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "dict_entries",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, DictEntries),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1484,6 +2184,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor conversion (HostOnly) ────────────────────────────────
     BuiltinDecl {
         name: "to_tensor",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToTensorList),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1491,6 +2192,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "to_list",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, ToListTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1498,6 +2200,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "pad_sequences",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, PadSequences),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1505,6 +2208,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "pad_sequences_to",
+        capability: sibling_capability!(CONTAINER_DOMAIN, Container, PadSequencesTo),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1513,6 +2217,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Test builtins (HostOnly) ────────────────────────────────────
     BuiltinDecl {
         name: "test_assert",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TestAssertBool),
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1522,6 +2227,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_eq",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TestAssertEq),
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1531,6 +2237,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TestAssertCloseTensor),
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
@@ -1538,6 +2245,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_eq_tensor",
+        capability: sibling_capability!(BOUNDARY_DOMAIN, Boundary, TestAssertEqTensor),
         inference: InferenceDisposition::GenericAccepted {
             reason: "the polymorphic signature fully determines this builtin type",
         },
@@ -1582,6 +2290,10 @@ pub enum ShapeClass {
     /// it rejects a non-existent/ambiguous axis or a positional index at
     /// symbolic rank, so no transposition can slip past.
     NameTracked,
+    /// Every tensor result retains the complete operand shape in order,
+    /// possibly appending trailing axes. Checked operation relations own
+    /// the exact output surface, including tuples of same-shaped tensors.
+    OrderedPrefix,
     /// Rewrites/reorders the shape positionally, is shape-parameterized, or is a
     /// non-tensor/host op whose output shape is *not* name-trackable at symbolic
     /// rank. Forbidden inside a rank-poly body: against an opaque spread there
@@ -1591,14 +2303,15 @@ pub enum ShapeClass {
 
 /// Classify a builtin's shape semantics for the Body-Discipline check.
 ///
-/// `Identity` and `NameTracked` are explicit allowlists; everything else falls
+/// `Identity`, `NameTracked`, and `OrderedPrefix` are explicit allowlists; other ops fall
 /// through to `Rewriting`. That default is the safe direction — a builtin that
-/// is not *provably* shape-identity or name-tracked is rejected inside a
+/// is not proven to preserve symbolic axis order is rejected inside a
 /// rank-poly body, so a missed classification can only over-reject, never open
 /// a §4.2 hole. The `shape_class_identity_set_is_pinned` test pins the sets so
 /// any change is deliberate.
 pub fn shape_class(name: &str) -> ShapeClass {
     match name {
+        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => ShapeClass::OrderedPrefix,
         // Pure elementwise — output shape == input shape (precision may change
         // for comparisons/logical). No axis argument, no reordering.
         "add" | "mul" | "sub" | "div" | "floor_div" | "trunc_div" | "mod" | "max_elem"
@@ -1621,7 +2334,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // `argmin_reduce` over a named axis so a *host-lane* occurrence keeps
         // its tensor type instead of falling through to the
         // "unsupported builtin" host emit. `argmax_reduce`/`argmin_reduce`
-        // return an int64 index tensor (no-grad). All remain usable at
+        // return an i64 index tensor (no-grad). All remain usable at
         // concrete rank.
         //
         // Named-axis expand (chelis#339, the R+1 inverse): `expand` addresses
@@ -1635,6 +2348,41 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,
     }
+}
+
+/// Operand-family contract shared by builtin schemes and direct-call diagnostics.
+/// Value constraints attach this contract to whole scalar/tensor operands; authored
+/// dtype bounds still constrain primitive precision parameters only.
+pub(crate) fn operand_dtype_family(name: &str) -> Option<TypeVarRestriction> {
+    use TypeVarRestriction::{ActiveFloat, ActiveInt, ActiveNumeric};
+    match name {
+        "mean" | "softmax" | "div" | "matmul" | "layer_norm" | "exp" | "log" | "sin" | "cos"
+        | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+        | "reduce_window_mean" => Some(ActiveFloat),
+        // [05-OP-64], [05-OP-47] and truncating division.
+        "trunc_div" | "mod" | "bitand" | "bitor" | "bitxor" | "shl" | "shr" => Some(ActiveInt),
+        // [05-OP-46], [05-OP-40], [05-OP-36], [05-OP-30]/[05-OP-12..16],
+        // and the arithmetic rows of spec/04 section 5.4.
+        "add" | "mul" | "sub" | "neg" | "floor_div" | "abs" | "floor" | "ceil" | "round"
+        | "max_elem" | "min_elem" | "cmplt" | "lt" | "gt" | "gte" | "lte" | "sum"
+        | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce" | "argmin_reduce"
+        | "reduce_window_sum" | "reduce_window_max" | "reduce_window_min" => Some(ActiveNumeric),
+        _ => None,
+    }
+}
+
+fn operand_value_restrictions(
+    name: &str,
+    operands: &[TypeVar],
+) -> Vec<(TypeVar, TypeVarRestriction)> {
+    operand_dtype_family(name)
+        .map(|family| {
+            operands
+                .iter()
+                .map(|var| (*var, family.for_value()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Create the built-in type environment with all RISC Tier 1 + Tier 2 signatures.
@@ -1664,8 +2412,9 @@ pub fn builtin_env() -> (Env, VarGen) {
         // "whole tensor as one type variable" shape.
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![dv],
             rvars: vec![],
             body: Type::Fn(
@@ -1681,8 +2430,9 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(vec![borrowed(Type::Var(tv))], Box::new(Type::Var(tv))),
@@ -1715,8 +2465,9 @@ pub fn builtin_env() -> (Env, VarGen) {
         let tv = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[tv]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1736,6 +2487,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1752,6 +2504,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let _dv = vg.fresh_dvar();
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1761,13 +2514,15 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
-    fn tensor_triop_return_first(name: &str, env: &mut Env, vg: &mut VarGen) {
+    fn tensor_layer_norm(name: &str, env: &mut Env, vg: &mut VarGen) {
         let t1 = vg.fresh_tvar();
         let t2 = vg.fresh_tvar();
         let t3 = vg.fresh_tvar();
+        let epsilon = vg.fresh_tvar();
         let scheme = Scheme {
-            tvars: vec![t1, t2, t3],
-            tvar_restrictions: vec![],
+            constraints: vec![],
+            tvars: vec![t1, t2, t3, epsilon],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2, t3, epsilon]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1775,6 +2530,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                     borrowed(Type::Var(t1)),
                     borrowed(Type::Var(t2)),
                     borrowed(Type::Var(t3)),
+                    borrowed(Type::Var(epsilon)),
                 ],
                 Box::new(Type::Var(t1)),
             ),
@@ -1787,8 +2543,9 @@ pub fn builtin_env() -> (Env, VarGen) {
         let t2 = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![t1, t2, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[t1, t2]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1803,8 +2560,9 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1819,14 +2577,15 @@ pub fn builtin_env() -> (Env, VarGen) {
     /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
     /// type with the spec §2.3.1 shape contract; this scheme exists so
     /// the function name is in scope at lookup time and the canonical
-    /// arg-arity / list-of-int64 constraints are visible during unification.
+    /// arg-arity / list-of-i64 constraints are visible during unification.
     fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input, out],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1841,6 +2600,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input, out],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1848,8 +2608,8 @@ pub fn builtin_env() -> (Env, VarGen) {
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
-                    // [05-DIM-1]: axis-domain axis (int32), extent-domain
-                    // size (int64).
+                    // [05-DIM-1]: axis-domain axis (i32), extent-domain
+                    // size (i64).
                     Type::Prim(Prim::Int32),
                     Type::Prim(Prim::Int64),
                 ],
@@ -1860,15 +2620,24 @@ pub fn builtin_env() -> (Env, VarGen) {
     }
 
     fn tensor_with_rate(name: &str, env: &mut Env, vg: &mut VarGen) {
-        let input = vg.fresh_tvar();
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let input = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         let scheme = Scheme {
-            tvars: vec![input],
-            tvar_restrictions: vec![],
+            constraints: vec![],
+            tvars: vec![precision],
+            tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
-            rvars: vec![],
+            rvars: vec![rank],
+            // [05-OP-37]: the key comes first and is consumed; the tensor is
+            // borrowed.
             body: Type::Fn(
-                vec![borrowed(Type::Var(input)), Type::Prim(Prim::F32)],
-                Box::new(Type::Var(input)),
+                vec![
+                    Type::Prim(Prim::Key),
+                    borrowed(input.clone()),
+                    Type::Var(precision),
+                ],
+                Box::new(input),
             ),
         };
         env.bind(name.to_string(), scheme);
@@ -1877,12 +2646,16 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn tensor_with_bounds(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input],
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
+            // [05-OP-8]: the key comes first and is consumed; the template
+            // is borrowed.
             body: Type::Fn(
                 vec![
+                    Type::Prim(Prim::Key),
                     borrowed(Type::Var(input)),
                     Type::Prim(Prim::F32),
                     Type::Prim(Prim::F32),
@@ -1893,11 +2666,12 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
-    fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
+    fn tensor_conv(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let kernel = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input, kernel, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1906,8 +2680,14 @@ pub fn builtin_env() -> (Env, VarGen) {
                 vec![
                     borrowed(Type::Var(input)),
                     borrowed(Type::Var(kernel)),
-                    Type::Prim(Prim::Int32),
-                    Type::Prim(Prim::Int32),
+                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
+                    Type::Adt(
+                        "List".to_string(),
+                        vec![Type::Tuple(vec![
+                            Type::Prim(Prim::Int64),
+                            Type::Prim(Prim::Int64),
+                        ])],
+                    ),
                 ],
                 Box::new(Type::Var(output)),
             ),
@@ -1918,8 +2698,9 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn tensor_reduce(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[input]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1934,6 +2715,13 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: match name {
+                "len" => vec![CollectionConstraint::Len {
+                    operand: Type::Var(input),
+                    result: Type::Var(output),
+                }],
+                _ => vec![],
+            },
             tvars: vec![input, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1948,8 +2736,26 @@ pub fn builtin_env() -> (Env, VarGen) {
         let rhs = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: match name {
+                "index" => vec![CollectionConstraint::Index {
+                    list: Type::Var(lhs),
+                    index: Type::Var(rhs),
+                    result: Type::Var(output),
+                }],
+                "append" => vec![CollectionConstraint::Append {
+                    list: Type::Var(lhs),
+                    value: Type::Var(rhs),
+                    result: Type::Var(output),
+                }],
+                "concat" => vec![CollectionConstraint::Concat {
+                    lhs: Type::Var(lhs),
+                    rhs: Type::Var(rhs),
+                    result: Type::Var(output),
+                }],
+                _ => vec![],
+            },
             tvars: vec![lhs, rhs, output],
-            tvar_restrictions: vec![],
+            tvar_restrictions: operand_value_restrictions(name, &[lhs, rhs]),
             dvars: vec![],
             rvars: vec![],
             body: Type::Fn(
@@ -1966,6 +2772,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -1984,6 +2791,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2002,6 +2810,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2020,6 +2829,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2042,6 +2852,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let c = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2062,6 +2873,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let e = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, d, e, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2087,6 +2899,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let d = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![a, b, c, d, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2103,6 +2916,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let input = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![input, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2118,6 +2932,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     fn generic_unop_borrow_same(name: &str, env: &mut Env, vg: &mut VarGen) {
         let tv = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![tv],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2132,6 +2947,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         let rhs = vg.fresh_tvar();
         let output = vg.fresh_tvar();
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![lhs, rhs, output],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2179,6 +2995,57 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("round", &mut env, &mut vg);
     tensor_with_bounds("uniform_like", &mut env, &mut vg);
 
+    // [05-OP-69]..[05-OP-72]: direct calls specialize these checked
+    // scalar/tensor relations at each application.
+    for name in ["key_from_seed", "split_key", "split_keys", "fold_in"] {
+        let input = vg.fresh_tvar();
+        let output = vg.fresh_tvar();
+        let extra = vg.fresh_tvar();
+        let operand = Type::Var(input);
+        let result = Type::Var(output);
+        let mut args = vec![operand.clone()];
+        let mut tvars = vec![input, output];
+        let constraint = match name {
+            "key_from_seed" => CollectionConstraint::KeyFromSeed {
+                operand,
+                result: result.clone(),
+            },
+            "split_key" => CollectionConstraint::SplitKey {
+                operand,
+                result: result.clone(),
+            },
+            "split_keys" => {
+                args.push(Type::Prim(Prim::Int64));
+                CollectionConstraint::SplitKeys {
+                    operand,
+                    count: Type::Prim(Prim::Int64),
+                    result: result.clone(),
+                }
+            }
+            "fold_in" => {
+                args.push(Type::Var(extra));
+                tvars.push(extra);
+                CollectionConstraint::FoldIn {
+                    operand,
+                    index: Type::Var(extra),
+                    result: result.clone(),
+                }
+            }
+            _ => unreachable!(),
+        };
+        env.bind(
+            name.to_string(),
+            Scheme {
+                constraints: vec![constraint],
+                tvars,
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(args, Box::new(result)),
+            },
+        );
+    }
+
     cmplt_sig("cmplt", &mut env, &mut vg);
 
     // Tier 2: Derived built-ins
@@ -2210,12 +3077,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_unop("silu", &mut env, &mut vg);
     tensor_unop("gelu", &mut env, &mut vg);
     tensor_reduce("softmax", &mut env, &mut vg);
-    tensor_unop("normalize", &mut env, &mut vg);
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_triop_return_first("layer_norm", &mut env, &mut vg);
-    tensor_conv2d("conv2d", &mut env, &mut vg);
+    tensor_layer_norm("layer_norm", &mut env, &mut vg);
+    tensor_conv("conv", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
     tensor_reduce_to_out("count", &mut env, &mut vg);
     tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
@@ -2224,7 +3090,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("argmax_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("argmin_reduce", &mut env, &mut vg);
     // §2.3.1 reduce_window family. Fallback HM scheme is
-    // `&tensor[D, p] -> List[int32] -> List[int32] -> tensor[D', p]`;
+    // `&tensor[D, p] -> List[i64] -> List[i64] -> tensor[D', p]`;
     // the actual shape contract (output rank = input rank, trailing
     // axis extents derived from the window/stride formula) is enforced
     // by the dedicated `infer_reduce_window_app` arm in `infer.rs`,
@@ -2257,6 +3123,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "test_assert".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2272,6 +3139,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_eq".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![value],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2299,6 +3167,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_close_tensor".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![precision],
                 tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
                 dvars: vec![],
@@ -2321,6 +3190,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(
             "test_assert_eq_tensor".to_string(),
             Scheme {
+                constraints: vec![],
                 tvars: vec![tensor_tv],
                 tvar_restrictions: vec![],
                 dvars: vec![],
@@ -2336,6 +3206,34 @@ pub fn builtin_env() -> (Env, VarGen) {
             },
         );
     }
+    env.bind(
+        "char_code".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::String)],
+                Box::new(Type::Prim(Prim::Int64)),
+            ),
+        },
+    );
+    env.bind(
+        "char_from_code".to_string(),
+        Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Fn(
+                vec![Type::Prim(Prim::Int64)],
+                Box::new(Type::Prim(Prim::String)),
+            ),
+        },
+    );
     generic_unop("string_len", &mut env, &mut vg);
     generic_binop("string_concat", &mut env, &mut vg);
     generic_unop("string_trim", &mut env, &mut vg);
@@ -2343,6 +3241,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_contains".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2356,6 +3255,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_starts_with".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2369,6 +3269,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "string_ends_with".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2392,7 +3293,25 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_binop("append", &mut env, &mut vg);
     generic_binop("concat", &mut env, &mut vg);
     generic_binop("take", &mut env, &mut vg);
-    generic_binop("drop", &mut env, &mut vg);
+    generic_binop("skip", &mut env, &mut vg);
+    // [05-OP-67]: `drop` consumes exactly one value of any type and
+    // returns unit. Binding the exact unit result here, rather than a
+    // free result variable, keeps a bare `drop` reference as precise as
+    // the application route in `infer::app`.
+    {
+        let consumed = vg.fresh_tvar();
+        env.bind(
+            "drop".to_string(),
+            Scheme {
+                constraints: vec![],
+                tvars: vec![consumed],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(vec![Type::Var(consumed)], Box::new(Type::Unit)),
+            },
+        );
+    }
     generic_binop("chunk", &mut env, &mut vg);
     generic_binop("range", &mut env, &mut vg);
     generic_binop("map", &mut env, &mut vg);
@@ -2403,6 +3322,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "fold".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![fold_acc, fold_item, fold_ret],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2423,6 +3343,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "scan".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![scan_acc, scan_item, scan_ret],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2437,8 +3358,8 @@ pub fn builtin_env() -> (Env, VarGen) {
             ),
         },
     );
-    // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
-    // The actual constraint shape (scalar `T`, callback signature, int64 `n`,
+    // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
+    // The actual constraint shape (scalar `T`, callback signature, i64 `n`,
     // tensor return) is enforced by the special-case arm in
     // `crates/chelis-types/src/infer.rs` so error reporting can pinpoint each
     // role independently. This loose generic scheme is the type-env entry
@@ -2451,6 +3372,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     env.bind(
         "tensor_scan".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![tensor_scan_a, tensor_scan_b, tensor_scan_c, tensor_scan_ret],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2483,19 +3405,38 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_unop_borrow("to_list", &mut env, &mut vg);
     generic_binop("pad_sequences", &mut env, &mut vg);
     generic_triop("pad_sequences_to", &mut env, &mut vg);
-    generic_unop("read_file", &mut env, &mut vg);
-    generic_binop("write_file", &mut env, &mut vg);
-    generic_unop("read_lines", &mut env, &mut vg);
-    generic_unop("read_bytes", &mut env, &mut vg);
-    generic_unop("file_exists", &mut env, &mut vg);
-    generic_unop("list_dir", &mut env, &mut vg);
-    generic_unop("mmap_file", &mut env, &mut vg);
-    // `process_run(cmd, args)` is an eval/test-only subprocess exec builtin
-    // (Hull Phase 0a). The 2-arg `generic_binop` scheme declares the arity;
-    // the concrete return tuple `(Int64, String, String)` is pinned in
-    // `infer.rs` and the IO effect is assigned in `chelis-effects`, mirroring
-    // how `read_file` acquires IO. Rejected by the C/HIP build backends.
-    generic_binop("process_run", &mut env, &mut vg);
+    // chelis#2524: [05-OP-60] and [05-OP-38] make every argument and result
+    // type of the file and process builtins exact, so each carries its exact
+    // signature and ordinary unification rejects any other argument. A generic
+    // scheme here admitted an `f32` path. The IO effect is still assigned in
+    // `chelis-effects` by name. `process_run` is eval/test-only (Hull Phase 0a)
+    // and rejected by the C/HIP build backends.
+    let string = || Type::Prim(Prim::String);
+    let list_of = |element: Type| Type::Adt("List".to_string(), vec![element]);
+    let mapped_file = || Type::Adt("MappedFile".to_string(), Vec::new());
+    for (name, params, result) in [
+        ("read_file", vec![string()], string()),
+        ("write_file", vec![string(), string()], Type::Unit),
+        ("read_lines", vec![string()], list_of(string())),
+        (
+            "read_bytes",
+            vec![string()],
+            list_of(Type::Prim(Prim::Int64)),
+        ),
+        ("file_exists", vec![string()], Type::Prim(Prim::Bool)),
+        ("list_dir", vec![string()], list_of(string())),
+        ("mmap_file", vec![string()], mapped_file()),
+        (
+            "process_run",
+            vec![string(), list_of(string())],
+            Type::Tuple(vec![Type::Prim(Prim::Int64), string(), string()]),
+        ),
+    ] {
+        env.bind(
+            name.to_string(),
+            Scheme::mono(Type::Fn(params, Box::new(result))),
+        );
+    }
     generic_binop("round_to", &mut env, &mut vg);
     // Host-lane CSV I/O (chelis#903); the concrete contracts live in
     // `check_csv_builtin_signature` (infer/app_hostio.rs).
@@ -2509,8 +3450,27 @@ pub fn builtin_env() -> (Env, VarGen) {
     generic_triop("csv_f64", &mut env, &mut vg);
     generic_triop("csv_int", &mut env, &mut vg);
     generic_triop("csv_str", &mut env, &mut vg);
-    generic_triop("mmap_read", &mut env, &mut vg);
-    generic_unop("mmap_len", &mut env, &mut vg);
+    // chelis#2524: the mapped-file reads take the handle and exact `i64`
+    // offsets and counts ([05-OP-60]). The handle keeps the owned parameter
+    // mode the generic scheme gave it, so ownership lowering is unchanged.
+    env.bind(
+        "mmap_read".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![
+                Type::Adt("MappedFile".to_string(), Vec::new()),
+                Type::Prim(Prim::Int64),
+                Type::Prim(Prim::Int64),
+            ],
+            Box::new(Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)])),
+        )),
+    );
+    env.bind(
+        "mmap_len".to_string(),
+        Scheme::mono(Type::Fn(
+            vec![Type::Adt("MappedFile".to_string(), Vec::new())],
+            Box::new(Type::Prim(Prim::Int64)),
+        )),
+    );
     generic_triop_second_third_borrow("einsum", &mut env, &mut vg);
     generic_triop_first_borrow("split", &mut env, &mut vg);
     generic_triop_first_two_borrow("gather", &mut env, &mut vg);
@@ -2543,6 +3503,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Some".to_string(),
         "Option".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2554,6 +3515,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "None".to_string(),
         "Option".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![option_tvar],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2592,6 +3554,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Cons".to_string(),
         "List".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2606,6 +3569,7 @@ pub fn register_prelude_adts(env: &mut Env, vg: &mut VarGen, adt_reg: &mut AdtRe
         "Nil".to_string(),
         "List".to_string(),
         Scheme {
+            constraints: vec![],
             tvars: vec![list_tvar],
             tvar_restrictions: vec![],
             dvars: vec![],
@@ -2766,6 +3730,8 @@ mod tests {
         for name in BUILTIN_NAMES {
             let expected = if identity.contains(name) {
                 ShapeClass::Identity
+            } else if ["key_from_seed", "split_key", "split_keys", "fold_in"].contains(name) {
+                ShapeClass::OrderedPrefix
             } else if name_tracked.contains(name) {
                 ShapeClass::NameTracked
             } else {
@@ -2779,7 +3745,7 @@ mod tests {
         }
         // Spot-check the positional shape-rewriters stay Rewriting (the §4.2
         // traps): a positional index is meaningless at symbolic rank.
-        for op in ["permute", "reshape", "matmul", "gather", "conv2d"] {
+        for op in ["permute", "reshape", "matmul", "gather", "conv"] {
             assert_eq!(
                 shape_class(op),
                 ShapeClass::Rewriting,
@@ -2875,10 +3841,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_env_has_layer_norm_and_conv2d() {
+    fn builtin_env_has_layer_norm_and_conv() {
         let (env, _) = builtin_env();
         assert!(env.lookup("layer_norm").is_some());
-        assert!(env.lookup("conv2d").is_some());
+        assert!(env.lookup("conv").is_some());
     }
 
     #[test]
@@ -3079,7 +4045,7 @@ mod tests {
         let mut subst = Subst::new();
         let add_ty = env.instantiate(add_scheme, &mut vg, &subst);
 
-        // add(tensor[batch,f32], int32) should fail
+        // add(tensor[batch,f32], i32) should fail
         let t1 = Type::Tensor(
             vec![Dim::Name("batch".into())],
             TensorPrec::Concrete(Prim::F32),
@@ -3110,6 +4076,66 @@ mod tests {
              In BUILTINS but not BUILTIN_NAMES: {in_table_not_array:?}\n\
              In BUILTIN_NAMES but not BUILTINS: {in_array_not_table:?}"
         );
+    }
+
+    #[test]
+    fn every_builtin_has_an_exact_nondefault_semantic_discovery_declaration() {
+        use std::collections::BTreeSet;
+
+        for builtin in BUILTINS {
+            let domains: BTreeSet<_> = builtin.capability.domains.iter().copied().collect();
+            assert!(
+                !domains.is_empty(),
+                "BuiltinDecl `{}` must select at least one semantic domain",
+                builtin.name
+            );
+            assert_eq!(
+                domains.len(),
+                builtin.capability.domains.len(),
+                "BuiltinDecl `{}` has a duplicate semantic domain",
+                builtin.name
+            );
+
+            let cases: BTreeSet<_> = builtin.capability.sibling_cases.iter().copied().collect();
+            assert_eq!(
+                cases.len(),
+                builtin.capability.sibling_cases.len(),
+                "BuiltinDecl `{}` has a duplicate sibling case",
+                builtin.name
+            );
+
+            for case in builtin.capability.sibling_cases {
+                assert_ne!(
+                    case.domain,
+                    BuiltinSemanticDomain::Numeric,
+                    "BuiltinDecl `{}` put a sibling case in Table A's Numeric domain",
+                    builtin.name
+                );
+                assert!(
+                    domains.contains(&case.domain),
+                    "BuiltinDecl `{}` sibling case {:?} names undeclared domain {:?}",
+                    builtin.name,
+                    case.case,
+                    case.domain
+                );
+            }
+
+            for sibling_domain in [
+                BuiltinSemanticDomain::Container,
+                BuiltinSemanticDomain::Boundary,
+            ] {
+                assert_eq!(
+                    domains.contains(&sibling_domain),
+                    builtin
+                        .capability
+                        .sibling_cases
+                        .iter()
+                        .any(|case| case.domain == sibling_domain),
+                    "BuiltinDecl `{}` must enumerate at least one exact case for each selected sibling domain and none for an unselected domain",
+                    builtin.name
+                );
+            }
+        }
     }
 
     /// Issue #912: every BUILTINS entry's shape_class must match the existing

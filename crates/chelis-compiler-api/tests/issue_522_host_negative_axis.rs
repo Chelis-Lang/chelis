@@ -116,10 +116,10 @@ fn issue522_gather_negative_axis_matches_positive() {
     assert_axis_parity(
         "gather",
         "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-         idx = to_tensor([cast(0, int64), cast(2, int64)])\n\
+         idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          out = gather(&x, &idx, -1)\n",
         "x = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-         idx = to_tensor([cast(0, int64), cast(2, int64)])\n\
+         idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          out = gather(&x, &idx, 1)\n",
     );
 }
@@ -129,11 +129,11 @@ fn issue522_scatter_negative_axis_matches_positive() {
     assert_axis_parity(
         "scatter",
         "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-         idx = to_tensor([cast(0, int64), cast(2, int64)])\n\
+         idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          upd = to_tensor([[10.0, 20.0], [30.0, 40.0]])\n\
          out = scatter(base, idx, upd, -1, \"replace\")\n",
         "base = to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])\n\
-         idx = to_tensor([cast(0, int64), cast(2, int64)])\n\
+         idx = to_tensor([cast(0, i64), cast(2, i64)])\n\
          upd = to_tensor([[10.0, 20.0], [30.0, 40.0]])\n\
          out = scatter(base, idx, upd, 1, \"replace\")\n",
     );
@@ -143,7 +143,7 @@ fn issue522_scatter_negative_axis_matches_positive() {
 fn scatter_duplicate_replace_host_eval_is_row_major_last_write_wins() {
     let result = eval_surf(
         "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
-         idx = to_tensor([cast(1, int64), cast(1, int64)])\n\
+         idx = to_tensor([cast(1, i64), cast(1, i64)])\n\
          upd = to_tensor([[5.0, 5.0], [6.0, 6.0]])\n\
          out = scatter(base, idx, upd, 0, \"replace\")\n",
     );

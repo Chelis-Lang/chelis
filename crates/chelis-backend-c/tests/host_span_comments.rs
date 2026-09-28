@@ -28,6 +28,7 @@ fn make_program(body: HostExpr) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -41,6 +42,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 

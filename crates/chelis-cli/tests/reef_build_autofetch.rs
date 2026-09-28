@@ -72,7 +72,7 @@ module_prefix = "Test"
 {deps_toml}"#,
         compiler = CURRENT_COMPILER_PIN,
     );
-    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> int32 = 0\n";
+    let main_text = "module Test.Main\n\nexport (placeholder)\ndef placeholder() -> i32 = 0\n";
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
@@ -260,7 +260,7 @@ nautilus = {{ version = "0.2.0" }}
     fs::write(
         app.join("src/main.ch"),
         // Trivial body — Item 8 cares about resolution, not codegen.
-        "module Demo.Main\n\ndef noop(x: int32) -> int32 = x\n",
+        "module Demo.Main\n\ndef noop(x: i32) -> i32 = x\n",
     )
     .expect("write main.ch");
     app
@@ -1015,7 +1015,7 @@ nautilus = {{ version = "0.6.1" }}
     .expect("write reef.toml");
     fs::write(
         app.join("src/main.ch"),
-        "module Demo.Main\n\ndef noop(x: int32) -> int32 = x\n",
+        "module Demo.Main\n\ndef noop(x: i32) -> i32 = x\n",
     )
     .expect("write main.ch");
     app

@@ -1,12 +1,63 @@
 use super::*;
 use crate::opaque::collect_opaque_invariants;
+use chelis_deep::Metadata;
 use chelis_types::types::Type;
 use std::collections::BTreeMap;
 
+#[test]
+fn unknown_forms_expose_no_obligation_children_or_metadata() {
+    let span = chelis_deep::Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let opaque = Metadata::from(chelis_deep::annotations::MetadataValue::Opaque(
+        chelis_deep::annotations::Present::new(span),
+    ));
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future".into(),
+        meta: opaque,
+        children: vec![child],
+        span,
+    }));
+
+    assert!(children(&unknown).is_empty());
+    assert!(!is_opaque(&unknown));
+}
+
+#[test]
+fn issue_872_declared_function_alias_retains_erased_opaque_return() {
+    for carries_opaque in [true, false] {
+        let result = if carries_opaque { "T" } else { "f32" };
+        let source = format!(
+            "module M\nexport (make)\n@opaque\n@invariant(p) p.value >= 0.0\n\
+             type T = | T {{ value: f32 }}\ntype F = f32 -> Option[{result}]\n\
+             type Alias = F\nsig make: Alias\ndef make(x: f32) = None\n"
+        );
+        let exprs = deep_of(&source);
+        let invs = collect_opaque_invariants(&exprs);
+        // Inference can erase the nominal return of a None-only producer;
+        // its aliased declaration remains authoritative in that case.
+        let sigs = BTreeMap::from([(
+            "make".to_string(),
+            Type::Fn(
+                vec![Type::Prim(chelis_types::types::Prim::F32)],
+                Box::new(Type::Adt(
+                    "Option".into(),
+                    vec![Type::Var(chelis_types::types::TypeVar(0))],
+                )),
+            ),
+        )]);
+        let col = collect_obligations(&exprs, &invs, &sigs);
+        assert!(col.errors.is_empty(), "{col:?}");
+        assert_eq!(
+            col.obligations.len(),
+            usize::from(carries_opaque),
+            "{col:?}"
+        );
+    }
+}
 /// Desugar a Surf module string to Deep.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 /// Run the checker and build the def-name -> inferred-type map the
@@ -52,6 +103,265 @@ fn direct_producer_yields_obligation() {
     assert_eq!(ob.position, ProducedPosition::Direct);
     assert_eq!(ob.meta.obligation_kind, "invariant_producer");
     assert_eq!(ob.meta.source_type, "Probability");
+}
+
+fn traversal_module(aliases: usize, records: usize, carries_opaque: bool) -> String {
+    let mut source = String::from(
+        "module M\nexport (make_w)\n@opaque\n@invariant(p) p.value >= 0.0 && p.value <= 1.0\ntype T = | T { value: f32 }\n",
+    );
+    let mut ty = if carries_opaque { "T" } else { "f32" }.to_string();
+    let mut value = if carries_opaque {
+        "T { value: 99.0 }"
+    } else {
+        "99.0"
+    }
+    .to_string();
+    for i in 0..aliases {
+        source.push_str(&format!("type A{i} = {ty}\n"));
+        ty = format!("A{i}");
+    }
+    for i in 0..records {
+        source.push_str(&format!("type W{i} = | W{i} {{ inner: {ty} }}\n"));
+        ty = format!("W{i}");
+        value = format!("W{i} {{ inner: {value} }}");
+    }
+    source.push_str(&format!("def make_w(x: f32) -> {ty} = {value}\n"));
+    source
+}
+
+#[test]
+fn issue_872_alias_threshold_never_drops_a_producer() {
+    assert_traversal_thresholds(&[(31, 1), (32, 1), (33, 1), (40, 1)]);
+}
+
+#[test]
+fn issue_872_record_threshold_never_drops_a_producer() {
+    assert_traversal_thresholds(&[(0, 15), (0, 16), (0, 17), (0, 24)]);
+}
+
+fn assert_traversal_thresholds(cases: &[(usize, usize)]) {
+    for &(aliases, records) in cases {
+        for carries_opaque in [true, false] {
+            let exprs = deep_of(&traversal_module(aliases, records, carries_opaque));
+            let invs = collect_opaque_invariants(&exprs);
+            let col = collect_obligations(&exprs, &invs, &inferred_sigs(&exprs));
+            assert_eq!(
+                col.errors.len(),
+                usize::from(carries_opaque),
+                "aliases={aliases}, records={records}, opaque={carries_opaque}: {col:?}"
+            );
+            assert!(col.obligations.is_empty(), "{col:?}");
+            if carries_opaque {
+                assert!(
+                    matches!(&col.errors[0], ObligationError::UnsupportedContainer { producer, .. } if producer == "make_w"),
+                    "{col:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue_872_direct_alias_producer_remains_obligated() {
+    for aliases in [31, 32, 33, 40] {
+        let exprs = deep_of(&traversal_module(aliases, 0, true));
+        let col = collect_obligations(
+            &exprs,
+            &collect_opaque_invariants(&exprs),
+            &inferred_sigs(&exprs),
+        );
+        assert!(col.errors.is_empty(), "{col:?}");
+        assert_eq!(col.obligations.len(), 1, "{col:?}");
+        assert_eq!(col.obligations[0].position, ProducedPosition::Direct);
+    }
+}
+
+fn proof_node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+    Expr::node(
+        tag,
+        Default::default(),
+        children,
+        chelis_deep::Span::new(0, 0),
+    )
+}
+
+fn proof_name(name: &str) -> Expr {
+    Expr::Atom(Atom::Name(name.to_string()), chelis_deep::Span::new(0, 0))
+}
+
+fn proof_adt(name: &str) -> Expr {
+    proof_node(DeepTag::TAdt, vec![proof_name(name)])
+}
+
+#[test]
+fn issue_872_function_alias_cycle_converges_and_exhaustion_is_explicit() {
+    let cycle = proof_adt("Cycle");
+    let ty = adt("Cycle");
+    let mut graph = ProofTypes::new(
+        BTreeMap::from([("Cycle", &cycle)]),
+        BTreeMap::new(),
+        Budget::default(),
+    );
+    let root = graph.project(Source::Checked(&ty)).unwrap();
+    assert!(graph.function(root).unwrap().is_none());
+    assert!(!graph.contains(root, "T").unwrap());
+    graph.budget = Budget::new(0);
+    assert!(matches!(
+        graph.function(root),
+        Err(TraversalError::Exhausted { limit: 0 })
+    ));
+}
+
+// No parser or checker participates: this is collect_obligations' actual
+// public embedding ingress, including cyclic raw alias/record declarations.
+fn parser_free_cycle(
+    opaque: bool,
+    alias: bool,
+) -> (Vec<Expr>, Vec<OpaqueInvariant>, BTreeMap<String, Type>) {
+    let payload = if opaque {
+        proof_adt("T")
+    } else {
+        proof_node(DeepTag::TUnit, vec![])
+    };
+    let mut exprs = vec![
+        proof_node(DeepTag::Export, vec![proof_name("make")]),
+        proof_node(
+            DeepTag::Def,
+            vec![proof_name("make"), proof_node(DeepTag::Tuple, vec![])],
+        ),
+    ];
+    if alias {
+        exprs.push(proof_node(
+            DeepTag::Typealias,
+            vec![
+                proof_name("Cycle"),
+                proof_node(DeepTag::Params, vec![]),
+                proof_node(DeepTag::TTuple, vec![proof_adt("Cycle"), payload]),
+            ],
+        ));
+    } else {
+        exprs.push(proof_node(
+            DeepTag::Deftype,
+            vec![
+                proof_name("Cycle"),
+                proof_node(DeepTag::Params, vec![]),
+                proof_node(
+                    DeepTag::Variant,
+                    vec![proof_name("Cycle"), proof_adt("Cycle"), payload],
+                ),
+            ],
+        ));
+    }
+    let invs = vec![OpaqueInvariant {
+        type_name: "T".into(),
+        ctor_name: "T".into(),
+        fields: vec![],
+        predicate: proof_node(DeepTag::Tuple, vec![]),
+        binder: "p".into(),
+        amenability: chelis_pred::PredAmenability::Opaque,
+    }];
+    (exprs, invs, BTreeMap::from([("make".into(), adt("Cycle"))]))
+}
+
+#[test]
+fn issue_872_parser_free_cycles_converge_without_hiding_opaque_fields() {
+    for alias in [false, true] {
+        for opaque in [false, true] {
+            let (exprs, invs, sigs) = parser_free_cycle(opaque, alias);
+            let col = collect_obligations(&exprs, &invs, &sigs);
+            assert!(col.obligations.is_empty(), "{col:?}");
+            assert_eq!(col.errors.len(), usize::from(opaque), "{col:?}");
+            if opaque {
+                assert!(
+                    matches!(col.errors[0], ObligationError::UnsupportedContainer { .. }),
+                    "{col:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue_872_low_budget_is_a_collection_error_not_an_empty_success() {
+    for opaque in [false, true] {
+        let (exprs, invs, sigs) = parser_free_cycle(opaque, false);
+        let col = collect_with_budget(&exprs, &invs, &sigs, 1);
+        assert!(
+            matches!(col.errors.as_slice(), [ObligationError::TypeTraversal {
+            type_name, producer, source: TraversalError::Exhausted { limit: 1 }
+        }] if type_name == "T" && producer == "make"),
+            "{col:?}"
+        );
+        assert!(col.obligations.is_empty());
+        // A completed no-opaque cycle is an honest empty set, not exhaustion.
+        let completed = collect_with_budget(&exprs, &invs, &sigs, 100);
+        assert_eq!(completed.errors.len(), usize::from(opaque), "{completed:?}");
+    }
+}
+
+#[test]
+fn issue_872_kinded_type_arguments_are_edges_but_dimensions_are_not() {
+    use chelis_types::types::{Dim, NominalArg};
+    let records = BTreeMap::new();
+    let dims = vec![NominalArg::Dimension(Dim::Lit(3))];
+    assert_eq!(
+        decompose_return(
+            &Type::KindedAdt("Sized".into(), dims.clone()),
+            "T",
+            &records
+        )
+        .unwrap(),
+        None
+    );
+    for opaque in [false, true] {
+        let mut args = dims.clone();
+        args.push(NominalArg::Type(if opaque { adt("T") } else { Type::Unit }));
+        let result = decompose_return(&Type::KindedAdt("Sized".into(), args), "T", &records);
+        assert_eq!(result.is_err(), opaque, "{result:?}");
+        let raw = proof_node(
+            DeepTag::TAdt,
+            vec![
+                proof_name("Sized"),
+                proof_node(DeepTag::DName, vec![proof_name("n")]),
+                if opaque {
+                    proof_adt("T")
+                } else {
+                    proof_node(DeepTag::TUnit, vec![])
+                },
+            ],
+        );
+        let mut graph = ProofTypes::new(BTreeMap::new(), BTreeMap::new(), Budget::default());
+        let root = graph
+            .project(Source::Deep(&raw))
+            .expect("dimension arguments are not malformed types");
+        assert_eq!(graph.decompose(root, "T").is_err(), opaque);
+    }
+}
+
+#[test]
+fn issue_872_supported_shared_alias_paths_keep_every_position() {
+    let source = "module M\nexport (make)\n@opaque\n@invariant(p) p.value >= 0.0\ntype T = | T { value: f32 }\ntype A = Option[T]\ndef make(x: f32) -> (A, A) = (None, None)\n";
+    let exprs = deep_of(source);
+    let col = collect_obligations(
+        &exprs,
+        &collect_opaque_invariants(&exprs),
+        &inferred_sigs(&exprs),
+    );
+    assert!(col.errors.is_empty(), "{col:?}");
+    assert_eq!(col.obligations.len(), 1, "{col:?}");
+    assert_eq!(
+        col.obligations[0].position,
+        ProducedPosition::TupleComponents(vec![
+            (
+                0,
+                ProducedPosition::InsideOption(Box::new(ProducedPosition::Direct))
+            ),
+            (
+                1,
+                ProducedPosition::InsideOption(Box::new(ProducedPosition::Direct))
+            ),
+        ])
+    );
 }
 
 #[test]
@@ -481,8 +791,8 @@ def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
 #[test]
 fn cr14_record_field_ref_to_opaque_is_covered_or_rejected() {
     // CR-14: a record field of type `&T` (a borrow of the opaque type) was
-    // mapped to the inert placeholder by type_from_deep, so the T inside the borrow
-    // was hidden and the producer silently missed. A `t-ref` now recurses,
+    // previously projected to an inert leaf, hiding the T inside the borrow
+    // and silently missing the producer. The graph follows the `t-ref` edge,
     // so the record-with-ref-field producer is covered-or-rejected.
     assert_record_alias_rejected(
         "module M
@@ -500,8 +810,8 @@ def make_w(t: &T) -> Wrapper = Wrapper { inner: t }
 #[test]
 fn cr14_tensor_record_field_is_not_a_false_positive() {
     // Negative-parity: a record field of a plain numeric tensor (which
-    // cannot contain the opaque type) must NOT be flagged -- the Error
-    // mapping for `t-tensor` is safe. The producer returns a record with a
+    // cannot contain the opaque type) must NOT be flagged -- the leaf
+    // classification for `t-tensor` is safe. The producer returns a record with a
     // tensor field and no opaque type, so no obligation and no error.
     let surf = "module M
 export (make_w)

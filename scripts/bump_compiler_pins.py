@@ -48,9 +48,10 @@ changes, seven categories of files must change with it:
 
 7. The committed `Cargo.lock` beside each out-of-workspace compile-fail
    fixture (`crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/`
-   and `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/`).
+   `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/`, and
+   `crates/chelis-unord/tests/compile_fail/order_escape/`).
    Each fixture is its own one-crate workspace that depends on the real
-   crates by path, so its lock records them at the workspace version. Both
+   crates by path, so its lock records them at the workspace version. They
    are compiled by a `gate.py` step with `cargo check --locked`, which
    refuses to update a stale lock:
 
@@ -193,6 +194,7 @@ PINNED_FIXTURE_JSON_FILES: list[Path] = [
 COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = [
     REPO_ROOT / "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
     REPO_ROOT / "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
+    REPO_ROOT / "crates/chelis-unord/tests/compile_fail/order_escape/Cargo.toml",
 ]
 
 

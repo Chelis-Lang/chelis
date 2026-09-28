@@ -92,76 +92,15 @@ impl std::error::Error for DecodeError {}
 /// This is the experimental contract point future codecs MUST call before
 /// handing a value of an invariant-carrying opaque type to in-process code.
 /// See the module docs for the V1 reality (no production caller yet).
-/// Decode a wire tensor payload (execution wire v2, chelis#729 section
-/// C3) into per-dtype IR storage, exactly: integer families and bool
-/// pass through untouched; f16/bf16 finalize their exact f64 images at
-/// the half width (identity for images produced by a conforming
-/// encoder).
+/// Reconstruct validated, already tagged storage without arithmetic finalization.
 pub(crate) fn wire_tensor_to_ir(
     value: &crate::schema::TensorValue,
 ) -> Result<chelis_ir::eval::TensorValue, String> {
-    use crate::schema::TensorElements;
-    use chelis_types::{RawTensor, finalize_tensor, types::Prim};
-    let (prim, raw) = match &value.data {
-        TensorElements::F64(v) => (Prim::F64, RawTensor::Float(v.clone())),
-        TensorElements::F32(v) => (
-            Prim::F32,
-            RawTensor::Float(v.iter().map(|&x| x as f64).collect()),
-        ),
-        TensorElements::F16(v) => {
-            validate_reduced_float_images(Prim::F16, v)?;
-            (Prim::F16, RawTensor::Float(v.clone()))
-        }
-        TensorElements::Bf16(v) => {
-            validate_reduced_float_images(Prim::Bf16, v)?;
-            (Prim::Bf16, RawTensor::Float(v.clone()))
-        }
-        TensorElements::Int64(v) => (Prim::Int64, RawTensor::Int(v.clone())),
-        TensorElements::Int32(v) => (
-            Prim::Int32,
-            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
-        ),
-        TensorElements::Int16(v) => (
-            Prim::Int16,
-            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
-        ),
-        TensorElements::Int8(v) => (
-            Prim::Int8,
-            RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
-        ),
-        TensorElements::Bool(v) => (
-            Prim::Bool,
-            RawTensor::Int(v.iter().map(|&x| i64::from(x)).collect()),
-        ),
-    };
-    let storage = finalize_tensor("wire", prim, raw).map_err(|trap| trap.to_string())?;
+    let shape = value.host_shape()?;
     Ok(chelis_ir::eval::TensorValue::from_storage(
-        value.shape.clone(),
-        storage,
+        shape,
+        value.data.clone(),
     ))
-}
-
-fn validate_reduced_float_image(prim: Prim, image: f64) -> Result<(), String> {
-    let round_trip = match prim {
-        Prim::F16 => f64::from(half::f16::from_f64(image)),
-        Prim::Bf16 => f64::from(half::bf16::from_f64(image)),
-        _ => unreachable!("exact reduced-float validation is only for f16/bf16"),
-    };
-    if round_trip != image && !image.is_nan() {
-        return Err(format!(
-            "{} wire image {image} is not an exact {} value; refusing to renormalize a corrupt execution payload (chelis#729 section C3 finalize-on-decode)",
-            prim.name(),
-            prim.name()
-        ));
-    }
-    Ok(())
-}
-
-fn validate_reduced_float_images(prim: Prim, images: &[f64]) -> Result<(), String> {
-    for &image in images {
-        validate_reduced_float_image(prim, image)?;
-    }
-    Ok(())
 }
 
 pub fn decode_adt_value(
@@ -235,31 +174,9 @@ fn structural_decode(
 ) -> Result<RuntimeValue, DecodeError> {
     match payload {
         ExecutionValue::Adt { ctor, fields } => decode_adt(ctor, fields, field_types),
-        ExecutionValue::Int8 { value } => RuntimeValue::scalar_like_int(Prim::Int8, *value as i64)
-            .map_err(DecodeError::Structural),
-        ExecutionValue::Int16 { value } => {
-            RuntimeValue::scalar_like_int(Prim::Int16, *value as i64)
-                .map_err(DecodeError::Structural)
-        }
-        ExecutionValue::Int32 { value } => {
-            RuntimeValue::scalar_like_int(Prim::Int32, *value as i64)
-                .map_err(DecodeError::Structural)
-        }
-        ExecutionValue::Int64 { value } => Ok(RuntimeValue::int64(*value)),
-        ExecutionValue::Float16 { value } => {
-            validate_reduced_float_image(Prim::F16, *value).map_err(DecodeError::Structural)?;
-            RuntimeValue::scalar_like_float(Prim::F16, *value).map_err(DecodeError::Structural)
-        }
-        ExecutionValue::Bfloat16 { value } => {
-            validate_reduced_float_image(Prim::Bf16, *value).map_err(DecodeError::Structural)?;
-            RuntimeValue::scalar_like_float(Prim::Bf16, *value).map_err(DecodeError::Structural)
-        }
-        ExecutionValue::Float32 { value } => {
-            RuntimeValue::scalar_like_float(Prim::F32, *value as f64)
-                .map_err(DecodeError::Structural)
-        }
-        ExecutionValue::Float64 { value } => Ok(RuntimeValue::float64(*value)),
+        ExecutionValue::Scalar { value } => Ok(RuntimeValue::from_scalar_value(value.get())),
         ExecutionValue::Bool { value } => Ok(RuntimeValue::Bool(*value)),
+        ExecutionValue::Key { bits } => Ok(RuntimeValue::Key(bits.key())),
         ExecutionValue::String { value } => Ok(RuntimeValue::String(value.clone())),
         ExecutionValue::Unit => Ok(RuntimeValue::Unit),
         // The wire payload carries its dtype (execution wire v2); decode it
@@ -273,14 +190,14 @@ fn structural_decode(
                 .iter()
                 .map(|item| structural_decode(item, field_types))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RuntimeValue::List(items))
+            Ok(RuntimeValue::List(items.into()))
         }
         ExecutionValue::Tuple { value } => {
             let items = value
                 .iter()
                 .map(|item| structural_decode(item, field_types))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RuntimeValue::Tuple(items))
+            Ok(RuntimeValue::Tuple(items.into()))
         }
         ExecutionValue::Dict { entries } => {
             let decoded = entries
@@ -292,7 +209,7 @@ fn structural_decode(
                     ))
                 })
                 .collect::<Result<Vec<_>, DecodeError>>()?;
-            Ok(RuntimeValue::Dict(decoded))
+            Ok(RuntimeValue::Dict(decoded.into()))
         }
     }
 }
@@ -326,7 +243,7 @@ fn decode_adt(
 
     Ok(RuntimeValue::Adt {
         ctor: ctor.to_string(),
-        fields,
+        fields: fields.into(),
         field_names: Some(field_names),
     })
 }
@@ -377,35 +294,18 @@ fn decode_scalar_field(
             other => Err(mismatch(&describe_payload(other))),
         };
     }
+    if prim == Prim::Key {
+        return match payload {
+            ExecutionValue::Key { bits } => Ok(RuntimeValue::Key(bits.key())),
+            other => Err(mismatch(&describe_payload(other))),
+        };
+    }
 
-    match (prim, payload) {
-        (Prim::Int8, ExecutionValue::Int8 { value }) => {
-            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
+    match payload {
+        ExecutionValue::Scalar { value } if value.get().prim() == prim => {
+            Ok(RuntimeValue::from_scalar_value(value.get()))
         }
-        (Prim::Int16, ExecutionValue::Int16 { value }) => {
-            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
-        }
-        (Prim::Int32, ExecutionValue::Int32 { value }) => {
-            RuntimeValue::scalar_like_int(prim, *value as i64).map_err(DecodeError::Structural)
-        }
-        (Prim::Int64, ExecutionValue::Int64 { value }) => {
-            RuntimeValue::scalar_like_int(prim, *value).map_err(DecodeError::Structural)
-        }
-        (Prim::F16, ExecutionValue::Float16 { value }) => {
-            validate_reduced_float_image(prim, *value).map_err(DecodeError::Structural)?;
-            RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
-        }
-        (Prim::Bf16, ExecutionValue::Bfloat16 { value }) => {
-            validate_reduced_float_image(prim, *value).map_err(DecodeError::Structural)?;
-            RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
-        }
-        (Prim::F32, ExecutionValue::Float32 { value }) => {
-            RuntimeValue::scalar_like_float(prim, *value as f64).map_err(DecodeError::Structural)
-        }
-        (Prim::F64, ExecutionValue::Float64 { value }) => {
-            RuntimeValue::scalar_like_float(prim, *value).map_err(DecodeError::Structural)
-        }
-        (_, other) => Err(mismatch(&describe_payload(other))),
+        other => Err(mismatch(&describe_payload(other))),
     }
 }
 
@@ -438,15 +338,9 @@ fn decode_tensor_field(
 fn describe_payload(payload: &ExecutionValue) -> String {
     match payload {
         ExecutionValue::Tensor { .. } => "a tensor".to_string(),
-        ExecutionValue::Int8 { .. } => "an int8".to_string(),
-        ExecutionValue::Int16 { .. } => "an int16".to_string(),
-        ExecutionValue::Int32 { .. } => "an int32".to_string(),
-        ExecutionValue::Int64 { .. } => "an int64".to_string(),
-        ExecutionValue::Float16 { .. } => "an f16".to_string(),
-        ExecutionValue::Bfloat16 { .. } => "a bf16".to_string(),
-        ExecutionValue::Float32 { .. } => "an f32".to_string(),
-        ExecutionValue::Float64 { .. } => "an f64".to_string(),
+        ExecutionValue::Scalar { value } => format!("a {}", value.get().prim().name()),
         ExecutionValue::Bool { .. } => "a bool".to_string(),
+        ExecutionValue::Key { .. } => "a key".to_string(),
         ExecutionValue::String { .. } => "a string".to_string(),
         ExecutionValue::List { .. } => "a list".to_string(),
         ExecutionValue::Dict { .. } => "a dict".to_string(),
@@ -455,6 +349,9 @@ fn describe_payload(payload: &ExecutionValue) -> String {
         ExecutionValue::Unit => "unit".to_string(),
     }
 }
+
+#[cfg(test)]
+use crate::compiler::wire_values;
 
 #[cfg(test)]
 mod tests {
@@ -471,15 +368,13 @@ type Probability = | Probability { value: f32 }
 
     fn program_exprs(source: &str) -> Vec<Expr> {
         let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-        chelis_surf::desugar::desugar_program(&decls)
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
     }
 
-    fn prob_payload(value: f64) -> ExecutionValue {
+    fn prob_payload(value: f32) -> ExecutionValue {
         ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float32 {
-                value: value as f32,
-            }],
+            fields: vec![wire_values::scalar_f32(value)],
         }
     }
 
@@ -499,7 +394,7 @@ type Probability = | Probability { value: f32 }
         let exprs = program_exprs(PROBABILITY_SRC);
         let payload = ExecutionValue::Adt {
             ctor: "Nope".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+            fields: vec![wire_values::scalar_f64(0.3)],
         };
         let err = try_decode_adt_value(&exprs, &payload).expect_err("unknown ctor rejected");
         assert!(
@@ -513,10 +408,7 @@ type Probability = | Probability { value: f32 }
         let exprs = program_exprs(PROBABILITY_SRC);
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![
-                ExecutionValue::Float64 { value: 0.3 },
-                ExecutionValue::Float64 { value: 0.4 },
-            ],
+            fields: vec![wire_values::scalar_f64(0.3), wire_values::scalar_f64(0.4)],
         };
         let err = try_decode_adt_value(&exprs, &payload).expect_err("wrong arity rejected");
         assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -529,7 +421,7 @@ type Probability = | Probability { value: f32 }
         let exprs = program_exprs(PROBABILITY_SRC);
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Int64 { value: 0 }],
+            fields: vec![wire_values::scalar_integer(Prim::Int64, 0)],
         };
         let err = try_decode_adt_value(&exprs, &payload).expect_err("int into float field");
         assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -540,7 +432,7 @@ type Probability = | Probability { value: f32 }
         let exprs = program_exprs(PROBABILITY_SRC);
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float64 { value: 0.3 }],
+            fields: vec![wire_values::scalar_f64(0.3)],
         };
         let err = try_decode_adt_value(&exprs, &payload)
             .expect_err("f64 wire carrier must not silently narrow into an f32 field");
@@ -550,16 +442,20 @@ type Probability = | Probability { value: f32 }
     #[test]
     fn every_numeric_scalar_wire_tag_round_trips_through_nested_carriers() {
         let scalars = vec![
-            ExecutionValue::Int8 { value: -8 },
-            ExecutionValue::Int16 { value: -16 },
-            ExecutionValue::Int32 { value: -32 },
-            ExecutionValue::Int64 {
-                value: 9_007_199_254_740_993,
-            },
-            ExecutionValue::Float16 { value: 1.5 },
-            ExecutionValue::Bfloat16 { value: 1.5 },
-            ExecutionValue::Float32 { value: 0.25 },
-            ExecutionValue::Float64 { value: 1e100 },
+            wire_values::scalar_integer(Prim::Int8, -8),
+            wire_values::scalar_integer(Prim::Int16, -16),
+            wire_values::scalar_integer(Prim::Int32, -32),
+            wire_values::scalar_integer(Prim::Int64, 9_007_199_254_740_993),
+            serde_json::from_value(
+                serde_json::json!({"type":"scalar","value":{"dtype":"f16","bits":"3e00"}}),
+            )
+            .unwrap(),
+            serde_json::from_value(
+                serde_json::json!({"type":"scalar","value":{"dtype":"bf16","bits":"3fc0"}}),
+            )
+            .unwrap(),
+            wire_values::scalar_f32(0.25),
+            wire_values::scalar_f64(1e100),
         ];
 
         for payload in [
@@ -579,38 +475,46 @@ type Probability = | Probability { value: f32 }
     }
 
     #[test]
-    fn reduced_float_scalar_wire_rejects_non_exact_images() {
-        for payload in [
-            ExecutionValue::Float16 { value: 2049.0 },
-            ExecutionValue::Bfloat16 { value: 257.0 },
+    fn reduced_float_scalar_wire_rejects_numeric_images_at_ingress() {
+        for (dtype, legacy_tag, numeric, bits) in [
+            ("f16", "float16", 2049.0, "6800"),
+            ("bf16", "bfloat16", 257.0, "4380"),
         ] {
-            let err = structural_decode(&payload, &UnordMap::new())
-                .expect_err("a reduced-float carrier may not silently round its claimed image");
-            assert!(
-                matches!(err, DecodeError::Structural(_)),
-                "corrupt reduced-float scalar must be structural: {err:?}"
-            );
-            assert!(
-                err.to_string().contains("exact"),
-                "the rejection must teach the exact-image contract: {err}"
+            for payload in [
+                serde_json::json!({"type":legacy_tag,"value":numeric}),
+                serde_json::json!({"type":"scalar","value":{"dtype":dtype,"value":numeric}}),
+            ] {
+                assert!(serde_json::from_value::<ExecutionValue>(payload).is_err());
+            }
+            let payload: ExecutionValue = serde_json::from_value(serde_json::json!({
+                "type":"scalar","value":{"dtype":dtype,"bits":bits}
+            }))
+            .unwrap();
+            let decoded = structural_decode(&payload, &UnordMap::new()).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded.to_execution_value().unwrap()).unwrap(),
+                serde_json::to_value(payload).unwrap()
             );
         }
     }
 
     #[test]
-    fn reduced_float_tensor_wire_rejects_non_exact_images() {
-        for data in [
-            crate::schema::TensorElements::F16(vec![2049.0]),
-            crate::schema::TensorElements::Bf16(vec![257.0]),
-        ] {
-            let err = wire_tensor_to_ir(&TensorValue {
-                shape: vec![1],
-                data,
-            })
-            .expect_err("a reduced-float tensor may not silently round its claimed image");
+    fn reduced_float_tensor_wire_rejects_numeric_images_at_ingress() {
+        for (dtype, numeric, bits) in [("f16", 2049.0, "6800"), ("bf16", 257.0, "4380")] {
             assert!(
-                err.contains("exact"),
-                "the rejection must teach the exact-image contract: {err}"
+                serde_json::from_value::<TensorValue>(serde_json::json!({
+                    "shape":[1],"data":{"dtype":dtype,"values":[numeric]}
+                }))
+                .is_err()
+            );
+            let tensor: TensorValue = serde_json::from_value(serde_json::json!({
+                "shape":[1],"data":{"dtype":dtype,"bits":[bits]}
+            }))
+            .unwrap();
+            let decoded = wire_tensor_to_ir(&tensor).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded.storage()).unwrap(),
+                serde_json::to_value(tensor.data).unwrap()
             );
         }
     }
@@ -629,7 +533,7 @@ type Probability = | Probability { value: f32 }
     #[test]
     fn nan_is_invariant_error_distinct_from_structural() {
         let exprs = program_exprs(PROBABILITY_SRC);
-        let err = try_decode_adt_value(&exprs, &prob_payload(f64::NAN))
+        let err = try_decode_adt_value(&exprs, &prob_payload(f32::NAN))
             .expect_err("NaN rejected pre-predicate");
         match err {
             DecodeError::Invariant(msg) => assert!(msg.contains("NaN"), "names NaN: {msg}"),
@@ -674,7 +578,7 @@ type Holder = | Holder { weights: tensor[3, f32] }
             fields: vec![ExecutionValue::Tensor {
                 value: TensorValue {
                     shape: vec![3],
-                    data: crate::schema::TensorElements::F32(vec![0.1, 0.2, 0.7]),
+                    data: wire_values::storage_f32(vec![0.1, 0.2, 0.7]),
                 },
             }],
         };
@@ -709,7 +613,7 @@ type Holder = | Holder { weights: tensor[1, f32] }
             fields: vec![ExecutionValue::Tensor {
                 value: TensorValue {
                     shape: vec![1],
-                    data: crate::schema::TensorElements::F64(vec![0.5]),
+                    data: wire_values::storage_f64(vec![0.5]),
                 },
             }],
         };

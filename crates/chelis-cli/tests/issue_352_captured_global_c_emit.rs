@@ -35,66 +35,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
-/// Locate `target/debug/` from the test binary's path. The test binary
-/// lives at `<target>/debug/deps/<binary>`, so `..` twice yields the
-/// debug dir. (Mirror of `issue_300_grad_codegen_compiles.rs`.)
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-/// Mirror of `issue_300_grad_codegen_compiles.rs::ensure_runtime_static_lib`.
-/// When `chelis-runtime` is built as a dev-dependency, cargo only emits the
-/// hashed staticlib in `target/debug/deps/`; the test cc invocation links
-/// against the conventional `target/debug/libchelis_runtime.a`.
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
 /// Resolve the C compiler the way the existing C-backend exec tests do:
 /// honor `$CC`, else `cc`. CI runners provide one.
 fn c_compiler() -> String {
@@ -128,12 +68,14 @@ fn chelis_build_c(source: &str, stem: &str) -> tempfile::TempDir {
 
 /// Compile the emitted `<stem>.c` against the runtime static lib without
 /// asserting on the outcome. Returns the compiler `Output` and the path the
-/// binary lands at on success. Split out of `compile_and_run_emitted` so
-/// the known-gap pins below can assert that compilation FAILS with the
-/// pinned diagnostic instead of panicking inside the helper.
+/// binary lands at on success.
 fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, PathBuf) {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
+    assert!(
+        runtime.is_file(),
+        "`chelis build` did not stage the carried runtime at {}",
+        runtime.display()
+    );
 
     let bin = build_dir.join("issue_352_bin");
     let compile = StdCommand::new(c_compiler())
@@ -145,7 +87,7 @@ fn compile_emitted(build_dir: &Path, kernel_c: &Path) -> (std::process::Output, 
             kernel_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",
@@ -582,127 +524,131 @@ out = f(1.0)\n";
     );
 }
 
-/// KNOWN GAP (RESIDUAL, advanced by chelis#377): `vmap` over a def that
-/// captures a top-level binding. chelis#377 closed the eval-side
-/// missing-input half — the transform lane now SERVES the captured `w` (by
-/// resolving top-level bindings referenced by the inlined body's `Load`s) —
-/// so the eval failure has moved one layer deeper, to the SAME vmap-lane
-/// batch-typing defect the backend already exhibits: `vectorize_axis0`
-/// prepends the batch axis to the captured `w`'s node too, typing it `[3, 2]`
-/// while the actual binding is rank-1 `[2]`. Correct vmap-with-captures must
-/// BROADCAST the capture across the batch axis, not batch it; that vmap-lane
-/// capability is the remaining residual (tracked under chelis#377). The grad
-/// half of the capture gap is fully fixed and promoted in
-/// `issue_377_grad_over_capturing_def_evals_and_agrees_with_backend`.
-///
-/// FAILURE-MODE PINS. The backend side fails the COMPILED binary at runtime
-/// with `expected rank 2, got 1`. The eval side fails with a CLEAN transform-
-/// lane diagnostic naming the capture (chelis#377) — NOT the uncontrolled
-/// `binary_map` shape-assertion PANIC it produced before the fix (serving the
-/// rank-1 capture into a vmap-batched rank-2 `Load`). This test asserts the
-/// eval failure is clean (never a panic) so the residual cannot regress into
-/// an evaluator crash, and surfaces loudly when the broadcast fix lands.
+/// chelis#516: a lexical tensor capture is invariant across mapped calls. Its
+/// load keeps the authored rank and the transformed DAG explicitly inserts a
+/// repeated batch axis before the elementwise consumer.
 #[test]
-fn issue_352_vmap_over_capturing_def_gap() {
+fn issue_516_vmap_over_capturing_def_runs_and_agrees() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def dot_w(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w)\n\
 out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
     let build = chelis_build_c(source, "vmapcap");
-    let (compile, bin) = compile_emitted(build.path(), &build.path().join("vmapcap.c"));
-    assert!(
-        compile.status.success(),
-        "the #376 hoist must keep the vmap-over-capture program COMPILING; \
-         compiler stderr=\n{}",
-        String::from_utf8_lossy(&compile.stderr),
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapcap.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3], data=[30.0, 60.0, 20.0])",
     );
-
-    let run = StdCommand::new(&bin).output().expect("run emitted binary");
-    assert!(
-        !run.status.success(),
-        "pinned gap unexpectedly fixed: vmap-over-capture binary now runs; \
-         promote this pin to an exact-output + eval agreement assertion",
-    );
-    let run_stderr = String::from_utf8_lossy(&run.stderr);
-    assert!(
-        run_stderr.contains("expected rank 2, got 1"),
-        "pinned gap changed shape: the vmap helper batched the captured \
-         input (rank-2 validation vs the rank-1 binding); stderr={run_stderr:?}",
-    );
-
-    let dir = tempdir().expect("tempdir");
-    let src_path = dir.path().join("vmapcap.ch");
-    fs::write(&src_path, source).expect("write .ch source");
-    let eval = Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .current_dir(dir.path())
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", src_path.to_str().unwrap()])
-        .output()
-        .expect("invoke chelis eval");
-    assert!(
-        !eval.status.success(),
-        "eval side of the gap is also broken"
-    );
-    let eval_stderr = String::from_utf8_lossy(&eval.stderr);
-    // chelis#377 review fix: the eval side now fails with a CLEAN transform-
-    // lane diagnostic, NOT the uncontrolled `binary_map` shape-assertion panic
-    // it used to produce (the served rank-1 capture reaching an elementwise op
-    // against the vmap-batched rank-2 `Load`). The transform lane rejects the
-    // capture rank mismatch before eval. Pin BOTH that it stays a failure (the
-    // broadcast capability is still a residual) AND that it is never a panic.
-    assert!(
-        !eval_stderr.contains("panicked"),
-        "vmap-over-capture must fail with a clean diagnostic, never an evaluator \
-         panic (chelis#377); stderr={eval_stderr:?}",
-    );
-    assert!(
-        eval_stderr.contains("capturing top-level binding `w`")
-            && eval_stderr.contains("chelis#377"),
-        "pinned eval-side vmap-capture residual must report the clean \
-         capture-batching diagnostic citing chelis#377; stderr={eval_stderr:?}",
-    );
+    let eval_out = chelis_eval(source, "vmapcap");
+    assert_eq!(binding_line(&stdout, "out"), binding_line(&eval_out, "out"));
 }
 
-/// chelis#377 review: `vmap(grad(f))` (per-sample gradients) where `f` captures
-/// a top-level binding hits the SAME vmap-lane capture-batching residual as a
-/// plain `vmap` over a capturing def, and must likewise fail with a CLEAN
-/// diagnostic — never the `binary_map` shape-assertion PANIC it produced before
-/// the fix. Pinned so the per-sample-grad composition cannot silently regress
-/// into an evaluator crash; promote to a value oracle when vmap-with-captures
-/// broadcasts the capture across the batch axis (chelis#377).
+/// The capture lift composes with AD: every sample sees the same captured
+/// weights and therefore has the same exact gradient with respect to `x`.
 #[test]
-fn issue_377_vmap_of_grad_over_capturing_def_fails_clean() {
+fn issue_516_vmap_of_grad_over_capture_runs_and_agrees() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def gradf(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
 def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf)\n\
 out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
+    let build = chelis_build_c(source, "vmapgradcap");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapgradcap.c"));
+    assert_eq!(
+        binding_line(&stdout, "out"),
+        "out = tensor(shape=[3, 2], data=[10.0, 20.0, 10.0, 20.0, 10.0, 20.0])",
+    );
+    let eval_out = chelis_eval(source, "vmapgradcap");
+    assert_eq!(binding_line(&stdout, "out"), binding_line(&eval_out, "out"));
+}
+
+/// A transformed closure may capture both a callable and a tensor. Building
+/// the unbatched backward DAG must preserve the callable's lexical environment
+/// while retaining the tensor capture at its authored rank; the later vmap
+/// rewrite owns the explicit batch lift.
+#[test]
+fn issue_516_vmap_grad_preserves_combined_callable_and_tensor_captures() {
+    let source = "w = to_tensor([10.0f32, 20.0f32])\n\
+def map_jacobian(\n\
+  model: &tensor[2, f32] -> tensor[2, f32],\n\
+  xs: tensor[3, 2, f32]\n\
+) -> tensor[3, 2, f32] = {\n\
+  objective = fn (theta: tensor[2, f32]) -> tensor_to_scalar(sum(mul(model(theta), w), 0i32))\n\
+  vmap(grad(objective))(xs)\n\
+}\n\
+def square(theta: &tensor[2, f32]) -> tensor[2, f32] = mul(theta, theta)\n\
+combo_out = map_jacobian(square, to_tensor([[1.0f32, 1.0f32], [2.0f32, 2.0f32], [3.0f32, 3.0f32]]))\n";
+
+    let eval_out = chelis_eval(source, "vmapgradcombinedcap");
+    assert_eq!(
+        binding_line(&eval_out, "combo_out"),
+        "combo_out = tensor(shape=[3, 2], data=[20.0, 40.0, 40.0, 80.0, 60.0, 120.0])",
+    );
+
+    let build = chelis_build_c(source, "vmapgradcombinedcap");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("vmapgradcombinedcap.c"));
+    assert_eq!(
+        binding_line(&stdout, "combo_out"),
+        binding_line(&eval_out, "combo_out"),
+    );
+}
+
+/// A second tensor supplied as an actual argument is mapped, not captured.
+/// Its rows must remain batch-varying in values and gradients.
+#[test]
+fn issue_516_second_tensor_formal_remains_mapped() {
+    let source = "def dot(x: tensor[2, f32], w: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
+xs = to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]])\n\
+ws = to_tensor([[10.0, 20.0], [1.0, 2.0], [3.0, 4.0]])\n\
+values = vmap(dot)(xs, ws)\n\
+gradients = vmap(grad(dot, wrt=x))(xs, ws)\n";
+    let build = chelis_build_c(source, "mappedformal");
+    let stdout = compile_and_run_emitted(build.path(), &build.path().join("mappedformal.c"));
+    assert_eq!(
+        binding_line(&stdout, "values"),
+        "values = tensor(shape=[3], data=[30.0, 6.0, 4.0])",
+    );
+    assert_eq!(
+        binding_line(&stdout, "gradients"),
+        "gradients = tensor(shape=[3, 2], data=[10.0, 20.0, 1.0, 2.0, 3.0, 4.0])",
+    );
+    let eval_out = chelis_eval(source, "mappedformal");
+    assert_eq!(
+        binding_line(&stdout, "values"),
+        binding_line(&eval_out, "values")
+    );
+    assert_eq!(
+        binding_line(&stdout, "gradients"),
+        binding_line(&eval_out, "gradients")
+    );
+}
+
+/// The transform's explicit capture lift does not change ordinary
+/// elementwise typing: different-rank operands remain an error.
+#[test]
+fn issue_516_plain_mismatched_mul_remains_a_type_error() {
     let dir = tempdir().expect("tempdir");
-    let src_path = dir.path().join("vmapgradcap.ch");
-    fs::write(&src_path, source).expect("write .ch source");
-    let eval = Command::cargo_bin("chelis")
+    let src_path = dir.path().join("plain_mismatch.ch");
+    fs::write(
+        &src_path,
+        "a = to_tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])\n\
+b = to_tensor([10.0, 20.0])\n\
+out = mul(a, b)\n",
+    )
+    .expect("write source");
+    let assert = Command::cargo_bin("chelis")
         .expect("chelis binary")
         .current_dir(dir.path())
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args(["eval", "--file", src_path.to_str().unwrap()])
-        .output()
-        .expect("invoke chelis eval");
+        .args(["check", src_path.to_str().unwrap()])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(
-        !eval.status.success(),
-        "vmap(grad(capturing def)) is still a residual (chelis#377)",
-    );
-    let eval_stderr = String::from_utf8_lossy(&eval.stderr);
-    assert!(
-        !eval_stderr.contains("panicked"),
-        "vmap(grad(capture)) must fail clean, never panic; stderr={eval_stderr:?}",
-    );
-    assert!(
-        eval_stderr.contains("capturing top-level binding `w`")
-            && eval_stderr.contains("chelis#377"),
-        "must report the clean capture-batching diagnostic; stderr={eval_stderr:?}",
+        stdout.contains("DimensionMismatch"),
+        "plain mismatched-rank mul must fail for its shape, not for an unrelated reason: {stdout}"
     );
 }
 

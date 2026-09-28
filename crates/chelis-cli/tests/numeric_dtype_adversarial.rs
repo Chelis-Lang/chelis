@@ -9,7 +9,7 @@
 //! Findings overview (full report in the RT-4 reply):
 //!
 //!   F1 (BLOCKER, SPEC-DIVERGENCE): host-program literal init silently
-//!      truncates declared f64 / int64 / int8 / int16 tensors to f32
+//!      truncates declared f64 / i64 / i8 / i16 tensors to f32
 //!      storage. Source `tensor[3, f64] = [1.1, 2.2, 3.3]` is allocated
 //!      at f32 (4 bytes/elem) and read back through a kernel that uses
 //!      `(double*)t->data`, so subsequent ops produce garbage.
@@ -19,15 +19,15 @@
 //!
 //!   F2 (BLOCKER): `chelis_host_reshape_tensor` and `emit_cast` hardcode
 //!      `sizeof(float)` in their memcpy regardless of dtype. f64 reshape
-//!      truncates to half; int8 cast is a 4x heap overflow.
+//!      truncates to half; i8 cast is a 4x heap overflow.
 //!      Offending code:
 //!        crates/chelis-backend-c/src/host_emit.rs:265
 //!        crates/chelis-backend-c/src/emit.rs:3067
 //!
 //!   F3 (BLOCKER): `cast` lowering is a bitwise reinterpret memcpy, not
-//!      a value-converting cast. `cast(3.5f32, int32)` does not produce
+//!      a value-converting cast. `cast(3.5f32, i32)` does not produce
 //!      `3`; it produces the bit pattern of `3.5f32` reinterpreted as
-//!      int32. Spec §5.2 requires `cast` to change precision (i.e.,
+//!      i32. Spec §5.2 requires `cast` to change precision (i.e.,
 //!      convert values).
 //!
 //!   F4 (BLOCKER): C backend panics with `panic!()` on bf16/f16 tensor
@@ -125,7 +125,7 @@ fn compile_and_run(work_dir: &Path, c_file: &str, bin_name: &str) -> Option<Stri
     cmd.current_dir(work_dir).arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(c_file);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg("libchelis_runtime.a");
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", bin_name]);
     let status = cmd.status().expect("gcc should run");
@@ -193,7 +193,7 @@ fn rt4_f1_i64_literal_storage_must_be_i64() {
     // nearest float to i64::MAX-100).
     write_file(
         &src,
-        r#"x: tensor[3, int64] = [9223372036854775000i64, 200i64, 1i64]
+        r#"x: tensor[3, i64] = [9223372036854775000i64, 200i64, 1i64]
 "#,
     );
     let build = run_build_in(dir.path(), &src, Some(&out_dir));
@@ -202,7 +202,7 @@ fn rt4_f1_i64_literal_storage_must_be_i64() {
         // F1 signature: integer literal mangled through float precision.
         assert!(
             !stdout.contains("9223372036854775808"),
-            "RT-4 F1: int64 literal mangled through float precision: {stdout}"
+            "RT-4 F1: i64 literal mangled through float precision: {stdout}"
         );
     }
 }
@@ -266,7 +266,7 @@ fn rt4_f2_emit_cast_must_not_hardcode_sizeof_float() {
 // =====================================================================
 // F3: cast emission is bitwise reinterpret, not value cast.
 // Spec §5.2 says "cast changes precision". A reinterpret of f32 bits
-// as int32 is not a precision change.
+// as i32 is not a precision change.
 // =====================================================================
 
 #[test]
@@ -387,7 +387,7 @@ fn rt4_f5_hip_f64_add_builds_through_hip_target() {
     );
 }
 
-/// Positive parity for F5: int8 elementwise (WS-A4 typed kernel
+/// Positive parity for F5: i8 elementwise (WS-A4 typed kernel
 /// templates) must build through HIP after the gate widens.
 #[test]
 fn rt4_f5_hip_int8_add_builds_through_hip_target() {
@@ -395,14 +395,14 @@ fn rt4_f5_hip_int8_add_builds_through_hip_target() {
     let src = dir.path().join("int8_hip.ch");
     write_file(
         &src,
-        r#"def my_add(x: tensor[3, int8], y: tensor[3, int8]) -> tensor[3, int8] = add(x, y)
+        r#"def my_add(x: tensor[3, i8], y: tensor[3, i8]) -> tensor[3, i8] = add(x, y)
 "#,
     );
     let build = run_build_target(dir.path(), &src, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         build.status.success(),
-        "RT-4 F5 positive parity: int8 add on --target hip must build. \
+        "RT-4 F5 positive parity: i8 add on --target hip must build. \
          stderr={stderr}"
     );
 }
@@ -516,7 +516,7 @@ fn rt4_f7_bf16_matmul_fixture_builds_through_hip() {
 fn rt4_invariant_f8e4m3_suffix_lex_rejected() {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join("f8e4m3_suffix.ch");
-    write_file(&src, "def main() -> int32 = 1f8e4m3\n");
+    write_file(&src, "def main() -> i32 = 1f8e4m3\n");
     let build = run_build_in(dir.path(), &src, None);
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
@@ -535,7 +535,7 @@ fn rt4_invariant_f8e4m3_suffix_lex_rejected() {
 fn rt4_invariant_unsigned_suffix_lex_rejected() {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join("u32_suffix.ch");
-    write_file(&src, "def main() -> int32 = 42u32\n");
+    write_file(&src, "def main() -> i32 = 42u32\n");
     let build = run_build_in(dir.path(), &src, None);
     let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
@@ -548,11 +548,11 @@ fn rt4_invariant_unsigned_suffix_lex_rejected() {
     );
 }
 
-/// Working: int matmul (int8/int16/int32/int64) all rejected at check
+/// Working: int matmul (i8/i16/i32/i64) all rejected at check
 /// per spec §5.7.2.
 #[test]
 fn rt4_invariant_int_matmul_rejected_for_every_int_dtype() {
-    for dtype in ["int8", "int16", "int32", "int64"] {
+    for dtype in ["i8", "i16", "i32", "i64"] {
         let dir = tempdir().expect("tempdir");
         let src = dir.path().join(format!("matmul_{dtype}.ch"));
         write_file(
@@ -575,19 +575,19 @@ fn rt4_invariant_int_matmul_rejected_for_every_int_dtype() {
     }
 }
 
-/// Working: cross-row enforcement at polymorphic instantiation. Even
+/// Working: checked-family enforcement at polymorphic instantiation. Even
 /// when the offending op (matmul) is in a dead-code branch (`if false
 /// then matmul(x,y) else matmul(x,y)`), the static analysis fires
-/// because instantiation type-checks regardless of runtime branch.
+/// because the authored contract is checked regardless of runtime branch.
 #[test]
 fn rt4_invariant_polymorphic_int_matmul_rejected_through_dead_branch() {
     let dir = tempdir().expect("tempdir");
     let src = dir.path().join("dead_int_matmul.ch");
     write_file(
         &src,
-        r#"sig wrap: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
+        r#"sig wrap[p: Float]: bool -> &tensor[2, 3, p] -> &tensor[3, 4, p] -> tensor[2, 4, p]
 def wrap(branch, x, y) = if branch then matmul(x, y) else matmul(x, y)
-def use_int(x: &tensor[2, 3, int32], y: &tensor[3, 4, int32]) -> tensor[2, 4, int32] = wrap(false, x, y)
+def use_int(x: &tensor[2, 3, i32], y: &tensor[3, 4, i32]) -> tensor[2, 4, i32] = wrap(false, x, y)
 "#,
     );
     let json = run_check(&src);
@@ -598,7 +598,9 @@ def use_int(x: &tensor[2, 3, int32], y: &tensor[3, 4, int32]) -> tensor[2, 4, in
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("5.7.2")),
+        messages
+            .iter()
+            .any(|m| m.contains("dtype family `Float`") && m.contains("`i32`")),
         "RT-4 invariant: polymorphic int matmul through any branch must be rejected; got {messages:?}"
     );
 }
@@ -625,7 +627,7 @@ fn rt4_invariant_f8e4m3_in_tensor_rejected() {
     );
 }
 
-/// Working: literal default rule §5.3 — `[1, 2, 3]` is `tensor[3, int32]`.
+/// Working: literal default rule §5.3 — `[1, 2, 3]` is `tensor[3, i32]`.
 #[test]
 fn rt4_invariant_int_literal_default_is_int32() {
     let bin = assert_cmd::cargo::cargo_bin("chelis");
@@ -644,12 +646,12 @@ fn rt4_invariant_int_literal_default_is_int32() {
     let output = child.wait_with_output().expect("wait");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("(t-prim {} int32)"),
-        "RT-4 invariant: [1, 2, 3] must default to int32 per §5.3; deep output: {stdout}"
+        stdout.contains("(t-prim {} i32)"),
+        "RT-4 invariant: [1, 2, 3] must default to i32 per §5.3; deep output: {stdout}"
     );
     assert!(
-        !stdout.contains("(t-prim {} int64)"),
-        "RT-4 invariant: int literal default must NOT be int64. deep output: {stdout}"
+        !stdout.contains("(t-prim {} i64)"),
+        "RT-4 invariant: int literal default must NOT be i64. deep output: {stdout}"
     );
 }
 
@@ -731,7 +733,7 @@ fn rt4_invariant_bf16_reduce_sum_returns_bf16() {
     );
 }
 
-/// Working: int8 reduce_sum returns int32 per §5.7.1 (accumulator
+/// Working: i8 reduce_sum returns i32 per §5.7.1 (accumulator
 /// precision for narrow integers).
 #[test]
 fn rt4_invariant_int8_reduce_sum_returns_int32() {
@@ -739,13 +741,13 @@ fn rt4_invariant_int8_reduce_sum_returns_int32() {
     let src = dir.path().join("sum_int8.ch");
     write_file(
         &src,
-        "def s(x: tensor[200, int8]) -> tensor[int32] = sum(x, 0)\n",
+        "def s(x: tensor[200, i8]) -> tensor[i32] = sum(x, 0)\n",
     );
     let json = run_check(&src);
     let errors = json["errors"].as_array().expect("errors array");
     assert!(
         errors.is_empty(),
-        "RT-4 invariant: int8 sum result must be int32 per §5.7.1; got {errors:?}"
+        "RT-4 invariant: i8 sum result must be i32 per §5.7.1; got {errors:?}"
     );
 }
 
@@ -758,11 +760,14 @@ fn rt4_invariant_polymorphic_id_specialized_at_multiple_dtypes() {
     let src = dir.path().join("multi_specialize.ch");
     write_file(
         &src,
-        r#"sig poly_id: tensor[n, p] -> tensor[n, p]
+        r#"sig poly_id[n, p]: tensor[n, p] -> tensor[n, p]
 def poly_id(x) = x
 def use_f32(x: tensor[3, f32]) -> tensor[3, f32] = poly_id(x)
-def use_i32(x: tensor[3, int32]) -> tensor[3, int32] = poly_id(x)
-def use_i64(x: tensor[3, int64]) -> tensor[3, int64] = poly_id(x)
+def use_i32(x: tensor[3, i32]) -> tensor[3, i32] = poly_id(x)
+def use_i64(x: tensor[3, i64]) -> tensor[3, i64] = poly_id(x)
+out_f32 = use_f32(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))
+out_i32 = use_i32(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32)]))
+out_i64 = use_i64(to_tensor([cast(1, i64), cast(2, i64), cast(3, i64)]))
 "#,
     );
     let build = run_build_in(dir.path(), &src, Some(&dir.path().join("out")));
@@ -773,10 +778,35 @@ def use_i64(x: tensor[3, int64]) -> tensor[3, int64] = poly_id(x)
     );
     let c_file = dir.path().join("out").join("multi_specialize.c");
     let c_source = fs::read_to_string(&c_file).expect("read emitted C");
-    for callee in ["use_f32", "use_i32", "use_i64"] {
+    let mut main = c_source
+        .split_once("int main(void)")
+        .expect("emitted C must contain main")
+        .1;
+    for (callee, dtype) in [
+        ("use_f32", "CHELIS_DTYPE_F32"),
+        ("use_i32", "CHELIS_DTYPE_I32"),
+        ("use_i64", "CHELIS_DTYPE_I64"),
+    ] {
+        let mut symbol = "chelis_fn_".to_string();
+        for byte in callee.bytes() {
+            symbol.push_str(&format!("{byte:02x}"));
+        }
+        let definition = format!("chelis_tensor* {symbol}(chelis_tensor* x)");
         assert!(
-            c_source.contains(callee),
-            "RT-4 invariant: monomorphized symbol `{callee}` missing from emitted C"
+            c_source.contains(&definition),
+            "RT-4 invariant: concrete wrapper `{callee}` missing from emitted C"
         );
+        let dtype_pos = main.find(dtype).unwrap_or_else(|| {
+            panic!("RT-4 invariant: `{callee}` call site must construct {dtype}")
+        });
+        let call = format!("{symbol}__chelis_owned_body(");
+        let call_pos = main.find(&call).unwrap_or_else(|| {
+            panic!("RT-4 invariant: concrete `{callee}` call missing from main")
+        });
+        assert!(
+            dtype_pos < call_pos,
+            "RT-4 invariant: `{callee}` must receive its concrete {dtype} input"
+        );
+        main = &main[call_pos + call.len()..];
     }
 }

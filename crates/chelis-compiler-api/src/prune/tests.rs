@@ -13,7 +13,7 @@ use chelis_macros::ExpansionOptions;
 fn expand(source: &str) -> Vec<DeepExpr> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parses");
     chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &ExpansionOptions::default(),
     )
     .expect("expansion succeeds")
@@ -25,10 +25,10 @@ fn expand(source: &str) -> Vec<DeepExpr> {
 fn def_names(exprs: &[DeepExpr]) -> Vec<String> {
     let mut names = Vec::new();
     for expr in exprs {
-        if let DeepExpr::List(list, _) = expr
-            && list_tag(list) == Some(DeepTag::Module)
+        if let DeepExpr::Node(node, _) = expr
+            && node.tag() == DeepTag::Module
         {
-            for child in &list.elements {
+            for child in node.children_slice() {
                 if let Some(name) = deep_def_name(child) {
                     names.push(name.to_string());
                 }
@@ -71,7 +71,7 @@ fn prune_descends_module_wrapper_not_just_flat_siblings() {
     let expanded = expand(MULTI_DEF_MODULE);
     assert_eq!(expanded.len(), 1, "expanded Surf is one module node");
     assert!(
-        matches!(&expanded[0], DeepExpr::List(list, _) if list_tag(list) == Some(DeepTag::Module)),
+        matches!(&expanded[0], DeepExpr::Node(node, _) if node.tag() == DeepTag::Module),
         "the single top-level node is a module"
     );
     let pruned = prune_to_entry(expanded, "scaled");
@@ -86,22 +86,18 @@ fn prune_preserves_module_head_and_import() {
     // element (a non-decl child) are kept so the pruned module is still a
     // well-formed module node carrying its import context.
     let pruned = prune_to_entry(expand(MULTI_DEF_MODULE), "priced");
-    let DeepExpr::List(list, _) = &pruned[0] else {
-        panic!("expected a module list");
+    let DeepExpr::Node(node, _) = &pruned[0] else {
+        panic!("expected a module node");
     };
-    assert_eq!(list_tag(list), Some(DeepTag::Module));
+    assert_eq!(node.tag(), DeepTag::Module, "the module tag is kept");
     assert!(
-        (list.tag() == Some(DeepTag::Module)),
-        "the module tag is first"
+        matches!(node.children_slice().first(), Some(DeepExpr::Atom(DeepAtom::Name(n), _)) if n == "demo.pricer"),
+        "the module-name atom is retained as the first child"
     );
-    assert!(
-        matches!(list.elements.get(2), Some(DeepExpr::Atom(DeepAtom::Name(n), _)) if n == "demo.pricer"),
-        "the module-name atom is retained at index 2"
-    );
-    let has_import = list
-        .elements
+    let has_import = node
+        .children_slice()
         .iter()
-        .any(|e| matches!(e, DeepExpr::List(l, _) if list_tag(l) == Some(DeepTag::Import)));
+        .any(|e| e.tag() == Some(DeepTag::Import));
     assert!(
         has_import,
         "the import element (a non-decl child) is preserved through pruning"
@@ -117,8 +113,9 @@ fn flat_top_level_form_prunes_without_a_module_wrapper() {
             .into_iter()
             .next()
             .and_then(|m| match m {
-                DeepExpr::List(list, _) => list
-                    .elements
+                DeepExpr::Node(node, _) => node
+                    .into_parts()
+                    .2
                     .into_iter()
                     .find(|e| deep_def_name(e) == Some("a")),
                 _ => None,
@@ -162,27 +159,26 @@ fn unknown_entry_leaves_the_program_unchanged() {
 }
 
 // ===========================================================================
-// chelis#1125 PP7 slice E5c: carrier parity ([04-TOT-5]).
+// chelis#1125 PP7 slice E5c: ingress parity ([04-TOT-5]).
 //
 // Spec authority: spec/04-type-system.md §10 [04-TOT-5] -- a Deep program's
-// verdict does not depend on which admitted representation carries it, and a
-// representation a reader cannot decode is a silent exemption under
-// [04-TOT-1] rather than an absent subtree. Design:
+// verdict does not depend on which ingress produced it. Design:
 // spec/design/checker_totality.md §"PP7. Stamped-ingress reader parity".
 //
-// The tests above all drive the macro-expansion carrier, where every node is
-// an `Expr::List`. A `.dp` file reaches this pruner through
-// `parse_and_stamp_file`, which produces `Expr::Node`. PP7 measured the
-// consequence through tide's `/lower`: the identical two-def program lowers
-// cleanly from Surf and fails the check stage from Deep with the UNRELATED
-// def's `unbound variable`, because `prune_to_entry` recognized no `module`
-// and no `def` in the stamped carrier and returned the program unpruned.
+// The tests above all drive the Surf macro-expansion ingress. A `.dp` file
+// reaches this pruner through `parse_and_stamp_file`. PP7 measured the
+// consequence of a pruner that read only one ingress's spelling through
+// tide's `/lower`: the identical two-def program lowered cleanly from Surf and
+// failed the check stage from Deep with the UNRELATED def's `unbound
+// variable`, because `prune_to_entry` recognized no `module` and no `def` in
+// the stamped tree and returned the program unpruned. Both ingresses now
+// produce the single node spelling; these tests keep the Deep ingress pinned.
 // ===========================================================================
 
-/// The stamped carrier of exactly the program `expand` produces: print the
+/// The Deep-ingress tree of exactly the program `expand` produces: print the
 /// expanded Deep and parse it back through the stamping ingress. Deriving it
 /// mechanically, rather than hand-authoring a second `.dp` text, is what makes
-/// "the same program in two admitted representations" true by construction.
+/// "the same program through two ingresses" true by construction.
 fn stamp(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
     let text = chelis_deep::printer::print_canonical(exprs);
     chelis_deep::parse_and_stamp_file(&text).unwrap_or_else(|e| {
@@ -190,35 +186,28 @@ fn stamp(exprs: &[DeepExpr]) -> Vec<DeepExpr> {
     })
 }
 
-/// Carrier-neutral `(tag, first-child-name)` for a declaration node. Written
-/// against the two carriers directly and NOT through `deep_def_name`, so a
-/// reader defect under test cannot make an assertion vacuous.
+/// `(tag, first-child-name)` for a declaration node. Written against the node
+/// directly and NOT through `deep_def_name`, so a reader defect under test
+/// cannot make an assertion vacuous.
 fn decl_head(expr: &DeepExpr) -> Option<(DeepTag, &str)> {
     match expr {
         DeepExpr::Node(node, _) => match node.children_slice().first() {
             Some(DeepExpr::Atom(DeepAtom::Name(name), _)) => Some((node.tag(), name.as_str())),
             _ => None,
         },
-        DeepExpr::List(list, _) => match (list.tag(), list.elements.get(2)) {
-            (Some(tag), Some(DeepExpr::Atom(DeepAtom::Name(name), _))) => {
-                Some((tag, name.as_str()))
-            }
-            _ => None,
-        },
         _ => None,
     }
 }
 
-/// Carrier-neutral children of a decoded node (tag and metadata dropped).
+/// Children of a decoded node (tag and metadata dropped).
 fn decl_children(expr: &DeepExpr) -> &[DeepExpr] {
     match expr {
         DeepExpr::Node(node, _) => node.children_slice(),
-        DeepExpr::List(list, _) if list.elements.len() > 2 => &list.elements[2..],
         _ => &[],
     }
 }
 
-/// The sorted `def` names in a program on EITHER carrier, descending into a
+/// The sorted `def` names in a program from either ingress, descending into a
 /// `module` wrapper when there is one.
 fn def_names_any_carrier(exprs: &[DeepExpr]) -> Vec<String> {
     let mut names = Vec::new();
@@ -239,40 +228,40 @@ fn def_names_any_carrier(exprs: &[DeepExpr]) -> Vec<String> {
 
 /// PP7's tide `/lower` entry-pruning row. REGRESSION TEST (red before the
 /// `prune.rs` repair, green after): the same program pruned to the same entry
-/// must keep the same defs whichever admitted carrier holds it. Before the
-/// repair the stamped carrier came back UNPRUNED, so `unrelated` survived and
+/// must keep the same defs whichever ingress produced it. Before the repair
+/// the Deep-ingress tree came back UNPRUNED, so `unrelated` survived and
 /// dragged its `missing_sym` reference into the check stage that the Surf
-/// carrier never reached.
+/// ingress never reached.
 #[test]
-fn prune_to_entry_agrees_across_both_admitted_carriers() {
+fn prune_to_entry_agrees_across_the_surf_and_deep_ingresses() {
     let expanded = expand(MULTI_DEF_MODULE);
     let stamped = stamp(&expanded);
     assert!(
         matches!(stamped.as_slice(), [DeepExpr::Node(node, _)] if node.tag() == DeepTag::Module),
         "the stamping ingress produces one `Expr::Node` module wrapper"
     );
-    let from_lists = def_names_any_carrier(&prune_to_entry(expanded, "priced"));
-    let from_nodes = def_names_any_carrier(&prune_to_entry(stamped, "priced"));
+    let from_surf = def_names_any_carrier(&prune_to_entry(expanded, "priced"));
+    let from_deep = def_names_any_carrier(&prune_to_entry(stamped, "priced"));
     assert_eq!(
-        from_lists,
+        from_surf,
         vec!["priced".to_string(), "scaled".to_string()],
-        "the list carrier prunes to the entry's closure"
+        "the Surf ingress prunes to the entry's closure"
     );
     assert_eq!(
-        from_nodes, from_lists,
-        "pruning to `priced` must keep the same defs on the stamped carrier as on \
-         the list carrier (chelis#1125 [04-TOT-5]); the stamped carrier kept \
+        from_deep, from_surf,
+        "pruning to `priced` must keep the same defs on the Deep ingress as on \
+         the Surf ingress (chelis#1125 [04-TOT-5]); the Deep ingress kept \
          `unrelated` and its unbound `missing_sym` reference"
     );
 }
 
-/// The stamped twin of `prune_preserves_module_head_and_import`. DISPOSITION
-/// LOCK (green before and after, for opposite reasons: before the repair the
-/// stamped program is returned untouched, so the wrapper trivially survives).
-/// Its job is to constrain the repair: the descent must rebuild the module on
-/// the SAME carrier it received, keeping the name atom first and the `import`
-/// element present. A repair that normalized the module to an `Expr::List`, or
-/// that dropped the non-decl children while pruning, fails here.
+/// The Deep-ingress twin of `prune_preserves_module_head_and_import`.
+/// DISPOSITION LOCK (green before and after, for opposite reasons: before the
+/// repair the stamped program is returned untouched, so the wrapper trivially
+/// survives). Its job is to constrain the repair: the descent must rebuild
+/// the module node, keeping the name atom first and the `import` element
+/// present. A repair that dropped the non-decl children while pruning fails
+/// here.
 #[test]
 fn stamped_module_head_and_import_survive_pruning() {
     let stamped = stamp(&expand(MULTI_DEF_MODULE));

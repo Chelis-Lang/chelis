@@ -135,19 +135,23 @@ mod tests {
     #[test]
     fn detects_matmul_pattern() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
             vec![],
             mat_f32(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
             vec![],
             mat_f32(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: chelis_ir::dag::RtDim::Lit(4),
@@ -157,6 +161,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: chelis_ir::dag::RtDim::Lit(2),
@@ -165,8 +170,9 @@ mod tests {
             tensor3_f32(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,

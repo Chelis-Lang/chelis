@@ -55,6 +55,13 @@ fn root_tensor<'a>(result: &'a EvalResult, name: &str) -> &'a TensorValue {
     }
 }
 
+fn wire_shape(shape: &[usize]) -> Vec<i64> {
+    shape
+        .iter()
+        .map(|&extent| i64::try_from(extent).unwrap())
+        .collect()
+}
+
 /// Nested `to_tensor` literal for the ramp: element at row-major position
 /// `flat` holds `flat` as an f32 literal, so every element is
 /// distinguishable and each trace sum is an exact small integer.
@@ -171,7 +178,7 @@ fn sweep(shape: &[usize], op: &str) {
             let result = eval_surf(&source);
             let out = root_tensor(&result, "out");
             let got_values = out.data.to_f64_lossy_vec();
-            if out.shape != want_shape || got_values != want_values {
+            if out.shape != wire_shape(&want_shape) || got_values != want_values {
                 failures.push(format!(
                     "axes ({axis1}, {axis2}): got shape {:?} values {got_values:?}, \
                      want shape {want_shape:?} values {want_values:?}",
@@ -252,7 +259,7 @@ fn trace_non_adjacent_reversed_axes_honor_the_declared_shape() {
     let out = root_tensor(&result, "out");
     let (want_shape, want_values) = reference_trace(&[2, 3, 2, 5], 2, 0);
     assert_eq!(want_shape, vec![3, 5], "reference self-check");
-    assert_eq!(out.shape, want_shape);
+    assert_eq!(out.shape, wire_shape(&want_shape));
     assert_eq!(out.data.to_f64_lossy_vec(), want_values);
 }
 
@@ -268,7 +275,7 @@ fn diagonal_negative_axes_normalize_onto_the_repaired_mapping() {
     ));
     let out = root_tensor(&result, "out");
     let (want_shape, want_values) = reference_diagonal(&[2, 3, 4], 2, 0);
-    assert_eq!(out.shape, want_shape);
+    assert_eq!(out.shape, wire_shape(&want_shape));
     assert_eq!(out.data.to_f64_lossy_vec(), want_values);
 }
 

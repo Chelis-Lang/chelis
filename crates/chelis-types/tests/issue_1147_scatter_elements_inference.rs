@@ -6,7 +6,7 @@ use chelis_types::check_typed_program;
 
 fn diagnostics(source: &str) -> Vec<String> {
     let decls = parse_surf(source).expect("Surf fixture must parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     match check_typed_program(&deep) {
         Ok(_) => Vec::new(),
         Err(result) => result
@@ -26,7 +26,7 @@ fn assert_rejected(source: &str, needle: &str) {
 }
 
 const PREFIX: &str = r#"
-def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] =
+def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] =
 "#;
 
 #[test]
@@ -42,7 +42,7 @@ fn valid_scatter_elements_is_accepted() {
 #[test]
 fn string_axis_is_rejected() {
     let source = format!("{PREFIX}  scatter_elements(data, indices, updates, \"zero\")\n");
-    assert_rejected(&source, "int32 axis");
+    assert_rejected(&source, "i32 axis");
 }
 
 #[test]
@@ -62,7 +62,7 @@ def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, f32], updates: tensor[2
     assert!(
         errors
             .iter()
-            .any(|error| error.contains("int32") || error.contains("int64")),
+            .any(|error| error.contains("i32") || error.contains("i64")),
         "floating-point indices checked clean: {errors:#?}"
     );
 }
@@ -71,7 +71,7 @@ def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, f32], updates: tensor[2
 fn string_data_is_rejected() {
     assert_rejected(
         r#"
-def apply(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) =
+def apply(indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) =
   scatter_elements("notatensor", indices, updates, 0)
 "#,
         "tensor data",
@@ -82,7 +82,7 @@ def apply(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) =
 fn updates_must_match_indices_shape_and_data_precision() {
     assert_rejected(
         r#"
-def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 3, f64]) -> tensor[2, 3, f32] =
+def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, i32], updates: tensor[2, 3, f64]) -> tensor[2, 3, f32] =
   scatter_elements(data, indices, updates, 1)
 "#,
         "updates",
@@ -93,7 +93,7 @@ def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor
 fn symbolic_containment_diagnostic_does_not_leak_rust_dimension_internals() {
     let errors = diagnostics(
         r#"
-def apply[n, k](data: tensor[n, 3, f32], indices: tensor[k, 3, int32], updates: tensor[k, 3, f32]) -> tensor[n, 3, f32] =
+def apply[n, k](data: tensor[n, 3, f32], indices: tensor[k, 3, i32], updates: tensor[k, 3, f32]) -> tensor[n, 3, f32] =
   scatter_elements(data, indices, updates, 1)
 "#,
     );
@@ -130,7 +130,7 @@ def apply[n, k](data: tensor[n, 3, f32], indices: tensor[k, 3, int32], updates: 
 fn precision_variable_is_unified_by_the_same_rule_as_other_tensor_ops() {
     let errors = diagnostics(
         r#"
-def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, p] =
+def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) -> tensor[2, 3, p] =
   scatter_elements(data, indices, updates, 1)
 "#,
     );
@@ -157,7 +157,7 @@ def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tenso
 fn a_precision_binder_shared_by_data_and_updates_stays_accepted() {
     let errors = diagnostics(
         r#"
-def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tensor[2, 2, p]) -> tensor[2, 3, p] =
+def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, i32], updates: tensor[2, 2, p]) -> tensor[2, 3, p] =
   scatter_elements(data, indices, updates, 1)
 "#,
     );

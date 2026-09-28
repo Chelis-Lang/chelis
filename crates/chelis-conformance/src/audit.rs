@@ -178,6 +178,16 @@ impl Ctx {
         }
     }
 
+    /// The recognized `conform.excluded_skills` declaration, or empty when the
+    /// manifest or declaration is absent. The vendored-skills row reports parse
+    /// failures and invalid names before using this as an omission list.
+    fn excluded_skills(&self) -> &[String] {
+        match &self.conform {
+            Some(Ok(decl)) => &decl.excluded_skills,
+            _ => &[],
+        }
+    }
+
     fn read(&self, rel: &str) -> Option<String> {
         read_opt(&self.root.join(rel))
     }
@@ -323,7 +333,23 @@ fn check_agents_md(ctx: &Ctx) -> Check {
     }
     // The managed inheritance block must be present, stamped to the pin, and
     // untampered.
-    check_managed_block(ctx, agents, "agents-inheritance", "AGENTS.md")
+    let canonical = canonical::body("agents-inheritance").expect("embedded AGENTS contract");
+    let expected = match crate::scaffold::apply_agents_exclusions(canonical, agents) {
+        Ok(expected) => expected,
+        Err(why) => {
+            return fail(
+                format!("AGENTS.md has an invalid shell-local exclusion block: {why}"),
+                "fix or remove the shell-owned exclusion block, then run `chelis reef conform sync`",
+            );
+        }
+    };
+    check_managed_block(
+        ctx,
+        agents,
+        "agents-inheritance",
+        "AGENTS.md",
+        Some(&expected),
+    )
 }
 
 fn check_reef_pin(ctx: &Ctx) -> Check {
@@ -481,6 +507,7 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
         &surface,
         "chelis-surface-header",
         "docs/CHELIS_SURFACE.md",
+        None,
     )
 }
 
@@ -957,15 +984,7 @@ fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
 fn check_vendored_skills(ctx: &Ctx) -> Check {
     let skills_dir = ctx.root.join("agent-skills");
     let mut problems = Vec::new();
-    // §8: the shared skill set is uniform by design and there is no per-shell
-    // exclusion control (chelis#1262). A shell that writes one anyway must be
-    // TOLD, not silently overridden on the next `sync`. Reported before the
-    // per-skill drift scan because it explains a whole class of "why did my
-    // pruned skill come back" in one line, and reported as its own failure so
-    // the fix text can name the sanctioned alternative instead of the generic
-    // "run conform sync".
-    //
-    // The declaration is read from the PARSED manifest, so the answer does not
+    // The control surface is read from the PARSED manifest, so the answer does not
     // depend on how it was spelled. An unparseable manifest fails here rather
     // than reading as "declares nothing": §8 cannot be checked against a file
     // this tool cannot read, and a silent pass on a MUST row is the failure this
@@ -986,15 +1005,13 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             return fail(
                 format!(
                     "reef.toml declares conformance control(s) contract §8 does not define: {}. \
-                     The only recognized declaration is `conform.local_skills`, an array of \
-                     strings.",
+                     The recognized declarations are `conform.local_skills` and \
+                     `conform.excluded_skills`, both arrays of strings.",
                     decl.findings().join(", ")
                 ),
-                "the shared skill set is uniform by design (contract §8) and there is no exclusion \
-                 control, so a key like `exclude`/`skip_skills` would be silently overridden by the \
-                 next `conform sync`. Remove the declaration. To record that a shared skill does \
-                 not fit this shell, append a trailing `<!-- shell-local:begin -->` block to its \
-                 SKILL.md saying so: that survives sync and reaches the agent at the point of use.",
+                "use `[conform] local_skills = [...]` for shell-owned additions and \
+                 `excluded_skills = [...]` for exact embedded shared-skill removals. Remove or \
+                 correct every other declaration before syncing.",
             );
         }
         Some(Ok(_)) => {}
@@ -1008,21 +1025,39 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             ));
         }
     }
+    // Exclusions are exact names from this pinned toolchain. Failing unknown
+    // names catches both typos and a skill removed or renamed upstream.
+    for excluded in ctx.excluded_skills() {
+        if !skills::SHARED_SKILLS.contains(&excluded.as_str()) {
+            problems.push(format!(
+                "{excluded}: [conform] excluded_skills does not name a shared skill in this toolchain"
+            ));
+        }
+    }
     for (name, body) in skills::EMBEDDED_SKILLS {
-        let path = skills_dir.join(name).join("SKILL.md");
+        let skill_dir = skills_dir.join(name);
+        let path = skill_dir.join("SKILL.md");
+        if ctx.excluded_skills().iter().any(|s| s == name) {
+            if skill_dir.exists() {
+                problems.push(format!(
+                    "{name}: present but declared in [conform] excluded_skills"
+                ));
+            }
+            continue;
+        }
         match read_opt(&path) {
             None => problems.push(format!("{name}: missing")),
             Some(live) => {
-                // A trailing shell-local block (chelis#653) is shell-owned; §8
-                // byte-checks only the toolchain-owned managed span above it.
+                // A trailing shell-local block (chelis#653) is shell-owned. §8
+                // derives the expected managed span by applying its validated
+                // exclusions to the embedded body, then byte-checks that span.
                 let (managed, block) = crate::scaffold::split_shell_local(&live);
-                if managed.trim_end() != body.trim_end() {
-                    problems.push(format!("{name}: forked/stale"));
-                }
-                if let Some(block) = block
-                    && let Err(why) = validate_shell_local_block(block)
-                {
-                    problems.push(format!("{name}: {why}"));
+                match crate::scaffold::apply_shell_local_exclusions(body, block) {
+                    Ok(expected) if managed.trim_end() != expected.trim_end() => {
+                        problems.push(format!("{name}: forked/stale"));
+                    }
+                    Err(why) => problems.push(format!("{name}: {why}")),
+                    Ok(_) => {}
                 }
             }
         }
@@ -1038,6 +1073,11 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 if skills::SHARED_SKILLS.contains(&name.as_str()) {
+                    if ctx.excluded_skills().iter().any(|s| s == &name) {
+                        // Presence was already reported above; do not inspect a
+                        // skill whose configured state is absence.
+                        continue;
+                    }
                     if let Ok(inner) = std::fs::read_dir(e.path()) {
                         for f in inner.flatten() {
                             let fname = f.file_name().to_string_lossy().into_owned();
@@ -1058,52 +1098,26 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
             }
         }
     }
+    for mirror in [".claude/skills", ".codex/skills"] {
+        if let Err(why) = exact_relative_symlink(&ctx.root.join(mirror), "../agent-skills") {
+            problems.push(format!("{mirror}: {why}"));
+        }
+    }
     if !problems.is_empty() {
         return fail(
             format!(
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain. \
-             The set is uniform by design (contract §8): a shared skill that does not fit this \
-             shell is recorded with a trailing `<!-- shell-local:begin -->` block in its SKILL.md, \
-             never removed, because a removal does not survive the next sync.",
+            "run `chelis reef conform sync` to re-materialize agent-skills/ and restore \
+             the .claude/skills and .codex/skills symlinks. \
+             Configure shell-owned additions with `[conform] local_skills` and embedded removals \
+             with `[conform] excluded_skills`; use a trailing `<!-- shell-local:begin -->` block \
+             to retain and amend a shared skill, with `shell-local:exclude` selectors for \
+             inherited sections that should be omitted.",
         );
     }
-    // Both tool-surface skill dirs must be symlinks that actually resolve to
-    // `agent-skills/` — a symlink to somewhere else (or a real dir) is not the
-    // materialized-pointer model.
-    for link in [".claude/skills", ".codex/skills"] {
-        if !symlink_targets_agent_skills(&ctx.root.join(link)) {
-            return fail(
-                format!("{link} is not a symlink to agent-skills/"),
-                format!("ln -s ../agent-skills {link}"),
-            );
-        }
-    }
     pass()
-}
-
-/// A trailing shell-local block (chelis#653) must be well-formed: exactly one
-/// begin marker, an end marker after it, and nothing but whitespace past the end
-/// marker (the block is strictly the file suffix, so `sync` can regenerate the
-/// managed span above it without touching author content).
-fn validate_shell_local_block(block: &str) -> Result<(), String> {
-    use crate::scaffold::{SHELL_LOCAL_BEGIN, SHELL_LOCAL_END};
-    if block.matches(SHELL_LOCAL_BEGIN).count() != 1 {
-        return Err(format!(
-            "malformed shell-local block (expected exactly one `{SHELL_LOCAL_BEGIN}`)"
-        ));
-    }
-    let Some(end) = block.find(SHELL_LOCAL_END) else {
-        return Err(format!("shell-local block missing `{SHELL_LOCAL_END}`"));
-    };
-    if !block[end + SHELL_LOCAL_END.len()..].trim().is_empty() {
-        return Err(format!(
-            "content after `{SHELL_LOCAL_END}` (the shell-local block must be the file suffix)"
-        ));
-    }
-    Ok(())
 }
 
 fn check_parity_harness(ctx: &Ctx) -> Check {
@@ -1180,7 +1194,13 @@ fn links_chelis_crates(cargo_toml: &str) -> bool {
 /// Shared managed-block freshness check: present, stamped to the reef pin,
 /// untampered (integrity vs its own fence hash), and — when stamped for the
 /// auditing version — byte-equal to the embedded canonical body.
-fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
+fn check_managed_block(
+    ctx: &Ctx,
+    doc: &str,
+    id: &str,
+    file: &str,
+    expected_body: Option<&str>,
+) -> Check {
     let Some(block) = managed_block::find(doc, id) else {
         return fail(
             format!("{file} has no managed block `{id}`"),
@@ -1214,7 +1234,7 @@ fn check_managed_block(ctx: &Ctx, doc: &str, id: &str, file: &str) -> Check {
     // (`block.version != AUDITOR_VERSION`) is spared here — no historical bodies
     // are embedded — but the version-stamp and integrity checks still apply.
     if block.version == AUDITOR_VERSION
-        && let Some(canon) = canonical::body(id)
+        && let Some(canon) = expected_body.or_else(|| canonical::body(id))
         && !block.matches_canonical(canon)
     {
         return fail(
@@ -1233,19 +1253,20 @@ fn read_opt(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Whether `path` is a symlink whose target's final component is
-/// `agent-skills` (i.e. it resolves to the shell's `agent-skills/` dir).
-fn symlink_targets_agent_skills(path: &Path) -> bool {
-    let is_symlink = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if !is_symlink {
-        return false;
+fn exact_relative_symlink(link: &Path, expected: &str) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(link)
+        .map_err(|e| format!("missing or unreadable symlink ({e})"))?;
+    if !metadata.file_type().is_symlink() {
+        return Err(format!("must be a symlink to {expected}"));
     }
-    std::fs::read_link(path)
-        .ok()
-        .and_then(|t| t.file_name().map(|s| s.to_os_string()))
-        .is_some_and(|name| name == "agent-skills")
+    let target = std::fs::read_link(link).map_err(|e| format!("cannot read symlink ({e})"))?;
+    if target != Path::new(expected) {
+        return Err(format!(
+            "points to {}, expected {expected}",
+            target.display()
+        ));
+    }
+    Ok(())
 }
 
 /// `CLAUDE.md` must be a symlink whose target is (or resolves to) `AGENTS.md`.

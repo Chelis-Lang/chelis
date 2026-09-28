@@ -25,9 +25,7 @@ use chelis_ir::eval::eval_tensor;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use support::codegen;
 
 mod common;
@@ -39,88 +37,6 @@ const F16_TOL: f64 = 1e-3;
 // Test harness (mirrors dtype_matrix_bf16_f16.rs; cannot share because
 // integration tests do not share modules without an explicit `mod`).
 // ---------------------------------------------------------------------
-
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let hashed = find_newest_runtime_archive(&deps_dir)?;
-    let hashed = match hashed {
-        Some(path) => path,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            find_newest_runtime_archive(&deps_dir)?.ok_or_else(|| {
-                std::io::Error::other(format!(
-                    "no libchelis_runtime-*.a found in {} after explicit \
-                     `cargo build -p chelis-runtime --lib`",
-                    deps_dir.display()
-                ))
-            })?
-        }
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
-fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    Ok(newest.map(|(_, p)| p))
-}
-
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        if let Err(e) = ensure_runtime_static_lib(&canonical) {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {}",
-                canonical.display(),
-                e
-            );
-        }
-        canonical
-    })
-    .clone()
-}
 
 fn gcc_available() -> bool {
     Command::new("gcc")
@@ -136,20 +52,11 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, main_c: &str) -> Stri
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), main_c).unwrap();
 
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
 
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let args: Vec<String> = vec![
         "-O2".into(),
         "-std=c11".into(),
@@ -268,13 +175,15 @@ fn run_unary_reduced(
     }
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![load], vec_ty(n, prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -354,19 +263,22 @@ fn run_binary_reduced(
     let n = lhs.len();
     assert_eq!(n, rhs.len(), "lhs and rhs must match length");
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![a, b], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![a, b], vec_ty(n, prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -432,20 +344,23 @@ fn bf16_div_agrees_with_evaluator() {
     let lhs = [6.0_f32, 9.0, 1.0, -2.0];
     let rhs = [2.0_f32, 3.0, 4.0, 8.0];
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n = 4;
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::Bf16),
         None,
     );
-    dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
+    dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::Bf16), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
@@ -483,20 +398,23 @@ fn f16_div_agrees_with_evaluator() {
     let lhs = [6.0_f32, 9.0, 1.0, -2.0];
     let rhs = [2.0_f32, 3.0, 4.0, 8.0];
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n = 4;
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         vec_ty(n, Prim::F16),
         None,
     );
-    dag.add_node(RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
+    dag.add_node(decl, RiscOp::Div, vec![a, b], vec_ty(n, Prim::F16), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [
         (
             "a".into(),
@@ -536,13 +454,15 @@ fn f16_div_agrees_with_evaluator() {
 fn unary_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> Vec<f64> {
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], vec_ty(n, prec), None);
+    dag.add_node(decl, op, vec![load], vec_ty(n, prec), None);
     let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
         "x".into(),
         chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
@@ -795,7 +715,6 @@ fn f16_round_agrees_with_evaluator() {
 // Reductions: MinReduce, ProdReduce
 // ---------------------------------------------------------------------
 
-#[allow(dead_code)] // helper for the future MinReduce/ProdReduce port
 fn run_scalar_reduce_reduced(
     test_name: &str,
     prec: Prim,
@@ -810,13 +729,15 @@ fn run_scalar_reduce_reduced(
     }
     let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(n, prec),
         None,
     );
-    dag.add_node(op, vec![load], scalar_ty(prec), None);
+    dag.add_node(decl, op, vec![load], scalar_ty(prec), None);
     let result = codegen(&dag, test_name).unwrap();
     let load_helper = match prec {
         Prim::Bf16 => "bf16_tensor_from_f32",
@@ -859,82 +780,66 @@ int main(void) {{
     );
 }
 
-// MinReduce and ProdReduce on bf16/f16 panic at codegen time today:
-// `emit_reduce_simple` (crates/chelis-backend-c/src/emit.rs:3540; see
-// WS-A1 / F1 guard) is f32-hardcoded. Widening to bf16/f16 is a
-// non-trivial change (it must thread through the `chelis_bf16_to_f32` /
-// `chelis_f32_to_bf16` convert-then-reduce pattern that Sum and
-// MaxReduce already follow); per the WS-Cleanup-Fixups brief
-// ("FIXUP only; no new architectural changes") we pin the structural
-// gap with rejection tests rather than expand emit_reduce_simple
-// here. Closure path: when emit_reduce_simple gains the
-// convert-then-reduce arm for reduced floats, flip these to active
-// agreement tests against the evaluator.
-
-#[test]
-fn bf16_min_reduce_is_structurally_unsupported_today() {
+/// Evaluator reference for a vec -> scalar reduction over reduced floats.
+fn scalar_reduce_eval(op: RiscOp, prec: Prim, vals: &[f32]) -> f64 {
+    let n = vals.len();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
-        vec_ty(4, Prim::Bf16),
+        vec_ty(n, prec),
         None,
     );
-    dag.add_node(
-        RiscOp::MinReduce { axis: 0 },
-        vec![load],
-        scalar_ty(Prim::Bf16),
-        None,
-    );
-    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
-    // diagnostic through the Result channel.
-    let err = codegen(&dag, "bf16_min_reduce_reject_probe")
-        .map(|_| ())
-        .expect_err("a bf16 min_reduce must be rejected, not emitted");
-    let rendered = err.to_string();
-    assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("bf16"),
-        "the rejection must be branded and name the dtype; got: {rendered}"
-    );
+    dag.add_node(decl, op, vec![load], scalar_ty(prec), None);
+    let inputs: UnordMap<String, chelis_ir::eval::TensorValue> = [(
+        "x".into(),
+        chelis_ir::eval::TensorValue::from_vec(vec![n], vals.iter().map(|&v| v as f64).collect()),
+    )]
+    .into_iter()
+    .collect();
+    let out = eval_tensor(&dag, &inputs).unwrap();
+    out[&NodeId(dag.len() - 1)].to_f64_lossy_vec()[0]
+}
+
+// MinReduce on bf16/f16 is emitted by `emit_reduce_extreme`, which widens
+// reduced floats to f32 arithmetic (chelis#1281). The minimum is one of the
+// rounded inputs, so the C result must equal the evaluator exactly.
+#[test]
+fn bf16_min_reduce_agrees_with_evaluator() {
+    let vals = [3.5_f32, -1.25, 2.0, 0.5];
+    let op = RiscOp::MinReduce { axis: 0 };
+    let expected = scalar_reduce_eval(op.clone(), Prim::Bf16, &vals);
+    run_scalar_reduce_reduced("bf16_min_reduce", Prim::Bf16, &vals, op, expected, 0.0);
 }
 
 #[test]
-fn f16_min_reduce_is_structurally_unsupported_today() {
-    let mut dag = Dag::new();
-    let load = dag.add_node(
-        RiscOp::Load { name: "x".into() },
-        vec![],
-        vec_ty(4, Prim::F16),
-        None,
-    );
-    dag.add_node(
-        RiscOp::MinReduce { axis: 0 },
-        vec![load],
-        scalar_ty(Prim::F16),
-        None,
-    );
-    // chelis#730 Phase 1: the former f32-hardcoded panic is a section C2
-    // diagnostic through the Result channel.
-    let err = codegen(&dag, "f16_min_reduce_reject_probe")
-        .map(|_| ())
-        .expect_err("a f16 min_reduce must be rejected, not emitted");
-    let rendered = err.to_string();
-    assert!(
-        rendered.starts_with("unsupported:") && rendered.contains("f16"),
-        "the rejection must be branded and name the dtype; got: {rendered}"
-    );
+fn f16_min_reduce_agrees_with_evaluator() {
+    let vals = [3.5_f32, -1.25, 2.0, 0.5];
+    let op = RiscOp::MinReduce { axis: 0 };
+    let expected = scalar_reduce_eval(op.clone(), Prim::F16, &vals);
+    run_scalar_reduce_reduced("f16_min_reduce", Prim::F16, &vals, op, expected, 0.0);
 }
+
+// ProdReduce on bf16/f16 is still rejected at codegen: `emit_reduce_simple`
+// is f32-hardcoded (WS-A1 / F1 guard). Closure path: when it gains the
+// convert-then-reduce arm for reduced floats, flip these to agreement tests
+// like the MinReduce ones above.
 
 #[test]
 fn bf16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(4, Prim::Bf16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ProdReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::Bf16),
@@ -955,13 +860,16 @@ fn bf16_prod_reduce_is_structurally_unsupported_today() {
 #[test]
 fn f16_prod_reduce_is_structurally_unsupported_today() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         vec_ty(4, Prim::F16),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ProdReduce { axis: 0 },
         vec![load],
         scalar_ty(Prim::F16),
@@ -993,13 +901,16 @@ fn run_cast_f32_to_reduced(test_name: &str, dst: Prim, value: f32, tol: f64) {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let src = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, Prim::F32).precision, value as f64),
         vec![],
         vec_ty(n, Prim::F32),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast { new_precision: dst },
         vec![src],
         vec_ty(n, dst),
@@ -1055,13 +966,16 @@ fn run_cast_reduced_to_f32(test_name: &str, src: Prim, value: f32, tol: f64) {
     }
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },
@@ -1105,13 +1019,16 @@ fn run_cast_reduced_to_reduced(test_name: &str, src: Prim, dst: Prim, value: f32
     assert_ne!(src, dst, "same-precision cast tested elsewhere");
     let n = 4;
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_ty(n, src).precision, value as f64),
         vec![],
         vec_ty(n, src),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::Cast { new_precision: dst },
         vec![c],
         vec_ty(n, dst),
@@ -1230,7 +1147,9 @@ fn cast_f32_to_f16_sweep_non_round_values() {
 #[test]
 fn eval_last_helper_returns_const_value() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_ty(Prim::F32).precision, 7.0),
         vec![],
         scalar_ty(Prim::F32),

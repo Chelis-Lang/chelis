@@ -15,7 +15,7 @@ use chelis_surf::resugar::resugar_program;
 
 fn deep_text(source: &str) -> String {
     let decls = surf_parse(source).unwrap_or_else(|error| panic!("parse `{source}`: {error}"));
-    print_canonical(&desugar_program(&decls))
+    print_canonical(&desugar_program(&decls).expect("Surf fixture must desugar"))
 }
 
 fn formatted(source: &str) -> String {
@@ -27,7 +27,7 @@ fn formatted(source: &str) -> String {
 
 #[test]
 fn sig_carries_a_binder_list_with_a_float_bound() {
-    let text = deep_text("sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]");
+    let text = deep_text("sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]");
     assert!(
         text.contains("dtype_bounds: {p: float}"),
         "expected a float bound on the defsig, got:\n{text}"
@@ -72,6 +72,55 @@ fn every_bounded_binder_occurrence_is_one_type_variable() {
         text.matches("(t-var {} p)").count(),
         3,
         "each occurrence resolves to the same named binder:\n{text}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_desugars_its_sig_binder_cast_target_as_t_var() {
+    // chelis#1625: `recast = fn (v) -> cast(v, p)` under a standalone
+    // `sig recast[p]: p -> p` must desugar the cast target as `(t-var {} p)`,
+    // the same spelling the `def recast(value) -> p = cast(value, p)` form
+    // produces, so the [04-DTYPE-1] classifier (which keys on a `t-var`
+    // target) recognizes it. Before the fix, this desugared to
+    // `(t-prim {} p)` and slipped past the checker at both ingresses.
+    let declarations = surf_parse("sig recast[p]: p -> p\nrecast = fn (v) -> cast(v, p)")
+        .expect("parse signature and lambda");
+    let deep = chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+        &desugar_program(&declarations).expect("Surf fixture must desugar"),
+    )
+    .expect("normalize source spans");
+    let text = chelis_deep::printer::print_canonical_flat(&deep);
+    assert!(
+        text.contains("(cast {} (var {} v) (t-var {} p))"),
+        "expected the cast target to desugar as `(t-var {{}} p)`, got:\n{text}"
+    );
+    assert!(
+        !text.contains("(t-prim {} p)"),
+        "the cast target must not desugar as `(t-prim {{}} p)`:\n{text}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_does_not_rebind_a_primitive_sig_binder_name() {
+    let error = surf_parse("sig recast[f32]: f32 -> f32\nrecast = fn (v) -> cast(v, f32)")
+        .expect_err("an active primitive cannot enter the binder list");
+    assert!(
+        error
+            .to_string()
+            .contains("`f32` cannot be a declaration binder"),
+        "the binder-list owner must reject the active primitive: {error}"
+    );
+}
+
+#[test]
+fn a_lambda_valued_binding_does_not_rebind_a_reserved_sig_binder_name() {
+    let error = surf_parse("sig recast[u8]: u8 -> u8\nrecast = fn (v) -> cast(v, u8)")
+        .expect_err("a reserved dtype cannot enter the binder list");
+    assert!(
+        error
+            .to_string()
+            .contains("`u8` cannot be a declaration binder"),
+        "the binder-list owner must reject the reserved dtype: {error}"
     );
 }
 
@@ -126,7 +175,7 @@ fn a_bound_requires_a_family_after_the_colon() {
 
 #[test]
 fn an_empty_binder_list_stays_rejected_on_a_sig() {
-    surf_parse("sig f[]: int32 -> int32").expect_err("must reject `[]`");
+    surf_parse("sig f[]: i32 -> i32").expect_err("must reject `[]`");
 }
 
 // === Canonical formatting ===
@@ -134,8 +183,8 @@ fn an_empty_binder_list_stays_rejected_on_a_sig() {
 #[test]
 fn canonical_form_spells_a_bound_with_one_space() {
     assert_eq!(
-        formatted("sig linspace[p:Float]: p -> p -> int64 -> tensor[n, p]").trim(),
-        "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]"
+        formatted("sig linspace[n,p:Float]: p -> p -> i64 -> tensor[n, p]").trim(),
+        "sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]"
     );
 }
 
@@ -149,7 +198,7 @@ fn canonical_form_preserves_authored_binder_order() {
 
 #[test]
 fn formatting_a_bounded_declaration_is_idempotent() {
-    let once = formatted("sig arange[p: Int]: p -> p -> tensor[n, p]");
+    let once = formatted("sig arange[n, p: Int]: p -> p -> tensor[n, p]");
     let twice = formatted(&once);
     assert_eq!(once, twice, "chelis fmt must reach a fixed point");
 }
@@ -159,7 +208,7 @@ fn formatting_a_bounded_declaration_is_idempotent() {
 #[test]
 fn bounded_deep_reparses_and_reprints_identically() {
     for source in [
-        "sig arange[p: Int]: p -> p -> tensor[n, p]",
+        "sig arange[n, p: Int]: p -> p -> tensor[n, p]",
         "def arange_values[p: Int](current: p, stop: p) -> p = current",
         "def scale[n, p: Float](x: tensor[n, p], k: p) -> tensor[n, p] = x",
         "sig total[p: Numeric]: p -> p -> p",
@@ -179,24 +228,32 @@ fn bounded_deep_reparses_and_reprints_identically() {
 fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
     // spec/02 §0.1 law 1: `desugar(resugar(·))` on canonical Deep.
     for source in [
-        "sig arange[p: Int]: p -> p -> tensor[n, p]",
+        "sig arange[n, p: Int]: p -> p -> tensor[n, p]",
         "def arange_values[p: Int](current: p, stop: p) -> p = current",
         "def scale[n, p: Float](x: tensor[n, p], k: p) -> tensor[n, p] = x",
         "def scale[p: Float](x: p) -> p = mul(x, cast(0.1, p))",
+        // chelis#1625: a lambda-valued top-level binding whose type comes
+        // from a standalone bounded sig must round-trip the same as the
+        // equivalent `def` spelling.
+        "sig recast[p: Float]: p -> p\nrecast = fn (v) -> cast(v, p)",
     ] {
         let decls = surf_parse(source).expect("parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let recovered =
             resugar_program(&deep).unwrap_or_else(|error| panic!("resugar `{source}`: {error}"));
         // `span` is derived surface provenance normalized away by
         // spec/03 §6.3.2, exactly as the canonical-Surf law harness does.
         assert_eq!(
-            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                &desugar_program(&recovered)
-            )),
-            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                &deep
-            )),
+            print_canonical(
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
+                    &desugar_program(&recovered).expect("Surf fixture must desugar")
+                )
+                .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "resugar/desugar is not the identity for `{source}`"
         );
     }
@@ -204,36 +261,35 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
 
 #[test]
 fn resugaring_recovers_the_authored_bound_spelling() {
-    let decls = surf_parse("sig arange[p: Int]: p -> p -> tensor[n, p]").expect("parse");
-    let recovered = resugar_program(&desugar_program(&decls)).expect("resugar");
+    let decls = surf_parse("sig arange[n, p: Int]: p -> p -> tensor[n, p]").expect("parse");
+    let recovered = resugar_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
+        .expect("resugar");
     assert_eq!(
         format_program(&recovered).trim(),
-        "sig arange[p: Int]: p -> p -> tensor[n, p]"
+        "sig arange[n, p: Int]: p -> p -> tensor[n, p]"
     );
 }
 
 #[test]
-fn resugaring_an_unbounded_sig_adds_no_binder_list() {
-    // The negative control for the previous test: implicit quantifiers stay
-    // implicit, so canonical output for an existing sig does not change.
-    let decls = surf_parse("sig identity: tensor[n, p] -> tensor[n, p]").expect("parse");
-    let recovered = resugar_program(&desugar_program(&decls)).expect("resugar");
+fn resugaring_an_unbounded_sig_preserves_its_complete_binder_list() {
+    let decls = surf_parse("sig identity[n, p]: tensor[n, p] -> tensor[n, p]").expect("parse");
+    let recovered = resugar_program(&desugar_program(&decls).expect("Surf fixture must desugar"))
+        .expect("resugar");
     assert_eq!(
         format_program(&recovered).trim(),
-        "sig identity: tensor[n, p] -> tensor[n, p]"
+        "sig identity[n, p]: tensor[n, p] -> tensor[n, p]"
     );
 }
 
 #[test]
 fn a_malformed_deep_bound_fails_resugaring_closed() {
-    let deep = deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
-        .expect("Deep parses; the family name is a resugaring concern");
-    resugar_program(&deep).expect_err("an unknown family must not resugar");
+    deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (p) (t-var {} p))")
+        .expect_err("unknown dtype families are rejected at ingress");
 }
 
 fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
     deep_parse_strict(&format!(
-        "(defsig {{dtype_bounds: {{p: float}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
+        "(defsig {{dtype_bounds: {{p: float}}}} scale (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
          (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) {body}))"
     ))
     .expect("Deep fixture")
@@ -243,7 +299,8 @@ fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
 fn unary_minus_literal_source_preserves_its_adopting_cast_through_resugar() {
     let deep = desugar_program(
         &surf_parse("def scale[p: Float](x: p) -> p = cast(-0.1, p)").expect("Surf"),
-    );
+    )
+    .expect("Surf fixture must desugar");
     let printed = print_canonical(&deep);
     assert!(
         printed.contains("surf_literal_style: \"unsuffixed\", type: (t-var {} p)} -0.1)")
@@ -285,7 +342,7 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
         deep_parse_strict("(defsig {} scale (t-fn {} (t-prim {} f32) (t-prim {} f32)))\n(def {} scale (fn {} (params {} (x {type: (t-prim {} f32)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} p))))").expect("Deep fixture"),
         binder_deep("(lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)"),
         deep_parse_strict(
-            "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+            "(defsig {dtype_bounds: {p: float}} scale (p) (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
              (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
                (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))",
         )
@@ -298,9 +355,26 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
         "surf_literal_style: 1, ",
         "",
     ] {
-        let deep = binder_deep(&format!(
-            "(cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))"
-        ));
-        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+        let source = format!(
+            "(defsig {{dtype_bounds: {{p: float}}}} scale (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p))) (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) (cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))))"
+        );
+        match deep_parse_strict(&source) {
+            Ok(deep) => {
+                resugar_program(&deep).expect_err("unrepresentable binder provenance");
+            }
+            Err(error) => assert!(error.to_string().contains("surf_literal_style")),
+        }
     }
+}
+
+#[test]
+fn duplicate_authored_bounds_reject_before_deep_construction() {
+    for source in [
+        "sig f[p: Float, p: Int]: p -> p\ndef f(x) = x",
+        "def f[p: Float, p: Int](x: p) -> p = x",
+    ] {
+        assert!(chelis_surf::parser::parse_str(source).is_err(), "{source}");
+    }
+    let declarations = chelis_surf::parser::parse_str("def f[p: Float](x: p) -> p = x").unwrap();
+    chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
 }

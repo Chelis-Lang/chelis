@@ -88,8 +88,9 @@ pub fn solve_property(property: &SmtProperty, timeout_ms: u64) -> TierBResult {
         // process down -- a cvc5 C++ abort on a term the in-process guards
         // somehow still admit, a cvc5-internal assertion on a well-formed
         // formula, a stack overflow, an OOM kill, a panic -- becomes a clean
-        // Tier C result in the parent instead of a bare process exit. Tests
-        // do not enable isolation, so they solve in-process (no spawn).
+        // Tier C result in the parent instead of a bare process exit. Unit
+        // tests default to their dedicated worker; integration tests explicitly
+        // register their binary's libtest entry before direct or engine calls.
         if crate::worker::isolation_enabled() {
             crate::worker::solve_property_isolated(property, timeout_ms)
         } else {
@@ -2486,7 +2487,7 @@ mod tests {
 
     #[test]
     fn w5_flagship_int32_comparison_still_proves() {
-        // int32 comparison with a precondition: n >= 0 => n + 1 >= 1.
+        // i32 comparison with a precondition: n >= 0 => n + 1 >= 1.
         let prop = SmtProperty {
             variables: vec![("n".to_string(), SmtSort::Int)],
             preconditions: vec![SmtExpr::Cmp(

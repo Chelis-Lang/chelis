@@ -21,12 +21,25 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use chelis_unord::UnordMap;
+use chelis_unord::{UnordMap, UnordSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+
+const INTERNAL_VMAP_AXIS_PREFIX: &str = "\0vmap-axis:";
+
+fn mapped_axis_annotation(axis: usize) -> String {
+    format!("{INTERNAL_VMAP_AXIS_PREFIX}{axis}")
+}
+
+fn parse_mapped_axis_annotation(annotation: &str) -> Option<usize> {
+    annotation
+        .strip_prefix(INTERNAL_VMAP_AXIS_PREFIX)?
+        .parse()
+        .ok()
+}
 
 /// A level change and the variable-generator state at which it took effect.
 /// Transitions are append-only between persisted-context resumptions.
@@ -72,10 +85,102 @@ pub struct TypeError {
 pub enum TypeErrorKind {
     TypeMismatch,
     PrecisionMismatch,
+    /// A checked family restriction failed, including before its operand
+    /// acquired a concrete type. Rendered publicly as PrecisionMismatch.
+    DtypeFamilyMismatch,
+    /// [04-LIN-10]: a function's type parameter was instantiated at a
+    /// key-carrying type. Rendered publicly as KeyReuse, the key-affinity
+    /// diagnostic. `value_binding` names the generic when it is a value
+    /// binding rather than a function, such as a generalized `let` binding,
+    /// whose repair is an ascription rather than a concrete key parameter.
+    KeyInstantiation {
+        value_binding: Option<String>,
+    },
     DimensionMismatch,
     ArityMismatch,
     OccursCheck,
     NotAFunction,
+}
+
+/// [04-LIN-10]: the generic a key-free type variable stands for a parameter
+/// of, so the diagnostic names it. Both parts are optional: a variable
+/// generalized before its binding is named has no generic yet, and a
+/// parameter the program never spelled has no binder name, and neither is
+/// invented ([04-FIT-10]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenericParameter {
+    /// The definition or `let` binding whose scheme quantified the variable.
+    pub generic: Option<String>,
+    /// The authored binder the variable instantiates, when there is one.
+    pub binder: Option<String>,
+    /// Whether `generic` is a value binding, one whose type is not a function
+    /// type, such as `e = Nil`. Its repair ascribes the binding a type with no
+    /// type parameter, or writes the value where it is used.
+    pub value: bool,
+}
+
+impl GenericParameter {
+    fn describe(&self) -> String {
+        match (&self.generic, &self.binder) {
+            (Some(generic), Some(binder)) => {
+                format!("type parameter `{binder}` of generic `{generic}`")
+            }
+            (Some(generic), None) => format!("an inferred type parameter of generic `{generic}`"),
+            (None, Some(binder)) => format!("type parameter `{binder}` of a generic function"),
+            (None, None) => "a type parameter of a generic function".to_string(),
+        }
+    }
+}
+
+/// A derived observation, never a replacement dimension for propagation.
+/// Labels, known constraints, and current authored rigidity are independent.
+/// Deliberately has no equality or conversion to `Dim`: each operation chooses
+/// its own proof/admission policy, and keeps the original ID in surviving axes.
+pub(crate) struct DimObservation {
+    constraint: Dim,
+    name: Option<String>,
+    protected: bool,
+}
+
+impl DimObservation {
+    pub(crate) fn known_extent(&self) -> Option<i64> {
+        match self.constraint {
+            Dim::Lit(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The literal category of policies that admit named runtime claims
+    /// (expand/reshape/concat), not every internally known constraint.
+    pub(crate) fn literal_extent(&self) -> Option<i64> {
+        if self.name.is_none() {
+            self.known_extent()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub(crate) fn variable(&self) -> Option<DimVar> {
+        match self.constraint {
+            Dim::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn rank(&self) -> Option<RankVar> {
+        match self.constraint {
+            Dim::Rank(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_wildcard(&self) -> bool {
+        matches!(self.constraint, Dim::Wildcard)
+    }
+    pub(crate) fn is_protected(&self) -> bool {
+        self.protected
+    }
 }
 
 /// Substitution: maps type variables to types and dim variables to dims.
@@ -95,7 +200,86 @@ pub struct Subst {
     /// value must not become unconstrained after a cache round trip.
     #[serde(default)]
     tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
+    /// [04-LIN-10]: the type variables that stand for a function's type
+    /// parameter, each with the generic it belongs to, so a violation names
+    /// it. Generalization marks every variable it quantifies, instantiation
+    /// copies the mark to the fresh variable, and binding a marked variable
+    /// refuses a key-carrying type and marks every variable left inside the
+    /// type it is bound to.
+    ///
+    /// Kept apart from [`Self::tvar_restrictions`] on purpose: those are dtype
+    /// families that many sites read as "this variable is a dtype", which a
+    /// variable that may still become a tuple, a list or a function is not.
+    /// Serialized, so a library's generics keep the rule across a context
+    /// round trip.
+    #[serde(default)]
+    key_free_tvars: Mutex<UnordMap<TypeVar, GenericParameter>>,
+    /// Spec/04 section 8.4.1: the data types of this check whose fields carry
+    /// a key, installed once every `type` declaration is registered and read
+    /// when a [`Self::key_free_tvars`] variable is bound to a data type.
+    #[serde(default)]
+    key_carrying_adts: UnordSet<String>,
     dims: Mutex<UnordMap<DimVar, Dim>>,
+    /// Named-axis view of a checker dimension identity, plus reserved
+    /// compiler-owned annotations on synthetic dimension identities. Schemes
+    /// retain these IDs and instantiation copies their annotations to fresh
+    /// IDs. This mandatory snapshot field is not evidence that arbitrary
+    /// equal names have equal sizes.
+    dimension_labels: Mutex<UnordMap<DimVar, String>>,
+    #[serde(skip)]
+    protected_dimensions: UnordSet<DimVar>,
+    /// chelis#1801: the alias CLASSES that have met a runtime extent `*`
+    /// without being bound to it, keyed by the class root.
+    ///
+    /// `unify_dim`'s wildcard arm deliberately leaves such a variable free
+    /// (the #143 invariant documented on that function), so a later concrete
+    /// argument in the same signature can still constrain it. That leaves no
+    /// record of the meeting at all, and `spec/04-type-system.md` section 3.2
+    /// needs one: a variable an application's instantiation minted, that met
+    /// `*` and that no argument bound, denotes that runtime extent.
+    ///
+    /// Why a property of the CLASS rather than of one variable. Unification
+    /// identifies variables, and which member roots a class changes while the
+    /// call unifies: `unify_dim` resolves both operands through
+    /// `constraint_dim` before it matches, so the meeting is recorded on
+    /// whatever rooted the class at that moment, and a later `bind_dvar` in
+    /// the same call can re-root the class over it. Asking one member, or
+    /// two, then misses a meeting recorded on a third. chelis#1925's rounds 1
+    /// and 2 were both exactly that miss, one alias member apart. The flag
+    /// therefore lives on the root and is OR-merged onto the new root at
+    /// every merge ([`Subst::merge_dvar_class_flags`]), and the absorbing
+    /// site asks the class once.
+    ///
+    /// Monotone within a pass and never cleared: dimension variables are
+    /// minted fresh and never reused, so an entry cannot become stale. Not
+    /// serialized: transient per-pass bookkeeping, like the deferred ledgers
+    /// below.
+    #[serde(skip)]
+    wildcard_touched_classes: UnordSet<DimVar>,
+    /// chelis#1801: the alias classes a DECLARED dimension of the definition
+    /// under check pins, keyed and merged exactly like the set above.
+    ///
+    /// This is half of section 3.2's own exclusion rather than an extra
+    /// guard: a literal or name that an argument of the same application
+    /// binds to the class is a CLAIM on the runtime extent, checked by a
+    /// section 4.7 guard, and absorbing the class to `*` would erase the
+    /// claim. The other half needs no ledger. A name or literal the class is
+    /// BOUND to is reported by `constraint_dim`, which the absorbing site
+    /// asks first; what `constraint_dim` cannot report is a declared binder,
+    /// because `bind_dvar`'s name arm records it as a label and leaves the
+    /// class unbound. `protected_dimensions` holds those binders, and this
+    /// set is what keeps that answer stable when a merge or a compose demotes
+    /// the protected member out of the root position.
+    #[serde(skip)]
+    binder_pinned_classes: UnordSet<DimVar>,
+    #[serde(skip)]
+    label_unification_depth: usize,
+    /// Only labels written by the active outer unification need rollback.
+    /// Interior mutability also covers scheme instantiation through `&Subst`.
+    #[serde(skip)]
+    dimension_label_undo: Mutex<Vec<(DimVar, Option<String>)>>,
+    #[serde(skip)]
+    refined_type_bindings: Vec<(TypeVar, Type)>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
@@ -126,6 +310,77 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
+    /// chelis#1489 suspended-operand ledger. A set of checked sites rejected
+    /// an unresolved `Type::Var` outright, which made them sensitive to WHEN
+    /// inference resolved a variable rather than to whether the program was
+    /// well typed: 0.18.6 changed that timing and they fired ~50x more often
+    /// on an unchanged corpus.
+    ///
+    /// What suspends here is `copy`, `cast`, and the ten csv host-lane slots
+    /// — ~97% of the measured occurrences. `round_to` is NOT among them: see
+    /// `unify_host_slot_eager`.
+    ///
+    /// `gather`, `scatter`, `scatter_replace` and `trace` record too, as
+    /// [`DeferredOperandGate::ShapeRoute`]. Their results are shape functions of
+    /// the operand, so that variant carries the arm's other evidence -- the RAW
+    /// axis, the indices, and `scatter`'s updates operand -- and discharge
+    /// replays the whole arm rather than the one helper call it appears to make.
+    ///
+    /// `concat` and `diagonal` do NOT record. They compute a new extent
+    /// arithmetically (a sum, a minimum), their helpers encode a dim they
+    /// cannot compute with as `Dim::Wildcard`, and a dim can still be a
+    /// variable when the operand's TYPE variable binds -- so deferring them let
+    /// a false declared extent check, build and run. They stay on their eager
+    /// paths; `the_arithmetic_routes_are_not_converted` pins the exclusion.
+    ///
+    /// Recording rather than tolerating is deliberate. The ~71 sibling gates
+    /// return on an unresolved operand and forget it, which is sound for them
+    /// but not here: measured, a tolerant `cast` lets
+    /// `def go[t](x: t) -> i32 = cast(x, i32)` check at 1.0 and BUILD,
+    /// with the backend choosing a dtype for the never-resolved `t`. A
+    /// variable that is never bound is still rejected.
+    ///
+    /// The `Copy` and `Cast` entries carry the result variable their call
+    /// returned, and discharge unifies the eager arm's own answer into it;
+    /// `HostSlot` carries no result and discharge unifies its expected type
+    /// against the operand instead. Both are load-bearing: a
+    /// revision that returned the OPERAND's variable made a deferred
+    /// `copy(&t)` type as `&tensor` where an eager one is `tensor`, so the
+    /// expression's type depended on when the operand resolved — the very
+    /// sensitivity this ledger exists to delete.
+    ///
+    /// Not serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    deferred_tensor_operands: Mutex<Vec<(TypeVar, DeferredOperandGate)>>,
+    /// Verdicts from suspended operand constraints that discharged badly
+    /// (chelis#1489).
+    ///
+    /// Discharge happens inside unification, which has no `DiagnosticSink`, so
+    /// the failure is recorded here and rendered by the per-def reporting pass.
+    /// Only failures land here; a constraint that discharges cleanly leaves no
+    /// trace beyond the unification it performed.
+    ///
+    /// Not serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    operand_gate_failures: Mutex<Vec<OperandGateFailure>>,
+    /// chelis#1654: checked collection-operation contracts instantiated during
+    /// this inference pass.
+    ///
+    /// Each scheme instantiation gets an opaque ID and its lexical inference
+    /// level. An application captures the exact IDs its callee produced,
+    /// attaches that call's evidence, and discharges only those instances after
+    /// argument unification. A relation merely carried through an alias,
+    /// aggregate, or higher-order result remains transportable until
+    /// generalization moves it back onto the resulting scheme.
+    ///
+    /// This is the single lifecycle owner for both variable-bearing and fully
+    /// monomorphic relations. In particular, no settled side queue can decide
+    /// tensor concat before an application supplies its axis and element
+    /// extents. Not serialized: schemes are the durable representation.
+    #[serde(skip)]
+    collection_contracts: Mutex<Vec<CollectionContractInstance>>,
+    #[serde(skip)]
+    next_collection_contract_id: Mutex<u64>,
     /// Current lexical generalization level. Serialized because a cloned
     /// checking context must preserve in-flight transactional state.
     #[serde(default)]
@@ -144,6 +399,531 @@ pub struct Subst {
     /// always level zero in the resumed check.
     #[serde(default)]
     resume_floors: VarWatermarks,
+}
+
+/// A suspended operand constraint that discharged to a rejection
+/// (chelis#1489).
+///
+/// Carries the data the diagnostic needs and none of the rendering: discharge
+/// runs inside unification, and the per-def reporting pass is what turns this
+/// into a `CheckError` (it is also what holds the declared type-parameter
+/// names the message may want).
+#[derive(Debug, Clone)]
+pub(crate) enum OperandGateFailure {
+    /// The operand settled to something the gate does not accept.
+    Rejected {
+        gate: DeferredOperandGate,
+        resolved: Type,
+    },
+    /// The gate accepted the operand, but the result the call had already
+    /// handed its consumer cannot be the result the settled operand produces.
+    ResultMismatch {
+        gate: DeferredOperandGate,
+        expected: Type,
+        settled: Type,
+    },
+    /// The gate's own decision function rejected the settled operand with a
+    /// specific error -- an unsupported cast precision, say -- rather than a
+    /// generic "wrong shape of type".
+    Decision { error: crate::errors::CheckError },
+}
+
+/// Which operand constraint suspended its decision (chelis#1489), and what it
+/// needs to decide once the operand is bound.
+///
+/// Not `Copy`: the host-slot arm carries the expected type and the producer's
+/// own slot wording, so discharge can re-decide without re-running the call.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DeferredOperandGate {
+    /// `copy` with an unresolved operand. Carries the result variable the call
+    /// returned: `copy(&t)` yields `t`, not `&t`, so discharge must unify the
+    /// eager arm's own answer into it rather than let the operand's type stand.
+    Copy { result: Box<Type> },
+    /// `cast`/`cast_trunc` whose SOURCE was unresolved. Carries the target
+    /// precision, the mode, and the result variable the call returned, which
+    /// discharge unifies against once `cast`'s own decision function is called
+    /// with the settled source type.
+    Cast {
+        target: crate::types::Prim,
+        mode: chelis_deep::CastMode,
+        result: Box<Type>,
+    },
+    /// chelis#2534: a checked `cast` whose TARGET is a declaration's dtype
+    /// binder and whose SOURCE was unresolved. Carries the target binder and
+    /// the result variable the call returned; discharge decides the settled
+    /// source with the same function the eager arm calls.
+    CastToBinder {
+        target: crate::types::TypeVar,
+        result: Box<Type>,
+    },
+    /// A host-lane slot that unifies against a fixed expected type:
+    /// the ten csv routes, which funnel through `unify_host_slot`. Carries
+    /// what the slot expected so discharge can re-decide without re-running
+    /// the call.
+    ///
+    /// `round_to` deliberately does NOT reach here. This variant carries ONE
+    /// expected type, and `round_to` accepts more than one; routing it here
+    /// made a later-bound operand reject against the single type this carries.
+    /// It is on `unify_host_slot_eager` instead.
+    HostSlot {
+        fname: String,
+        description: String,
+        expected: Box<Type>,
+    },
+    /// A shape-computing route whose result is a function of the operand's
+    /// shape: `gather`, `scatter`, `scatter_replace` and `trace` (chelis#1489
+    /// gate 3). `concat` and `diagonal` are deliberately excluded; see the
+    /// deferred-operand ledger's doc.
+    ///
+    /// The payload is the WHOLE call minus its operand, and
+    /// `infer::shape_route_result` is the one function that decides it. The
+    /// eager arm builds this same payload and calls that same function with a
+    /// resolved operand, so there is no second implementation of any route --
+    /// this is a deferral of one decision, not a copy of the arm's tail.
+    ShapeRoute {
+        route: ShapeRoute,
+        result: Box<Type>,
+    },
+}
+
+pub(crate) type CollectionContractId = u64;
+
+#[derive(Debug, Clone)]
+struct CollectionContractInstance {
+    id: CollectionContractId,
+    level: u32,
+    constraint: CollectionConstraint,
+    state: CollectionContractState,
+}
+
+#[derive(Debug, Clone)]
+enum CollectionContractState {
+    Transport,
+    Consumed {
+        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+    },
+}
+
+impl ShapeRoute {
+    /// Whether this route's arm normalizes one borrow off its operand.
+    ///
+    /// `gather` and `trace` read their operand through `type_for_readonly_check`,
+    /// which strips one `Type::Ref`; `scatter` and `scatter_replace` pass
+    /// `subst.apply` and reject a borrowed operand. Stripping unconditionally in
+    /// the shared decision widened those in the ACCEPTING direction -- and, when
+    /// `concat` still went through here, a borrowed `concat` passed its element
+    /// guard with empty per-element dims and made the concat axis a wildcard, so
+    /// any declared extent was admitted.
+    ///
+    /// The strip is a property of the route, so it is recorded as one.
+    pub(crate) fn normalizes_borrow(&self) -> bool {
+        match self {
+            Self::Gather { op, .. } => op == "gather",
+            Self::Trace { .. } => true,
+        }
+    }
+
+    /// The builtin's name, for the diagnostic.
+    pub(crate) fn op(&self) -> &str {
+        match self {
+            Self::Gather { op, .. } => op,
+            Self::Trace { .. } => "trace",
+        }
+    }
+}
+
+/// A shape-computing call with its operand left out (chelis#1489).
+///
+/// Carries every input the decision needs EXCEPT the operand, so the same
+/// value decides the call eagerly and after a deferral.
+///
+/// Two fields are deliberately raw rather than pre-computed, because
+/// pre-computing them needs the operand:
+///
+/// - `raw_axis` is the axis as written. The eager resolvers normalize a
+///   negative axis against the operand's RANK and yield 0 when the operand is
+///   not a concrete tensor, so an axis resolved before the operand settled
+///   would be wrong. It is normalized inside the decision instead.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ShapeRoute {
+    /// `gather`, and `scatter`/`scatter_replace` when `updates` is present.
+    Gather {
+        op: String,
+        indices: Box<Type>,
+        raw_axis: Option<i64>,
+        updates: Option<Box<Type>>,
+        /// `scatter`'s mode string, exactly as written. Validated inside the
+        /// decision: validating it in the arm meant the deferred path skipped
+        /// it and demoted a type error to a runtime abort.
+        mode: Option<String>,
+    },
+    /// `trace`, which takes an axis PAIR.
+    ///
+    /// `diagonal` also takes one and is deliberately NOT here: it computes the
+    /// minimum of two extents, and when a dim it reads is still a variable at
+    /// discharge its helper falls back to `Dim::Wildcard`, which the declared
+    /// signature then narrows to any extent at all. It stays on its eager path
+    /// until that helper stops encoding "unknown" as permissive; see chelis#1489.
+    Trace {
+        raw_axis1: Option<i64>,
+        raw_axis2: Option<i64>,
+    },
+}
+
+impl DeferredOperandGate {
+    /// The result the suspended call handed its consumer, if it handed one.
+    ///
+    /// `copy` and `cast` return a fresh variable that discharge unifies with the
+    /// decided type; a host slot returns its builtin's own fixed result type and
+    /// carries none. A shape route returns a fresh variable for the same reason
+    /// `copy` does -- its result is a function of a shape nobody knows yet.
+    ///
+    /// Answering this is not optional bookkeeping. `Env::generalize` refuses to
+    /// quantify anything this returns (chelis#1489, #1832): a result variable
+    /// that is generalized before its gate discharges gives every use of a
+    /// `let`-bound name its own instance, and the declared result is then never
+    /// checked against what the call produces. Returning `None` for a variant
+    /// that does hand out a fresh variable reopens that hole for that variant.
+    /// The match is deliberately exhaustive with no wildcard arm so a new gate
+    /// cannot be added without deciding this.
+    fn result(&self) -> Option<&Type> {
+        match self {
+            Self::Copy { result }
+            | Self::Cast { result, .. }
+            | Self::CastToBinder { result, .. }
+            | Self::ShapeRoute { result, .. } => Some(result.as_ref()),
+            Self::HostSlot { .. } => None,
+        }
+    }
+
+    // A consumer may have constrained the provisional result's dtype before
+    // this producer settles. Preserve that family's error; the producer did
+    // not violate its own operand contract (a valid cast can produce an int).
+    fn reconcile_result(&self, result: &Type, settled: Type, subst: &mut Subst) {
+        if let Err(error) = unify(result, &settled, subst) {
+            if matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch) {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: error.into(),
+                });
+            } else {
+                let expected = subst.apply(result);
+                subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                    gate: self.clone(),
+                    expected,
+                    settled,
+                });
+            }
+        }
+    }
+
+    /// Settle this constraint against the type its operand was just bound to
+    /// (chelis#1489).
+    ///
+    /// Every arm calls the SAME decision function its eager counterpart calls
+    /// -- `copy_result_from_source`, `cast_result_from_settled_source`, or the
+    /// slot unification -- so there is no second implementation of any gate to
+    /// disagree with the first. The unification of `result` is what stops the
+    /// fresh variable the eager call handed its consumer from staying
+    /// unconstrained.
+    ///
+    /// `resolved` is never a `Type::Var`: the caller only discharges a bound
+    /// variable, and re-aliases instead when a variable was bound to another.
+    fn discharge(self, resolved: &Type, subst: &mut Subst) {
+        match self {
+            Self::Copy { ref result } => {
+                match crate::infer::expr::copy_result_from_source(resolved) {
+                    Some(settled) => {
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    None => subst.record_operand_gate_failure(OperandGateFailure::Rejected {
+                        gate: self.clone(),
+                        resolved: resolved.clone(),
+                    }),
+                }
+            }
+            Self::Cast {
+                target,
+                mode,
+                ref result,
+            } => {
+                match crate::infer::expr_record::cast_result_from_settled_source(
+                    resolved.clone(),
+                    target,
+                    mode,
+                    subst,
+                ) {
+                    Ok(settled) => {
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: *error,
+                    }),
+                }
+            }
+            Self::CastToBinder { target, ref result } => {
+                match crate::infer::expr_record::binder_cast_result_from_settled_source(
+                    resolved.clone(),
+                    target,
+                    subst,
+                ) {
+                    Ok(settled) => {
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: *error,
+                    }),
+                }
+            }
+            Self::HostSlot { ref expected, .. } => {
+                if unify(expected.as_ref(), resolved, subst).is_err() {
+                    subst.record_operand_gate_failure(OperandGateFailure::Rejected {
+                        gate: self.clone(),
+                        resolved: resolved.clone(),
+                    });
+                }
+            }
+            Self::ShapeRoute {
+                ref route,
+                ref result,
+            } => {
+                match crate::infer::shape_route_result(route, resolved) {
+                    Ok((settled, updates)) => {
+                        // The updates equation `scatter` imposes is part of the
+                        // arm, not of the helper. Replaying only the helper
+                        // would drop it.
+                        if let Some(expected_updates) = updates
+                            && let ShapeRoute::Gather {
+                                updates: Some(actual),
+                                ..
+                            } = route
+                            && let Err(te) = unify(&expected_updates, actual.as_ref(), subst)
+                        {
+                            // Record the unification error itself, not a generic
+                            // result mismatch. The eager arm reports `te.into()`,
+                            // which carries `DimensionMismatch`; collapsing that
+                            // onto `TypeMismatch` would change a published
+                            // diagnostic kind by inference order -- the wire
+                            // change `kind()`'s own doc forbids.
+                            subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                                error: te.into(),
+                            });
+                            return;
+                        }
+                        self.reconcile_result(result, settled, subst);
+                    }
+                    Err(message) => {
+                        subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                            error: crate::errors::CheckError::new(
+                                crate::errors::CheckErrorKind::TypeMismatch,
+                                message,
+                                Vec::new(),
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rejection this gate emits once the operand is known to be wrong.
+    ///
+    /// The wording each gate used when it decided eagerly, with two
+    /// exceptions. The eager host-slot rejection appends macro provenance ("in
+    /// expansion of ...") from the node, and discharge has no node, so a
+    /// host-slot rejection inside a macro expansion loses that suffix. And
+    /// `subject_for` substitutes a backticked declared type-parameter name
+    /// (``got `t` ``) where the eager arm printed the internal identity --
+    /// that one is [04-FIT-9] and is asserted by
+    /// `a_never_resolved_declared_parameter_is_named_not_numbered`.
+    pub(crate) fn message(&self, subject: &str) -> String {
+        match self {
+            Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
+            Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
+            Self::CastToBinder { .. } => format!(
+                "cast to a quantified scalar dtype requires a numeric or bool scalar, got {subject}"
+            ),
+            Self::HostSlot {
+                fname, description, ..
+            } => format!("{fname} expects {description}, got {subject}"),
+            Self::ShapeRoute { route, .. } => {
+                format!("{} expects tensor input, got {subject}", route.op())
+            }
+        }
+    }
+
+    /// What to call this constraint's call in a diagnostic.
+    pub(crate) fn noun(&self) -> &str {
+        match self {
+            Self::Copy { .. } => "copy",
+            Self::Cast { .. } | Self::CastToBinder { .. } => "cast",
+            Self::HostSlot { fname, .. } => fname,
+            Self::ShapeRoute { route, .. } => route.op(),
+        }
+    }
+
+    /// The diagnostic kind the gate emitted when it decided eagerly.
+    ///
+    /// Deferring must not change the kind: a published vocabulary identity is
+    /// something consumers count by name (chelis#1334 tallies these), so
+    /// collapsing gates onto a different kind would be a wire change smuggled
+    /// in behind a timing fix.
+    pub(crate) fn kind(&self) -> crate::errors::CheckErrorKind {
+        use crate::errors::CheckErrorKind as Kind;
+        match self {
+            Self::Cast { .. } | Self::CastToBinder { .. } => Kind::CastNonTensor,
+            Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
+                Kind::TypeMismatch
+            }
+        }
+    }
+
+    /// The repair hint, where the eager path carried one.
+    pub(crate) fn suggestions(&self) -> Vec<String> {
+        match self {
+            Self::Copy { .. } => vec!["Wrap only tensor values in copy".to_string()],
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Decide one consumed collection contract and reconcile its result.
+///
+/// `Unresolved` leaves the owning contract instance live until the current
+/// application or declaration boundary supplies the missing evidence. Every
+/// settled verdict removes the instance before entering this function, so
+/// result unification cannot rediscover or cross-contaminate another call.
+enum CollectionDischarge {
+    Unresolved,
+    Settled(Option<Type>),
+}
+
+fn discharge_collection_constraint(
+    constraint: &crate::types::CollectionConstraint,
+    tensor_concat: Option<&crate::infer::TensorConcatCallEvidence>,
+    subst: &mut Subst,
+) -> CollectionDischarge {
+    match crate::infer::decide_collection_constraint(constraint, tensor_concat, subst) {
+        Ok(None) => CollectionDischarge::Unresolved,
+        Ok(Some(settled)) => {
+            let result = constraint.result();
+            if unify(result, &settled, subst).is_err() {
+                let expected = subst.apply(result);
+                subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                    error: crate::errors::CheckError::new(
+                        crate::errors::CheckErrorKind::TypeMismatch,
+                        format!(
+                            "{} result does not match the type this call produces once its \
+                             operand is known: expected {expected}, got {settled}",
+                            constraint.builtin()
+                        ),
+                        Vec::new(),
+                    ),
+                });
+            }
+            CollectionDischarge::Settled(Some(settled))
+        }
+        Err(message) => {
+            subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                error: crate::errors::CheckError::new(
+                    crate::errors::CheckErrorKind::TypeMismatch,
+                    message,
+                    Vec::new(),
+                ),
+            });
+            CollectionDischarge::Settled(None)
+        }
+    }
+}
+
+/// Whether `ty` still contains the function value governed by `constraint`.
+///
+/// The relation's fixed operand/result fields reconstruct its callable type.
+/// Exact structural containment works for fully monomorphic contracts, while
+/// the ordinary shared inference variables make the same test true for
+/// polymorphic aliases and higher-order results after substitution.
+pub(crate) fn collection_contract_visible_in_type(
+    constraint: &CollectionConstraint,
+    ty: &Type,
+) -> bool {
+    let callable = collection_contract_callable_type(constraint);
+    fn contains(ty: &Type, callable: &Type) -> bool {
+        if ty == callable {
+            return true;
+        }
+        match ty {
+            Type::Fn(parameters, result) => {
+                parameters
+                    .iter()
+                    .any(|parameter| contains(parameter, callable))
+                    || contains(result, callable)
+            }
+            Type::Ref(inner) => contains(inner, callable),
+            Type::Adt(_, arguments) | Type::Tuple(arguments) => arguments
+                .iter()
+                .any(|argument| contains(argument, callable)),
+            Type::KindedAdt(_, arguments) => arguments
+                .iter()
+                .any(|argument| matches!(argument, NominalArg::Type(ty) if contains(ty, callable))),
+            Type::Var(_) | Type::Prim(_) | Type::Tensor(_, _) | Type::Unit | Type::Error(_) => {
+                false
+            }
+        }
+    }
+    contains(ty, &callable)
+}
+
+fn collection_contract_callable_type(constraint: &CollectionConstraint) -> Type {
+    Type::Fn(
+        constraint.operands().into_iter().cloned().collect(),
+        Box::new(constraint.result().clone()),
+    )
+}
+
+fn collect_non_callable_tvars(ty: &Type, vars: &mut UnordSet<TypeVar>) {
+    match ty {
+        Type::Var(var) => {
+            vars.insert(*var);
+        }
+        Type::Fn(_, _) => {}
+        Type::Ref(inner) => collect_non_callable_tvars(inner, vars),
+        Type::Tensor(_, TensorPrec::Var(var)) => {
+            vars.insert(*var);
+        }
+        Type::Adt(_, arguments) | Type::Tuple(arguments) => {
+            for argument in arguments {
+                collect_non_callable_tvars(argument, vars);
+            }
+        }
+        Type::KindedAdt(_, arguments) => {
+            for argument in arguments {
+                if let NominalArg::Type(ty) = argument {
+                    collect_non_callable_tvars(ty, vars);
+                }
+            }
+        }
+        Type::Prim(_) | Type::Tensor(_, TensorPrec::Concrete(_)) | Type::Unit | Type::Error(_) => {}
+    }
+}
+
+/// Whether an unresolved transported function argument became tied to a
+/// non-callable argument of this application. This is the higher-order
+/// `invoke(len, x)` edge: `identity(len)` returns the callable and is handled
+/// by `collection_contract_visible_in_type`, while `ignore(len, x)` leaves no
+/// shared variable and may discard the unused capability.
+fn collection_contract_tied_to_arguments(
+    constraint: &CollectionConstraint,
+    arguments: &[Type],
+    subst: &Subst,
+) -> bool {
+    let mut argument_vars = UnordSet::default();
+    for argument in arguments {
+        collect_non_callable_tvars(&subst.apply(argument), &mut argument_vars);
+    }
+    constraint.operands().into_iter().any(|operand| {
+        crate::env::free_tvars(&subst.apply(operand))
+            .into_iter()
+            .any(|variable| argument_vars.contains(&variable))
+    })
 }
 
 /// Which deferred use shape registered a ledger entry (determines the
@@ -166,12 +946,55 @@ impl Clone for Subst {
                     .expect("subst.tvar_restrictions poisoned")
                     .clone(),
             ),
+            key_free_tvars: Mutex::new(
+                self.key_free_tvars
+                    .lock()
+                    .expect("subst.key_free_tvars poisoned")
+                    .clone(),
+            ),
+            key_carrying_adts: self.key_carrying_adts.clone(),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
+            dimension_labels: Mutex::new(
+                self.dimension_labels
+                    .lock()
+                    .expect("dimension labels poisoned")
+                    .clone(),
+            ),
+            protected_dimensions: self.protected_dimensions.clone(),
+            wildcard_touched_classes: self.wildcard_touched_classes.clone(),
+            binder_pinned_classes: self.binder_pinned_classes.clone(),
+            label_unification_depth: 0,
+            dimension_label_undo: Mutex::new(Vec::new()),
+            refined_type_bindings: Vec::new(),
             ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
                 self.deferred_borrow_vars
                     .lock()
                     .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
+            deferred_tensor_operands: Mutex::new(
+                self.deferred_tensor_operands
+                    .lock()
+                    .expect("subst.deferred_tensor_operands poisoned")
+                    .clone(),
+            ),
+            collection_contracts: Mutex::new(
+                self.collection_contracts
+                    .lock()
+                    .expect("subst.collection_contracts poisoned")
+                    .clone(),
+            ),
+            next_collection_contract_id: Mutex::new(
+                *self
+                    .next_collection_contract_id
+                    .lock()
+                    .expect("subst.next_collection_contract_id poisoned"),
+            ),
+            operand_gate_failures: Mutex::new(
+                self.operand_gate_failures
+                    .lock()
+                    .expect("subst.operand_gate_failures poisoned")
                     .clone(),
             ),
             deferred_opaque_uses: Mutex::new(
@@ -235,6 +1058,12 @@ impl Subst {
     /// Existing IDs become level-zero imports; only work performed after this
     /// point contributes level metadata to the serialized context.
     pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
+        self.protected_dimensions.clear();
+        // chelis#1801: per-pass evidence, cleared at the pass boundary for the
+        // same reason the protected set is. A resumed check reads it back
+        // empty anyway (it is `serde(skip)`); this covers a live reuse.
+        self.wildcard_touched_classes.clear();
+        self.binder_pinned_classes.clear();
         assert_eq!(
             self.current_level, 0,
             "a persisted type environment cannot resume inside an inference scope"
@@ -369,6 +1198,12 @@ impl Subst {
         self.lower_type_to(ty, self.current_level);
     }
 
+    /// Lower every variable reachable through `ty` to the enclosing `level`,
+    /// so no scope entered since generalizes over it.
+    pub(crate) fn lower_type_to_level(&mut self, ty: &Type, level: u32) {
+        self.lower_type_to(ty, level);
+    }
+
     #[cfg(test)]
     pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
         (
@@ -467,6 +1302,72 @@ impl Subst {
             .remove(&v);
     }
 
+    /// [04-LIN-10]: mark `v` as standing for a function's type parameter. A
+    /// variable already marked keeps its generic, so a violation names the
+    /// first generic the variable was found to belong to.
+    pub(crate) fn forbid_key_instantiation(&self, v: TypeVar, origin: GenericParameter) {
+        self.key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .entry(v)
+            .or_insert(origin);
+    }
+
+    /// The generic `v` stands for a type parameter of, when it is marked.
+    pub(crate) fn key_free_origin(&self, v: TypeVar) -> Option<GenericParameter> {
+        self.key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .get(&v)
+            .cloned()
+    }
+
+    /// Name the generic that a binding's scheme belongs to on each of its
+    /// quantified variables, with the authored binder each one instantiates
+    /// when `binders` records it. An authored binder of this binding always
+    /// names the variable. A variable this binding did not spell keeps the
+    /// name of a generic it came from, so `t = (dup, 1)` then `(t.0)(k)` names
+    /// `dup`'s parameter rather than the tuple.
+    pub(crate) fn name_generic_parameters(
+        &self,
+        scheme: &Scheme,
+        generic: &str,
+        binders: &UnordMap<TypeVar, String>,
+    ) {
+        let binders = binders.to_sorted();
+        let mut marks = self
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned");
+        for tv in &scheme.tvars {
+            let binder = binders
+                .iter()
+                .find(|(declared, _)| {
+                    **declared == *tv || self.apply(&Type::Var(**declared)) == Type::Var(*tv)
+                })
+                .map(|(_, name)| (*name).clone());
+            let named_elsewhere = marks
+                .get(tv)
+                .is_some_and(|existing| existing.generic.is_some());
+            if binder.is_none() && named_elsewhere {
+                continue;
+            }
+            marks.insert(
+                *tv,
+                GenericParameter {
+                    generic: Some(generic.to_string()),
+                    binder,
+                    value: !matches!(scheme.body, Type::Fn(_, _)),
+                },
+            );
+        }
+    }
+
+    /// Install spec/04 section 8.4.1's key-carrying data types for this check.
+    pub(crate) fn set_key_carrying_adts(&mut self, adts: UnordSet<String>) {
+        self.key_carrying_adts = adts;
+    }
+
     /// Record a new dim-variable binding.
     pub fn insert_dim(&mut self, v: DimVar, dim: Dim) {
         self.dims
@@ -485,9 +1386,7 @@ impl Subst {
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
         dims.iter().try_fold(1_i128, |product, dim| {
-            let Dim::Lit(value) = self.apply_dim(dim) else {
-                return None;
-            };
+            let value = self.observe_dim(dim).literal_extent()?;
             product.checked_mul(i128::from(value))
         })
     }
@@ -498,10 +1397,7 @@ impl Subst {
     pub(crate) fn static_dim_products_match(&self, lhs: &[Dim], rhs: &[Dim]) -> Option<bool> {
         fn values(subst: &Subst, dims: &[Dim]) -> Option<Vec<i64>> {
             dims.iter()
-                .map(|dim| match subst.apply_dim(dim) {
-                    Dim::Lit(value) => Some(value),
-                    _ => None,
-                })
+                .map(|dim| subst.observe_dim(dim).literal_extent())
                 .collect()
         }
 
@@ -580,6 +1476,494 @@ impl Subst {
         vec![Dim::Rank(current)]
     }
 
+    /// Suspend an operand decision on the variable that has to be bound
+    /// before it can be made (chelis#1489). Unification discharges it at that
+    /// binding; see the `deferred_tensor_operands` field doc.
+    pub(crate) fn record_deferred_tensor_operand(&self, v: TypeVar, gate: DeferredOperandGate) {
+        self.deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned")
+            .push((v, gate));
+    }
+
+    /// Every variable a PENDING gate waits on or hands out (chelis#1489).
+    ///
+    /// Consulted by `Env::generalize`, which must not quantify any of them.
+    ///
+    /// The result: a suspended `copy`/`cast` hands its consumer a fresh result
+    /// variable and ties it to the operand only through this ledger --
+    /// invisibly to levels. When an unannotated `let` generalized that
+    /// variable, every use of the bound name got its own unconstrained
+    /// instance, and discharge later bound only the original: a declared
+    /// result was never checked against what the call produces, and a false
+    /// signature checked and ran.
+    ///
+    /// The operand: the gate is suspended on this one variable, and only its
+    /// binding discharges the gate. When an unannotated `let` generalized it,
+    /// every application of the bound lambda bound a fresh instance instead,
+    /// the gate stayed on the never-bound template, and the declaration
+    /// boundary rejected a well-typed program as unresolved (chelis#2584:
+    /// `g = fn (y) -> cast(y, p)` then `g(x)`). Keeping it monomorphic is what
+    /// [04-INF-1] requires of a lambda carrying a pending obligation, so its
+    /// first application binds the operand and discharges the gate.
+    ///
+    /// ALL free variables are returned, not just a top-level type variable. A
+    /// pending result can be partly unified before it discharges -- `g` meeting
+    /// a `tensor[?d, 3, f32]` expectation makes it `tensor[?d, 3, f32]` -- and
+    /// quantifying `?d` reopens the same hole.
+    pub(crate) fn pending_gate_vars(
+        &self,
+    ) -> (UnordSet<TypeVar>, UnordSet<DimVar>, UnordSet<RankVar>) {
+        let ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        let mut tvars = UnordSet::default();
+        let mut dvars = UnordSet::default();
+        let mut rvars = UnordSet::default();
+        // Almost every `generalize` runs with an empty ledger -- a suspended
+        // operand decision is the exception, not the rule -- so leave without
+        // applying the substitution or walking a type in that case.
+        if ledger.is_empty() {
+            return (tvars, dvars, rvars);
+        }
+        for (operand, gate) in ledger.iter() {
+            let operand = self.apply(&Type::Var(*operand));
+            let result = gate.result().map(|result| self.apply(result));
+            for pending in std::iter::once(&operand).chain(result.as_ref()) {
+                tvars.extend(crate::env::free_tvars(pending));
+                dvars.extend(crate::env::free_dvars(pending));
+                rvars.extend(crate::env::free_rvars(pending));
+            }
+        }
+        (tvars, dvars, rvars)
+    }
+
+    /// chelis#2584, [04-INF-1]: whether a pending gate waits on or hands out a
+    /// variable of `ty` that generalization at the current level would
+    /// quantify. A `let`-bound lambda for which this holds carries a deferred
+    /// obligation, so the whole lambda stays monomorphic until its first
+    /// application, and every later use has that same instantiation; an
+    /// unchecked second parameter does not become polymorphic beside a
+    /// checked one.
+    pub(crate) fn has_generalizable_pending_gate(&self, ty: &Type) -> bool {
+        let (tvars, dvars, rvars) = self.pending_gate_vars();
+        if tvars.is_empty() && dvars.is_empty() && rvars.is_empty() {
+            return false;
+        }
+        let ty = self.apply(ty);
+        let level = self.current_level();
+        crate::env::free_tvars(&ty)
+            .iter()
+            .any(|v| tvars.contains(v) && self.level_of_tvar(*v) > level)
+            || crate::env::free_dvars(&ty)
+                .iter()
+                .any(|v| dvars.contains(v) && self.level_of_dvar(*v) > level)
+            || crate::env::free_rvars(&ty)
+                .iter()
+                .any(|v| rvars.contains(v) && self.level_of_rvar(*v) > level)
+    }
+
+    /// Record one fresh use of a checked collection-operation contract.
+    pub(crate) fn record_collection_contract(
+        &self,
+        constraint: CollectionConstraint,
+    ) -> CollectionContractId {
+        let id = {
+            let mut next = self
+                .next_collection_contract_id
+                .lock()
+                .expect("subst.next_collection_contract_id poisoned");
+            let id = *next;
+            *next = next
+                .checked_add(1)
+                .expect("collection contract identity overflow");
+            id
+        };
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .push(CollectionContractInstance {
+                id,
+                level: self.current_level,
+                constraint,
+                state: CollectionContractState::Transport,
+            });
+        id
+    }
+
+    /// Mark the beginning of an expression's contract instantiations.
+    pub(crate) fn collection_contract_mark(&self) -> CollectionContractId {
+        *self
+            .next_collection_contract_id
+            .lock()
+            .expect("subst.next_collection_contract_id poisoned")
+    }
+
+    /// Live contract instances minted since `mark`, in instantiation order.
+    pub(crate) fn collection_contract_ids_since(
+        &self,
+        mark: CollectionContractId,
+    ) -> Vec<CollectionContractId> {
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .iter()
+            .filter_map(|instance| (instance.id >= mark).then_some(instance.id))
+            .collect()
+    }
+
+    /// Transportable child-scope instances considered by `Env::generalize`.
+    pub(crate) fn pending_collection_contracts(
+        &self,
+    ) -> Vec<(CollectionContractId, u32, CollectionConstraint)> {
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .iter()
+            .filter(|instance| matches!(instance.state, CollectionContractState::Transport))
+            .map(|instance| {
+                (
+                    instance.id,
+                    instance.level,
+                    instance.constraint.map_types(|carried| self.apply(carried)),
+                )
+            })
+            .collect()
+    }
+
+    /// Move or discard exact transport instances selected by generalization.
+    pub(crate) fn take_collection_contracts(&self, removals: &[CollectionContractId]) {
+        if removals.is_empty() {
+            return;
+        }
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .retain(|instance| !removals.contains(&instance.id));
+    }
+
+    /// Drop the scheme copies instantiated for a direct syntactic builtin call.
+    pub(crate) fn discard_collection_contracts(&self, ids: &[CollectionContractId]) {
+        self.take_collection_contracts(ids);
+    }
+
+    /// Whether these exact callee instances include tensor concat.
+    pub(crate) fn collection_contracts_include_concat(
+        &self,
+        ids: &[CollectionContractId],
+        callee: &Type,
+    ) -> bool {
+        let callee = self.apply(callee);
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .iter()
+            .any(|instance| {
+                ids.contains(&instance.id)
+                    && matches!(instance.constraint, CollectionConstraint::Concat { .. })
+                    && collection_contract_callable_type(
+                        &instance.constraint.map_types(|carried| self.apply(carried)),
+                    ) == callee
+            })
+    }
+
+    /// Consume the exact checked contracts instantiated by this callee.
+    pub(crate) fn prepare_collection_contract_call(
+        &self,
+        ids: &[CollectionContractId],
+        callee: &Type,
+        tensor_concat: Option<crate::infer::TensorConcatCallEvidence>,
+    ) {
+        let callee = self.apply(callee);
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        for instance in contracts.iter_mut() {
+            if !ids.contains(&instance.id) {
+                continue;
+            }
+            let normalized = instance.constraint.map_types(|carried| self.apply(carried));
+            if collection_contract_callable_type(&normalized) != callee {
+                continue;
+            }
+            let evidence = matches!(instance.constraint, CollectionConstraint::Concat { .. })
+                .then(|| tensor_concat.clone())
+                .flatten();
+            instance.state = CollectionContractState::Consumed {
+                tensor_concat: evidence,
+            };
+        }
+    }
+
+    /// Finish one application's contract lifecycle after ordinary call
+    /// unification has tied all argument and result variables together.
+    ///
+    /// Exact callee instances are consumed. Contracts instantiated by
+    /// function-valued arguments remain transport when the application result
+    /// still contains their callable; otherwise a now-decidable relation is
+    /// checked and an unresolved ignored value is discarded. No instance from
+    /// before `mark` is examined.
+    pub(crate) fn finish_collection_contract_application(
+        &mut self,
+        mark: CollectionContractId,
+        arguments: &[Type],
+        result: &Type,
+    ) -> Option<Type> {
+        let ids = self.collection_contract_ids_since(mark);
+        let applied_result = self.apply(result);
+        let mut checked_result = None;
+        for id in ids {
+            let Some(instance) = self.take_collection_contract_instance(id) else {
+                continue;
+            };
+            match instance.state.clone() {
+                CollectionContractState::Consumed { tensor_concat } => {
+                    match discharge_collection_constraint(
+                        &instance.constraint,
+                        tensor_concat.as_ref(),
+                        self,
+                    ) {
+                        CollectionDischarge::Unresolved => {
+                            self.restore_collection_contract_instance(instance);
+                        }
+                        CollectionDischarge::Settled(Some(settled)) => {
+                            if let Some(previous) = &checked_result {
+                                let _ = unify(previous, &settled, self);
+                            } else {
+                                checked_result = Some(settled);
+                            }
+                        }
+                        CollectionDischarge::Settled(None) => {}
+                    }
+                }
+                CollectionContractState::Transport => {
+                    let normalized = instance.constraint.map_types(|carried| self.apply(carried));
+                    if collection_contract_visible_in_type(&normalized, &applied_result) {
+                        self.restore_collection_contract_instance(instance);
+                    } else if collection_contract_tied_to_arguments(
+                        &instance.constraint,
+                        arguments,
+                        self,
+                    ) {
+                        match discharge_collection_constraint(&instance.constraint, None, self) {
+                            CollectionDischarge::Unresolved => {
+                                let mut consumed = instance;
+                                consumed.state = CollectionContractState::Consumed {
+                                    tensor_concat: None,
+                                };
+                                self.restore_collection_contract_instance(consumed);
+                            }
+                            CollectionDischarge::Settled(_) => {}
+                        }
+                    } else {
+                        // A checked function argument not returned by the
+                        // outer call is either consumed by the callee's type
+                        // equations or ignored. A decidable relation owns its
+                        // verdict; an unresolved ignored value owns no future
+                        // application and is deliberately discarded.
+                        let _discarded =
+                            discharge_collection_constraint(&instance.constraint, None, self);
+                    }
+                }
+            }
+        }
+        checked_result
+    }
+
+    /// Cancel every contract instance created while a failed application was
+    /// inferred. This is the explicit cleanup edge that prevents a rejected
+    /// call from lending evidence to a later valid one.
+    pub(crate) fn cancel_collection_contract_application(&self, mark: CollectionContractId) {
+        self.collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned")
+            .retain(|instance| instance.id < mark);
+    }
+
+    fn take_collection_contract_instance(
+        &self,
+        id: CollectionContractId,
+    ) -> Option<CollectionContractInstance> {
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let index = contracts.iter().position(|instance| instance.id == id)?;
+        Some(contracts.remove(index))
+    }
+
+    fn restore_collection_contract_instance(&self, instance: CollectionContractInstance) {
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let index = contracts
+            .iter()
+            .position(|current| current.id > instance.id)
+            .unwrap_or(contracts.len());
+        contracts.insert(index, instance);
+    }
+
+    /// Drain unresolved consumed relations and detached child-scope transport
+    /// at a declaration boundary. Transport born in the active recursive
+    /// component's own level stays live until component generalization.
+    pub(crate) fn take_boundary_collection_contracts(&self) -> Vec<CollectionConstraint> {
+        let current_level = self.current_level;
+        let mut contracts = self
+            .collection_contracts
+            .lock()
+            .expect("subst.collection_contracts poisoned");
+        let mut unresolved = Vec::new();
+        contracts.retain(|instance| match instance.state {
+            CollectionContractState::Consumed { .. } => {
+                unresolved.push(instance.constraint.map_types(|carried| self.apply(carried)));
+                false
+            }
+            CollectionContractState::Transport
+                if current_level == 0 || instance.level > current_level =>
+            {
+                false
+            }
+            CollectionContractState::Transport => true,
+        });
+        unresolved
+    }
+
+    /// Record a discharge failure for the per-def reporting pass
+    /// (chelis#1489).
+    pub(crate) fn record_operand_gate_failure(&self, failure: OperandGateFailure) {
+        self.operand_gate_failures
+            .lock()
+            .expect("subst.operand_gate_failures poisoned")
+            .push(failure);
+    }
+
+    /// Drain the discharge failures. Called once per def body, with
+    /// [`Self::take_deferred_tensor_operands`], by the reporting pass.
+    pub(crate) fn take_operand_gate_failures(&self) -> Vec<OperandGateFailure> {
+        std::mem::take(
+            &mut *self
+                .operand_gate_failures
+                .lock()
+                .expect("subst.operand_gate_failures poisoned"),
+        )
+    }
+
+    /// Take every constraint suspended on `v`, leaving the rest of the ledger
+    /// in place (chelis#1489).
+    ///
+    /// Discharge removes a constraint BEFORE deciding it, so a decision that
+    /// unifies -- and therefore re-enters this -- cannot rediscover the
+    /// constraint it is in the middle of discharging.
+    ///
+    /// The ledger does NOT strictly shrink: binding a variable to another
+    /// VARIABLE re-suspends the obligation on the target, so an entry can be
+    /// removed and re-added. Termination rests on the alias chain being
+    /// acyclic -- `bind_tvar_inner` rejects self-binding and `occurs_in`
+    /// rejects cycles -- not on a shrinking count.
+    fn take_operand_gates_on(&self, v: TypeVar) -> Vec<DeferredOperandGate> {
+        let mut ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        let mut taken = Vec::new();
+        ledger.retain(|(tv, gate)| {
+            if *tv == v {
+                taken.push(gate.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    /// Re-suspend `gate` on `target` because `v` was bound to it rather than
+    /// to a concrete type (chelis#1489).
+    ///
+    /// Identifying two variables must carry the obligation across, exactly as
+    /// the shape ledgers' `merge_alias` does; dropping it here would silently
+    /// un-defer the constraint.
+    /// Remove and decide every suspended scalar `Cast` or `CastToBinder` gate
+    /// whose operand now resolves to a variable with a declared dtype-family
+    /// bound, when that bound alone settles it (chelis#2151, chelis#2534). See
+    /// [`discharge_bounded_scalar_casts`].
+    ///
+    /// Almost every binding runs with an empty ledger, so it returns early
+    /// without applying the substitution in that case.
+    #[allow(clippy::type_complexity)]
+    fn take_bounded_scalar_cast_gates(
+        &self,
+    ) -> Vec<(
+        DeferredOperandGate,
+        Result<Type, Box<crate::errors::CheckError>>,
+    )> {
+        let mut ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        if ledger.is_empty() {
+            return Vec::new();
+        }
+        let mut decided = Vec::new();
+        ledger.retain(|(tv, gate)| {
+            if !matches!(
+                gate,
+                DeferredOperandGate::Cast { .. } | DeferredOperandGate::CastToBinder { .. }
+            ) {
+                return true;
+            }
+            let Type::Var(operand) = self.apply(&Type::Var(*tv)) else {
+                return true;
+            };
+            let Some(
+                bound @ (TypeVarRestriction::ActiveFloat
+                | TypeVarRestriction::ActiveInt
+                | TypeVarRestriction::ActiveNumeric),
+            ) = self.tvar_restriction(operand)
+            else {
+                return true;
+            };
+            let decision = match gate {
+                DeferredOperandGate::Cast { target, mode, .. } => {
+                    crate::infer::expr_record::bounded_scalar_cast_result(bound, *target, *mode)
+                }
+                // chelis#2534: every member of a numeric bound is a scalar
+                // source a binder-target `cast` admits ([05-OP-63]).
+                DeferredOperandGate::CastToBinder { target, .. } => Some(Ok(Type::Var(*target))),
+                _ => None,
+            };
+            match decision {
+                Some(decision) => {
+                    decided.push((gate.clone(), decision));
+                    false
+                }
+                None => true,
+            }
+        });
+        decided
+    }
+
+    fn realias_operand_gate(&self, target: TypeVar, gate: DeferredOperandGate) {
+        self.deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned")
+            .push((target, gate));
+    }
+
+    /// Drain the deferred tensor-operand ledger. Called once per def body's
+    /// inference so one def's deferrals cannot leak into the next.
+    pub(crate) fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
+        std::mem::take(
+            &mut *self
+                .deferred_tensor_operands
+                .lock()
+                .expect("subst.deferred_tensor_operands poisoned"),
+        )
+    }
+
     /// Issue #256: record a borrow site whose inner type was still an
     /// unresolved `Type::Var` when the `borrow` inference arm ran. The
     /// driver drains these after a def body's inference completes and
@@ -647,11 +2031,13 @@ impl Subst {
                 }
             }
         };
-        // Phase 2: compress — point every link in the chain directly at
-        // the terminal value.
+        // Keep the terminal binding's owner: a shared tensor type may later
+        // acquire a protected dimension identity while retaining its name.
         if chain.len() > 1 {
             for v in chain {
-                map.insert(v, terminal.clone());
+                if v != current {
+                    map.insert(v, Type::Var(current));
+                }
             }
         }
         terminal
@@ -685,6 +2071,90 @@ impl Subst {
         terminal
     }
 
+    fn place_mapped_axes(mut base: Vec<Dim>, mut mapped: Vec<(usize, DimVar, Dim)>) -> Vec<Dim> {
+        let deferred = |var, resolved: Dim| match resolved {
+            Dim::Var(_) => resolved,
+            _ => Dim::Var(var),
+        };
+        mapped.sort_by_key(|(axis, var, _)| (*axis, var.0));
+        if base.iter().any(|dim| matches!(dim, Dim::Rank(_))) {
+            // An unresolved spread has no physical width yet. Keep the
+            // compiler-owned identities present; row unification uses their
+            // recorded axes rather than this storage order.
+            base.extend(
+                mapped
+                    .into_iter()
+                    .map(|(_, var, resolved)| deferred(var, resolved)),
+            );
+            return base;
+        }
+        for (axis, var, resolved) in mapped {
+            if axis <= base.len() {
+                base.insert(axis, resolved);
+            } else {
+                // Bounds checking belongs to vmap inference/application. An
+                // unresolved stored transform must remain representable until
+                // that boundary reports the user-facing error.
+                base.push(deferred(var, resolved));
+            }
+        }
+        base
+    }
+
+    fn apply_tensor_dims(&self, dims: &[Dim]) -> Vec<Dim> {
+        let mut base = Vec::with_capacity(dims.len());
+        let mut mapped = Vec::new();
+        for dim in dims {
+            match dim {
+                Dim::Var(var) if self.mapped_axis(*var).is_some() => {
+                    let axis = self.mapped_axis(*var).expect("guarded mapped axis");
+                    let resolved = self.resolve_dvar(*var);
+                    let resolved = if resolved == Dim::Var(*var) {
+                        Dim::Var(*var)
+                    } else {
+                        self.apply_dim(&resolved)
+                    };
+                    mapped.push((axis, *var, resolved));
+                }
+                Dim::Rank(rank) => {
+                    for resolved in self.resolve_rvar(*rank) {
+                        base.push(self.apply_dim(&resolved));
+                    }
+                }
+                _ => base.push(self.apply_dim(dim)),
+            }
+        }
+        Self::place_mapped_axes(base, mapped)
+    }
+
+    fn apply_tensor_dims_excluding(
+        &self,
+        dims: &[Dim],
+        quantified_dvars: &chelis_unord::UnordSet<DimVar>,
+        quantified_rvars: &chelis_unord::UnordSet<RankVar>,
+    ) -> Vec<Dim> {
+        let mut base = Vec::with_capacity(dims.len());
+        let mut mapped = Vec::new();
+        for dim in dims {
+            match dim {
+                Dim::Var(var) if self.mapped_axis(*var).is_some() => {
+                    let axis = self.mapped_axis(*var).expect("guarded mapped axis");
+                    let resolved = self.apply_dim_excluding(dim, quantified_dvars);
+                    mapped.push((axis, *var, resolved));
+                }
+                Dim::Var(var) if quantified_dvars.contains(var) => base.push(dim.clone()),
+                Dim::Rank(var) if quantified_rvars.contains(var) => base.push(dim.clone()),
+                Dim::Rank(var) => {
+                    for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
+                        base.push(self.apply_dim_excluding(&resolved, quantified_dvars));
+                    }
+                }
+                _ => base.push(self.apply_dim_excluding(dim, quantified_dvars)),
+            }
+        }
+        Self::place_mapped_axes(base, mapped)
+    }
+
     /// Apply this substitution to a type, resolving all bound variables.
     /// Path-compresses any chains of length ≥ 2 it encounters so future
     /// lookups land in O(1).
@@ -698,20 +2168,7 @@ impl Subst {
             }
             Type::Ref(inner) => Type::Ref(Box::new(self.apply(inner))),
             Type::Tensor(dims, prec) => {
-                // A `Dim::Rank` expands to the whole shape vector it is bound
-                // to (or stays as the sole `Dim::Rank` while unbound).
-                let mut out: Vec<Dim> = Vec::with_capacity(dims.len());
-                for d in dims {
-                    match d {
-                        Dim::Rank(r) => {
-                            for rd in self.resolve_rvar(*r) {
-                                out.push(self.apply_dim(&rd));
-                            }
-                        }
-                        _ => out.push(self.apply_dim(d)),
-                    }
-                }
-                Type::Tensor(out, self.apply_tensor_prec(prec))
+                Type::Tensor(self.apply_tensor_dims(dims), self.apply_tensor_prec(prec))
             }
             Type::Adt(name, args) => {
                 let args = args.iter().map(|a| self.apply(a)).collect();
@@ -802,24 +2259,8 @@ impl Subst {
                 quantified_rvars,
             ))),
             Type::Tensor(dims, prec) => {
-                let mut resolved_dims = Vec::with_capacity(dims.len());
-                for dim in dims {
-                    match dim {
-                        Dim::Var(var) if quantified_dvars.contains(var) => {
-                            resolved_dims.push(dim.clone());
-                        }
-                        Dim::Rank(var) if quantified_rvars.contains(var) => {
-                            resolved_dims.push(dim.clone());
-                        }
-                        Dim::Rank(var) => {
-                            for resolved in self.resolve_rvar_excluding(*var, quantified_rvars) {
-                                resolved_dims
-                                    .push(self.apply_dim_excluding(&resolved, quantified_dvars));
-                            }
-                        }
-                        _ => resolved_dims.push(self.apply_dim_excluding(dim, quantified_dvars)),
-                    }
-                }
+                let resolved_dims =
+                    self.apply_tensor_dims_excluding(dims, quantified_dvars, quantified_rvars);
                 let resolved_prec = match prec {
                     TensorPrec::Var(var) if quantified_tvars.contains(var) => prec.clone(),
                     TensorPrec::Var(var) => {
@@ -955,9 +2396,333 @@ impl Subst {
     /// Apply this substitution to a dimension. Path-compresses chains.
     pub fn apply_dim(&self, dim: &Dim) -> Dim {
         match dim {
+            Dim::Var(v) => {
+                if self.mapped_axis(*v).is_some() {
+                    // The tensor-shape applicator must see the transform
+                    // boundary before it can place the resolved batch
+                    // identity at its requested axis.
+                    return Dim::Var(*v);
+                }
+                let resolved = self.resolve_dvar(*v);
+                if self.dimension_label(*v).is_some() && !matches!(resolved, Dim::Var(_)) {
+                    // Keep the label's identity available to aliases and
+                    // name-sensitive operations, even after a concrete call.
+                    Dim::Var(*v)
+                } else {
+                    resolved
+                }
+            }
+            _ => dim.clone(),
+        }
+    }
+
+    pub(crate) fn constraint_dim(&self, dim: &Dim) -> Dim {
+        match dim {
             Dim::Var(v) => self.resolve_dvar(*v),
             _ => dim.clone(),
         }
+    }
+
+    /// Resolve the shape run currently assigned to a rank variable, preserving
+    /// a sole unbound/aliased `Dim::Rank` identity for rigidity checks.
+    pub(crate) fn constraint_rank(&self, rank: RankVar) -> Vec<Dim> {
+        self.resolve_rvar(rank)
+            .into_iter()
+            .map(|dim| self.constraint_dim(&dim))
+            .collect()
+    }
+
+    pub(crate) fn observe_dim(&self, dim: &Dim) -> DimObservation {
+        let constraint = self.constraint_dim(dim);
+        let name = match dim {
+            Dim::Var(v) => self.dimension_label(*v),
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        }
+        .or_else(|| match &constraint {
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        });
+        let protected = matches!(&constraint, Dim::Var(v) if self.is_protected_dimension(*v));
+        DimObservation {
+            constraint,
+            name,
+            protected,
+        }
+    }
+
+    pub(crate) fn dimension_label(&self, v: DimVar) -> Option<String> {
+        self.raw_dimension_annotation(v)
+            .filter(|annotation| parse_mapped_axis_annotation(annotation).is_none())
+    }
+
+    fn raw_dimension_annotation(&self, v: DimVar) -> Option<String> {
+        let root = self.resolve_dvar(v);
+        let labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        labels
+            .get(&v)
+            .or_else(|| match root {
+                Dim::Var(root) => labels.get(&root),
+                _ => None,
+            })
+            .cloned()
+    }
+
+    pub(crate) fn mapped_axis(&self, v: DimVar) -> Option<usize> {
+        let labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        labels
+            .get(&v)
+            .and_then(|annotation| parse_mapped_axis_annotation(annotation))
+    }
+
+    pub(crate) fn mark_mapped_axis(&self, var: DimVar, axis: usize) {
+        self.set_dimension_label(var, mapped_axis_annotation(axis));
+    }
+
+    pub(crate) fn copy_dimension_label(&self, old: DimVar, fresh: DimVar) {
+        if let Some(annotation) = self.raw_dimension_annotation(old) {
+            self.set_dimension_label(fresh, annotation);
+        }
+    }
+
+    fn set_dimension_label(&self, var: DimVar, label: String) {
+        // The only nested lock order is labels -> undo. Rollback has exclusive
+        // access to Subst and uses get_mut, so it never acquires the reverse.
+        let mut labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        if labels.get(&var) == Some(&label) {
+            return;
+        }
+        let previous = labels.insert(var, label);
+        if self.label_unification_depth != 0 {
+            self.dimension_label_undo
+                .lock()
+                .expect("dimension label undo poisoned")
+                .push((var, previous));
+        }
+    }
+
+    fn finish_dimension_label_writes(&mut self, rollback: bool) {
+        let undo = self
+            .dimension_label_undo
+            .get_mut()
+            .expect("dimension label undo poisoned");
+        if rollback && !undo.is_empty() {
+            let labels = self
+                .dimension_labels
+                .get_mut()
+                .expect("dimension labels poisoned");
+            for (var, previous) in undo.drain(..).rev() {
+                if let Some(label) = previous {
+                    labels.insert(var, label);
+                } else {
+                    labels.remove(&var);
+                }
+            }
+        } else {
+            undo.clear();
+        }
+    }
+
+    pub(crate) fn semantic_dim(&self, dim: &Dim) -> Dim {
+        if let Dim::Var(v) = dim
+            && self.mapped_axis(*v).is_none()
+            && let Some(label) = self.dimension_label(*v)
+        {
+            return Dim::Name(label);
+        }
+        self.constraint_dim(dim)
+    }
+
+    /// Semantic annotation/name-query view. Never use this before the authored
+    /// result guards: projecting a labelled identity to Name erases rigidity.
+    pub(crate) fn semantic_type(&self, ty: &Type) -> Type {
+        match self.apply(ty) {
+            Type::Tensor(dims, prec) => {
+                Type::Tensor(dims.iter().map(|d| self.semantic_dim(d)).collect(), prec)
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter().map(|a| self.semantic_type(a)).collect(),
+                Box::new(self.semantic_type(&ret)),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.semantic_type(&inner))),
+            Type::Tuple(items) => {
+                Type::Tuple(items.iter().map(|t| self.semantic_type(t)).collect())
+            }
+            Type::Adt(name, args) => {
+                Type::Adt(name, args.iter().map(|t| self.semantic_type(t)).collect())
+            }
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name,
+                args.iter()
+                    .map(|a| match a {
+                        NominalArg::Type(t) => NominalArg::Type(self.semantic_type(t)),
+                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(d)),
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// The variable that currently roots `v`'s alias class.
+    ///
+    /// A class already bound to a concrete dimension has no variable root and
+    /// answers `v` itself. That case never reaches the class flags: the
+    /// absorbing site skips it on `constraint_dim`'s answer first, because a
+    /// bound class denotes what it is bound to.
+    fn dvar_class_root(&self, v: DimVar) -> DimVar {
+        match self.resolve_dvar(v) {
+            Dim::Var(root) => root,
+            _ => v,
+        }
+    }
+
+    /// chelis#1801: record that `v`'s alias class met a runtime extent `*`
+    /// without being bound to it. Written only by [`unify_dim`]'s
+    /// wildcard-against-variable arm; read only by the application rule that
+    /// absorbs the extent.
+    pub(crate) fn note_wildcard_touch(&mut self, v: DimVar) {
+        let root = self.dvar_class_root(v);
+        self.wildcard_touched_classes.insert(root);
+    }
+
+    /// chelis#1801: whether `v`'s alias class has met a runtime extent `*`.
+    ///
+    /// This answers only "did the meeting happen". Whether the class still
+    /// denotes that extent is a separate question the caller asks of the
+    /// substitution, because an argument in the same call may have bound it
+    /// to a literal after the meeting.
+    pub(crate) fn dvar_class_met_wildcard(&self, v: DimVar) -> bool {
+        self.wildcard_touched_classes
+            .contains(&self.dvar_class_root(v))
+    }
+
+    /// chelis#1801: whether a declared dimension pins `v`'s alias class.
+    ///
+    /// `def outer(s: tensor[seq, f32])` binds the class to the named
+    /// dimension `seq`, which is section 3.2's exclusion, and it reaches that
+    /// exclusion through the rigidity ledger rather than through a `Dim::Name`
+    /// unification: the name arm in `bind_dvar` records the name as a label
+    /// and binds nothing. The set carries the same answer for a class whose
+    /// protected member a merge or a compose demoted out of the root.
+    pub(crate) fn dvar_class_is_binder_pinned(&self, v: DimVar) -> bool {
+        let root = self.dvar_class_root(v);
+        self.binder_pinned_classes.contains(&root) || self.protected_dimensions.contains(&root)
+    }
+
+    /// chelis#1801: carry both class flags from `from`'s class onto `into`'s.
+    ///
+    /// Called by [`bind_dvar`] before every merge. A merged class keeps one
+    /// root, so evidence recorded on the other root would otherwise become
+    /// unreachable, which is the defect chelis#1925's rounds 1 and 2 both
+    /// reported.
+    fn merge_dvar_class_flags(&mut self, from: DimVar, into: DimVar) {
+        let source = self.dvar_class_root(from);
+        let target = self.dvar_class_root(into);
+        if source == target {
+            return;
+        }
+        if self.wildcard_touched_classes.contains(&source) {
+            self.wildcard_touched_classes.insert(target);
+        }
+        if self.binder_pinned_classes.contains(&source)
+            || self.protected_dimensions.contains(&source)
+        {
+            self.binder_pinned_classes.insert(target);
+        }
+    }
+
+    /// chelis#1801: re-canonicalize both operands' class evidence through the
+    /// COMPOSED alias graph.
+    ///
+    /// Reached from [`Self::compose`], and a set union is the wrong operation
+    /// here. `compose_bindings` merges only the binding maps, so composition
+    /// can JOIN two classes that were separate in either operand: a flag
+    /// keyed to the variable that rooted its class before the compose is then
+    /// keyed to a member that no longer roots it, and the query on the new
+    /// root answers false. Every incoming key is therefore re-resolved
+    /// against the composed graph and re-keyed to the root it now has, which
+    /// is exactly what the label pass in [`Self::compose`] does and for the
+    /// same reason.
+    ///
+    /// Protection is folded in on the way through. The pin query reads
+    /// `protected_dimensions` at the root, so a protected member that the
+    /// compose demoted out of the root position would otherwise stop pinning
+    /// its class. Carrying the other operand's protection here is also the
+    /// conservative direction: it can only withhold an absorption, never
+    /// erase a claim.
+    fn recanonicalize_class_flags(&mut self, left: &Subst, right: &Subst) {
+        let mut touched: Vec<DimVar> = Vec::new();
+        let mut pinned: Vec<DimVar> = Vec::new();
+        for source in [left, right] {
+            touched.extend(source.wildcard_touched_classes.to_sorted().iter().copied());
+            pinned.extend(source.binder_pinned_classes.to_sorted().iter().copied());
+            pinned.extend(source.protected_dimensions.to_sorted().iter().copied());
+        }
+        self.wildcard_touched_classes.clear();
+        self.binder_pinned_classes.clear();
+        for v in touched {
+            let root = self.dvar_class_root(v);
+            self.wildcard_touched_classes.insert(root);
+        }
+        for v in pinned {
+            let root = self.dvar_class_root(v);
+            self.binder_pinned_classes.insert(root);
+        }
+    }
+
+    pub(crate) fn protect_dimensions(&mut self, vars: impl IntoIterator<Item = DimVar>) {
+        for v in vars {
+            self.protected_dimensions.insert(v);
+        }
+    }
+
+    /// Current-check authored rigidity, never historical snapshot metadata.
+    /// Instantiation freshens quantified IDs without copying protection;
+    /// lexical captures keep their canonical ID. Both live and decoded imports
+    /// clear historical protection in `resume_for_new_check` before inference.
+    pub(crate) fn is_protected_dimension(&self, var: DimVar) -> bool {
+        matches!(self.resolve_dvar(var), Dim::Var(root) if self.protected_dimensions.contains(&root))
+    }
+
+    pub(crate) fn validate_dimension_labels(&self, var_gen: &VarGen) -> Result<(), &'static str> {
+        for (var, label) in self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned")
+            .to_sorted()
+        {
+            if var.0 >= var_gen.watermarks().next_dvar {
+                return Err("dimension label refers to an unallocated checker identity");
+            }
+            if parse_mapped_axis_annotation(label).is_some() {
+                continue;
+            }
+            if label.is_empty() || label == "_" || label.chars().any(char::is_whitespace) {
+                return Err("invalid dimension label in checker snapshot");
+            }
+        }
+        Ok(())
+    }
+
+    fn type_binding_owner(&self, mut v: TypeVar) -> TypeVar {
+        let map = self.types.lock().expect("subst.types poisoned");
+        while let Some(Type::Var(next)) = map.get(&v) {
+            if *next == v {
+                break;
+            }
+            v = *next;
+        }
+        v
     }
 
     /// Apply this substitution to a tensor precision slot.
@@ -994,6 +2759,69 @@ impl Subst {
     pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
         let mut trial = self.clone();
         trial.compose_bindings(other);
+        // chelis#1801: `compose_bindings` merges the BINDINGS; the class
+        // evidence is separate and has to be re-canonicalized through the
+        // composed alias graph, never copied, because the compose can join
+        // two classes that were separate in either operand.
+        trial.recanonicalize_class_flags(self, other);
+        // Re-canonicalize BOTH operands' labels through the composed alias
+        // graph; merely copying incoming entries misses a newly joined class.
+        let mut incoming = Vec::new();
+        let mut mapped_axes = Vec::new();
+        for source in [&*self, other] {
+            for (v, annotation) in source
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned")
+                .to_sorted()
+            {
+                if parse_mapped_axis_annotation(annotation).is_some() {
+                    mapped_axes.push((*v, annotation.clone()));
+                } else {
+                    incoming.push((*v, annotation.clone()));
+                }
+            }
+        }
+        trial
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned")
+            .clear();
+        for (v, label) in incoming {
+            let target = trial.constraint_dim(&Dim::Var(v));
+            let mut labels = trial
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned");
+            let root = if let Dim::Var(root) = target { root } else { v };
+            if matches!(&target, Dim::Name(name) if name != &label)
+                || [v, root]
+                    .iter()
+                    .any(|id| labels.get(id).is_some_and(|old| old != &label))
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!("conflicting dimension labels while composing {v:?}"),
+                });
+            }
+            labels.insert(v, label.clone());
+            labels.insert(root, label);
+        }
+        for (v, annotation) in mapped_axes {
+            let mut labels = trial
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned");
+            if let Some(existing) = labels.get(&v)
+                && existing != &annotation
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!("conflicting mapped-axis annotations while composing {v:?}"),
+                });
+            }
+            labels.insert(v, annotation);
+        }
 
         let mut restrictions = self.tvar_restrictions_snapshot();
         for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
@@ -1011,11 +2839,37 @@ impl Subst {
             .clear();
         for (source, restriction) in restrictions.into_sorted() {
             let resolved = trial.resolve_tvar(source);
-            ensure_tvar_restriction(restriction, &resolved)?;
+            ensure_tvar_restriction(restriction, &resolved, &trial)?;
             if let Type::Var(target) = resolved {
                 trial.narrow_tvar_restriction(target, restriction)?;
             }
         }
+
+        // [04-LIN-10]: both operands' key-free marks hold in the composed
+        // graph, so each is re-checked against what its variable now resolves
+        // to, exactly like a dtype family above.
+        let incoming_marks = other
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .clone()
+            .into_sorted();
+        for (source, origin) in incoming_marks {
+            trial.forbid_key_instantiation(source, origin);
+        }
+        let marks = trial
+            .key_free_tvars
+            .lock()
+            .expect("subst.key_free_tvars poisoned")
+            .clone()
+            .into_sorted();
+        for (source, origin) in marks {
+            let resolved = trial.resolve_tvar(source);
+            ensure_key_free(&origin, &resolved, &resolved, &trial)?;
+        }
+        trial
+            .key_carrying_adts
+            .merge(other.key_carrying_adts.clone());
 
         *self = trial;
         Ok(())
@@ -1055,7 +2909,7 @@ impl Subst {
                 let Some(restriction) = self.tvar_restriction(*source) else {
                     return Ok(());
                 };
-                ensure_tvar_restriction(restriction, target)?;
+                ensure_tvar_restriction(restriction, target, self)?;
                 if let Type::Var(target) = target {
                     self.narrow_tvar_restriction(*target, restriction)?;
                 }
@@ -1146,7 +3000,7 @@ impl Subst {
                 let val = self_dims
                     .get_mut(&var)
                     .expect("collected dimension variable remains present");
-                *val = other.apply_dim(val);
+                *val = other.constraint_dim(val);
             }
         }
         {
@@ -1206,7 +3060,7 @@ fn merge_tvar_restrictions(
     incoming: TypeVarRestriction,
 ) -> Result<TypeVarRestriction, TypeError> {
     existing.intersect(incoming).ok_or_else(|| TypeError {
-        kind: TypeErrorKind::PrecisionMismatch,
+        kind: TypeErrorKind::DtypeFamilyMismatch,
         message: format!(
             "dtype families `{}` and `{}` share no active dtype, so the type variables they bound cannot be the same type",
             existing.family_name(),
@@ -1216,9 +3070,82 @@ fn merge_tvar_restrictions(
 }
 /// Unify two types, producing a substitution or a type error.
 pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
-    let t1 = subst.apply(t1);
-    let t2 = subst.apply(t2);
+    let outer = subst.label_unification_depth == 0;
+    subst.label_unification_depth += 1;
+    let result = unify_preserving_owners(t1, t2, subst);
+    subst.label_unification_depth -= 1;
+    if outer {
+        subst.finish_dimension_label_writes(result.is_err());
+        if result.is_err() {
+            let mut types = subst.types.lock().expect("subst.types poisoned");
+            for (v, old) in subst.refined_type_bindings.drain(..).rev() {
+                types.insert(v, old);
+            }
+        } else {
+            subst.refined_type_bindings.clear();
+        }
+    }
+    result
+}
 
+fn unify_preserving_owners(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
+    let owner1 = if let Type::Var(v) = t1 {
+        Some(subst.type_binding_owner(*v))
+    } else {
+        None
+    };
+    let owner2 = if let Type::Var(v) = t2 {
+        Some(subst.type_binding_owner(*v))
+    } else {
+        None
+    };
+    // Resolve only the outer variable. Recursion must still see a shared T
+    // under Ref/Fn rather than an eagerly copied tensor payload.
+    let t1 = if matches!(t1, Type::Var(_)) {
+        subst.apply(t1)
+    } else {
+        t1.clone()
+    };
+    let t2 = if matches!(t2, Type::Var(_)) {
+        subst.apply(t2)
+    } else {
+        t2.clone()
+    };
+    let result = unify_resolved(&t1, &t2, subst);
+    if result.is_ok() {
+        for (owner, old, other) in [(owner1, &t1, &t2), (owner2, &t2, &t1)] {
+            if let (Some(owner), Type::Tensor(dims, prec), Type::Tensor(other_dims, _)) =
+                (owner, old, other)
+                && dims.len() == other_dims.len()
+            {
+                let refined: Vec<_> = dims
+                    .iter()
+                    .zip(other_dims)
+                    .map(|(d, other)| {
+                        if matches!(d, Dim::Name(_))
+                            && matches!(other, Dim::Var(v) if subst.dimension_label(*v).is_some())
+                        {
+                            subst.apply_dim(other)
+                        } else {
+                            d.clone()
+                        }
+                    })
+                    .collect();
+                if &refined != dims {
+                    subst.refined_type_bindings.push((owner, old.clone()));
+                    subst
+                        .types
+                        .lock()
+                        .expect("subst.types poisoned")
+                        .insert(owner, Type::Tensor(refined, prec.clone()));
+                }
+            }
+        }
+    }
+    result
+}
+
+fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     match (&t1, &t2) {
         // Same type — trivially unified
         (Type::Prim(p1), Type::Prim(p2)) if p1 == p2 => Ok(()),
@@ -1236,8 +3163,8 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         (Type::Ref(inner1), Type::Ref(inner2)) => unify(inner1, inner2, subst),
 
         // Type variable binding
-        (Type::Var(v), _) => bind_tvar(*v, &t2, subst),
-        (_, Type::Var(v)) => bind_tvar(*v, &t1, subst),
+        (Type::Var(v), _) => bind_tvar(*v, t2, subst),
+        (_, Type::Var(v)) => bind_tvar(*v, t1, subst),
 
         // Function types
         (Type::Fn(args1, ret1), Type::Fn(args2, ret2)) => {
@@ -1282,6 +3209,8 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
             match (s1, s2) {
                 // Both ground (Tier-1 / fully-monomorphic): length + element-wise.
                 (0, 0) => {
+                    let d1 = canonicalize_ground_mapped_axes(&d1, subst)?;
+                    let d2 = canonicalize_ground_mapped_axes(&d2, subst)?;
                     if d1.len() != d2.len() {
                         return Err(TypeError {
                             kind: TypeErrorKind::DimensionMismatch,
@@ -1298,10 +3227,10 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
                     Ok(())
                 }
                 // Exactly one side carries spreads: split the ground side.
-                (_, 0) => unify_row_against_ground(&d1, &d2, subst),
-                (0, _) => unify_row_against_ground(&d2, &d1, subst),
+                (_, 0) => unify_row_against_ground_with_mapped_axes(&d1, &d2, subst),
+                (0, _) => unify_row_against_ground_with_mapped_axes(&d2, &d1, subst),
                 // Both carry spreads: only structurally-identical rows unify.
-                (_, _) => unify_row_against_row(&d1, &d2, subst),
+                (_, _) => unify_rows_with_mapped_axes(&d1, &d2, subst),
             }
         }
 
@@ -1458,12 +3387,32 @@ pub fn unify_tensor_prec(
 /// distinct `Lit <-> Lit` continue to be rejected, and the
 /// `Var <-> Lit` cross-position contract is unaffected.
 pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
-    let d1 = subst.apply_dim(d1);
-    let d2 = subst.apply_dim(d2);
+    let name1 = subst.semantic_dim(d1);
+    let name2 = subst.semantic_dim(d2);
+    if let (Dim::Name(a), Dim::Name(b)) = (&name1, &name2)
+        && a != b
+    {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!("dimension mismatch: {name1:?} vs {name2:?}"),
+        });
+    }
+    let d1 = subst.constraint_dim(d1);
+    let d2 = subst.constraint_dim(d2);
 
     match (&d1, &d2) {
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
         (Dim::Lit(l1), Dim::Lit(l2)) if l1 == l2 => Ok(()),
+        // chelis#1801 / spec/04-type-system.md section 3.2: record the
+        // meeting before the permissive arm swallows it. The variable is
+        // still deliberately left FREE here (the Wildcard/Var invariant
+        // above), so a later concrete argument in the same signature can
+        // constrain it; `infer_app` decides what an unconstrained one
+        // denotes once the whole call has unified.
+        (Dim::Wildcard, Dim::Var(v)) | (Dim::Var(v), Dim::Wildcard) => {
+            subst.note_wildcard_touch(*v);
+            Ok(())
+        }
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => Ok(()),
         // Issue #219 Option A: Name and Lit unify without binding any
         // substitution. The Name carries a label for diagnostics, the
@@ -1478,7 +3427,88 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
     }
 }
 
+/// Bind `v`, then settle every operand constraint that was waiting on it
+/// (chelis#1489).
+///
+/// The wrapper exists so discharge cannot be skipped: `bind_tvar_inner` has
+/// more than one success path, and an earlier design that decided these
+/// constraints in a separate end-of-inference pass was order-dependent in
+/// exactly the way this issue is about. Binding a variable is the event that
+/// makes a suspended decision decidable, so that is where the decision is
+/// made, and nothing schedules it.
 fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
+    bind_tvar_inner(v, ty, subst)?;
+    discharge_operand_gates(v, subst);
+    discharge_bounded_scalar_casts(subst);
+    Ok(())
+}
+
+/// Settle the suspended scalar `cast`/`cast_trunc` gates that a binding has
+/// made decidable without binding their operand to a type (chelis#2151).
+///
+/// A binding is also the event through which a variable GAINS a declared
+/// dtype-family bound: identified with a bounded variable, or with a rigid
+/// authored binder. Such a variable may never be bound to a concrete type, so
+/// [`discharge_operand_gates`] would only carry its gate from one variable to
+/// the next, and the per-def pass would reject a well-typed cast. [04-DTYPE-2]
+/// makes the bound enough to decide it: the operand is a scalar primitive of
+/// that family at every instantiation.
+///
+/// The decision is [`crate::infer::expr_record::bounded_scalar_cast_result`].
+/// This is its only call site. A cast whose operand already carries the bound
+/// is suspended like any other, and it settles at the next binding, which the
+/// suspended cast's own result variable guarantees. The cast and the bound are
+/// therefore settled together by whichever arrives second, and the verdict
+/// cannot depend on which operand inference visits first. Only what later
+/// bindings cannot change is decided here (every acceptance, and a rejection
+/// that reads only the target); a gate it declines stays suspended.
+fn discharge_bounded_scalar_casts(subst: &mut Subst) {
+    for (gate, decision) in subst.take_bounded_scalar_cast_gates() {
+        let (DeferredOperandGate::Cast { ref result, .. }
+        | DeferredOperandGate::CastToBinder { ref result, .. }) = gate
+        else {
+            continue;
+        };
+        match decision {
+            Ok(settled) => gate.reconcile_result(result, settled, subst),
+            Err(error) => {
+                subst.record_operand_gate_failure(OperandGateFailure::Decision { error: *error })
+            }
+        }
+    }
+}
+
+/// Settle the constraints suspended on `v`, now that it is bound.
+///
+/// Reached only from [`bind_tvar`]. Records failures rather than returning
+/// them: a discharge failure is a diagnostic about the program, not a
+/// unification error, and turning it into one would abort the surrounding
+/// unification and lose every other constraint waiting on this binding.
+fn discharge_operand_gates(v: TypeVar, subst: &mut Subst) {
+    let gates = subst.take_operand_gates_on(v);
+    if gates.is_empty() {
+        return;
+    }
+    let resolved = subst.apply(&Type::Var(v));
+    for gate in gates {
+        // Still a variable: `v` was identified with another variable rather
+        // than given a type. Carry the obligation across so it discharges when
+        // THAT variable binds.
+        if let Type::Var(target) = resolved {
+            if target != v {
+                subst.realias_operand_gate(target, gate);
+                continue;
+            }
+            // Bound to itself is not a binding; leave it suspended for the
+            // per-def pass to report as never-resolved.
+            subst.realias_operand_gate(v, gate);
+            continue;
+        }
+        gate.discharge(&resolved, subst);
+    }
+}
+
+fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     if let Type::Var(v2) = ty
         && *v2 == v
     {
@@ -1504,7 +3534,10 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         (found, None) | (None, found) => found,
     };
     if let Some(restriction) = source_restriction {
-        ensure_tvar_restriction(restriction, ty)?;
+        ensure_tvar_restriction(restriction, ty, subst)?;
+    }
+    if let Some(origin) = subst.key_free_origin(v) {
+        ensure_key_free(&origin, ty, ty, subst)?;
     }
 
     // An older variable that becomes bound to a younger composite makes all
@@ -1519,26 +3552,116 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     Ok(())
 }
 
+/// [04-LIN-10]: check that a function's type parameter is not instantiated at
+/// a key-carrying type (spec/04 section 8.4.1), and carry the rule onto every
+/// variable left inside `ty`, which the parameter's instantiation now
+/// includes. `whole` is the complete type the parameter is bound to, for the
+/// diagnostic.
+///
+/// Function types carry no key, so a function-typed instantiation passes and
+/// its parameter and result variables stay unmarked: the function's own
+/// scheme, not this parameter, decides whether a key may reach them.
+fn ensure_key_free(
+    origin: &GenericParameter,
+    ty: &Type,
+    whole: &Type,
+    subst: &Subst,
+) -> Result<(), TypeError> {
+    let refuse = || TypeError {
+        kind: TypeErrorKind::KeyInstantiation {
+            value_binding: origin.generic.clone().filter(|_| origin.value),
+        },
+        message: format!(
+            "{} cannot be instantiated at the key-carrying type `{}`: a function's type \
+             parameter never stands for a key or a value that carries one, because a generic \
+             body may use its value more than once (spec/04-type-system.md [04-LIN-10])",
+            origin.describe(),
+            subst.apply(whole)
+        ),
+    };
+    match ty {
+        Type::Var(var) => match subst.apply(&Type::Var(*var)) {
+            Type::Var(root) => {
+                subst.forbid_key_instantiation(root, origin.clone());
+                Ok(())
+            }
+            resolved => ensure_key_free(origin, &resolved, whole, subst),
+        },
+        Type::Prim(Prim::Key) => Err(refuse()),
+        Type::Prim(_) | Type::Unit | Type::Fn(_, _) | Type::Error(_) => Ok(()),
+        Type::Tensor(_, TensorPrec::Concrete(prim)) => {
+            ensure_key_free(origin, &Type::Prim(*prim), whole, subst)
+        }
+        Type::Tensor(_, TensorPrec::Var(var)) => {
+            ensure_key_free(origin, &Type::Var(*var), whole, subst)
+        }
+        Type::Ref(inner) => ensure_key_free(origin, inner, whole, subst),
+        Type::Tuple(elements) => elements
+            .iter()
+            .try_for_each(|element| ensure_key_free(origin, element, whole, subst)),
+        Type::Adt(name, arguments) => {
+            if subst.key_carrying_adts.contains(name) {
+                return Err(refuse());
+            }
+            arguments
+                .iter()
+                .try_for_each(|argument| ensure_key_free(origin, argument, whole, subst))
+        }
+        Type::KindedAdt(name, arguments) => {
+            if subst.key_carrying_adts.contains(name) {
+                return Err(refuse());
+            }
+            arguments.iter().try_for_each(|argument| match argument {
+                NominalArg::Type(argument) => ensure_key_free(origin, argument, whole, subst),
+                NominalArg::Dimension(_) => Ok(()),
+            })
+        }
+    }
+}
+
 /// Check one instantiation of a bounded type variable ([04-DTYPE-2]).
 ///
 /// An unresolved variable and a witnessed error both pass: the first is
 /// narrowed instead by [`Subst::narrow_tvar_restriction`], and the second
 /// already owns a diagnostic.
-fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
+fn ensure_tvar_restriction(
+    restriction: TypeVarRestriction,
+    ty: &Type,
+    subst: &Subst,
+) -> Result<(), TypeError> {
     let family = restriction.family_name();
     let gloss = restriction.membership_gloss();
     match ty {
+        Type::Ref(inner) if restriction.is_value_constraint() => {
+            ensure_tvar_restriction(restriction, inner, subst)
+        }
+        Type::Tensor(_, precision) if restriction.is_value_constraint() => {
+            let family = restriction.precision_family();
+            match precision {
+                TensorPrec::Concrete(prim) => {
+                    ensure_tvar_restriction(family, &Type::Prim(*prim), subst)
+                }
+                TensorPrec::Var(var) => {
+                    let resolved = subst.apply(&Type::Var(*var));
+                    if let Type::Var(var) = resolved {
+                        subst.narrow_tvar_restriction(var, family)
+                    } else {
+                        ensure_tvar_restriction(family, &resolved, subst)
+                    }
+                }
+            }
+        }
         Type::Var(_) | Type::Error(_) => Ok(()),
         Type::Prim(prim) if restriction.admits(*prim) => Ok(()),
         Type::Prim(prim) => Err(TypeError {
-            kind: TypeErrorKind::PrecisionMismatch,
+            kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
                 "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{}`",
                 prim.name()
             ),
         }),
         other => Err(TypeError {
-            kind: TypeErrorKind::PrecisionMismatch,
+            kind: TypeErrorKind::DtypeFamilyMismatch,
             message: format!(
                 "type variable bounded by dtype family `{family}` ({gloss}) cannot be instantiated at `{other}`"
             ),
@@ -1547,6 +3670,55 @@ fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result
 }
 
 fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
+    if let Dim::Name(name) = dim
+        && (subst.protected_dimensions.contains(&v) || subst.dimension_label(v).is_some())
+    {
+        subst.set_dimension_label(v, name.clone());
+        // chelis#1801 note: this arm records an authored name as a LABEL and
+        // binds nothing, so it is the one place a name reaches a class
+        // without `constraint_dim` being able to report it, and it carries no
+        // pin of its own. Not because the operand must come from the
+        // definition under check: `def named(w: tensor[batch, f32])` keeps
+        // `batch` as a `Dim::Name` in its published scheme, so instantiating
+        // it anywhere contributes one. The route is the arm's OWN
+        // precondition. It fires only when `v` is protected, which the pin
+        // reads directly, or already labelled, and a label is never created
+        // from nothing: the three production writers of `set_dimension_label`
+        // are `copy_dimension_label`, which propagates an existing label to a
+        // fresh instantiation id, and the two below, which each require an
+        // existing label or protection. Every label therefore traces back to
+        // a declared binder.
+        //
+        // What that argument does NOT establish is that the labelled variable
+        // is itself protected, because the instantiation copy lands a label on
+        // a fresh unprotected id. chelis#1925's round 3 measured the gap
+        // instead of arguing it: instrumenting all 196 `.ch` files in the
+        // corpus plus 32 probes found no unpinned class reaching this arm, and
+        // the labelled-then-named state, constructed four ways, binds through
+        // the fall-through below so `constraint_dim` reports it.
+        // `a_name_arm_class_is_pinned_by_protection_not_by_a_second_ledger`
+        // locks what the arm leaves behind and says where the pin goes if a
+        // program ever reaches that state.
+        return Ok(());
+    }
+    if let Dim::Var(other) = dim
+        && *other != v
+    {
+        if subst.protected_dimensions.contains(&v) && !subst.protected_dimensions.contains(other) {
+            return bind_dvar(*other, &Dim::Var(v), subst);
+        }
+        if let Some(label) = subst
+            .dimension_label(v)
+            .or_else(|| subst.dimension_label(*other))
+        {
+            if subst.mapped_axis(v).is_none() {
+                subst.set_dimension_label(v, label.clone());
+            }
+            if subst.mapped_axis(*other).is_none() {
+                subst.set_dimension_label(*other, label);
+            }
+        }
+    }
     if let Dim::Var(v2) = dim
         && *v2 == v
     {
@@ -1557,6 +3729,14 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             kind: TypeErrorKind::OccursCheck,
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
+    }
+    // chelis#1801: the merge below leaves the union with one root, so the
+    // class properties have to arrive there first. A name or literal the
+    // class is BOUND to needs no flag: `constraint_dim` reports the binding,
+    // and the absorbing site skips on that answer before it asks anything
+    // else.
+    if let Dim::Var(other) = dim {
+        subst.merge_dvar_class_flags(v, *other);
     }
     let target_level = subst.level_of_dvar(v);
     subst.lower_dim_to(dim, target_level);
@@ -1583,6 +3763,142 @@ fn resolve_shape(dims: &[Dim], subst: &Subst) -> Vec<Dim> {
         }
     }
     out
+}
+
+fn mapped_axis_dim(dim: &Dim, subst: &Subst) -> Option<(usize, DimVar)> {
+    let Dim::Var(var) = dim else {
+        return None;
+    };
+    subst.mapped_axis(*var).map(|axis| (axis, *var))
+}
+
+fn mapped_axis_error(axis: usize, unbatched_rank: usize) -> TypeError {
+    TypeError {
+        kind: TypeErrorKind::DimensionMismatch,
+        message: format!("vmap axis {axis} is out of bounds for rank {unbatched_rank} tensor"),
+    }
+}
+
+fn canonicalize_ground_mapped_axes(dims: &[Dim], subst: &Subst) -> Result<Vec<Dim>, TypeError> {
+    let mut base = Vec::with_capacity(dims.len());
+    let mut mapped = Vec::new();
+    for dim in dims {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            mapped.push(marker);
+        } else {
+            base.push(dim.clone());
+        }
+    }
+    mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    for pair in mapped.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!("two vmap batch dimensions claim mapped axis {}", pair[0].0),
+            });
+        }
+    }
+    let unbatched_rank = base.len();
+    for (axis, var) in mapped {
+        if axis > base.len() {
+            return Err(mapped_axis_error(axis, unbatched_rank));
+        }
+        base.insert(axis, Dim::Var(var));
+    }
+    Ok(base)
+}
+
+fn split_row_mapped_axes(
+    row: &[Dim],
+    ground: &[Dim],
+    subst: &mut Subst,
+) -> Result<(Vec<Dim>, Vec<Dim>), TypeError> {
+    let mut clean_row = Vec::with_capacity(row.len());
+    let mut mapped = Vec::new();
+    for dim in row {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            mapped.push(marker);
+        } else {
+            clean_row.push(dim.clone());
+        }
+    }
+    mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    for pair in mapped.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!("two vmap batch dimensions claim mapped axis {}", pair[0].0),
+            });
+        }
+    }
+
+    let mut clean_ground = ground.to_vec();
+    let unbatched_rank = ground.len().saturating_sub(mapped.len());
+    for (axis, var) in &mapped {
+        let Some(batch) = ground.get(*axis) else {
+            return Err(mapped_axis_error(*axis, unbatched_rank));
+        };
+        // Bind the compiler-owned batch identity in this direction so an
+        // authored operand identity remains the class root and retains its
+        // user-facing label.
+        unify_dim(&Dim::Var(*var), batch, subst)?;
+    }
+    for (axis, _) in mapped.into_iter().rev() {
+        clean_ground.remove(axis);
+    }
+    Ok((clean_row, clean_ground))
+}
+
+fn unify_row_against_ground_with_mapped_axes(
+    row: &[Dim],
+    ground: &[Dim],
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let ground = canonicalize_ground_mapped_axes(ground, subst)?;
+    let (row, ground) = split_row_mapped_axes(row, &ground, subst)?;
+    unify_row_against_ground(&row, &ground, subst)
+}
+
+fn unify_rows_with_mapped_axes(
+    left: &[Dim],
+    right: &[Dim],
+    subst: &mut Subst,
+) -> Result<(), TypeError> {
+    let mut left_row = Vec::with_capacity(left.len());
+    let mut right_row = Vec::with_capacity(right.len());
+    let mut left_mapped = Vec::new();
+    let mut right_mapped = Vec::new();
+    for dim in left {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            left_mapped.push(marker);
+        } else {
+            left_row.push(dim.clone());
+        }
+    }
+    for dim in right {
+        if let Some(marker) = mapped_axis_dim(dim, subst) {
+            right_mapped.push(marker);
+        } else {
+            right_row.push(dim.clone());
+        }
+    }
+    left_mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    right_mapped.sort_by_key(|(axis, var)| (*axis, var.0));
+    if left_mapped
+        .iter()
+        .map(|(axis, _)| axis)
+        .ne(right_mapped.iter().map(|(axis, _)| axis))
+    {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: "cannot unify vectorized rank-spread rows with different mapped axes"
+                .to_string(),
+        });
+    }
+    for ((_, left_var), (_, right_var)) in left_mapped.iter().zip(&right_mapped) {
+        unify_dim(&Dim::Var(*left_var), &Dim::Var(*right_var), subst)?;
+    }
+    unify_row_against_row(&left_row, &right_row, subst)
 }
 
 /// chelis#339 named-axis expand: a signature whose result rows *introduce* an
@@ -1642,7 +3958,7 @@ fn check_introduced_name_rank_collision(
     }
     for rv in ret_rvars {
         for bound in resolve_shape(&[Dim::Rank(rv)], subst) {
-            if let Dim::Name(n) = &bound
+            if let Dim::Name(n) = &subst.semantic_dim(&bound)
                 && introduced.contains(&n)
             {
                 return Err(TypeError {
@@ -1699,7 +4015,8 @@ fn unify_row_against_ground(
                     // The spread is immediately followed by a named anchor:
                     // locate that name in the remaining ground to fix the split.
                     Some(0) => {
-                        let name = match &rest[0] {
+                        let semantic_anchor = subst.semantic_dim(&rest[0]);
+                        let name = match &semantic_anchor {
                             Dim::Name(s) => s,
                             other => {
                                 return Err(TypeError {
@@ -1712,7 +4029,7 @@ fn unify_row_against_ground(
                             }
                         };
                         let hits: Vec<usize> = (gi..n)
-                            .filter(|&j| matches!(&ground[j], Dim::Name(g) if g == name))
+                            .filter(|&j| matches!(subst.semantic_dim(&ground[j]), Dim::Name(g) if &g == name))
                             .collect();
                         match hits.as_slice() {
                             [split] => {
@@ -1886,6 +4203,404 @@ fn occurs_in_dim(v: DimVar, dim: &Dim, subst: &Subst) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_label_aliases_keep_identity_after_compression_and_literal_binding() {
+        let mut subst = Subst::new();
+        let root = DimVar(0);
+        subst.protect_dimensions([root]);
+        unify_dim(&Dim::Var(root), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        for i in 1..5 {
+            unify_dim(&Dim::Var(DimVar(i)), &Dim::Var(DimVar(i - 1)), &mut subst).unwrap();
+        }
+        assert_eq!(subst.apply_dim(&Dim::Var(DimVar(4))), Dim::Var(root));
+        unify_dim(&Dim::Var(root), &Dim::Lit(2), &mut subst).unwrap();
+        assert_eq!(subst.constraint_dim(&Dim::Var(DimVar(4))), Dim::Lit(2));
+        assert_eq!(
+            subst.semantic_dim(&Dim::Var(DimVar(4))),
+            Dim::Name("fixed".into())
+        );
+        assert!(matches!(subst.apply_dim(&Dim::Var(DimVar(4))), Dim::Var(_)));
+        assert!(unify_dim(&Dim::Var(DimVar(4)), &Dim::Lit(3), &mut subst).is_err());
+    }
+
+    #[test]
+    fn protected_labels_do_not_leak_from_a_failed_type_unification() {
+        let mut subst = Subst::new();
+        subst.protect_dimensions([DimVar(0)]);
+        let tensor = |dim| Type::Tensor(vec![dim], TensorPrec::Concrete(Prim::F32));
+        let left = Type::Tuple(vec![tensor(Dim::Var(DimVar(0))), Type::Unit]);
+        let right = Type::Tuple(vec![tensor(Dim::Name("fixed".into())), tensor(Dim::Lit(1))]);
+        assert!(unify(&left, &right, &mut subst).is_err());
+        assert_eq!(subst.dimension_label(DimVar(0)), None);
+        unify_dim(&Dim::Var(DimVar(0)), &Dim::Name("other".into()), &mut subst).unwrap();
+    }
+
+    #[test]
+    fn dimension_label_undo_replays_repeated_copy_writes_and_skips_noops() {
+        let mut subst = Subst::new();
+        subst.set_dimension_label(DimVar(0), "fixed".into());
+        subst.set_dimension_label(DimVar(1), "other".into());
+        subst.set_dimension_label(DimVar(2), "before".into());
+        subst.label_unification_depth = 1;
+        // Exercise the &Subst writer used by scheme instantiation, including
+        // repeated writes to both a pre-existing entry and a fresh entry.
+        for target in [DimVar(2), DimVar(3)] {
+            subst.copy_dimension_label(DimVar(0), target);
+            subst.copy_dimension_label(DimVar(0), target);
+            subst.copy_dimension_label(DimVar(1), target);
+        }
+        assert_eq!(subst.dimension_label_undo.lock().unwrap().len(), 4);
+        subst.label_unification_depth = 0;
+        subst.finish_dimension_label_writes(true);
+        assert_eq!(subst.dimension_label(DimVar(2)).as_deref(), Some("before"));
+        assert_eq!(subst.dimension_label(DimVar(3)), None);
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn protected_label_nested_alias_failure_preserves_prior_success() {
+        let mut subst = Subst::new();
+        subst.protect_dimensions([DimVar(0), DimVar(1)]);
+        let tensor = |d| Type::Tensor(vec![d], TensorPrec::Concrete(Prim::F32));
+        unify(
+            &tensor(Dim::Var(DimVar(0))),
+            &tensor(Dim::Name("fixed".into())),
+            &mut subst,
+        )
+        .unwrap();
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+        let lhs = Type::Tuple(vec![
+            Type::Tuple(vec![
+                tensor(Dim::Var(DimVar(1))),
+                tensor(Dim::Var(DimVar(2))),
+            ]),
+            Type::Unit,
+        ]);
+        let rhs = Type::Tuple(vec![
+            Type::Tuple(vec![
+                tensor(Dim::Name("other".into())),
+                tensor(Dim::Var(DimVar(1))),
+            ]),
+            tensor(Dim::Lit(1)),
+        ]);
+        assert!(unify(&lhs, &rhs, &mut subst).is_err());
+        assert_eq!(subst.dimension_label(DimVar(0)).as_deref(), Some("fixed"));
+        assert_eq!(subst.dimension_label(DimVar(1)), None);
+        assert_eq!(subst.dimension_label(DimVar(2)), None);
+        assert_eq!(subst.label_unification_depth, 0);
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+        // Existing dim aliases are outside this narrow label rollback; retry
+        // must nevertheless be free to install a different semantic label.
+        unify(
+            &tensor(Dim::Var(DimVar(1))),
+            &tensor(Dim::Name("retry".into())),
+            &mut subst,
+        )
+        .unwrap();
+        assert_eq!(subst.dimension_label(DimVar(2)).as_deref(), Some("retry"));
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dimension_label_journal_is_absent_from_clones_and_wire() {
+        let mut subst = Subst::new();
+        subst.label_unification_depth = 1;
+        subst.set_dimension_label(DimVar(0), "fixed".into());
+        assert_eq!(subst.dimension_label_undo.lock().unwrap().len(), 1);
+        let cloned = subst.clone();
+        assert_eq!(cloned.label_unification_depth, 0);
+        assert!(cloned.dimension_label_undo.lock().unwrap().is_empty());
+        let bytes = bincode::serialize(&subst).unwrap();
+        assert_eq!(bytes, bincode::serialize(&cloned).unwrap());
+        let decoded: Subst = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.label_unification_depth, 0);
+        assert!(decoded.dimension_label_undo.lock().unwrap().is_empty());
+        subst.label_unification_depth = 0;
+        subst.finish_dimension_label_writes(true);
+        assert_eq!(subst.dimension_label(DimVar(0)), None);
+        for independent in [&cloned, &decoded] {
+            assert_eq!(
+                independent.dimension_label(DimVar(0)).as_deref(),
+                Some("fixed")
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_axis_annotation_survives_clone_wire_and_compose() {
+        let mapped = DimVar(0);
+        let mut subst = Subst::new();
+        subst.mark_mapped_axis(mapped, 3);
+        assert_eq!(subst.mapped_axis(mapped), Some(3));
+        assert_eq!(
+            subst.dimension_label(mapped),
+            None,
+            "compiler transform metadata must never become a user dimension name"
+        );
+
+        let cloned = subst.clone();
+        let decoded: Subst = bincode::deserialize(&bincode::serialize(&subst).unwrap()).unwrap();
+        for carrier in [&cloned, &decoded] {
+            assert_eq!(carrier.mapped_axis(mapped), Some(3));
+        }
+
+        let mut receiver = Subst::new();
+        receiver.compose(&subst).unwrap();
+        assert_eq!(receiver.mapped_axis(mapped), Some(3));
+        subst.compose(&Subst::new()).unwrap();
+        assert_eq!(subst.mapped_axis(mapped), Some(3));
+    }
+
+    #[test]
+    fn mapped_axis_is_removed_before_every_anchored_spread_split() {
+        for axis in 0..=4 {
+            let batch = DimVar(0);
+            let pre = RankVar(0);
+            let post = RankVar(1);
+            let mut subst = Subst::new();
+            subst.mark_mapped_axis(batch, axis);
+            let row = Type::Tensor(
+                vec![
+                    Dim::Rank(pre),
+                    Dim::Name("seq".into()),
+                    Dim::Rank(post),
+                    Dim::Var(batch),
+                ],
+                TensorPrec::Concrete(Prim::F32),
+            );
+            let authored = vec![
+                Dim::Name("left".into()),
+                Dim::Name("inner".into()),
+                Dim::Name("seq".into()),
+                Dim::Name("right".into()),
+            ];
+            let mut ground = authored.clone();
+            ground.insert(axis, Dim::Name("batch".into()));
+            let ground = Type::Tensor(ground, TensorPrec::Concrete(Prim::F32));
+
+            unify(&row, &ground, &mut subst)
+                .unwrap_or_else(|error| panic!("axis {axis}: {error:?}"));
+            assert_eq!(
+                subst.resolve_rvar(pre),
+                authored[..2],
+                "axis {axis}: mapped batch leaked into the leading spread"
+            );
+            assert_eq!(
+                subst.resolve_rvar(post),
+                authored[3..],
+                "axis {axis}: mapped batch leaked into the trailing spread"
+            );
+            assert_eq!(
+                subst.resolve_dvar(batch),
+                Dim::Name("batch".into()),
+                "axis {axis}: mapped batch lost its actual extent identity"
+            );
+        }
+    }
+
+    #[test]
+    fn protected_labels_are_freshened_but_captured_ids_are_not() {
+        let mut vg = VarGen::default();
+        let quantified = vg.fresh_dvar();
+        let capture = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let alias_chain = vg.fresh_dvar();
+        let mut subst = Subst::new();
+        subst.protect_dimensions([quantified, capture]);
+        for v in [quantified, capture] {
+            unify_dim(&Dim::Var(v), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        }
+        // Exercise both alias operand orders; binding prefers the protected
+        // representative, including after path compression.
+        unify_dim(&Dim::Var(capture), &Dim::Var(alias), &mut subst).unwrap();
+        unify_dim(&Dim::Var(alias_chain), &Dim::Var(alias), &mut subst).unwrap();
+        assert!(subst.is_protected_dimension(alias_chain));
+        assert_eq!(
+            subst.constraint_dim(&Dim::Var(alias_chain)),
+            Dim::Var(capture)
+        );
+        let scheme = Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![quantified],
+            rvars: vec![],
+            body: Type::Tensor(
+                vec![Dim::Var(quantified), Dim::Var(alias_chain)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        };
+        let mut env = crate::env::Env::new();
+        env.bind("f".into(), scheme);
+        let a = env.instantiate(env.lookup("f").unwrap(), &mut vg, &subst);
+        let b = env.instantiate(env.lookup("f").unwrap(), &mut vg, &subst);
+        let (Type::Tensor(a, _), Type::Tensor(b, _)) = (a, b) else {
+            panic!("tensor")
+        };
+        assert_ne!(a[0], b[0]);
+        for dims in [&a, &b] {
+            let Dim::Var(fresh) = dims[0] else {
+                panic!("fresh dimension")
+            };
+            assert!(!subst.is_protected_dimension(fresh));
+            let Dim::Var(captured) = dims[1] else {
+                panic!("captured dimension")
+            };
+            assert!(subst.is_protected_dimension(captured));
+            assert_eq!(subst.constraint_dim(&dims[1]), Dim::Var(capture));
+        }
+        unify_dim(&a[0], &Dim::Lit(2), &mut subst).unwrap();
+        unify_dim(&b[0], &Dim::Lit(3), &mut subst).unwrap();
+        assert_eq!(subst.semantic_dim(&a[0]), Dim::Name("fixed".into()));
+        assert_eq!(subst.semantic_dim(&b[0]), Dim::Name("fixed".into()));
+    }
+
+    #[test]
+    fn protected_dimension_queries_agree_after_live_and_decoded_resume() {
+        let mut vg = VarGen::default();
+        let historical = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let mut published = Subst::new();
+        published.protect_dimensions([historical]);
+        unify_dim(
+            &Dim::Var(historical),
+            &Dim::Name("fixed".into()),
+            &mut published,
+        )
+        .unwrap();
+        unify_dim(&Dim::Var(alias), &Dim::Var(historical), &mut published).unwrap();
+        let mut live = published.clone();
+        let mut decoded: Subst =
+            bincode::deserialize(&bincode::serialize(&published).unwrap()).unwrap();
+        // Raw mid-check serialization intentionally omits active protection.
+        // The public context entry point resumes BOTH paths before inference.
+        assert!(live.is_protected_dimension(alias));
+        assert!(!decoded.is_protected_dimension(alias));
+        for subst in [&mut live, &mut decoded] {
+            subst.resume_for_new_check(&vg);
+            assert!(!subst.is_protected_dimension(alias));
+            assert_eq!(
+                subst.semantic_dim(&Dim::Var(alias)),
+                Dim::Name("fixed".into())
+            );
+        }
+        let current = vg.fresh_dvar();
+        let current_alias = vg.fresh_dvar();
+        for subst in [&mut live, &mut decoded] {
+            subst.protect_dimensions([current]);
+            unify_dim(&Dim::Var(current), &Dim::Name("fixed".into()), subst).unwrap();
+            unify_dim(&Dim::Var(current), &Dim::Var(current_alias), subst).unwrap();
+            assert!(subst.is_protected_dimension(current_alias));
+            assert!(!subst.is_protected_dimension(alias));
+        }
+        assert_eq!(
+            bincode::serialize(&live).unwrap(),
+            bincode::serialize(&decoded).unwrap()
+        );
+    }
+
+    #[test]
+    fn protected_label_pending_result_stays_monomorphic_in_both_generalizers() {
+        let mut vg = VarGen::default();
+        let mut subst = Subst::new();
+        let level = subst.enter_level(&vg);
+        let operand = vg.fresh_tvar();
+        let dim = vg.fresh_dvar();
+        let rank = vg.fresh_rvar();
+        let precision = vg.fresh_tvar();
+        subst.protect_dimensions([dim]);
+        unify_dim(&Dim::Var(dim), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        let result = Type::Tensor(
+            vec![Dim::Var(dim), Dim::Rank(rank)],
+            TensorPrec::Var(precision),
+        );
+        subst.record_deferred_tensor_operand(
+            operand,
+            DeferredOperandGate::Copy {
+                result: Box::new(result.clone()),
+            },
+        );
+        subst.leave_level(level, &vg);
+        // generalize-sweep-oracle executes and compares the reference algorithm.
+        let scheme = crate::env::Env::new().generalize(&result, &subst);
+        assert!(scheme.dvars.is_empty());
+        assert!(scheme.rvars.is_empty());
+        assert!(scheme.tvars.is_empty());
+    }
+
+    #[test]
+    fn protected_label_shared_type_refinement_rolls_back_with_failed_retry() {
+        let mut subst = Subst::new();
+        let tv = TypeVar(0);
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        let tensor = |d| Type::Tensor(vec![d], TensorPrec::Concrete(Prim::F32));
+        unify(
+            &Type::Var(tv),
+            &tensor(Dim::Name("fixed".into())),
+            &mut subst,
+        )
+        .unwrap();
+        let lhs = Type::Tuple(vec![Type::Var(tv), Type::Unit]);
+        let rhs = Type::Tuple(vec![tensor(Dim::Var(dv)), tensor(Dim::Lit(1))]);
+        assert!(unify(&lhs, &rhs, &mut subst).is_err());
+        assert_eq!(
+            subst.apply(&Type::Var(tv)),
+            tensor(Dim::Name("fixed".into()))
+        );
+        assert_eq!(subst.dimension_label(dv), None);
+        unify_dim(&Dim::Var(dv), &Dim::Name("other".into()), &mut subst).unwrap();
+    }
+
+    #[test]
+    fn protected_label_is_a_rank_anchor_without_erasing_its_identity() {
+        let mut subst = Subst::new();
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        unify_dim(&Dim::Var(dv), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        let row = [Dim::Rank(RankVar(0)), Dim::Name("fixed".into())];
+        let ground = [Dim::Name("batch".into()), Dim::Var(dv)];
+        unify_row_against_ground(&row, &ground, &mut subst).unwrap();
+        assert_eq!(subst.constraint_dim(&Dim::Var(dv)), Dim::Var(dv));
+        assert_eq!(
+            subst.resolve_rvar(RankVar(0)),
+            vec![Dim::Name("batch".into())]
+        );
+    }
+
+    #[test]
+    fn protected_label_in_rank_spread_cannot_collide_with_inserted_name() {
+        let mut subst = Subst::new();
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        unify_dim(&Dim::Var(dv), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        subst.insert_rank(RankVar(0), vec![Dim::Var(dv)]);
+        let tensor = |dims| Type::Tensor(dims, TensorPrec::Concrete(Prim::F32));
+        let args = [tensor(vec![Dim::Rank(RankVar(0))])];
+        let ret = tensor(vec![Dim::Rank(RankVar(0)), Dim::Name("fixed".into())]);
+        assert!(check_introduced_name_rank_collision(&args, &ret, &subst).is_err());
+    }
+
+    #[test]
+    fn protected_label_compose_rejects_conflicting_alias_classes_transactionally() {
+        let mut left = Subst::new();
+        let mut right = Subst::new();
+        left.protect_dimensions([DimVar(0)]);
+        right.protect_dimensions([DimVar(1)]);
+        unify_dim(&Dim::Var(DimVar(0)), &Dim::Name("fixed".into()), &mut left).unwrap();
+        unify_dim(&Dim::Var(DimVar(1)), &Dim::Name("other".into()), &mut right).unwrap();
+        right.insert_dim(DimVar(0), Dim::Var(DimVar(1)));
+        assert!(left.compose(&right).is_err());
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(DimVar(0))),
+            Dim::Var(DimVar(0))
+        );
+        assert_eq!(
+            left.semantic_dim(&Dim::Var(DimVar(0))),
+            Dim::Name("fixed".into())
+        );
+    }
 
     fn var_gen() -> VarGen {
         VarGen::default()
@@ -2113,7 +4828,7 @@ mod tests {
     /// tests that exercise narrowing through a program detect
     /// `merge_tvar_restrictions` returning `Err`, so a reversion that merely
     /// widens survives them; this one asserts the surviving family IS `Float`
-    /// and that `int32` is consequently rejected.
+    /// and that `i32` is consequently rejected.
     ///
     /// It does not isolate either mechanism, and measurement rather than
     /// reasoning says so. `bind_tvar`'s `merged_restriction` and
@@ -2158,12 +4873,12 @@ mod tests {
                  Numeric (numeric_first = {numeric_first})"
             );
 
-            // And the narrowing is observable: int32 is in Numeric but not in
+            // And the narrowing is observable: i32 is in Numeric but not in
             // Float, so it must now be rejected.
             let error = unify(&Type::Var(surviving), &Type::Prim(Prim::Int32), &mut subst)
                 .expect_err("a narrowed variable must reject a non-float dtype");
             assert!(
-                matches!(error.kind, TypeErrorKind::PrecisionMismatch)
+                matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch)
                     && error.message.contains("Float"),
                 "expected a Float PrecisionMismatch, got: {}",
                 error.message
@@ -2203,8 +4918,73 @@ mod tests {
             &mut call_subst,
         )
         .expect_err("instantiated alias must retain its active-float domain");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
+    }
+
+    #[test]
+    fn operation_value_restrictions_survive_serialization_and_late_tensor_binding() {
+        for restriction in [
+            TypeVarRestriction::FloatValue,
+            TypeVarRestriction::IntValue,
+            TypeVarRestriction::NumericValue,
+        ] {
+            let mut vg = var_gen();
+            let value = vg.fresh_tvar();
+            let scheme = Scheme {
+                tvars: vec![value],
+                tvar_restrictions: vec![(value, restriction)],
+                dvars: vec![],
+                rvars: vec![],
+                constraints: vec![],
+                body: Type::Var(value),
+            };
+            let scheme: Scheme =
+                bincode::deserialize(&bincode::serialize(&scheme).unwrap()).unwrap();
+            assert_eq!(scheme.tvar_restrictions, vec![(value, restriction)]);
+            for (dtype, accepts) in [
+                (Prim::F32, restriction != TypeVarRestriction::IntValue),
+                (Prim::Int32, restriction != TypeVarRestriction::FloatValue),
+                (Prim::Bool, false),
+            ] {
+                let mut subst = Subst::new();
+                let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
+                let precision = vg.fresh_tvar();
+                unify(
+                    &instantiated,
+                    &Type::Tensor(vec![], TensorPrec::Var(precision)),
+                    &mut subst,
+                )
+                .unwrap();
+                assert_eq!(
+                    unify(&Type::Var(precision), &Type::Prim(dtype), &mut subst).is_ok(),
+                    accepts,
+                    "{restriction:?} at {dtype:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authored_dtype_bounds_still_reject_whole_tensor_types() {
+        let mut vg = var_gen();
+        for restriction in [
+            TypeVarRestriction::ActiveFloat,
+            TypeVarRestriction::ActiveInt,
+            TypeVarRestriction::ActiveNumeric,
+        ] {
+            let mut subst = Subst::new();
+            let value = vg.fresh_tvar();
+            subst.narrow_tvar_restriction(value, restriction).unwrap();
+            assert!(
+                unify(
+                    &Type::Var(value),
+                    &Type::Tensor(vec![], TensorPrec::Concrete(Prim::F32)),
+                    &mut subst
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2298,7 +5078,7 @@ mod tests {
         let error = receiver
             .compose(&other)
             .expect_err("the merged substitution must enforce the receiver restriction");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
         assert_eq!(receiver.types_snapshot(), receiver_types_before);
         assert_eq!(
@@ -2321,7 +5101,7 @@ mod tests {
         let error = receiver
             .compose(&other)
             .expect_err("the merged substitution must enforce the right restriction");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
         assert_eq!(receiver.types_snapshot(), receiver_types_before);
         assert_eq!(
@@ -2342,9 +5122,9 @@ mod tests {
             .insert_type(restricted, Type::Prim(Prim::Int32))
             .expect_err("a forbidden direct insertion must fail explicitly");
 
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert!(error.message.contains("active float dtype"));
-        assert!(error.message.contains("int32"));
+        assert!(error.message.contains("i32"));
         assert_eq!(subst.apply(&Type::Var(restricted)), Type::Var(restricted));
         assert_eq!(
             subst.tvar_restriction(restricted),
@@ -2413,7 +5193,7 @@ mod tests {
         let error = subst
             .insert_type(declared_precision, Type::Prim(Prim::Bool))
             .expect_err("the projected declaration must reject a non-float");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
     }
 
     #[test]
@@ -2435,7 +5215,7 @@ mod tests {
         let error = subst
             .project_tvar_restrictions(&inferred, &declared)
             .expect_err("a forbidden declared slot rejects the whole projection");
-        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(matches!(error.kind, TypeErrorKind::DtypeFamilyMismatch));
         assert_eq!(subst.tvar_restrictions_snapshot(), restrictions_before);
         assert_eq!(subst.tvar_restriction(first_target), None);
     }
@@ -2595,7 +5375,7 @@ mod tests {
         let t2 = Type::Tensor(vec![Dim::Name("a".into())], tprec(Prim::Int32));
         assert!(
             unify(&t1, &t2, &mut s).is_err(),
-            "f32 vs int32 precision must fail even with a rank var"
+            "f32 vs i32 precision must fail even with a rank var"
         );
     }
 
@@ -2871,13 +5651,16 @@ mod tests {
         // resolve `Var(v) → Wildcard` and the permissive Wildcard arm
         // would silently accept any concrete value.
         //
-        // The current implementation satisfies this because the
-        // `(Wildcard, _) | (_, Wildcard) => Ok(())` arm matches before
-        // the `(Var(_), _) => bind_dvar(...)` arm (Rust `match` is
-        // first-match-wins) and returns `Ok(())` without touching the
-        // substitution. This test pins the property in case a future
-        // refactor reorders the arms or adds an explicit
-        // `(Wildcard, Var)` arm that does bind.
+        // The current implementation satisfies this because both
+        // wildcard arms match before the `(Var(_), _) => bind_dvar(...)`
+        // arm (Rust `match` is first-match-wins) and neither binds the
+        // dim var. chelis#1801 added the explicit
+        // `(Wildcard, Var(v)) | (Var(v), Wildcard)` arm ahead of the
+        // permissive one; it RECORDS the meeting in
+        // `wildcard_touched_classes` and still leaves `v` free, which is
+        // what lets the concrete binding below still happen. This test
+        // pins the property in case a future refactor reorders the arms
+        // or makes either wildcard arm bind.
         let mut g = var_gen();
         let dv = g.fresh_dvar();
         let mut s = Subst::new();
@@ -2906,6 +5689,410 @@ mod tests {
         // the sig promised is now enforced end to end.
         let err = unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
+    }
+
+    #[test]
+    fn a_wildcard_meeting_a_class_is_recorded_and_survives_clone_and_compose() {
+        // chelis#1801. `unify_dim`'s wildcard arm leaves the variable free
+        // by design, so without this record nothing downstream can tell a
+        // variable that met a runtime extent from one that met nothing. The
+        // application rule reads the record to decide what an unconstrained
+        // instantiation variable denotes (spec/04-type-system.md section
+        // 3.2).
+        //
+        // Evidentiary status: a mechanism test for a mechanism this change
+        // introduces. There is no base-sha reading to compare against; what
+        // it proves is that each of the three carriers keeps the evidence.
+        let mut g = var_gen();
+        let touched = g.fresh_dvar();
+        let untouched = g.fresh_dvar();
+        let mut s = Subst::new();
+
+        assert!(!s.dvar_class_met_wildcard(touched));
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(touched), &mut s).is_ok());
+        assert!(
+            s.dvar_class_met_wildcard(touched),
+            "the Wildcard-then-Var direction records the meeting",
+        );
+        assert!(
+            !s.dvar_class_met_wildcard(untouched),
+            "and records nothing about a variable that met nothing",
+        );
+
+        // The symmetric direction records too.
+        let mut symmetric = Subst::new();
+        assert!(unify_dim(&Dim::Var(touched), &Dim::Wildcard, &mut symmetric).is_ok());
+        assert!(symmetric.dvar_class_met_wildcard(touched));
+
+        // A wildcard against a wildcard names no variable, so it records
+        // nothing: the permissive arm is still what handles it.
+        let mut both_wild = Subst::new();
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Wildcard, &mut both_wild).is_ok());
+        assert!(!both_wild.dvar_class_met_wildcard(touched));
+
+        // `Subst::clone` carries the record. A clone that dropped it would
+        // silently un-record the meeting for every checking context that
+        // clones the substitution into its own state.
+        let cloned = s.clone();
+        assert!(cloned.dvar_class_met_wildcard(touched));
+        assert!(!cloned.dvar_class_met_wildcard(untouched));
+
+        // `Subst::compose` carries it in BOTH directions: from the receiver
+        // (through the trial clone) and from the argument (through
+        // `absorb_wildcard_touches`). The argument direction is the one a
+        // compose can lose, because `compose_bindings` merges only the
+        // binding maps.
+        let mut receiver = Subst::new();
+        receiver.compose(&s).expect("composing a rename is valid");
+        assert!(
+            receiver.dvar_class_met_wildcard(touched),
+            "compose adopts the argument's wildcard-meeting evidence",
+        );
+
+        let mut carrier = s.clone();
+        carrier
+            .compose(&Subst::new())
+            .expect("composing an empty substitution is valid");
+        assert!(
+            carrier.dvar_class_met_wildcard(touched),
+            "and keeps its own",
+        );
+    }
+
+    #[test]
+    fn a_recorded_meeting_does_not_by_itself_mean_the_class_is_still_free() {
+        // chelis#1801 negative parity for the test above, and the reason the
+        // absorbing site asks the substitution a second question. The record
+        // is monotone: it says the meeting happened, never that the variable
+        // is still unconstrained. A literal in a later argument of the same
+        // call binds the variable, and `constraint_dim` is what reports that.
+        //
+        // `apply_dim` cannot: it deliberately answers `Var(v)` for a
+        // LABELLED variable that resolved to a concrete dim, so an absorber
+        // written against it would overwrite the literal with `*`.
+        //
+        // Evidentiary status: a disposition lock on which predicate answers
+        // "is this variable still unbound", not a regression test. The state
+        // is built here directly. Swapping the absorbing site to `apply_dim`
+        // was measured and changed no source-level reading, so no source
+        // fixture pins this; what it pins is the contract the absorbing site
+        // relies on.
+        let mut g = var_gen();
+        let dv = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.set_dimension_label(dv, "k".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(dv), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).is_ok());
+
+        assert!(
+            s.dvar_class_met_wildcard(dv),
+            "the meeting is still recorded after the literal binding",
+        );
+        assert_eq!(
+            s.constraint_dim(&Dim::Var(dv)),
+            Dim::Lit(3),
+            "but the variable is bound, so it denotes the literal",
+        );
+        assert_eq!(
+            s.apply_dim(&Dim::Var(dv)),
+            Dim::Var(dv),
+            "`apply_dim` keeps the label's identity and cannot answer this",
+        );
+    }
+
+    #[test]
+    fn a_class_keeps_its_wildcard_evidence_when_a_later_binding_re_roots_it() {
+        // chelis#1925 round 2, at the unit level. `unify_dim` resolves both
+        // operands through `constraint_dim` before it matches, so the meeting
+        // is recorded on whatever rooted the class at that moment, and a
+        // later `bind_dvar` in the same call re-roots the class over it. Ask
+        // the variable, or two ends of the class, and a meeting recorded on a
+        // third member is invisible; the class that carried it is then
+        // generalized instead of denoting the extent it met.
+        //
+        // Evidentiary status: regression test for the merge this change
+        // introduces. Making `merge_dvar_class_flags` a no-op fails the loop
+        // below, which is how it was checked.
+        let mut g = var_gen();
+        let (first, middle, last) = (g.fresh_dvar(), g.fresh_dvar(), g.fresh_dvar());
+        let mut s = Subst::new();
+
+        // The meeting happens while `middle` still roots its own class.
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(middle), &mut s).is_ok());
+        assert!(s.dvar_class_met_wildcard(middle));
+
+        // Two more members join and the class re-roots away from `middle`.
+        assert!(unify_dim(&Dim::Var(middle), &Dim::Var(last), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(first), &Dim::Var(middle), &mut s).is_ok());
+
+        for member in [first, middle, last] {
+            assert!(
+                s.dvar_class_met_wildcard(member),
+                "every member answers for the class, whichever member roots it",
+            );
+        }
+    }
+
+    #[test]
+    fn an_authored_binder_pins_its_class_even_after_it_meets_a_runtime_extent() {
+        // Negative parity for the row above, and the exclusion
+        // `spec/04-type-system.md` section 3.2 states: a class an argument
+        // binds to a named dimension is a CLAIM on the runtime extent,
+        // checked by a section 4.7 guard, so absorbing it to `*` would erase
+        // the claim. The meeting is still recorded; the pin is what stops the
+        // absorption, and both answers have to survive the same merge.
+        //
+        // Evidentiary status: disposition lock on the two predicates the
+        // absorbing site asks. The source-level twin is
+        // `an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class`.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let minted = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([binder]);
+        s.set_dimension_label(binder, "seq".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(minted), &Dim::Var(binder), &mut s).is_ok());
+
+        assert!(
+            s.dvar_class_met_wildcard(minted),
+            "the class still carries the meeting after the binder joins it",
+        );
+        assert!(
+            s.dvar_class_is_binder_pinned(minted),
+            "and the authored binder pins the class against absorption",
+        );
+        assert!(
+            s.dvar_class_is_binder_pinned(binder),
+            "asked from either member",
+        );
+    }
+
+    #[test]
+    fn a_name_arm_class_is_pinned_by_protection_not_by_a_second_ledger() {
+        // chelis#1925 round 2, the first of the paths that pin or union
+        // WITHOUT a plain `insert_dim`. `bind_dvar`'s name arm records the
+        // name as a LABEL and returns, so `constraint_dim` still answers the
+        // variable and the absorbing site has no binding to skip on.
+        //
+        // The arm needs no ledger of its own. It fires only when the variable
+        // is protected or already labelled, and a `Dim::Name` operand arises
+        // only from the definition under check, whose binders are protected.
+        // The protected half is therefore the whole reachable half, and it
+        // pins through the rigidity ledger.
+        //
+        // Evidentiary status, per assertion. The protected rows are a
+        // disposition lock on the pin the absorbing site relies on. The last
+        // row records a state no source program reaches, measured rather than
+        // assumed: `def named(w: tensor[batch, f32])` passed as a polymorphic
+        // argument reads `() -> tensor[batch, f32]` and executes identically
+        // with and without a pin on this arm, because the reachable spelling
+        // BINDS the name rather than labelling it, and `constraint_dim`
+        // reports that. If a change ever makes the labelled-but-unprotected
+        // state reachable, this row is where the missing pin goes.
+        let mut g = var_gen();
+        let protected = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([protected]);
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(protected), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(protected), &Dim::Name("seq".to_string()), &mut s).is_ok());
+
+        assert_eq!(
+            s.constraint_dim(&Dim::Var(protected)),
+            Dim::Var(protected),
+            "the name arm binds nothing, so the class still reads as unbound",
+        );
+        assert!(s.dvar_class_met_wildcard(protected));
+        assert!(
+            s.dvar_class_is_binder_pinned(protected),
+            "and the declared binder pins it against absorption",
+        );
+
+        let labelled = g.fresh_dvar();
+        let mut unreached = Subst::new();
+        unreached.set_dimension_label(labelled, "seq".to_string());
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(labelled), &mut unreached).is_ok());
+        assert!(
+            unify_dim(
+                &Dim::Var(labelled),
+                &Dim::Name("seq".to_string()),
+                &mut unreached
+            )
+            .is_ok()
+        );
+        assert!(
+            !unreached.dvar_class_is_binder_pinned(labelled),
+            "a labelled but UNPROTECTED variable is not pinned by this arm, and no \
+             source program reaches that state today",
+        );
+    }
+
+    #[test]
+    fn a_swapped_binding_direction_still_lands_the_evidence_on_the_merged_root() {
+        // The second such path. When `v` is protected and the other operand
+        // is not, `bind_dvar` recurses with the operands SWAPPED, so the
+        // union direction flips. The merge therefore hooks the actual insert
+        // rather than the entry; hooking the entry would key the evidence to
+        // a variable that does not root the merged class.
+        //
+        // Evidentiary status: disposition lock on where the hook sits.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let minted = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([binder]);
+
+        // The meeting is recorded on the unprotected member, and the
+        // protected one is unified FIRST, which is the direction that
+        // recurses.
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(binder), &Dim::Var(minted), &mut s).is_ok());
+
+        assert!(
+            s.dvar_class_met_wildcard(binder),
+            "the meeting survives the swap, asked from the protected member",
+        );
+        assert!(s.dvar_class_met_wildcard(minted), "and from the other one");
+        assert!(
+            s.dvar_class_is_binder_pinned(minted),
+            "and the protected member pins the class it was merged into",
+        );
+    }
+
+    #[test]
+    fn a_literal_claim_against_a_named_dimension_leaves_no_absorbable_class() {
+        // The third such path. `unify_dim`'s `(Name, Lit)` arm returns `Ok`
+        // binding nothing (issue #219 Option A), so a literal claim against a
+        // named dimension produces no union event either. It needs no hook:
+        // by the time that arm matches, `constraint_dim` has already resolved
+        // both operands to non-variables, so no class is left for an
+        // application to absorb, and the class the name came from was pinned
+        // when the declared binder reached it.
+        //
+        // Evidentiary status: a reachability receipt for that claim rather
+        // than a lock on a repair. It is the row to re-run if the arm ever
+        // starts binding.
+        let mut g = var_gen();
+        let named = g.fresh_dvar();
+        let bystander = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([named]);
+        s.set_dimension_label(named, "batch".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(named), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(named), &Dim::Name("batch".to_string()), &mut s).is_ok());
+        assert!(
+            s.dvar_class_is_binder_pinned(named),
+            "the declared binder pinned the class before any literal arrived",
+        );
+
+        // The literal claim now meets the NAME, not the variable.
+        assert!(unify_dim(&Dim::Name("batch".to_string()), &Dim::Lit(3), &mut s).is_ok());
+        assert!(
+            s.dvar_class_is_binder_pinned(named),
+            "and the literal arm leaves the pin where it was",
+        );
+        assert!(
+            !s.dvar_class_met_wildcard(bystander),
+            "recording nothing about any other class",
+        );
+    }
+
+    #[test]
+    fn compose_rekeys_class_evidence_onto_the_root_the_composed_graph_gives_it() {
+        // The fourth such path, and the one a set union gets wrong.
+        // `compose_bindings` merges only the binding maps, so a compose can
+        // JOIN two classes that were separate in either operand. Copying the
+        // flags across leaves the meeting keyed to a variable that no longer
+        // roots the joined class, and the query on the new root answers
+        // false.
+        //
+        // Evidentiary status: regression test for the re-canonicalization.
+        // Replacing `recanonicalize_class_flags` with the set union it
+        // supersedes fails the second-to-last assertion, which is how it was
+        // checked.
+        let mut g = var_gen();
+        let met = g.fresh_dvar();
+        let joiner = g.fresh_dvar();
+
+        // The left operand knows the meeting and roots that class at `met`.
+        let mut left = Subst::new();
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(met), &mut left).is_ok());
+        assert!(left.dvar_class_met_wildcard(met));
+
+        // The right operand knows an aliasing the left never saw, and it
+        // re-roots that class onto `joiner`.
+        let mut right = Subst::new();
+        assert!(unify_dim(&Dim::Var(met), &Dim::Var(joiner), &mut right).is_ok());
+        assert!(!right.dvar_class_met_wildcard(joiner));
+
+        left.compose(&right).expect("composing an alias is valid");
+
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(met)),
+            Dim::Var(joiner),
+            "the compose joined the classes and `joiner` roots the result",
+        );
+        assert!(
+            left.dvar_class_met_wildcard(joiner),
+            "so the meeting has to be readable from the new root",
+        );
+        assert!(
+            left.dvar_class_met_wildcard(met),
+            "and from the member it was recorded on",
+        );
+    }
+
+    #[test]
+    fn compose_keeps_the_binder_pin_when_it_demotes_the_protected_member() {
+        // The pin's half of the path above, and the reason
+        // `binder_pinned_classes` exists at all rather than the query reading
+        // the rigidity ledger alone.
+        //
+        // `bind_dvar` never demotes a protected member: when the protected
+        // side would bind to an unprotected one it recurses with the operands
+        // swapped, so protection stays at the root and the merge needs no
+        // help. `compose_bindings` has no such rule, so a compose CAN put an
+        // unprotected variable at the root of a class a declared binder pins,
+        // and the set is what keeps that answer reachable.
+        //
+        // Evidentiary status: regression test for the protection fold in
+        // `recanonicalize_class_flags`. Removing that fold fails the last
+        // assertion, which is how it was checked. Removing the same fold from
+        // `merge_dvar_class_flags` fails nothing today, for the swap reason
+        // above; it is kept because a class this compose pinned can still be
+        // merged afterwards, and the set is then the only carrier.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let joiner = g.fresh_dvar();
+
+        let mut left = Subst::new();
+        left.protect_dimensions([binder]);
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(binder), &mut left).is_ok());
+        assert!(
+            left.dvar_class_is_binder_pinned(binder),
+            "the declared binder pins its own class before the compose",
+        );
+
+        // The other operand re-roots that class onto an unprotected variable,
+        // which is the demotion `bind_dvar` would have refused.
+        let mut right = Subst::new();
+        assert!(unify_dim(&Dim::Var(binder), &Dim::Var(joiner), &mut right).is_ok());
+
+        left.compose(&right).expect("composing an alias is valid");
+
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(binder)),
+            Dim::Var(joiner),
+            "the compose demoted the protected member out of the root",
+        );
+        assert!(
+            left.dvar_class_is_binder_pinned(joiner),
+            "and the pin has to survive it, or the absorption would erase the claim",
+        );
     }
 
     #[test]

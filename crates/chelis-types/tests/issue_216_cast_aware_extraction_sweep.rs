@@ -6,7 +6,7 @@
 //! (shrink, stride, pad, permute, expand). The R3 sibling-sweep audit
 //! identified 13 additional infer-time int-literal extractors in
 //! `crates/chelis-types/src/infer.rs` that share the same cast-bypass
-//! antipattern in different domains: reductions, conv2d helpers,
+//! antipattern in different domains: reductions, conv helpers,
 //! gather/scatter, shape lookup, split, softmax, vmap.
 //!
 //! Each test in this file pins one cast-wrapped form that MUST trip the
@@ -36,7 +36,7 @@ use chelis_types::check_ir_program;
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -50,14 +50,14 @@ fn surf_to_deep(source: &str) -> Vec<Expr> {
 // axes index from the end."
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `sum(x, cast(99, int32))` on a rank-2 tensor is rejected at
+/// EXPECT: `sum(x, cast(99, i32))` on a rank-2 tensor is rejected at
 /// infer with an out-of-bounds axis diagnostic. Without the cast-aware
 /// fix the cast wrapper hides the literal and the bounds check is
 /// silently skipped.
 #[test]
 fn issue216_sum_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, int32))
+def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -75,13 +75,13 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(99, int32))
     );
 }
 
-/// EXPECT: `max_reduce(x, cast(7, int32))` on rank-2 tensor is rejected
+/// EXPECT: `max_reduce(x, cast(7, i32))` on rank-2 tensor is rejected
 /// (mirror of sum). Locks the swap is reduction-family-wide, not just
 /// `sum`-specific.
 #[test]
 fn issue216_max_reduce_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, int32))
+def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -99,14 +99,14 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = max_reduce(x, cast(7, int32))
     );
 }
 
-/// Positive control: `sum(x, cast(-1, int32))` on rank-2 still
+/// Positive control: `sum(x, cast(-1, i32))` on rank-2 still
 /// type-checks cleanly. The cast-aware extractor must peel the wrapper
 /// so the negative axis normalizes (rank + axis = 1) instead of being
 /// dropped as "non-literal."
 #[test]
 fn issue216_sum_cast_wrapped_negative_axis_typechecks() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, int32))
+def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -127,12 +127,12 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, f32] = sum(x, cast(-1, int32))
 // Spec: softmax is shape-preserving but the axis must be in [0, rank).
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `softmax(x, cast(5, int32))` on rank-2 is rejected at infer
+/// EXPECT: `softmax(x, cast(5, i32))` on rank-2 is rejected at infer
 /// with an out-of-bounds axis diagnostic.
 #[test]
 fn issue216_softmax_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, int32))
+def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -154,17 +154,17 @@ def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(x, cast(5, int32))
 // Shape axis lookup (`shape(tensor, axis)`).
 // Site: infer.rs shape arm (~line 8238).
 // Spec: axis is a non-negative literal index. Issue #206 already locks
-// the `shape(x, cast(N, int32))` idiomatic form for runtime-dim reshape.
+// the `shape(x, cast(N, i32))` idiomatic form for runtime-dim reshape.
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `shape(x, cast(-1, int32))` is rejected at infer with the
+/// EXPECT: `shape(x, cast(-1, i32))` is rejected at infer with the
 /// `shape requires non-negative axis` diagnostic. Without the cast-aware
 /// fix the negative axis slips past the positivity check (cast peels at
 /// the extractor, then `axis < 0` fires).
 #[test]
 fn issue216_shape_cast_wrapped_negative_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(-1, int32))
+def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(-1, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -182,12 +182,12 @@ def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(-1, int32))
     );
 }
 
-/// EXPECT: `shape(x, cast(9, int32))` on rank-2 is rejected with the
+/// EXPECT: `shape(x, cast(9, i32))` on rank-2 is rejected with the
 /// out-of-bounds axis diagnostic.
 #[test]
 fn issue216_shape_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(9, int32))
+def f(x: tensor[2, 4, f32]) -> i32 = shape(x, cast(9, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -211,12 +211,12 @@ def f(x: tensor[2, 4, f32]) -> int32 = shape(x, cast(9, int32))
 // Spec: split axis is bounded by tensor rank; negative axes wrap.
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `split(x, cast(9, int32), sizes)` is rejected with the
+/// EXPECT: `split(x, cast(9, i32), sizes)` is rejected with the
 /// `split axis ... out of bounds` diagnostic.
 #[test]
 fn issue216_split_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, int32), [cast(2, int32), cast(2, int32)])
+def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, i32), [cast(2, i32), cast(2, i32)])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -241,12 +241,12 @@ def f(x: tensor[2, 4, f32]) -> List[tensor[2, 4, f32]] = split(x, cast(9, int32)
 // Spec: axis must be in [-rank, rank).
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `gather(table, ids, cast(9, int32))` on rank-2 table is
+/// EXPECT: `gather(table, ids, cast(9, i32))` on rank-2 table is
 /// rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_gather_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(table: tensor[10, 4, f32], ids: tensor[3, int64]) -> tensor[3, 4, f32] = gather(table, ids, cast(9, int32))
+def f(table: tensor[10, 4, f32], ids: tensor[3, i64]) -> tensor[3, 4, f32] = gather(table, ids, cast(9, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -271,12 +271,12 @@ def f(table: tensor[10, 4, f32], ids: tensor[3, int64]) -> tensor[3, 4, f32] = g
 // Spec: each axis must be in [-rank, rank).
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `trace(m, cast(9, int32), cast(1, int32))` on a rank-2
+/// EXPECT: `trace(m, cast(9, i32), cast(1, i32))` on a rank-2
 /// matrix is rejected with an OOB axis diagnostic.
 #[test]
 fn issue216_trace_cast_wrapped_oob_axis_is_error() {
     let src = r#"
-def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, int32), cast(1, int32))
+def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, i32), cast(1, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -294,13 +294,13 @@ def f(m: tensor[4, 4, f32]) -> tensor[f32] = trace(m, cast(9, int32), cast(1, in
     );
 }
 
-/// EXPECT: `diagonal(m, cast(0, int32), cast(9, int32))` rejects on the
+/// EXPECT: `diagonal(m, cast(0, i32), cast(9, i32))` rejects on the
 /// second-axis side (locks `resolve_axis_pair_member` swap for both
 /// member calls, not just one).
 #[test]
 fn issue216_diagonal_cast_wrapped_oob_axis2_is_error() {
     let src = r#"
-def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, int32), cast(9, int32))
+def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, i32), cast(9, i32))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -319,39 +319,39 @@ def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, int32), cast
 }
 
 // ---------------------------------------------------------------------------
-// conv2d stride/padding (validator + derived-output-type + concrete-spatial).
-// Sites: `extract_typed_scalar_literal` (~line 5874), used by the conv2d
-// validator (~line 5413); `derive_conv2d_output_type` (~lines 5720, 5721);
-// `compute_concrete_conv2d_spatial` (~lines 11722, 11723).
+// conv stride/padding (validator + derived-output-type + concrete-spatial).
+// Sites: `extract_typed_scalar_literal` (~line 5874), used by the conv
+// validator (~line 5413); `derive_conv_output_type` (~lines 5720, 5721);
+// `compute_concrete_conv_spatial` (~lines 11722, 11723).
 // Spec: spec/05 §471-483 -- stride must be positive; padding non-negative.
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `conv2d(&x, &k, cast(0, int32), 0)` is rejected with the
-/// conv2d positive-stride diagnostic. Without the cast-aware fix the
-/// cast(0, int32) was rejected with the WRONG diagnostic
+/// EXPECT: `conv(&x, &k, [cast(0i64, i64), cast(0i64, i64)], [(0i64, 0i64), (0i64, 0i64)])` is rejected with the
+/// conv positive-stride diagnostic. Without the cast-aware fix the
+/// cast(0, i32) was rejected with the WRONG diagnostic
 /// (`requires a literal integer stride`) because `extract_int_literal`
 /// returned None on the cast wrapper. After the swap to
 /// `extract_int_for_dim`, the cast peels to 0 and the actual
 /// `positive stride` check fires.
 #[test]
-fn issue216_conv2d_cast_wrapped_zero_stride_is_error() {
+fn issue216_conv_cast_wrapped_zero_stride_is_error() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, cast(0, int32), 0)
+  conv(&x, &k, [cast(0i64, i64), cast(0i64, i64)], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check to fail on cast-wrapped zero conv2d stride");
+    let rep = res.expect_err("expected check to fail on cast-wrapped zero conv stride");
     // Lock the post-fix diagnostic: "requires a positive stride, got 0".
     // Pre-fix the message was "requires a literal integer stride", which
     // is the wrong layer (the cast was a literal int, just wrapped).
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.to_lowercase().contains("conv2d")
+            .any(|e| e.message.to_lowercase().contains("conv")
                 && e.message.contains("positive")
                 && e.message.contains("stride")),
-        "expected the conv2d positive-stride diagnostic (post-fix), got {:?}",
+        "expected the conv positive-stride diagnostic (post-fix), got {:?}",
         rep.errors
             .iter()
             .map(|e| e.message.clone())
@@ -359,25 +359,25 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// EXPECT: `conv2d(&x, &k, 1, cast(-1, int32))` is rejected with the
-/// conv2d non-negative-padding diagnostic. Same pre-vs-post-fix story
+/// EXPECT: `conv(&x, &k, [1i64, 1i64], [(cast(-1i64, i64), cast(-1i64, i64)), (cast(-1i64, i64), cast(-1i64, i64))])` is rejected with the
+/// conv non-negative-padding diagnostic. Same pre-vs-post-fix story
 /// as the zero-stride case.
 #[test]
-fn issue216_conv2d_cast_wrapped_negative_padding_is_error() {
+fn issue216_conv_cast_wrapped_negative_padding_is_error() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, 1, cast(-1, int32))
+  conv(&x, &k, [1i64, 1i64], [(cast(-1i64, i64), cast(-1i64, i64)), (cast(-1i64, i64), cast(-1i64, i64))])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check to fail on cast-wrapped negative conv2d padding");
+    let rep = res.expect_err("expected check to fail on cast-wrapped negative conv padding");
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.to_lowercase().contains("conv2d")
+            .any(|e| e.message.to_lowercase().contains("conv")
                 && e.message.contains("non-negative")
                 && e.message.contains("padding")),
-        "expected the conv2d non-negative-padding diagnostic (post-fix), got {:?}",
+        "expected the conv non-negative-padding diagnostic (post-fix), got {:?}",
         rep.errors
             .iter()
             .map(|e| e.message.clone())
@@ -385,14 +385,14 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// Positive control: `conv2d(&x, &k, cast(1, int32), cast(0, int32))`
+/// Positive control: `conv(&x, &k, [cast(1i64, i64), cast(1i64, i64)], [(cast(0i64, i64), cast(0i64, i64)), (cast(0i64, i64), cast(0i64, i64))])`
 /// type-checks cleanly. Locks the swap is the cast-peeling itself, not
 /// a regression on well-formed cast-wrapped stride/padding.
 #[test]
-fn issue216_conv2d_cast_wrapped_wellformed_typechecks() {
+fn issue216_conv_cast_wrapped_wellformed_typechecks() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, cast(1, int32), cast(0, int32))
+  conv(&x, &k, [cast(1i64, i64), cast(1i64, i64)], [(cast(0i64, i64), cast(0i64, i64)), (cast(0i64, i64), cast(0i64, i64))])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -401,7 +401,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for cast-wrapped well-formed conv2d, got {} error(s)",
+            "expected clean check for cast-wrapped well-formed conv, got {} error(s)",
             rep.errors.len()
         );
     }
@@ -430,7 +430,7 @@ fn issue216_vmap_cast_wrapped_negative_axis_is_error() {
                     (t-tensor {} (d-name {} features) (t-prim {} f32))))
              (def {} f (fn {} (params {} x) (var {} x)))
              (def {} g (vmap {} (var {} f)
-                 (cast {} (lit {type: (t-prim {} int32)} -1) (t-prim {} int32))))";
+                 (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
     let deep = parse_deep(src).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative vmap axis");
@@ -455,7 +455,7 @@ fn issue216_vmap_cast_wrapped_negative_axis_is_error() {
 // compile-time literal int indices during desugar, so cast-wrapping is
 // unreachable from Surf. The swap is defense-in-depth for Deep-direct
 // paths (e.g. macro output, decompiled IR, custom tooling). After the
-// swap, a Deep `(cast {} (lit ... -1) (t-prim {} int32))` in the wrt
+// swap, a Deep `(cast {} (lit ... -1) (t-prim {} i32))` in the wrt
 // slot peels to -1 and trips the `must be non-negative` check.
 // ---------------------------------------------------------------------------
 
@@ -478,7 +478,7 @@ fn issue216_grad_wrt_cast_wrapped_negative_index_is_error() {
                     (lit {type: (t-prim {} f32)} 1.0)))
              (def {} dw
                 (grad {} (var {} loss)
-                    (cast {} (lit {type: (t-prim {} int32)} -1) (t-prim {} int32))))";
+                    (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32))))";
     let deep = parse_deep(src).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative grad wrt index");
@@ -512,8 +512,8 @@ fn issue216_grad_wrt_cast_wrapped_negative_tuple_index_is_error() {
              (def {} grads
                 (grad {} (var {} loss)
                     (tuple {}
-                        (lit {type: (t-prim {} int32)} 0)
-                        (cast {} (lit {type: (t-prim {} int32)} -1) (t-prim {} int32)))))";
+                        (lit {type: (t-prim {} i32)} 0)
+                        (cast {} (lit {type: (t-prim {} i32)} -1) (t-prim {} i32)))))";
     let deep = parse_deep(src).expect("deep parse");
     let res = check_ir_program(&deep);
     let rep = res.expect_err("expected check to fail on cast-wrapped negative tuple wrt index");

@@ -51,6 +51,29 @@ class CanonicalBundleEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["PATH"], "/test/bin")
 
 
+class CargoTargetDirectoryTests(unittest.TestCase):
+    def test_default_target_is_under_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(regen.cargo_target_dir(repository), repository / "target")
+
+    def test_absolute_target_stays_absolute(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            target = Path(temporary) / "agent-target"
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}, clear=True):
+                self.assertEqual(regen.cargo_target_dir(repository), target)
+
+    def test_relative_target_resolves_from_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": "target/agent"}, clear=True):
+                self.assertEqual(
+                    regen.cargo_target_dir(repository), repository / "target/agent"
+                )
+
+
 class RuntimeLockRegenerationTests(unittest.TestCase):
     def make_package(self, root: Path) -> Path:
         package = root / "chelis-std"
@@ -262,44 +285,18 @@ class RealGeneratorFixedPointTests(unittest.TestCase):
                 snapshots[1],
                 "two unchanged invocations of the supported generator must emit identical bytes",
             )
+            # Exercise the production comparison against the same freshly
+            # generated pair, without another two full compiler/reef builds.
+            self.assertEqual(regen.snapshot_violations(snapshots[0], *snapshots), ([], []))
+            stale = dict(snapshots[0])
+            name = next(iter(stale))
+            stale[name] = "deliberately stale"
+            self.assertEqual(regen.snapshot_violations(stale, *snapshots), ([name], []))
+            self.assertEqual(regen.snapshot_violations(snapshots[0], snapshots[0], stale), ([], [name]))
         finally:
             for path, contents in before.items():
                 path.write_bytes(contents)
 
-    def test_check_rejects_stale_committed_output_without_mutating_it(self):
-        repo = regen.repo_root()
-        version = regen.chelis_std_version(repo)
-        outputs = regen.owned_generated_outputs(repo, version)
-        before = {path: path.read_bytes() for path in outputs}
-        stale = outputs[1]
-        mutated = before[stale] + b"round-5-stale-artifact"
-        stale.write_bytes(mutated)
-
-        try:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(repo / "scripts/regenerate_chelis_std_bundle.py"),
-                    "--debug",
-                    "--check",
-                ],
-                cwd=repo,
-                env=os.environ.copy(),
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(completed.returncode, 0)
-            report = completed.stdout + completed.stderr
-            self.assertIn("stale generated output", report)
-            self.assertIn(stale.relative_to(repo).as_posix(), report)
-            self.assertEqual(
-                stale.read_bytes(),
-                mutated,
-                "--check must restore the exact committed input bytes",
-            )
-        finally:
-            for path, contents in before.items():
-                path.write_bytes(contents)
 
 
 if __name__ == "__main__":

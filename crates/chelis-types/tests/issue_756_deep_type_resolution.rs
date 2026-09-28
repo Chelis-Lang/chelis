@@ -12,8 +12,6 @@
 //! spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.1.
 
-mod support;
-
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::types::Type;
 use chelis_types::{build_type_env_from_library, check_ir_program, check_ir_with_context};
@@ -36,7 +34,8 @@ fn assert_accepts(source: &str, label: &str) {
 fn assert_surf_accepts(source: &str, label: &str) {
     let declarations = chelis_surf::parser::parse_str(source)
         .unwrap_or_else(|error| panic!("{label}: Surf fixture must parse: {error}"));
-    let exprs = chelis_surf::desugar::desugar_program(&declarations);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let fitness = chelis_types::check_program(&exprs);
     assert!(
         fitness.errors.is_empty(),
@@ -105,7 +104,7 @@ fn valid_primitives_self_and_forward_nominals_are_accepted() {
         "(deftype {} Scalars ()
            (variant {} Scalars
              (field {} a (t-prim {} f32))
-             (field {} b (t-prim {} int64))
+             (field {} b (t-prim {} i64))
              (field {} c (t-prim {} bool))))
          (deftype {} Node ()
            (variant {} Node (field {} next (t-adt {} Node))))
@@ -180,23 +179,23 @@ fn documented_zero_parameter_symbolic_dimension_alias_is_accepted() {
 }
 
 #[test]
-fn implicit_defsig_binders_and_legal_metadata_hole_are_accepted() {
+fn explicit_defsig_binders_and_legal_metadata_hole_are_accepted() {
     assert_accepts(
-        "(defsig {} polymorphic
+        "(defsig {} polymorphic (n r p)
            (t-fn {}
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))))
          (def {} polymorphic
            (fn {} (params {} value) (var {} value)))
          (def {} inferred (lit {type: (t-var {} _)} 1))",
-        "implicit signature binders and metadata inference hole",
+        "explicit signature binders and metadata inference hole",
     );
 }
 
 #[test]
 fn enclosing_defsig_binder_is_legal_in_nested_ascription_metadata() {
     assert_accepts(
-        "(defsig {} keep
+        "(defsig {} keep (n)
            (t-fn {}
              (t-tensor {} (d-var {} n) (t-prim {} f32))
              (t-tensor {} (d-var {} n) (t-prim {} f32))))
@@ -212,7 +211,7 @@ fn enclosing_defsig_binder_is_legal_in_nested_ascription_metadata() {
 #[test]
 fn annotation_pass_preserves_nested_defsig_binder_result_type() {
     let exprs = parse(
-        "(defsig {} keep
+        "(defsig {} keep (n)
            (t-fn {}
              (t-tensor {} (d-var {} n) (t-prim {} f32))
              (t-tensor {} (d-var {} n) (t-prim {} f32))))
@@ -459,10 +458,10 @@ fn malformed_canonical_primitive_reports_once_at_every_type_consumer() {
 
 #[test]
 fn independent_rhs_and_malformed_let_ascription_each_report_once() {
-    let exprs = support::parse_unchecked_legacy(
+    let exprs = parse(
         "(def {} bad
            (let {} (bind {} value
-             (var {type: (t-prim {} f32 extra)} missing))
+             (var {type: (t-prim {} missing_dtype)} missing))
              (lit {} 0)))",
     );
     let result = check_ir_program(&exprs)
@@ -477,7 +476,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
         result
             .errors
             .iter()
-            .filter(|error| error.message.contains("missing"))
+            .filter(|error| error.message.contains("unbound variable: missing"))
             .count(),
         1,
         "the RHS root must report exactly once: {:?}",
@@ -487,7 +486,7 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
         result
             .errors
             .iter()
-            .filter(|error| error.message.contains("t-prim"))
+            .filter(|error| error.message.contains("missing_dtype"))
             .count(),
         1,
         "the malformed ascription root must report exactly once: {:?}",
@@ -497,9 +496,9 @@ fn independent_rhs_and_malformed_let_ascription_each_report_once() {
 
 #[test]
 fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
-    let exprs = support::parse_unchecked_legacy(
+    let exprs = parse(
         "(def {} duplicate (var {} missing))
-         (def {} duplicate (lit {type: (t-prim {} f32 extra)} 1.0))",
+         (def {} duplicate (lit {type: (t-prim {} missing_dtype)} 1.0))",
     );
     let result = check_ir_program(&exprs)
         .expect_err("duplicate declarations with independent roots must fail the checker");
@@ -509,7 +508,11 @@ fn prebound_failure_is_owned_by_its_exact_duplicate_name_declaration() {
         "the duplicate plus both independent roots must each report once: {:?}",
         result.errors
     );
-    for needle in ["duplicate definition", "missing", "t-prim"] {
+    for needle in [
+        "duplicate definition",
+        "unbound variable: missing",
+        "missing_dtype",
+    ] {
         assert_eq!(
             result
                 .errors

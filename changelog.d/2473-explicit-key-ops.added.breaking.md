@@ -1,0 +1,3 @@
+The `key` element dtype and the explicit key operations `key_from_seed`, `split_key`, `split_keys` and `fold_in` ([05-OP-69] through [05-OP-72], derived under [05-RNG-2]) exist in the IR, the DAG evaluator and compiled C, and `chelis build --target hip` refuses them with its typed rejection ([#2413](https://github.com/Chelis-Lang/chelis/issues/2413), step 1). `key` is an active tensor element dtype, stored as runtime dtype `key` (id 9) in a `chelis_tensor`, with no arithmetic, comparison, cast, literal or default; DLPack and NumPy refuse key tensors. A draw may take a batch of keys, one per row of its data.
+
+BREAKING: WireDag adds the four key operations and admits `key` at any rank.

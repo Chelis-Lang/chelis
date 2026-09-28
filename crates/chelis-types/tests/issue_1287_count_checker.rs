@@ -1,7 +1,7 @@
 //! First-class `count` checker contract (chelis#1287 / [05-OP-29]).
 //!
 //! Positive and negative cases are paired deliberately: `count` accepts only
-//! bool tensors, one or more compile-time int32 axes, and returns an int64
+//! bool tensors, one or more compile-time i32 axes, and returns an i64
 //! tensor with every selected axis removed.
 
 use chelis_surf::desugar::desugar_program;
@@ -11,7 +11,7 @@ use chelis_types::errors::CheckError;
 
 fn errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture parses");
-    match check_typed_program(&desugar_program(&decls)) {
+    match check_typed_program(&desugar_program(&decls).expect("Surf fixture must desugar")) {
         Ok(_) => Vec::new(),
         Err(report) => report.errors,
     }
@@ -38,31 +38,31 @@ fn assert_rejects(source: &str, needle: &str) {
 fn concrete_positional_axes_are_variadic_and_order_independent() {
     assert_clean(
         r#"
-def f(x: tensor[2, 3, 4, bool]) -> tensor[3, int64] = count(&x, 0, -1)
-def g(x: tensor[2, 3, 4, bool]) -> tensor[3, int64] = count(&x, 2, 0)
+def f(x: tensor[2, 3, 4, bool]) -> tensor[3, i64] = count(&x, 0, -1)
+def g(x: tensor[2, 3, 4, bool]) -> tensor[3, i64] = count(&x, 2, 0)
 "#,
     );
 }
 
 #[test]
 fn bool_tensor_is_required_not_numeric_tensor_or_bool_scalar() {
-    assert_clean("def good(x: tensor[4, bool]) -> tensor[int64] = count(&x, 0)");
+    assert_clean("def good(x: tensor[4, bool]) -> tensor[i64] = count(&x, 0)");
     assert_rejects(
-        "def bad(x: tensor[4, int64]) -> tensor[int64] = count(&x, 0)",
+        "def bad(x: tensor[4, i64]) -> tensor[i64] = count(&x, 0)",
         "bool tensor",
     );
     assert_rejects(
-        "def bad(x: bool) -> tensor[int64] = count(x, 0)",
+        "def bad(x: bool) -> tensor[i64] = count(x, 0)",
         "tensor input",
     );
     assert_rejects(
-        "def bad[p](x: tensor[4, p]) -> tensor[int64] = count(&x, 0)",
+        "def bad[p](x: tensor[4, p]) -> tensor[i64] = count(&x, 0)",
         "exactly a bool tensor",
     );
     assert_rejects(
         r#"
-def count_any[p](x: tensor[4, p]) -> tensor[int64] = count(&x, 0)
-def bad(x: tensor[4, int64]) -> tensor[int64] = count_any(x)
+def count_any[p](x: tensor[4, p]) -> tensor[i64] = count(&x, 0)
+def bad(x: tensor[4, i64]) -> tensor[i64] = count_any(x)
 "#,
         "exactly a bool tensor",
     );
@@ -71,23 +71,23 @@ def bad(x: tensor[4, int64]) -> tensor[int64] = count_any(x)
 #[test]
 fn axes_are_required_unique_static_int32_and_in_range() {
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, 3, int64] = count(&x)",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[2, 3, i64] = count(&x)",
         "expected 2 args, got 1",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, 0)",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 0)",
         "duplicate",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, int64] = count(&x, 1i64)",
-        "int32 axis",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[2, i64] = count(&x, 1i64)",
+        "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool], axis: int32) -> tensor[2, int64] = count(&x, axis)",
+        "def bad(x: tensor[2, 3, bool], axis: i32) -> tensor[2, i64] = count(&x, axis)",
         "compile-time constant",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[2, int64] = count(&x, 2)",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[2, i64] = count(&x, 2)",
         "out of bounds",
     );
 }
@@ -96,26 +96,26 @@ fn axes_are_required_unique_static_int32_and_in_range() {
 fn variadic_axes_enforce_int32_in_every_position() {
     assert_clean(
         r#"
-def first_cast(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, cast(0, int32), 1)
-def later_cast(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, cast(1, int32))
+def first_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, cast(0, i32), 1)
+def later_cast(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i32))
 "#,
     );
 
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0i64, 1)",
-        "int32 axis",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0i64, 1)",
+        "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, 1i64)",
-        "int32 axis",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, 1i64)",
+        "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, cast(0, int64), 1)",
-        "int32 axis",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, cast(0, i64), 1)",
+        "i32 axis",
     );
     assert_rejects(
-        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, cast(1, int64))",
-        "int32 axis",
+        "def bad(x: tensor[2, 3, bool]) -> tensor[i64] = count(&x, 0, cast(1, i64))",
+        "i32 axis",
     );
 }
 
@@ -123,42 +123,42 @@ def later_cast(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, cast(1, in
 fn rank_polymorphic_count_uses_only_named_axes() {
     assert_clean(
         r#"
-def good(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq)
+def good[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
 "#,
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, 0)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, 0)
 "#,
         "rank-spread",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq, seq)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, seq)
 "#,
         "duplicate",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, missing)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, missing)
 "#,
         "no named `missing` axis",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq)
+def bad[pre, post](x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq)
 "#,
         "ambiguous",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq, 0)
+def bad[pre, post](x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, i64] = count(&x, seq, 0)
 "#,
         "positional and named axes cannot be mixed",
     );
     assert_rejects(
         r#"
-def bad(x: &tensor[row, col, bool]) -> tensor[row, int64] = count(&x, col)
+def bad(x: &tensor[row, col, bool]) -> tensor[row, i64] = count(&x, col)
 "#,
         "concrete-rank operand requires",
     );

@@ -236,8 +236,8 @@ fn record_update_kv_key(key: &str) -> String {
 
 fn pat_lit_value(value: &str) -> String {
     format!(
-        "(defsig {{}} pl (t-fn {{}} (t-prim {{}} int32) (t-prim {{}} f32)))
-  (def {{}} pl (fn {{}} (params {{}} (n {{type: (t-prim {{}} int32)}}))
+        "(defsig {{}} pl (t-fn {{}} (t-prim {{}} i32) (t-prim {{}} f32)))
+  (def {{}} pl (fn {{}} (params {{}} (n {{type: (t-prim {{}} i32)}}))
     (match {{}} (var {{}} n)
       (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} f32)}} 1.0))
       (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"
@@ -308,11 +308,11 @@ fn vmap_with_no_axis_child_keeps_the_declared_default() {
 #[test]
 fn vmap_with_a_readable_axis_still_checks() {
     assert_accepted(
-        &vmap_axis("(lit {type: (t-prim {} int32)} 0)"),
+        &vmap_axis("(lit {type: (t-prim {} i32)} 0)"),
         "vmap with an explicit axis 0",
     );
     assert_accepted(
-        &vmap_axis("(cast {} (lit {type: (t-prim {} int64)} 0) (t-prim {} int32))"),
+        &vmap_axis("(cast {} (lit {type: (t-prim {} i64)} 0) (t-prim {} i32))"),
         "vmap with a cast-wrapped axis literal (chelis#216)",
     );
 }
@@ -322,7 +322,7 @@ fn vmap_with_a_readable_axis_still_checks() {
 /// the generic malformed message.
 #[test]
 fn vmap_axis_range_diagnostics_are_unchanged() {
-    let errors = diagnostics(&vmap_axis("(lit {type: (t-prim {} int32)} -7)"));
+    let errors = diagnostics(&vmap_axis("(lit {type: (t-prim {} i32)} -7)"));
     assert!(
         errors
             .iter()
@@ -330,7 +330,7 @@ fn vmap_axis_range_diagnostics_are_unchanged() {
         "a readable negative axis keeps its own diagnostic; got:\n  {}",
         rendered(&errors)
     );
-    let errors = diagnostics(&vmap_axis("(lit {type: (t-prim {} int32)} 2)"));
+    let errors = diagnostics(&vmap_axis("(lit {type: (t-prim {} i32)} 2)"));
     assert!(
         errors
             .iter()
@@ -641,7 +641,7 @@ fn readable_pattern_binder_names_still_bind() {
 /// `pat-lit` value slot is malformed Deep rather than a typing question.
 ///
 /// The float row is the one that shows the vacuity biting: `1.5` as a bare
-/// atom against an `int32` scrutinee is rejected under [04-PAT-1] today, and
+/// atom against an `i32` scrutinee is rejected under [04-PAT-1] today, and
 /// wrapping it in a `lit` node made the same program check clean.
 #[test]
 fn pat_lit_value_that_is_not_a_literal_atom_is_rejected() {
@@ -666,12 +666,12 @@ fn pat_lit_value_that_is_not_a_literal_atom_is_rejected() {
 fn pat_lit_with_a_literal_atom_keeps_its_existing_verdicts() {
     assert_accepted(
         &pat_lit_value("1"),
-        "pat-lit with an integer atom against an int32 scrutinee",
+        "pat-lit with an integer atom against an i32 scrutinee",
     );
     let errors = diagnostics(&pat_lit_value("1.5"));
     assert!(
         errors.iter().any(|e| e.message.contains("[04-PAT-1]")),
-        "a readable float atom against an int32 scrutinee keeps its \
+        "a readable float atom against an i32 scrutinee keeps its \
          [04-PAT-1] rejection; got:\n  {}",
         rendered(&errors)
     );
@@ -819,7 +819,7 @@ fn migrated_selector_reads_reject_through_the_seam() {
     );
 
     let errors = diagnostics(
-        "(def {} c1 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} int32)
+        "(def {} c1 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} i32)
     (var {} nonexistent_name_zzz)))",
     );
     assert_seam_message(
@@ -846,7 +846,7 @@ fn migrated_selector_reads_reject_through_the_seam() {
 fn tuple_get_detail_names_the_payload_atom_behind_a_lit_wrapper() {
     let errors = diagnostics(
         "(def {} t4 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0)
-      (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} -1)))",
+      (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} i32)} -1)))",
     );
     assert_seam_message(
         &errors,
@@ -867,7 +867,7 @@ fn tuple_get_detail_names_the_payload_atom_behind_a_lit_wrapper() {
 fn a_readable_out_of_bounds_tuple_index_is_not_malformed() {
     let errors = diagnostics(
         "(def {} t5 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0))
-      (lit {type: (t-prim {} int32)} 7)))",
+      (lit {type: (t-prim {} i32)} 7)))",
     );
     assert!(
         errors
@@ -896,15 +896,15 @@ fn already_total_selector_reads_still_accept_readable_children() {
     );
     assert_accepted(
         "(def {} t2 (tuple-get {} (tuple {} (lit {type: (t-prim {} f32)} 1.0)
-      (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} int32)} 0)))",
+      (lit {type: (t-prim {} f32)} 2.0)) (lit {type: (t-prim {} i32)} 0)))",
         "`tuple-get` with an integer index",
     );
     assert_accepted(
-        "(def {} c2 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} int32) trunc))",
+        "(def {} c2 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} i32) trunc))",
         "`cast` with the `trunc` mode selector",
     );
     assert_accepted(
-        "(def {} c3 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} int32)))",
+        "(def {} c3 (cast {} (lit {type: (t-prim {} f32)} 1.0) (t-prim {} i32)))",
         "`cast` with the mode selector omitted",
     );
 }

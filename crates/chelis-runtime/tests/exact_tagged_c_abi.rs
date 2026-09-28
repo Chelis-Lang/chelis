@@ -6,15 +6,15 @@
 //! allocation, access, or observation.
 
 use chelis_runtime::{
-    chelis_alloc, chelis_dtype, chelis_dtype_size, chelis_fill_scalar, chelis_option_is_some,
-    chelis_option_release, chelis_option_unwrap, chelis_parse_scalar, chelis_scalar,
-    chelis_scalar_from_bits, chelis_scalar_tensor, chelis_string_from_cstr, chelis_string_release,
-    chelis_tensor_begin_write, chelis_tensor_end_write, chelis_tensor_entry_borrow,
-    chelis_tensor_numel, chelis_tensor_rank, chelis_tensor_read_view, chelis_tensor_release,
-    chelis_tensor_shape, chelis_tensor_to_scalar, chelis_value, chelis_value_box_scalar,
-    chelis_value_unbox_scalar, CHELIS_DTYPE_BF16, CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16,
-    CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16, CHELIS_DTYPE_I32, CHELIS_DTYPE_I64,
-    CHELIS_DTYPE_I8, CHELIS_VALUE_SCALAR,
+    chelis_alloc, chelis_dtype, chelis_dtype_size, chelis_fill_scalar, chelis_key,
+    chelis_key_from_seed, chelis_option_is_some, chelis_option_release, chelis_option_unwrap,
+    chelis_parse_scalar, chelis_scalar, chelis_scalar_from_bits, chelis_scalar_tensor,
+    chelis_string_from_cstr, chelis_string_release, chelis_tensor_begin_write,
+    chelis_tensor_end_write, chelis_tensor_entry_borrow, chelis_tensor_numel, chelis_tensor_rank,
+    chelis_tensor_read_view, chelis_tensor_release, chelis_tensor_shape, chelis_tensor_to_scalar,
+    chelis_value, chelis_value_box_scalar, chelis_value_unbox_scalar, CHELIS_DTYPE_BF16,
+    CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F16, CHELIS_DTYPE_F32, CHELIS_DTYPE_F64, CHELIS_DTYPE_I16,
+    CHELIS_DTYPE_I32, CHELIS_DTYPE_I64, CHELIS_DTYPE_I8, CHELIS_VALUE_SCALAR,
 };
 use std::env;
 use std::ffi::CString;
@@ -144,6 +144,28 @@ fn every_active_dtype_round_trips_exact_stored_bits() {
             chelis_tensor_release(tensor);
         }
     }
+}
+
+/// [05-OP-69]: `chelis_key_from_seed` returns the seed's two's-complement
+/// bits with no mixing, for every `int64_t` including the extremes.
+#[test]
+fn key_from_seed_carries_the_seed_bits_unmixed() {
+    let cases = [
+        (0_i64, 0_u64),
+        (7, 7),
+        (-1, 0xffff_ffff_ffff_ffff),
+        (-3, 0xffff_ffff_ffff_fffd),
+        (i64::MAX, 0x7fff_ffff_ffff_ffff),
+        (i64::MIN, 0x8000_0000_0000_0000),
+    ];
+    for (seed, bits) in cases {
+        assert_eq!(
+            chelis_key_from_seed(seed),
+            chelis_key { bits },
+            "seed {seed}"
+        );
+    }
+    assert_eq!(std::mem::size_of::<chelis_key>(), 8);
 }
 
 #[test]
@@ -441,16 +463,16 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     // product overflow
     (
         "shape-overflow",
-        "Overflow: chelis_tensor_entry_borrow extent product exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow extent product exceeds i64",
     ),
     // byte overflow
     (
         "byte-overflow",
-        "Overflow: chelis_tensor_entry_borrow byte size exceeds int64",
+        "Overflow: chelis_tensor_entry_borrow byte size exceeds i64",
     ),
     (
         "alloc-byte-overflow",
-        "Overflow: chelis_alloc byte size exceeds int64",
+        "Overflow: chelis_alloc byte size exceeds i64",
     ),
     // declared capacity and base pointer
     (
@@ -463,7 +485,7 @@ const CAPACITY_CONTROL_DIAGNOSTICS: &[(&str, &str)] = &[
     ),
     (
         "view-alignment",
-        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for int64",
+        "Domain: chelis_tensor_entry_borrow data pointer is not aligned for i64",
     ),
 ];
 

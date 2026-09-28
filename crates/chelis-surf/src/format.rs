@@ -89,7 +89,7 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
         }
         error => FormatError::Lex(error),
     })?;
-    let decls =
+    let mut decls =
         parser::parse_legacy_v018_source_tokens(source, &tokens).map_err(|error| match &error {
             ParseError::Expected { found, offset, .. }
                 if matches!(found.as_str(), "Do" | "Quote" | "Unquote" | "Splice") =>
@@ -101,10 +101,293 @@ pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
             }
             _ => FormatError::Parse(error),
         })?;
+    migrate_v018_names(&mut decls);
     if let Some(offset) = first_ambiguous_comment_offset(&decls, &comments) {
         return Err(FormatError::AmbiguousComment { offset });
     }
     Ok(format_decls_with_comments(&decls, &comments))
+}
+
+/// A lexically shadowed `drop` is an ordinary local value, not the builtin
+/// ([04-LIN] spec/04 section 8.6 lets a parameter or block binding shadow a
+/// builtin name), so the list-slice rename must not touch a call to it. The
+/// walker carries the shadow depth rather than a name set because `drop` is
+/// the only name it decides about.
+#[derive(Default, Clone, Copy)]
+struct DropShadow(usize);
+
+impl DropShadow {
+    fn is_shadowed(self) -> bool {
+        self.0 > 0
+    }
+
+    fn entering(self, names: impl IntoIterator<Item = bool>) -> Self {
+        Self(self.0 + names.into_iter().filter(|shadows| *shadows).count())
+    }
+}
+
+/// Apply every v0.18 source rename: the integer dtype spellings, and the
+/// list slice `drop(xs, n)` -> `skip(xs, n)`. The list rename is arity-driven
+/// rather than textual, because the one-argument `drop(value)` is the
+/// unrelated linearity consume of [05-OP-67] and must not be rewritten.
+fn migrate_v018_names(decls: &mut [Decl]) {
+    for decl in decls {
+        match decl {
+            Decl::Module { decls, .. } => migrate_v018_names(decls),
+            Decl::Sig { ty, .. } | Decl::TypeAlias { ty, .. } => migrate_type(ty),
+            Decl::TypeDef {
+                variants,
+                invariant,
+                ..
+            } => {
+                for variant in variants {
+                    match &mut variant.fields {
+                        VariantFields::Positional(fields) => {
+                            fields.iter_mut().for_each(migrate_type);
+                        }
+                        VariantFields::Record(fields) => {
+                            fields.iter_mut().for_each(|(_, ty)| migrate_type(ty));
+                        }
+                    }
+                }
+                if let Some(invariant) = invariant {
+                    migrate_expr(&mut invariant.body, DropShadow::default());
+                }
+            }
+            Decl::FunDef {
+                params,
+                ret_ty,
+                body,
+                ..
+            } => {
+                let shadow = DropShadow::default().entering(param_shadows(params));
+                params.iter_mut().for_each(migrate_param);
+                if let Some(ty) = ret_ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(body, shadow);
+            }
+            Decl::Property {
+                params,
+                preconditions,
+                body,
+                options,
+                ..
+            } => {
+                let shadow = DropShadow::default().entering(param_shadows(params));
+                params.iter_mut().for_each(migrate_param);
+                preconditions
+                    .iter_mut()
+                    .for_each(|expr| migrate_expr(expr, shadow));
+                migrate_expr(body, shadow);
+                for option in options {
+                    match option {
+                        PropertyOption::Tolerance(expr, _)
+                        | PropertyOption::Seed(expr, _)
+                        | PropertyOption::Samples(expr, _) => migrate_expr(expr, shadow),
+                        PropertyOption::Contract(..) => {}
+                    }
+                }
+            }
+            Decl::LetDef { ty, value, .. } => {
+                if let Some(ty) = ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(value, DropShadow::default());
+            }
+            Decl::MacroDef { body, .. } => migrate_expr(body, DropShadow::default()),
+            Decl::Import { .. } | Decl::Dim { .. } | Decl::Export { .. } => {}
+        }
+    }
+}
+
+fn param_shadows(params: &[Param]) -> Vec<bool> {
+    params.iter().map(|param| param.name == "drop").collect()
+}
+
+fn migrate_param(param: &mut Param) {
+    if let Some(ty) = &mut param.ty {
+        migrate_type(ty);
+    }
+}
+
+fn migrate_type(ty: &mut TypeExpr) {
+    match ty {
+        TypeExpr::Named(name, _) => {
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name) {
+                *name = canonical.to_string();
+            }
+        }
+        TypeExpr::Tensor(dims, precision, _) => {
+            dims.iter_mut().for_each(migrate_type);
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(precision.as_str())
+            {
+                *precision = TensorPrecision::new(canonical, precision.span());
+            }
+        }
+        TypeExpr::Arrow(args, ret, _) => {
+            args.iter_mut().for_each(migrate_type);
+            migrate_type(ret);
+        }
+        TypeExpr::Ref(inner, _) => migrate_type(inner),
+        TypeExpr::App(_, args, _) | TypeExpr::Tuple(args, _) => {
+            args.iter_mut().for_each(migrate_type);
+        }
+        TypeExpr::DimensionLiteral(..) | TypeExpr::Infer(..) | TypeExpr::RankSpread(..) => {}
+    }
+}
+
+fn migrate_expr(expr: &mut Expr, shadow: DropShadow) {
+    match expr {
+        Expr::Lit(..) | Expr::Var(..) | Expr::Constructor(..) => {}
+        Expr::Apply(function, args, _) => {
+            // [05-OP-54]/[05-OP-67]: the two-argument list slice became
+            // `skip`; the one-argument linearity consume kept `drop`. Arity
+            // is the exact discriminator the old shared declaration used, so
+            // it is the one this rewrite uses too.
+            if args.len() == 2 {
+                rename_drop_head(function, shadow);
+            }
+            migrate_expr(function, shadow);
+            args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
+            items.iter_mut().for_each(|item| migrate_expr(item, shadow))
+        }
+        Expr::Record(_, fields, _) => {
+            fields
+                .iter_mut()
+                .for_each(|(_, value)| migrate_expr(value, shadow));
+        }
+        Expr::RecordUpdate(base, fields, _) => {
+            migrate_expr(base, shadow);
+            fields
+                .iter_mut()
+                .for_each(|(_, value)| migrate_expr(value, shadow));
+        }
+        Expr::Access(value, _, _)
+        | Expr::TupleGet(value, _, _)
+        | Expr::Unary(_, value, _)
+        | Expr::Jit(value, _)
+        | Expr::Realize(value, _)
+        | Expr::Copy(value, _)
+        | Expr::Borrow(value, _)
+        | Expr::Quote(value, _)
+        | Expr::Unquote(value, _)
+        | Expr::Splice(value, _) => migrate_expr(value, shadow),
+        Expr::Binary(_, left, right, _) | Expr::WithDevice(left, right, _) => {
+            migrate_expr(left, shadow);
+            migrate_expr(right, shadow);
+        }
+        Expr::Pipe(seed, stages, _) => {
+            // A pipe stage receives the piped value as its FIRST argument
+            // (spec/01 section 3.6), so `xs |> drop(1)` is the two-argument
+            // list slice written with one argument, while a bare `xs |> drop`
+            // stage is the one-argument consume and keeps its name.
+            //
+            // The stage's own head is decided HERE and the walk continues into
+            // its parts rather than into the stage: `migrate_expr` on the
+            // stage would reach the `Expr::Apply` arm, which reads the written
+            // argument count as the whole arity and would rename the head of
+            // `xs |> drop(a, b)` -- a three-argument call that is neither
+            // operation.
+            migrate_expr(seed, shadow);
+            for stage in stages.iter_mut() {
+                let Expr::Apply(function, args, _) = stage else {
+                    migrate_expr(stage, shadow);
+                    continue;
+                };
+                if args.len() == 1 {
+                    rename_drop_head(function, shadow);
+                }
+                migrate_expr(function, shadow);
+                args.iter_mut().for_each(|arg| migrate_expr(arg, shadow));
+            }
+        }
+        Expr::If(condition, then_expr, else_expr, _) => {
+            migrate_expr(condition, shadow);
+            migrate_expr(then_expr, shadow);
+            migrate_expr(else_expr, shadow);
+        }
+        Expr::Match(scrutinee, arms, _) => {
+            migrate_expr(scrutinee, shadow);
+            for arm in arms {
+                // A pattern binder named `drop` shadows the builtin for the
+                // arm's guard and body exactly as a parameter does.
+                let arm_shadow = shadow.entering(pattern_binder_shadows(&arm.pattern));
+                if let Some(guard) = &mut arm.guard {
+                    migrate_expr(guard, arm_shadow);
+                }
+                migrate_expr(&mut arm.body, arm_shadow);
+            }
+        }
+        Expr::Lambda(params, body, _) => {
+            let inner = shadow.entering(param_shadows(params));
+            params.iter_mut().for_each(migrate_param);
+            migrate_expr(body, inner);
+        }
+        Expr::Cast(value, precision, _, _) => {
+            migrate_expr(value, shadow);
+            if let Some(canonical) = crate::desugar::migrated_integer_dtype_name(precision) {
+                *precision = canonical.to_string();
+            }
+        }
+        Expr::Grad(value, _, _) | Expr::Vmap(value, _, _) => migrate_expr(value, shadow),
+        Expr::Annotate(value, ty, _) => {
+            migrate_expr(value, shadow);
+            migrate_type(ty);
+        }
+        Expr::Block(bindings, body, _) => {
+            // Block bindings are sequential, so each value is migrated in the
+            // scope before its own binder takes effect.
+            let mut inner = shadow;
+            for binding in bindings {
+                if let Some(ty) = &mut binding.ty {
+                    migrate_type(ty);
+                }
+                migrate_expr(&mut binding.value, inner);
+                inner = inner.entering(let_pattern_shadows(&binding.pattern));
+            }
+            migrate_expr(body, inner);
+        }
+    }
+}
+
+fn pattern_binder_shadows(pattern: &Pattern) -> Vec<bool> {
+    match pattern {
+        Pattern::Var(name, _) => vec![name == "drop"],
+        Pattern::Wildcard(_) | Pattern::Lit(..) => Vec::new(),
+        Pattern::Constructor(_, inner, _) | Pattern::Tuple(inner, _) => {
+            inner.iter().flat_map(pattern_binder_shadows).collect()
+        }
+        Pattern::Record(_, fields, _) => fields
+            .iter()
+            .flat_map(|(_, inner)| pattern_binder_shadows(inner))
+            .collect(),
+        Pattern::As(name, inner, _) => std::iter::once(name == "drop")
+            .chain(pattern_binder_shadows(inner))
+            .collect(),
+    }
+}
+
+fn let_pattern_shadows(pattern: &LetPattern) -> Vec<bool> {
+    match pattern {
+        LetPattern::Var(name, _) => vec![name == "drop"],
+        LetPattern::Wildcard(_) => Vec::new(),
+        LetPattern::Tuple(inner, _) => inner.iter().flat_map(let_pattern_shadows).collect(),
+    }
+}
+
+/// Rewrite a call head that names the v0.18 list `drop` to `skip`. The caller
+/// has already established that the call carries the list slice's two
+/// arguments, counting a piped value; this only decides the spelling.
+fn rename_drop_head(function: &mut Expr, shadow: DropShadow) {
+    if !shadow.is_shadowed()
+        && let Expr::Var(name, _) = function
+        && name == "drop"
+    {
+        *name = "skip".to_string();
+    }
 }
 
 fn first_ambiguous_comment_offset(decls: &[Decl], comments: &[Comment]) -> Option<usize> {
@@ -475,12 +758,13 @@ fn format_decl(decl: &Decl) -> String {
         }
         Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
             options,
             ..
-        } => format_property(name, params, preconditions, body, options),
+        } => format_property(name, type_binders, params, preconditions, body, options),
         Decl::LetDef {
             name, ty, value, ..
         } => {
@@ -505,17 +789,19 @@ fn format_decl(decl: &Decl) -> String {
 
 fn format_property(
     name: &str,
+    type_binders: &[TypeBinder],
     params: &[Param],
     preconditions: &[Expr],
     body: &Expr,
     options: &[PropertyOption],
 ) -> String {
+    let type_binders = format_type_binders(type_binders);
     let params = params
         .iter()
         .map(format_param)
         .collect::<Vec<_>>()
         .join(", ");
-    let mut out = format!("@property {name} forall({params})");
+    let mut out = format!("@property {name}{type_binders} forall({params})");
     if !preconditions.is_empty() {
         out.push_str(" where ");
         out.push_str(
@@ -649,7 +935,6 @@ fn format_effects(effects: Option<&[EffectExpr]>) -> String {
 fn format_effect(effect: &EffectExpr) -> String {
     match effect {
         EffectExpr::Diff(_) => "Diff".to_string(),
-        EffectExpr::Random(_) => "Random".to_string(),
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
         EffectExpr::Test(_) => "Test".to_string(),
@@ -661,7 +946,7 @@ fn format_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named(name, _) if name == "unit" => "unit".to_string(),
         // chelis#1587: `i8`..`i64` are accepted INPUT spellings for
-        // `int8`..`int64`. §P10-P12's model is that the parser accepts a wider
+        // `i8`..`i64`. §P10-P12's model is that the parser accepts a wider
         // set than the formatter emits, so the canonical formatter must rewrite
         // them; without this the alias would be a second canonical Surf
         // spelling and the §0.1 laws would admit two printings of one type.
@@ -758,7 +1043,9 @@ fn format_expr(expr: &Expr) -> String {
                 .join(", ")
         ),
         Expr::Access(expr, field, _) => format!("{}.{}", wrap_simple(expr), field),
-        Expr::TupleGet(expr, index, _) => format!("{}.{}", wrap_simple(expr), index),
+        Expr::TupleGet(expr, index, _) => {
+            format!("{}.{}", wrap_tuple_projection_receiver(expr), index)
+        }
         Expr::Binary(op, left, right, _) => {
             // Operands that are compound, non-self-delimiting expressions
             // (`if`/`match`/`fn`/`|>`/block) MUST be parenthesized, or the
@@ -833,11 +1120,6 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Realize(expr, _) => format!("realize({})", format_expr(expr)),
         Expr::Copy(expr, _) => format!("copy({})", format_expr(expr)),
         Expr::Borrow(expr, _) => format!("&{}", wrap_simple(expr)),
-        Expr::WithSeed(seed, body, _) => format!(
-            "with seed({}) {}",
-            format_expr(seed),
-            format_handler_body(body)
-        ),
         Expr::WithDevice(device, body, _) => {
             format!(
                 "with device({}) {}",
@@ -894,10 +1176,11 @@ fn format_lit(lit: &Literal) -> String {
         Literal::Float(value) => canonical_float(*value),
         // Typed-suffix literals (spec/02-surf-syntax.md §P10a): the
         // canonical formatter preserves the suffix on the literal token
-        // since dropping it would change the program's typing.
-        Literal::TypedInt(value, suffix) if suffix.is_float() => {
-            format!("{}{}", canonical_float(*value as f64), suffix.as_str())
-        }
+        // since dropping it would change the program's typing. It preserves
+        // the integer body for the same reason: under a float suffix that body
+        // is [04-LIT-1]'s exact `literal_source: integer` form, finalized once
+        // at the declared width, so printing `8000000.0f64` for `8000000f64`
+        // would put a decimal decode in its place (chelis#2119).
         Literal::TypedInt(value, suffix) => format!("{value}{}", suffix.as_str()),
         Literal::TypedFloat(value, suffix) => {
             format!("{}{}", canonical_float(*value), suffix.as_str())
@@ -1095,7 +1378,6 @@ fn format_call_callee(function: &Expr) -> String {
         | Expr::Match(..)
         | Expr::Lambda(..)
         | Expr::RecordUpdate(..)
-        | Expr::WithSeed(..)
         | Expr::WithDevice(..)
         | Expr::Par(..)
         | Expr::Do(..)
@@ -1264,7 +1546,6 @@ fn expression_span(expr: &Expr) -> chelis_deep::Span {
         | Expr::Realize(_, span)
         | Expr::Copy(_, span)
         | Expr::Borrow(_, span)
-        | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
         | Expr::Do(_, span)
@@ -1287,6 +1568,20 @@ fn wrap_simple(expr: &Expr) -> String {
         | Expr::TupleGet(_, _, _)
         | Expr::Tuple(_, _) => format_expr(expr),
         _ => format!("({})", format_expr(expr)),
+    }
+}
+
+/// Render the receiver of a numeric tuple projection.
+///
+/// Most postfix receivers are self-delimiting, but a tuple projection followed
+/// immediately by another numeric projection is not: `pairs.0.0` lexes the
+/// second suffix as `Float(0.0)`. Preserve grouping for that one shape so the
+/// formatter's output remains parseable without adding redundant parentheses
+/// to ordinary or mixed field/projection chains (chelis#1709).
+fn wrap_tuple_projection_receiver(expr: &Expr) -> String {
+    match expr {
+        Expr::TupleGet(..) => format!("({})", format_expr(expr)),
+        _ => wrap_simple(expr),
     }
 }
 
@@ -1804,7 +2099,7 @@ mod tests {
     fn hof_arg_arrow_keeps_parens() {
         // `(a -> b) -> c`: the function-typed argument must stay parenthesized.
         assert_eq!(
-            sig_type_str("module T\nsig f: (a -> b) -> c"),
+            sig_type_str("module T\nsig f[a, b, c]: (a -> b) -> c"),
             "(a -> b) -> c"
         );
     }
@@ -1812,12 +2107,12 @@ mod tests {
     #[test]
     fn hof_arg_arrow_format_is_idempotent() {
         // A second format pass over the issue reproducer must be stable.
-        let source = "module T\nsig f: (a -> b) -> c\ndef f(g, x) = x\n";
+        let source = "module T\nsig f[a, b, c]: (a -> b) -> c\ndef f(g, x) = x\n";
         let once = format_source(source).expect("format once");
         let twice = format_source(&once).expect("format twice");
         assert_eq!(once, twice, "HOF sig formatting must be idempotent");
         assert!(
-            once.contains("sig f: (a -> b) -> c"),
+            once.contains("sig f[a, b, c]: (a -> b) -> c"),
             "grouping parens around the function-typed argument were dropped; got: {once}"
         );
     }
@@ -1825,7 +2120,10 @@ mod tests {
     #[test]
     fn curried_arrow_gets_no_spurious_parens() {
         // Plain curried `a -> b -> c` must NOT grow parens.
-        assert_eq!(sig_type_str("module T\nsig f: a -> b -> c"), "a -> b -> c");
+        assert_eq!(
+            sig_type_str("module T\nsig f[a, b, c]: a -> b -> c"),
+            "a -> b -> c"
+        );
     }
 
     #[test]
@@ -1833,7 +2131,7 @@ mod tests {
         // Right-position arrow parens are redundant; `a -> (b -> c)` is the
         // same type as `a -> b -> c` and canonicalizes to the bare form.
         assert_eq!(
-            sig_type_str("module T\nsig f: a -> (b -> c)"),
+            sig_type_str("module T\nsig f[a, b, c]: a -> (b -> c)"),
             "a -> b -> c"
         );
     }
@@ -1842,8 +2140,8 @@ mod tests {
     fn hof_arg_and_curried_are_distinct_asts() {
         // The two sources must parse to *different* ASTs — proof that the
         // grouping is semantically meaningful, not cosmetic.
-        let hof = sig_type_ast("module T\nsig f: (a -> b) -> c");
-        let curried = sig_type_ast("module T\nsig f: a -> b -> c");
+        let hof = sig_type_ast("module T\nsig f[a, b, c]: (a -> b) -> c");
+        let curried = sig_type_ast("module T\nsig f[a, b, c]: a -> b -> c");
         assert_ne!(
             hof, curried,
             "`(a -> b) -> c` and `a -> b -> c` must be distinct types"
@@ -1859,12 +2157,12 @@ mod tests {
     #[test]
     fn hof_arg_arrow_round_trips_through_parser() {
         // Format → reparse → format must be stable and arity-preserving.
-        let src = "module T\nsig f: (a -> b) -> c";
+        let src = "module T\nsig f[a, b, c]: (a -> b) -> c";
         let first = sig_type_str(src);
-        let reparsed = sig_type_str(&format!("module T\nsig f: {first}"));
+        let reparsed = sig_type_str(&format!("module T\nsig f[a, b, c]: {first}"));
         assert_eq!(first, reparsed, "arrow-arg sig must round-trip");
         // The reparsed AST must still be the one-argument HOF shape.
-        let ast = sig_type_ast(&format!("module T\nsig f: {first}"));
+        let ast = sig_type_ast(&format!("module T\nsig f[a, b, c]: {first}"));
         match ast {
             TypeExpr::Arrow(args, _, _) => {
                 assert_eq!(args.len(), 1, "must remain a 1-argument function type");
@@ -1884,7 +2182,7 @@ mod tests {
         // argument position of the outer arrow (needs parens); `e` is the
         // return.
         assert_eq!(
-            sig_type_str("module T\nsig f: (a -> b) -> (c -> d) -> e"),
+            sig_type_str("module T\nsig f[a, b, c, d, e]: (a -> b) -> (c -> d) -> e"),
             "(a -> b) -> (c -> d) -> e"
         );
     }
@@ -1893,10 +2191,10 @@ mod tests {
     fn nested_hof_arg_round_trips() {
         // `((a -> b) -> c) -> d`: a function-typed argument whose own argument
         // is a function. Both layers of grouping must survive.
-        let src = "module T\nsig f: ((a -> b) -> c) -> d";
+        let src = "module T\nsig f[a, b, c, d]: ((a -> b) -> c) -> d";
         assert_eq!(sig_type_str(src), "((a -> b) -> c) -> d");
         let once = sig_type_str(src);
-        let twice = sig_type_str(&format!("module T\nsig f: {once}"));
+        let twice = sig_type_str(&format!("module T\nsig f[a, b, c, d]: {once}"));
         assert_eq!(once, twice, "nested HOF arg must be idempotent");
     }
 

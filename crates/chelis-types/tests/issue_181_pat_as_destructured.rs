@@ -33,18 +33,9 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
         return Some(expr);
     }
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                if let Some(found) = find_tagged(child, tag) {
-                    return Some(found);
-                }
-            }
-        }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = node.meta().find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
             for child in node.children_slice() {
                 if let Some(found) = find_tagged(child, tag) {
@@ -60,10 +51,8 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = data.meta.find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
             for child in &data.children {
                 if let Some(found) = find_tagged(child, tag) {
@@ -72,20 +61,19 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = map.find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
         }
         Expr::MetaExpr(meta, _) => {
             if let Some(found) = find_tagged(&meta.expr, tag) {
                 return Some(found);
             }
-            for (_, value) in &meta.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = meta
+                .metadata
+                .find_expression(|value| find_tagged(value, tag))
+            {
+                return Some(found);
             }
         }
         Expr::Atom(_, _) => {}
@@ -93,21 +81,13 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
     None
 }
 
-/// Extract the `type` entry from either stamped or legacy node metadata.
+/// Extract the `type` entry from stamped node metadata.
 fn type_metadata(expr: &Expr) -> Option<&Expr> {
     let meta = match expr {
         Expr::Node(node, _) => node.meta(),
-        Expr::List(list, _) => {
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            meta
-        }
         _ => return None,
     };
-    meta.entries
-        .iter()
-        .find_map(|(key, value)| (key == "type").then_some(value))
+    meta.ty().map(|ty| ty.expression())
 }
 
 /// Render an Expr to canonical Deep text for substring matching.
@@ -118,7 +98,7 @@ fn render(expr: &Expr) -> String {
 #[test]
 fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
     // type FooState[a] = | FooState { x: a, y: a }
-    // def use_foo[n](state: FooState[tensor[n, f32]]) -> int32 = {
+    // def use_foo[n](state: FooState[tensor[n, f32]]) -> i32 = {
     //   match state with {
     //     | (pat-as {} whole (pat-record {} FooState (kv {} x (pat-var {} x))
     //                                                (kv {} y (pat-var {} y)))) => 0
@@ -130,10 +110,10 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
 (module {} Issue181PatAs
   (deftype {} FooState (a)
     (variant {} FooState (field {} x (t-var {} a)) (field {} y (t-var {} a))))
-  (defsig {} use_foo
+  (defsig {} use_foo (n)
     (t-fn {}
       (t-adt {} FooState (t-tensor {} (d-var {} n) (t-prim {} f32)))
-      (t-prim {} int32)))
+      (t-prim {} i32)))
   (def {} use_foo
     (fn {}
       (params {} (state {type: (t-adt {} FooState (t-tensor {} (d-var {} n) (t-prim {} f32)))}))
@@ -146,7 +126,7 @@ fn pat_as_wrapping_pat_record_stamps_both_outer_and_inner_types() {
               (kv {} x (pat-var {} x))
               (kv {} y (pat-var {} y))))
           ()
-          (lit {type: (t-prim {} int32)} 0))))))
+          (lit {type: (t-prim {} i32)} 0))))))
 "#;
     let exprs = deep(src);
     let checked = check_typed_program(&exprs).expect("type check should succeed");

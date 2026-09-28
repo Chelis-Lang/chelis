@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_deep::parser::parse_str;
 use chelis_ir::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
@@ -159,25 +159,93 @@ fn raw_decoder_preserves_exact_primitives_and_polymorphic_names() {
     );
 }
 
+fn type_metadata(type_expr: Expr) -> Metadata {
+    Metadata::from(chelis_deep::annotations::MetadataValue::Type(
+        chelis_deep::annotations::TypeSyntax::try_new(type_expr)
+            .expect("canonical test type syntax"),
+    ))
+}
+
+#[test]
+fn raw_decoder_reads_decoded_type_nodes() {
+    for source in [
+        "(t-prim {} i64)",
+        "(t-ref {} (t-prim {} f32))",
+        "(t-tensor {} (d-lit {} 4) (t-var {} p))",
+        "(t-adt {} Option (t-prim {} bool))",
+        "(t-tuple {} (t-prim {} i32) (t-unit {}))",
+        "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
+    ] {
+        let successor = parse_one(source);
+        assert!(decode_host_type(&successor).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn metadata_decoder_reads_undecodable_carrier_metadata() {
+    let span = Span::new(0, 0);
+    let metadata = type_metadata(parse_one("(t-prim {} i64)"));
+    let successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: metadata.clone(),
+        children: vec![],
+        span,
+    }));
+    assert!(matches!(
+        successor.carrier(),
+        chelis_deep::ExprCarrier::UndecodableHead(..)
+    ));
+    assert_eq!(
+        decode_host_type_metadata(&successor),
+        Ok(HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+            Prim::Int64
+        )))
+    );
+
+    let missing_successor = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-literal".into(),
+        meta: Metadata::default(),
+        children: vec![],
+        span,
+    }));
+    assert_eq!(
+        decode_host_type_metadata(&missing_successor),
+        Err(HostTypeDecodeError::MissingTypeMetadata)
+    );
+}
+
+#[test]
+fn raw_decoder_fails_closed_for_every_non_type_carrier_class() {
+    let span = Span::new(0, 0);
+    let rejected = [
+        Expr::BareList(vec![], span),
+        Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-type".into(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        })),
+        Expr::Atom(Atom::Name("i64".into()), span),
+        Expr::Map(Metadata::default(), span),
+    ];
+
+    for expr in rejected {
+        assert!(
+            matches!(
+                decode_host_type(&expr),
+                Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
+            ),
+            "{expr:?}"
+        );
+    }
+}
+
 #[test]
 fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
-    // The parser now rejects a zero-child `t-prim` before it can reach the
-    // decoder. Construct the controlled legacy mutation directly so this
-    // remains a decoder failure-state test rather than a parser test.
+    // The parser rejects a zero-child `t-prim` before it can reach the
+    // decoder, and a stamped node cannot carry one.
     let span = Span::new(0, 0);
-    let malformed = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(chelis_deep::DeepTag::TPrim), span),
-                Expr::Map(MetaMap::default(), span),
-            ],
-        },
-        span,
-    );
-    assert!(matches!(
-        decode_host_type(&malformed),
-        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
-    ));
+    assert!(parse_str("(t-prim {})").is_err());
 
     let unknown = parse_one("(t-prim {} float24)");
     assert_eq!(
@@ -193,11 +261,15 @@ fn raw_decoder_rejects_malformed_and_unknown_syntax_without_a_term() {
         Err(HostTypeDecodeError::MissingTypeMetadata)
     );
 
-    let invalid = parse_one("(lit {type: nope} 1)");
-    assert!(matches!(
-        decode_host_type_metadata(&invalid),
-        Err(HostTypeDecodeError::MalformedTypeSyntax { .. })
-    ));
+    assert!(parse_str("(lit {type: nope} 1)").is_err());
+    // Invalid type payloads cannot enter an AST annotation, including via serde.
+    assert!(
+        chelis_deep::annotations::TypeSyntax::try_new(Expr::Atom(Atom::Name("nope".into()), span),)
+            .is_err()
+    );
+    let malformed =
+        serde_json::json!({"entries": [["type", Expr::Atom(Atom::Name("nope".into()), span)]]});
+    assert!(serde_json::from_value::<Metadata>(malformed).is_err());
 }
 
 fn production_legacy_unknown_lines(source: &str) -> Vec<(usize, &str)> {
@@ -251,6 +323,12 @@ fn raw_host_type_decoding_is_result_typed() {
         state.contains("Result<HostTypeTerm, HostTypeDecodeError>"),
         "raw Deep host-type decoding must return a typed Result; defining the error \
          vocabulary without using it at the boundary is insufficient"
+    );
+    let definition = ["fn stamped_", "parts"].concat();
+    let call = ["stamped_", "parts("].concat();
+    assert!(
+        !state.contains(&definition) && !state.contains(&call),
+        "E5b requires every host-type read to disposition ExprCarrier directly"
     );
 }
 

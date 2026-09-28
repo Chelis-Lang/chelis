@@ -264,7 +264,7 @@ fn mixed_nominal_headers_keep_type_and_dimension_slots_distinct() {
     let source = "\
 type Packet[a, n] =
   | Packet { item: a, payload: tensor[n, f32] }
-def good() -> Packet[int32, 2] = Packet { item: 7i32, payload: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
+def good() -> Packet[i32, 2] = Packet { item: 7i32, payload: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }
 ";
     let (status, json) = check_json(source);
     assert!(status.success(), "mixed nominal kinds must check: {json}");
@@ -272,7 +272,7 @@ def good() -> Packet[int32, 2] = Packet { item: 7i32, payload: to_tensor([cast(1
     assert_eq!(json["errors"], serde_json::json!([]));
 
     assert_check_rejects(
-        "type Packet[a, n] = | Packet { item: a, payload: tensor[n, f32] }\ndef wrong() -> Packet[int32, 3] = Packet { item: 7i32, payload: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }\n",
+        "type Packet[a, n] = | Packet { item: a, payload: tensor[n, f32] }\ndef wrong() -> Packet[i32, 3] = Packet { item: 7i32, payload: to_tensor([cast(1.0, f32), cast(2.0, f32)]) }\n",
         "DimensionMismatch",
     );
 }
@@ -328,14 +328,14 @@ fn kinded_nominals_preserve_record_access_and_exhaustiveness_checks() {
     let access = "\
 type Frame[n] =
   | Frame { items: tensor[n, f32] }
-def first(frame: Frame[2]) -> f32 = index(to_list(frame.items), 0)
+def first(frame: Frame[2]) -> f32 = index(to_list(frame.items), 0i64)
 ";
     let (status, json) = check_json(access);
     assert!(status.success(), "kinded record access must check: {json}");
     assert_eq!(json["errors"], serde_json::json!([]));
 
     assert_check_rejects(
-        "type Choice[n] = | Left(tensor[n, f32]) | Right(tensor[n, f32])\ndef incomplete(value: Choice[2]) -> f32 = match value with { | Left(items) => index(to_list(items), 0) }\n",
+        "type Choice[n] = | Left(tensor[n, f32]) | Right(tensor[n, f32])\ndef incomplete(value: Choice[2]) -> f32 = match value with { | Left(items) => index(to_list(items), 0i64) }\n",
         "NonExhaustiveMatch",
     );
 }
@@ -346,7 +346,7 @@ fn matching_dimension_application_evaluates_and_c_backend_runs() {
 type Column[n] =
   | Column { items: tensor[n, f32] }
 type Pair[n] = Column[n]
-def total(value: Pair[2]) -> f32 = add(index(to_list(value.items), 0), index(to_list(value.items), 1))
+def total(value: Pair[2]) -> f32 = add(index(to_list(value.items), 0i64), index(to_list(value.items), 1i64))
 def main() -> f32 = total(Column { items: to_tensor([cast(1.0, f32), cast(2.0, f32)]) })
 out = print(main())
 ";
@@ -391,7 +391,7 @@ out = print(main())
 fn direct_dimension_kinded_tensor_alias_evaluates_and_c_backend_runs() {
     let source = "\
 type Row[n] = tensor[n, f32]
-def total(value: Row[2]) -> f32 = tensor_to_scalar(sum(value, cast(0, int32)))
+def total(value: Row[2]) -> f32 = tensor_to_scalar(sum(value, cast(0, i32)))
 def main() -> f32 = total(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
 out = print(main())
 ";
@@ -437,7 +437,7 @@ fn generic_dimension_kinded_tensor_alias_preserves_authored_symbol_in_c() {
     let source = "\
 type Row[n] = tensor[n, f32]
 def double_it[batch](value: Row[batch]) -> Row[batch] = add(copy(value), value)
-def main() -> f32 = tensor_to_scalar(sum(double_it(to_tensor([cast(1.0, f32), cast(2.0, f32)])), cast(0, int32)))
+def main() -> f32 = tensor_to_scalar(sum(double_it(to_tensor([cast(1.0, f32), cast(2.0, f32)])), cast(0, i32)))
 out = print(main())
 ";
     let dir = tempdir().expect("tempdir");

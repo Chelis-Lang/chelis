@@ -39,9 +39,12 @@ use chelis_types::errors::CheckErrorKind;
 /// program type-checked cleanly.
 fn check_diagnostics(source: &str) -> Vec<(CheckErrorKind, String)> {
     let decls = parse_str(source).expect("surf parse");
-    let exprs = expand_program(&desugar_program(&decls), &ExpansionOptions::default())
-        .expect("macro expand")
-        .into_exprs();
+    let exprs = expand_program(
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
+        &ExpansionOptions::default(),
+    )
+    .expect("macro expand")
+    .into_exprs();
     match check_ir_program(&exprs) {
         Ok(_) => Vec::new(),
         Err(rep) => rep
@@ -64,7 +67,7 @@ fn is_precision_mismatch(diags: &[(CheckErrorKind, String)]) -> bool {
 /// bound var).
 #[test]
 fn issue_458_div_f32_literal_over_i32_bound_var_is_precision_mismatch() {
-    let diags = check_diagnostics("def recip_n(n: int32) -> f32 = div(1.0, n)");
+    let diags = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, n)");
     assert!(
         !diags.is_empty(),
         "spec §5.1/§5.2: div(f32, i32-bound-var) must be a type error \
@@ -72,18 +75,18 @@ fn issue_458_div_f32_literal_over_i32_bound_var_is_precision_mismatch() {
     );
     assert!(
         is_precision_mismatch(&diags),
-        "spec §5.1: mixed (f32, int32) numeric op must be a PrecisionMismatch; got: {diags:?}"
+        "spec §5.1: mixed (f32, i32) numeric op must be a PrecisionMismatch; got: {diags:?}"
     );
     assert!(
         diags
             .iter()
-            .any(|(_, m)| m.contains("f32") && m.contains("int32")),
-        "diagnostic must name both operand precisions (f32 and int32); got: {diags:?}"
+            .any(|(_, m)| m.contains("f32") && m.contains("i32")),
+        "diagnostic must name both operand precisions (f32 and i32); got: {diags:?}"
     );
 }
 
-/// Literal path: `div(1.0, 4)` — the integer literal `4` is `int32`
-/// (§5.3), so this is the SAME mixed `(f32, int32)` pair. It must be
+/// Literal path: `div(1.0, 4)` — the integer literal `4` is `i32`
+/// (§5.3), so this is the SAME mixed `(f32, i32)` pair. It must be
 /// rejected at type-check, NOT const-folded to 0.25. This is the precise
 /// #458 regression: the literal and bound-variable paths must produce the
 /// same diagnostic.
@@ -92,18 +95,18 @@ fn issue_458_div_f32_literal_over_i32_literal_rejects_not_folds_to_quarter() {
     let diags = check_diagnostics("out = div(1.0, 4)");
     assert!(
         !diags.is_empty(),
-        "spec §5.1: div(1.0, 4) is a mixed (f32, int32) pair and must be a type \
+        "spec §5.1: div(1.0, 4) is a mixed (f32, i32) pair and must be a type \
          error, NOT a silent 0.25 const-fold (the chelis#458 defect); got no diagnostics"
     );
     assert!(
         is_precision_mismatch(&diags),
-        "spec §5.1: literal mixed (f32, int32) div must be a PrecisionMismatch; got: {diags:?}"
+        "spec §5.1: literal mixed (f32, i32) div must be a PrecisionMismatch; got: {diags:?}"
     );
     assert!(
         diags
             .iter()
-            .any(|(_, m)| m.contains("f32") && m.contains("int32")),
-        "diagnostic must name both operand precisions (f32 and int32); got: {diags:?}"
+            .any(|(_, m)| m.contains("f32") && m.contains("i32")),
+        "diagnostic must name both operand precisions (f32 and i32); got: {diags:?}"
     );
 }
 
@@ -113,7 +116,7 @@ fn issue_458_div_f32_literal_over_i32_literal_rejects_not_folds_to_quarter() {
 #[test]
 fn issue_458_literal_and_bound_var_div_reject_identically() {
     let literal = check_diagnostics("out = div(1.0, 4)");
-    let bound = check_diagnostics("def recip_n(n: int32) -> f32 = div(1.0, n)");
+    let bound = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, n)");
     let literal_msgs: Vec<&String> = literal.iter().map(|(_, m)| m).collect();
     let bound_msgs: Vec<&String> = bound.iter().map(|(_, m)| m).collect();
     assert_eq!(
@@ -129,10 +132,10 @@ fn issue_458_literal_and_bound_var_div_reject_identically() {
 /// so the only reason it rejects is the §5.1 precision rule, not §5.4).
 #[test]
 fn issue_458_add_f32_literal_over_i32_bound_var_is_precision_mismatch() {
-    let diags = check_diagnostics("def bump(n: int32) -> f32 = add(1.0, n)");
+    let diags = check_diagnostics("def bump(n: i32) -> f32 = add(1.0, n)");
     assert!(
         is_precision_mismatch(&diags),
-        "spec §5.1: add(f32, int32) must be a PrecisionMismatch (no implicit \
+        "spec §5.1: add(f32, i32) must be a PrecisionMismatch (no implicit \
          promotion); got: {diags:?}"
     );
 }
@@ -144,7 +147,7 @@ fn issue_458_add_f32_literal_over_i32_bound_var_is_precision_mismatch() {
 /// blocking those programs outright.
 #[test]
 fn issue_458_explicit_cast_n_to_f32_typechecks() {
-    let diags = check_diagnostics("def recip_n(n: int32) -> f32 = div(1.0, cast(n, f32))");
+    let diags = check_diagnostics("def recip_n(n: i32) -> f32 = div(1.0, cast(n, f32))");
     assert!(
         diags.is_empty(),
         "the explicit-cast fix div(1.0, cast(n, f32)) must type-check cleanly \

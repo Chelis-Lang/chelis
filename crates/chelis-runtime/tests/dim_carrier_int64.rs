@@ -1,6 +1,6 @@
-//! chelis#1112: the C lane's dimension carrier is int64.
+//! chelis#1112: the C lane's dimension carrier is i64.
 //!
-//! `spec/05-risc-primitives.md` [05-DIM-2] declares the extent dtype int64
+//! `spec/05-risc-primitives.md` [05-DIM-2] declares the extent dtype i64
 //! and `spec/04-type-system.md` [04-NUM-11] requires a value to cross every
 //! boundary at its declared dtype. Before this change the C ABI carried
 //! `shape`, `strides`, and `size` as 32-bit `int`, so an extent above
@@ -48,7 +48,7 @@ fn a_view_checks_an_extent_above_int32_at_full_width() {
     assert!(!success, "an undersized borrowed view returned success");
     assert!(
         stderr.contains("required 8589934592"),
-        "the exact f32 byte requirement must retain the int64 extent:\n{stderr}"
+        "the exact f32 byte requirement must retain the i64 extent:\n{stderr}"
     );
 }
 

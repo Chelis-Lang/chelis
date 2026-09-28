@@ -2,8 +2,8 @@
 //!
 //! The oracle owns the frozen source list and passes it on stdin as JSON; this
 //! binary owns the structural derivation. Splitting it that way keeps one
-//! parser per language: Rust is read with `syn`, and the C and Objective-C
-//! headers through clang's front end under a fixed target lane.
+//! parser per language: Rust is read with `syn`, and C, C++, and Objective-C
+//! sources through clang's front end under a fixed target lane.
 
 use std::env;
 use std::fs;
@@ -90,11 +90,11 @@ fn run() -> Result<(), String> {
             .and_then(|extension| extension.to_str())
         {
             Some("rs") => scan_rust_source(&raw_path, &source),
-            Some("h") => scan_c_header(&raw_path, &source),
+            Some("h" | "cpp") => scan_c_header(&raw_path, &source),
             other => {
                 return Err(format!(
                     "`{raw_path}` has unsupported extension {other:?}; the inventory reads \
-                     Rust, C, and Objective-C headers only"
+                     Rust, C, C++, and Objective-C sources only"
                 ));
             }
         }

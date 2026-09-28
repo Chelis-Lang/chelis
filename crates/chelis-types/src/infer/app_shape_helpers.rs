@@ -192,7 +192,7 @@ pub(super) enum SizeClass {
     /// the tensor's shape.
     ShapeSourced,
     /// A runtime value with no static value and no tensor source — a bare
-    /// `int32`/`int64` parameter, a `cast`/arithmetic over one, or a `let`
+    /// `i32`/`i64` parameter, a `cast`/arithmetic over one, or a `let`
     /// name bound to such. No backend representation; rejected at check
     /// (#469) so check↔build↔eval agree.
     Sourceless,
@@ -219,15 +219,15 @@ pub(super) fn sourceless_expand_size_error(
         CheckErrorKind::DimensionMismatch,
         format!(
             "`{builtin}` size resolves to {described}, but no tensor in scope carries \
-             it. Runtime extents use exact `int64`; source the value from an in-scope \
-             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime \
+             it. Runtime extents use exact `i64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, i32-axis)` read. A bare runtime \
              scalar has no shape identity to attach to the result yet. Tracked by \
              Chelis-Lang/chelis#469 (spec/04-type-system.md \u{00a7}4.7.2)"
         ),
         vec![
             "Source the extent from a tensor in scope with \
-             `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an \
-             exact `int64` literal extent."
+             `shape(x, cast(axis, i32))`, bind that read to a `let`, or use an \
+             exact `i64` literal extent."
                 .to_string(),
         ],
     )
@@ -241,8 +241,60 @@ pub(super) fn sourceless_expand_size_error(
 /// reads. The recursion mirrors the IR layer's
 /// `extract_dim_expr_value`/`symbol_has_tensor_source`/`shape_dep` triad so
 /// the check-time accept set matches what the backends can materialize.
-pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
+pub(super) fn classify_expand_size(
+    expr: &deep::Expr,
+    env: &Env,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+) -> SizeClass {
+    classify_size_in(
+        expr,
+        &SizeCtx {
+            env,
+            adt_reg,
+            subst,
+            piped: &[],
+        },
+    )
+}
+
+/// What `classify_expand_size` reads while it walks: the type environment,
+/// the ADT registry a record projection resolves its field type against
+/// (chelis#1266), and the pipe-stage parameters currently standing for an
+/// upstream value (chelis#569).
+struct SizeCtx<'a> {
+    env: &'a Env,
+    adt_reg: &'a AdtRegistry,
+    subst: &'a Subst,
+    piped: &'a [PipedParam],
+}
+
+/// One pipe stage's parameter while the walk is inside that stage's body
+/// (chelis#569). `(pipe {} v s1 s2)` means `s2(s1(v))`, and each `s` is the
+/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a
+/// call-stage, so the walk classifies `body` with `p` standing for what the
+/// stage receives instead of materializing the rewritten application.
+struct PipedParam {
+    name: String,
+    class: SizeClass,
+    /// The piped value's type, when the check layer can read it without
+    /// inference. Only the pipe's own input expression has one: a stage
+    /// RESULT is a computed value whose type this layer does not model, and
+    /// `None` there keeps the shape-operand question fail-closed.
+    ty: Option<Type>,
+}
+
+impl SizeCtx<'_> {
+    fn piped(&self, name: &str) -> Option<&PipedParam> {
+        // Innermost binding wins: a nested pipe reuses the synthesized
+        // parameter name, so the search runs from the end.
+        self.piped.iter().rev().find(|param| param.name == name)
+    }
+}
+
+fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
     stack_guard!("classify_expand_size", expr, SizeClass::Unknown);
+    let env = ctx.env;
     // The checker and lowerer share one checked static folder.
     if fold_static_int_expr(expr, |name| env.static_size_value(name)).is_some() {
         return SizeClass::Static;
@@ -250,7 +302,7 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
     // An inline `shape(t, axis)` read (possibly `cast`-wrapped) of an
     // in-scope tensor is the canonical shape source (`bias_broadcast`).
     if let Some(operand) = shape_read_operand(expr) {
-        return if shape_operand_is_in_scope_tensor(operand, env) {
+        return if shape_operand_is_in_scope_tensor(operand, ctx) {
             SizeClass::ShapeSourced
         } else {
             // `shape(<non-tensor>, ...)` cannot supply an extent.
@@ -273,11 +325,18 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
         // `cast(<inner>, ty)` — provenance is the inner expr's.
         DeepTag::Cast => kids
             .first()
-            .map_or(SizeClass::Unknown, |inner| classify_expand_size(inner, env)),
+            .map_or(SizeClass::Unknown, |inner| classify_size_in(inner, ctx)),
         DeepTag::Var => match symbolic_dim_ref_name(expr) {
+            // Inside a pipe stage, the stage parameter stands for what the
+            // stage receives, so it carries that value's class (chelis#569).
+            Some(name) if ctx.piped(name).is_some() => ctx
+                .piped(name)
+                .map_or(SizeClass::Unknown, |param| param.class),
             // A name carried by an in-scope tensor's shape is a
             // Form-2 symbolic dim with a real source.
-            Some(name) if env.tensor_carries_dim(name) => SizeClass::ShapeSourced,
+            Some(name) if env.tensor_carries_dim_with_subst(name, ctx.subst) => {
+                SizeClass::ShapeSourced
+            }
             // A recorded `let` provenance (shape-sourced or static).
             Some(name) => match env.size_provenance(name) {
                 Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
@@ -290,7 +349,16 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
             None => SizeClass::Unknown,
         },
         // Integer arithmetic: combine the operands' classes.
-        DeepTag::App => classify_arith_app(kids, env),
+        DeepTag::App => classify_arith_app(kids, ctx),
+        // chelis#569's `pipe` arm is gone: `chelis_deep::pipe::fold_pipe`
+        // rewrites `v |> s1 |> s2` into `s2(s1(v))` over the checker's input,
+        // so the canonical spelling of a shape read reaches this slot as the
+        // `app` node above and takes the same route the direct spelling does.
+        // The arm that used to sit here read only the pipe's input for a
+        // type, so a `shape(...)` read in a LATER stage classified
+        // `Sourceless` where the direct spelling classified `ShapeSourced`:
+        // an under-approximation the fold makes unnecessary rather than
+        // safer.
         // chelis#530: any other List-shaped size — a tuple
         // projection (`t.0`), an inline `match`/`if`, a record
         // `access`, etc. — has NO backend-materializable shape
@@ -311,10 +379,9 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
 }
 
 /// Combine the size classes of an integer-arithmetic application's
-/// operands (chelis#397/#469). `Sourceless` is absorbing (a sum/product
-/// touching a sourceless scalar is itself sourceless); a `ShapeSourced`
-/// operand makes the whole expression `ShapeSourced` (the extent is
-/// recoverable from that tensor); all-`Static` operands stay `Static`.
+/// operands (chelis#397/#469/#1379). `combine_arith_classes` below states the
+/// fold and owns the rule; this arm decides only whether the callee is one of
+/// the arithmetic builtins.
 ///
 /// A non-arithmetic `app` — any other function call, e.g. `ident(a_dim)` or
 /// a user `def` — produces a runtime value with NO shape source the backend
@@ -331,8 +398,7 @@ pub(super) fn classify_expand_size(expr: &deep::Expr, env: &Env) -> SizeClass {
 /// chelis#1107 round 3: takes the children slice rather than a `&deep::List`,
 /// so the classifier works on either carrier (a stamped `Expr::Node` has no
 /// `&deep::List` to hand over).
-pub(super) fn classify_arith_app(kids: &[deep::Expr], env: &Env) -> SizeClass {
-    const INT_ARITH: &[&str] = &["add", "sub", "mul", "div", "mod", "neg"];
+fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
     let Some(callee) = kids.first() else {
         return SizeClass::Sourceless;
     };
@@ -340,24 +406,57 @@ pub(super) fn classify_arith_app(kids: &[deep::Expr], env: &Env) -> SizeClass {
     if !is_int_arith {
         return SizeClass::Sourceless;
     }
-    let operand_classes: Vec<SizeClass> = kids[1..]
-        .iter()
-        .map(|arg| classify_expand_size(arg, env))
-        .collect();
+    combine_arith_classes(kids[1..].iter().map(|arg| classify_size_in(arg, ctx)))
+}
+
+/// The integer-arithmetic builtins the provenance walk follows.
+///
+/// The same operator set the shared static folder walks
+/// (`fold_static_int_expr`), because the two decide one question about one
+/// category: whether an expression is checked integer arithmetic. They
+/// disagreed on the two integer division primitives, and `spec/05` section 2.1
+/// makes those the ONLY way to divide an i64 extent, `div` being float-only.
+/// A static `floor_div(4i64, 2i64)` therefore folded and was admitted while a
+/// runtime `floor_div(shape(x, 0), 2i64)` was rejected as sourceless: the same
+/// operator on the same category, decided opposite ways by two enumerations
+/// (chelis#1379).
+const INT_ARITH: &[&str] = &[
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "mod",
+    "neg",
+];
+
+/// Fold operand classes, shared by the application and bare-pipe-stage
+/// spellings of the same arithmetic.
+///
+/// A `ShapeSourced` operand makes the whole expression `ShapeSourced`, because
+/// the extent is computable from that tensor and whatever it is combined with.
+/// `Sourceless` decides only an expression with no admissible operand at all,
+/// and all-`Static` operands stay `Static`. `Sourceless` used to be absorbing,
+/// which rejected `add(shape(x, 0), k)` at check even though both lanes execute
+/// it (chelis#1379). The pipe spelling reaches this through the same fold, so
+/// the two spellings cannot answer differently.
+fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass {
+    let operand_classes: Vec<SizeClass> = classes.collect();
+    if operand_classes.contains(&SizeClass::ShapeSourced) {
+        return SizeClass::ShapeSourced;
+    }
     if operand_classes.contains(&SizeClass::Sourceless) {
         return SizeClass::Sourceless;
     }
     if operand_classes.contains(&SizeClass::Unknown) {
         return SizeClass::Unknown;
     }
-    if operand_classes.contains(&SizeClass::ShapeSourced) {
-        return SizeClass::ShapeSourced;
-    }
     SizeClass::Static
 }
 
 /// Recognize a `shape(operand, axis)` application — possibly wrapped in one
-/// or more `cast(..., int32)` layers — and return its `operand` expr
+/// or more `cast(..., i32)` layers — and return its `operand` expr
 /// (chelis#397/#469). The check-layer analog of the IR layer's
 /// `shape_app_operand_axis`. The axis is not validated here (the operand's
 /// presence is what proves a tensor source); a runtime axis is fine.
@@ -385,53 +484,84 @@ pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
 /// tensor (chelis#397/#469). The operand is a bare `var` (`shape(x, 0)`) or
 /// a borrow of one (`shape(&x, 0)`); either way the named binding must have
 /// a tensor type in `env`. A non-tensor operand cannot supply an extent.
-pub(super) fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, env: &Env) -> bool {
-    // Unwrap a `borrow(x)`/`&x` wrapper to the underlying var.
-    let var_name = shape_operand_var_name(operand);
-    match var_name {
-        Some(name) => env.lookup(name).is_some_and(scheme_is_tensor_carrying),
-        None => false,
-    }
+fn shape_operand_is_in_scope_tensor(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> bool {
+    shape_operand_type(operand, ctx)
+        .as_ref()
+        .is_some_and(type_is_tensor)
 }
 
-/// The underlying `var` name of a `shape(...)` operand, unwrapping a
-/// `borrow`/`&` layer (chelis#397/#469).
-pub(super) fn shape_operand_var_name(operand: &deep::Expr) -> Option<&str> {
-    stack_guard!("shape_operand_var_name", operand, None);
+/// The type a `shape(...)` operand denotes, when the check layer can read it
+/// without inference (chelis#397/#469, chelis#1266).
+///
+/// The question this answers is "does this operand have a tensor type", not
+/// "is this operand a named tensor binding". The two diverged at a record
+/// field: `shape(inp.q, 0)` names no tensor binding, yet `inp.q` is an
+/// in-scope tensor with exactly the extent the size reads (chelis#1266).
+/// Asking the ADT base whether IT is tensor-carrying is the wrong question --
+/// `Inputs` is a record, not a tensor -- so the projection resolves the
+/// FIELD's declared type instead.
+///
+/// Recognized spellings: a bare `var`, a `borrow`/`&` wrapper in either the
+/// tag or the builtin-application form, and a field projection (`access`) of
+/// any of these, nested to any depth. A projection resolves only on a
+/// single-record-variant ADT with named fields, which is the only shape
+/// `infer_access` itself projects.
+fn shape_operand_type(operand: &deep::Expr, ctx: &SizeCtx<'_>) -> Option<Type> {
+    stack_guard!("shape_operand_type", operand, None);
     if let Some(name) = symbolic_dim_ref_name(operand) {
-        return Some(name);
+        // A pipe stage's parameter denotes the upstream value (chelis#569).
+        if let Some(param) = ctx.piped(name) {
+            return param.ty.clone();
+        }
+        return ctx.env.lookup(name).map(|scheme| scheme.body.clone());
     }
-    // chelis#1107 amendment: carrier-preserving read.
     let (tag, _, kids) = stamped_parts(operand)?;
     // `&x` desugars to the `(borrow {} (var x))` TAG form; `borrow(x)`
     // may also appear as the `(app {} (var borrow) (var x))` builtin form.
     if tag == DeepTag::Borrow {
-        return kids.first().and_then(shape_operand_var_name);
+        return kids
+            .first()
+            .and_then(|inner| shape_operand_type(inner, ctx));
+    }
+    if tag == DeepTag::Access {
+        // `(access {} target field)`: the field's declared type, read off the
+        // single record variant of the target's ADT.
+        let target = kids.first()?;
+        let field = kids.get(1).and_then(symbol_name)?;
+        let mut resolved = shape_operand_type(target, ctx)?;
+        while let Type::Ref(inner) = resolved {
+            resolved = *inner;
+        }
+        let (Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _)) = resolved else {
+            return None;
+        };
+        let variant = single_record_variant(ctx.adt_reg, &adt_name)?;
+        return variant
+            .fields
+            .iter()
+            .find(|(name, _)| name.as_deref() == Some(field))
+            .map(|(_, ty)| ty.clone());
     }
     let callee = kids.first()?;
     if tag == DeepTag::App && is_builtin_var(callee, "borrow") {
-        return kids.get(1).and_then(shape_operand_var_name);
+        return kids.get(1).and_then(|inner| shape_operand_type(inner, ctx));
     }
     None
 }
 
-/// True when a scheme's body is (or contains, through `Ref`) a tensor type
-/// (chelis#397/#469).
-pub(super) fn scheme_is_tensor_carrying(scheme: &Scheme) -> bool {
-    fn is_tensor(ty: &Type) -> bool {
-        match ty {
-            Type::Tensor(..) => true,
-            Type::Ref(inner) => is_tensor(inner),
-            _ => false,
-        }
+/// True when a type is (or contains, through `Ref`) a tensor type.
+fn type_is_tensor(ty: &Type) -> bool {
+    match ty {
+        Type::Tensor(..) => true,
+        Type::Ref(inner) => type_is_tensor(inner),
+        _ => false,
     }
-    is_tensor(&scheme.body)
 }
 
 /// Describe a non-literal axis argument for the issue #259 diagnostic.
 ///
 /// When the axis is a `(var name)` (the common case: a function-parameter
-/// `int32` such as `mean(&x, ax)`), name it so the user can see which
+/// `i32` such as `mean(&x, ax)`), name it so the user can see which
 /// binding is the runtime value. Otherwise fall back to a generic
 /// "non-constant expression" phrasing. Kept deliberately small: this only
 /// feeds a user-facing message, not a control-flow decision.
@@ -468,152 +598,87 @@ pub(super) fn render_declared_dim(dim_names: &UnordMap<DimVar, String>, dv: DimV
 
 /// Post-body rigidity check for a def's declared dimension parameters.
 ///
-/// `declared_dvars` are the dim variables introduced by the declared
-/// parameter signatures, snapshotted before body inference. After the
-/// body is inferred, each declared dim parameter is universally
-/// quantified and must stay distinct: the body must type-check for
-/// *all* instantiations of those dims.
+/// Classify and check every dimension identity owned by one declaration.
 ///
-/// Two failure modes are flagged here, both `DimensionMismatch`:
+/// The structural binder list owns the complete identity set. Signature
+/// parameter occurrences are rigid, result-only occurrences are
+/// output-inferred under §4.4.1, and identities absent from the outer
+/// signature but used by body annotations are rigid under [04-INF-6].
 ///
-/// - `Dim::Var -> Dim::Lit`: the body forced a polymorphic dim
-///   parameter to a concrete literal (Nautilus Bug 2). The signature's
-///   polymorphism claim is self-contradictory.
-/// - `Dim::Var -> Dim::Var` (or any shared resolution) collapse: two
-///   *distinct* declared dim parameters resolved to the *same*
-///   dimension after body inference. The body unified two
-///   universally-quantified dim parameters that must stay distinct.
-///   This is Path B of `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A):
-///   `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
-///   tensor[n, f32] = y` collapses `n` and `m` via free `unify_dim`
-///   and never routes through the Shape A relaxed-retry guard.
-///
-/// A single declared dim parameter appearing in multiple param
-/// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
-/// never trips the collapse check.
-pub(super) fn check_declared_dvars_rigid(
-    declared_dvars: &[DimVar],
-    dim_names: &UnordMap<DimVar, String>,
-    subst: &Subst,
-    errors: &mut DiagnosticSink<'_>,
-) {
-    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
-    // First resolved dim seen -> the declared dvar that produced it.
-    // A second declared dvar resolving to the same dim is a collapse.
-    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
-    for dv in declared_dvars {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
-        if let Dim::Lit(n) = resolved {
-            errors.push(CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
-                     body: declared dim parameters must remain polymorphic",
-                    render(*dv)
-                ),
-                vec![
-                    "Replace the polymorphic dim with the concrete literal in the signature, or \
-                     ensure the body does not pin the dim to a specific size"
-                        .to_string(),
-                ],
-            ));
-            continue;
-        }
-        // A declared dim parameter that resolves to itself (still
-        // unbound) is the legitimate polymorphic case; it cannot
-        // collide with another declared dvar's distinct identity.
-        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
-            if *prev != *dv {
-                errors.push(CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!(
-                        "distinct declared dim parameters {} and {} were unified by the \
-                         function body: declared dim parameters are rigid and must remain \
-                         distinct",
-                        render(*prev),
-                        render(*dv)
-                    ),
-                    vec![
-                        "The body returns or constrains a value whose dimension differs from \
-                         the declared one. Use the same dim parameter on both sides if they \
-                         are meant to be equal, or fix the body so each declared dim stays \
-                         independent"
-                            .to_string(),
-                    ],
-                ));
-            }
-        } else {
-            seen.push((resolved, *dv));
-        }
-    }
-}
-
-/// chelis#273 return-position rigidity guard.
-///
-/// `check_declared_dvars_rigid` collects declared dim parameters from
-/// the signature's *parameter* positions only, so a dim parameter
-/// appearing **only in the return type** was never checked and the body
-/// could silently pin it (`def f[k](a: tensor[2, f32]) ->
-/// tensor[k, f32] = a` pinned `k := 2`).
-///
-/// A return-only dim parameter is not fully rigid, though: the body is
-/// the only place the output dimension can come from (Chelis has no
-/// explicit dim application; callers instantiate dims by unification
-/// against *arguments*, which never mention a return-only dim). The
-/// legitimate **output-inferred** uses must stay green
-/// (spec/04-type-system.md §4.4.1):
-///
-/// - the body leaves the dim var unbound (a clean, generalizable dim,
-///   e.g. variable-fed `to_tensor`), or
-/// - the body resolves it to a **body-internal** concrete dim
-///   (`examples/hello_tensor.ch`: `def main() -> tensor[n, f32]` whose
-///   body builds a `tensor[3, f32]`); the registered scheme then
-///   resolves to the produced dim.
-///
-/// What is rejected is **input coupling** — the body deriving the
-/// promised-independent output dim from the caller-visible parameter
-/// world:
-///
-/// - `Dim::Var -> Dim::Lit` pin where the literal equals the
-///   post-unification resolution of a dimension occurring in a declared
-///   parameter position, or
-/// - collapse with a distinct *param-position* declared dim parameter
-///   (either binding orientation).
-///
-/// Two return-only dim parameters collapsing with each other are
-/// tolerated (both are output-inferred; no caller-visible coupling).
-/// Known residual: coupling through a named symbolic dim
-/// (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x` binds
-/// `m := Name("batch")`) is not flagged — `Dim::Name` unifies
-/// permissively by design (chelis#219) and no declared dim parameter
-/// participates.
-pub(super) fn check_return_only_dvars_rigid(
+/// A collapse is accepted only when both identities are return-only. If
+/// either identity is parameter-position or body-only, the authored
+/// universal contract has been narrowed and the declaration is rejected.
+pub(super) fn check_authored_dvars_rigid(
+    declaration: &str,
     decl_ty: &Type,
-    param_dvars: &[DimVar],
     dim_names: &UnordMap<DimVar, String>,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
     let Type::Fn(decl_params, decl_ret) = decl_ty else {
+        // A non-function declaration has no parameter/result role split:
+        // every authored dimension in its declared value type is rigid under
+        // [04-INF-6]. In particular, §4.4.1's return-only output-inference
+        // exception applies only to a function result.
+        let mut rigid_dvars = dim_names
+            .to_sorted()
+            .into_iter()
+            .map(|(dv, _)| *dv)
+            .collect::<Vec<_>>();
+        rigid_dvars.sort_by_key(|dv| dv.0);
+        check_declared_dvars_rigid(Some(declaration), &rigid_dvars, dim_names, subst, errors);
         return;
     };
-    let ret_only: Vec<DimVar> = crate::env::free_dvars(decl_ret)
+
+    let mut param_dvars = Vec::new();
+    for ty in decl_params {
+        for dv in crate::env::free_dvars(ty) {
+            if !param_dvars.contains(&dv) {
+                param_dvars.push(dv);
+            }
+        }
+    }
+    let mut return_only_dvars = Vec::new();
+    for dv in crate::env::free_dvars(decl_ret) {
+        if dim_names.contains_key(&dv)
+            && !param_dvars.contains(&dv)
+            && !return_only_dvars.contains(&dv)
+        {
+            return_only_dvars.push(dv);
+        }
+    }
+    let rigid_dvars = dim_names
+        .to_sorted()
         .into_iter()
-        .filter(|dv| !param_dvars.contains(dv))
-        .collect();
-    if ret_only.is_empty() {
-        return;
+        .map(|(dv, _)| *dv)
+        .filter(|dv| !return_only_dvars.contains(dv))
+        .collect::<Vec<_>>();
+
+    check_declared_dvars_rigid(Some(declaration), &rigid_dvars, dim_names, subst, errors);
+
+    // chelis#273 return-position rigidity guard. A return-only identity may
+    // remain unbound, resolve to a body-internal concrete output, or collapse
+    // with another return-only identity. It may not derive from a declared
+    // parameter dimension or collapse with any rigid authored identity.
+    //
+    // Known §4.4.1 boundary: coupling through a named symbolic dim is not
+    // flagged unless another authored dimension identity participates.
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
+    let mut param_dims = Vec::new();
+    for ty in decl_params {
+        crate::env::collect_dims(ty, &mut param_dims);
     }
-    // Every dimension occurring in a declared parameter position,
-    // resolved through the post-body substitution.
-    let mut param_dims: Vec<Dim> = Vec::new();
-    for t in decl_params {
-        crate::env::collect_dims(t, &mut param_dims);
-    }
-    let resolved_param_dims: Vec<Dim> = param_dims.iter().map(|d| subst.apply_dim(d)).collect();
-    for dv in &ret_only {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
+    let resolved_param_dims = param_dims
+        .iter()
+        .map(|dim| subst.constraint_dim(dim))
+        .collect::<Vec<_>>();
+    for dv in &return_only_dvars {
+        let constraint = subst.constraint_dim(&Dim::Var(*dv));
+        let resolved = if matches!(constraint, Dim::Lit(_)) {
+            constraint
+        } else {
+            subst.semantic_dim(&Dim::Var(*dv))
+        };
         if let Dim::Lit(n) = resolved {
             if resolved_param_dims.contains(&Dim::Lit(n)) {
                 errors.push(CheckError::new(
@@ -635,27 +700,135 @@ pub(super) fn check_return_only_dvars_rigid(
                     ],
                 ));
             }
-        } else if let Some(pdv) = param_dvars
+        } else if let Some(rigid_dv) = rigid_dvars
             .iter()
-            .find(|pdv| subst.apply_dim(&Dim::Var(**pdv)) == resolved)
+            .find(|rigid_dv| subst.semantic_dim(&Dim::Var(**rigid_dv)) == resolved)
         {
+            if param_dvars.contains(rigid_dv) {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter {} was unified with the distinct \
+                         declared dim parameter {} from a parameter position: declared \
+                         dim parameters are rigid and must remain distinct \
+                         (spec/04-type-system.md \u{00a7}4.4.1)",
+                        render(*dv),
+                        render(*rigid_dv)
+                    ),
+                    vec![
+                        "Use the same dim parameter in both positions if the return \
+                         dimension is meant to equal the input's, or fix the body so the \
+                         declared dims stay independent"
+                            .to_string(),
+                    ],
+                ));
+            } else {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "return-position dim parameter {} and rigid body-only dim parameter {} \
+                         of `{declaration}` were unified by the function body: a collapse \
+                         involving an authored rigid dimension binder is a type error \
+                         (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                        render(*dv),
+                        render(*rigid_dv)
+                    ),
+                    vec![
+                        "Use the same binder if the dimensions are meant to be equal, or fix the \
+                         body so the body-only binder remains independent. Only two return-only \
+                         binders may share one body-inferred output dimension."
+                            .to_string(),
+                    ],
+                ));
+            }
+        }
+    }
+}
+
+/// `declared_dvars` are the rigid dim variables introduced by a declaration
+/// or function contract, snapshotted before body inference. After the body is
+/// inferred, each must stay distinct: the body must type-check for *all*
+/// instantiations of those dims.
+///
+/// Two failure modes are flagged here, both `DimensionMismatch`:
+///
+/// - `Dim::Var -> Dim::Lit`: the body forced a polymorphic dim
+///   parameter to a concrete literal (Nautilus Bug 2). The signature's
+///   polymorphism claim is self-contradictory.
+/// - `Dim::Var -> Dim::Var` (or any shared resolution) collapse: two
+///   *distinct* declared dim parameters resolved to the *same*
+///   dimension after body inference. The body unified two
+///   universally-quantified dim parameters that must stay distinct.
+///   This is Path B of `TypeCheck-FreeDimVarUnification-F1` (SR-LEAK-A):
+///   `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
+///   tensor[n, f32] = y` collapses `n` and `m` via free `unify_dim`
+///   and never routes through the Shape A relaxed-retry guard.
+///
+/// A single declared dim parameter appearing in multiple param
+/// positions (`def h[n](x: tensor[n], y: tensor[n])`) is one dvar and
+/// never trips the collapse check.
+pub(super) fn check_declared_dvars_rigid(
+    declaration: Option<&str>,
+    declared_dvars: &[DimVar],
+    dim_names: &UnordMap<DimVar, String>,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let render = |dv: DimVar| render_declared_dim(dim_names, dv);
+    let owner = declaration.map_or_else(String::new, |name| format!(" in declaration `{name}`"));
+    // First resolved dim seen -> the declared dvar that produced it.
+    // A second declared dvar resolving to the same dim is a collapse.
+    let mut seen: Vec<(Dim, DimVar)> = Vec::new();
+    for dv in declared_dvars {
+        let constraint = subst.constraint_dim(&Dim::Var(*dv));
+        let resolved = if matches!(constraint, Dim::Lit(_)) {
+            constraint
+        } else {
+            subst.semantic_dim(&Dim::Var(*dv))
+        };
+        if let Dim::Lit(n) = resolved {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "return-position dim parameter {} was unified with the distinct \
-                     declared dim parameter {} from a parameter position: declared \
-                     dim parameters are rigid and must remain distinct \
-                     (spec/04-type-system.md \u{00a7}4.4.1)",
+                    "polymorphic dim parameter {} forced to concrete Lit({n}) by function \
+                     body{owner}: an authored dimension binder is rigid and the body must \
+                     type-check for every dimension \
+                     (spec/04-type-system.md §3.1.3 [04-INF-6])",
                     render(*dv),
-                    render(*pdv)
                 ),
                 vec![
-                    "Use the same dim parameter in both positions if the return \
-                     dimension is meant to equal the input's, or fix the body so the \
-                     declared dims stay independent"
+                    "Replace the polymorphic dim with the concrete literal in the signature, or \
+                     ensure the body does not pin the dim to a specific size"
                         .to_string(),
                 ],
             ));
+            continue;
+        }
+        // A declared dim parameter that resolves to itself (still
+        // unbound) is the legitimate polymorphic case; it cannot
+        // collide with another declared dvar's distinct identity.
+        if let Some((_, prev)) = seen.iter().find(|(candidate, _)| candidate == &resolved) {
+            if *prev != *dv {
+                errors.push(CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    format!(
+                        "distinct declared dim parameters {} and {} were unified by the function \
+                         body{owner}: authored dimension binders are rigid and must remain \
+                         distinct (spec/04-type-system.md §3.1.3 [04-INF-6])",
+                        render(*prev),
+                        render(*dv)
+                    ),
+                    vec![
+                        "The body returns or constrains a value whose dimension differs from \
+                         the declared one. Use the same dim parameter on both sides if they \
+                         are meant to be equal, or fix the body so each declared dim stays \
+                         independent"
+                            .to_string(),
+                    ],
+                ));
+            }
+        } else {
+            seen.push((resolved, *dv));
         }
     }
 }

@@ -68,12 +68,12 @@ fn generated_program(definitions: usize, shape: GraphShape) -> Vec<deep::Expr> {
     let mut source = String::from("module Profile.Issue1316\n");
     for index in 0..definitions {
         source.push_str(&format!(
-            "def f{index}(x: int32) -> int32 = {}\n",
+            "def f{index}(x: i32) -> i32 = {}\n",
             function_body(index, definitions, shape)
         ));
     }
     let declarations = chelis_surf::parser::parse_str(&source).expect("generated Surf parses");
-    chelis_surf::desugar::desugar_program(&declarations)
+    chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar")
 }
 
 fn plan_for(program: &[deep::Expr]) -> FunctionInferencePlan {
@@ -315,30 +315,31 @@ fn issue_1316_each_public_driver_builds_one_shared_plan() {
 }
 
 #[test]
-fn issue_1316_malformed_group_rejects_in_both_drivers() {
-    let malformed = vec![node_expr(
-        DeepTag::Def,
-        vec![
-            symbol_expr("broken"),
-            node_expr(
-                DeepTag::Fn,
-                vec![node_expr(DeepTag::Params, vec![symbol_expr("x")])],
-            ),
-        ],
-    )];
-    assert!(check_typed_program(&malformed).is_err());
-    assert!(check_ir_program(&malformed).is_err());
+fn issue_1316_malformed_group_is_rejected_before_either_driver() {
+    // A `fn` without a body cannot reach either driver: the node constructor
+    // enforces `fn`'s two-child arity, and the parser builds through it.
+    let params = stamped_node_expr(DeepTag::Params, vec![symbol_expr("x")]);
+    assert!(matches!(
+        DeepNode::try_new(DeepTag::Fn, deep::Metadata::default(), vec![params]),
+        Err(chelis_deep::node::NodeError::ArityViolation {
+            tag: DeepTag::Fn,
+            actual: 1,
+            ..
+        })
+    ));
+    assert!(chelis_deep::parser::parse_str("(def {} broken (fn {} (params {} x)))").is_err());
 }
 
 #[test]
 fn issue_1316_unknown_call_diagnostic_order_is_stable_across_drivers() {
     let declarations = chelis_surf::parser::parse_str(
         "module Profile.Errors\n\
-         def first(x: int32) -> int32 = missing_first(x)\n\
-         def second(x: int32) -> int32 = missing_second(x)\n",
+         def first(x: i32) -> i32 = missing_first(x)\n\
+         def second(x: i32) -> i32 = missing_second(x)\n",
     )
     .expect("fixture parses");
-    let program = chelis_surf::desugar::desugar_program(&declarations);
+    let program =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let messages = |result: Result<CheckedProgram, InferResult>| {
         result
             .expect_err("unknown calls must reject")

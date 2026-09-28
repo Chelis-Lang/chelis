@@ -10,9 +10,9 @@
 //! output type variable `out`. All shape resolution comes from the
 //! infer-time post-check (`check_reduction_signature` /
 //! `check_expand_signature`), which reads the axis literal. When the
-//! axis is a literal (`mean(&x, cast(0, int32))` or `mean(&x, 0)`) the
+//! axis is a literal (`mean(&x, cast(0, i32))` or `mean(&x, 0)`) the
 //! post-check fires and resolves `out` to the reduced tensor shape.
-//! When the axis is a non-literal (`mean(&x, ax)` where `ax: int32` is a
+//! When the axis is a non-literal (`mean(&x, ax)` where `ax: i32` is a
 //! function parameter), `extract_int_for_dim` returns `None`, the
 //! post-check pre-fix short-circuited with `subst.apply(result_ty)`, and
 //! `out` stayed a fresh `Type::Var`. A subsequent `&` borrow of the
@@ -44,7 +44,7 @@ use chelis_types::{InferResult, check_ir_program};
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -60,7 +60,7 @@ fn messages(rep: &InferResult) -> Vec<String> {
 // produce a targeted diagnostic naming the axis cause, NOT a borrow error.
 // ---------------------------------------------------------------------------
 
-/// EXPECT (issue #259 reproducer): `mean(&x, ax)` with `ax: int32` a
+/// EXPECT (issue #259 reproducer): `mean(&x, ax)` with `ax: i32` a
 /// function parameter is rejected with a diagnostic at the `mean` call
 /// site naming the compile-time-constant-axis requirement. The
 /// misleading `borrow requires tensor or tensor-carrying input, got ?N`
@@ -69,7 +69,7 @@ fn messages(rep: &InferResult) -> Vec<String> {
 fn issue259_mean_nonliteral_axis_reports_axis_cause_not_borrow() {
     let src = r#"
 def consumer[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)
-def go[m, n](x: tensor[m, n, f32], ax: int32) -> tensor[n, f32] = {
+def go[m, n](x: tensor[m, n, f32], ax: i32) -> tensor[n, f32] = {
   y = mean(&x, ax)
   consumer(&y)
 }
@@ -119,7 +119,7 @@ fn issue259_reduction_family_nonliteral_axis_all_report_axis_cause() {
         "argmin_reduce",
     ] {
         let src = format!(
-            "def go[m, n](x: tensor[m, n, f32], ax: int32) -> tensor[n, f32] = {name}(&x, ax)\n"
+            "def go[m, n](x: tensor[m, n, f32], ax: i32) -> tensor[n, f32] = {name}(&x, ax)\n"
         );
         let deep = surf_to_deep(&src);
         let rep = check_ir_program(&deep)
@@ -149,7 +149,7 @@ fn issue259_reduction_family_nonliteral_axis_all_report_axis_cause() {
 fn issue259_expand_nonliteral_axis_reports_axis_cause_not_borrow() {
     let src = r#"
 def consumer[m, n](x: &tensor[m, n, f32]) -> tensor[m, n, f32] = copy(x)
-def go[n](x: tensor[n, f32], ax: int32) -> tensor[4, n, f32] = {
+def go[n](x: tensor[n, f32], ax: i32) -> tensor[4, n, f32] = {
   y = insert(&x, ax, 4i64)
   consumer(&y)
 }
@@ -202,7 +202,7 @@ def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
     }
 }
 
-/// Positive control: the `cast(N, int32)`-wrapped literal axis form also
+/// Positive control: the `cast(N, i32)`-wrapped literal axis form also
 /// still type-checks. Issue #216 made `extract_int_for_dim` cast-aware;
 /// this confirms the #259 non-literal arm does not swallow the
 /// cast-wrapped literal that #216 deliberately admits.
@@ -211,7 +211,7 @@ fn issue259_mean_cast_wrapped_literal_axis_still_typechecks() {
     let src = r#"
 def consumer[m](x: &tensor[m, f32]) -> tensor[m, f32] = copy(x)
 def go[m](x: tensor[m, 4, f32]) -> tensor[m, f32] = {
-  y = mean(&x, cast(1, int32))
+  y = mean(&x, cast(1, i32))
   consumer(&y)
 }
 "#;
@@ -270,7 +270,7 @@ def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = mean(&x, 9)
     );
 }
 
-/// Negative parity: a genuinely non-tensor borrow (a stack `int32` bound
+/// Negative parity: a genuinely non-tensor borrow (a stack `i32` bound
 /// against a `&tensor[..]` parameter) still fails for the right reason.
 /// This is unrelated to the reduction axis path and must keep its own
 /// diagnostic; the #259 fix must not suppress it.
@@ -278,11 +278,10 @@ def go[m, n](x: tensor[m, n, f32]) -> tensor[m, f32] = mean(&x, 9)
 fn issue259_non_tensor_borrow_still_rejected() {
     let src = r#"
 def consumer[n](x: &tensor[n, f32]) -> tensor[n, f32] = copy(x)
-def go(v: int32) -> tensor[1, f32] = consumer(&v)
+def go(v: i32) -> tensor[1, f32] = consumer(&v)
 "#;
     let deep = surf_to_deep(src);
-    let rep =
-        check_ir_program(&deep).expect_err("borrow of int32 against &tensor must be rejected");
+    let rep = check_ir_program(&deep).expect_err("borrow of i32 against &tensor must be rejected");
     assert!(
         !rep.errors.is_empty(),
         "borrow of a non-tensor must surface at least one error"

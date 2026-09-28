@@ -13,6 +13,8 @@
 //! `proven`). These oracles lock the chelis-prove invariants for the canonical
 //! `&&`/`||` form and the auto-fallthrough.
 
+mod support;
+
 use chelis_prove::composition::CompositeVerdict;
 use chelis_prove::property_runner::{
     PropertyOutcome, PropertyRunOptions, PropertyRunResult, PropertyStatus, PropertyTier,
@@ -100,6 +102,7 @@ def helper(x: f32) -> f32 = log(x)
 
 #[test]
 fn false_conjunction_goal_is_never_falsely_proven() {
+    crate::support::isolate();
     // smt-only false-conjunction is the laundering-risk path; auto/default may
     // fuzz it. In every build the verdict must NOT be a proof and must not be a
     // clean pass, and must never surface a `status: error`.
@@ -122,6 +125,7 @@ fn false_conjunction_goal_is_never_falsely_proven() {
 
 #[test]
 fn false_disjunction_goal_is_never_falsely_proven() {
+    crate::support::isolate();
     let outcome = one(DISJ_FALSE, "auto", 256);
     assert_ne!(outcome.status, PropertyStatus::Error, "{outcome:?}");
     assert_ne!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
@@ -133,6 +137,7 @@ fn false_disjunction_goal_is_never_falsely_proven() {
 
 #[test]
 fn nonlowerable_conjunction_under_auto_falls_to_fuzz_not_error() {
+    crate::support::isolate();
     // The second wart in chelis#463: a conjunction that cannot lower to SMT
     // must, under `--tier auto`, fall through to Tier C fuzz CLEANLY -- never a
     // `status: error`. A true non-lowerable conjunction fuzz-passes, badged as
@@ -162,6 +167,7 @@ fn nonlowerable_conjunction_under_auto_falls_to_fuzz_not_error() {
 
 #[test]
 fn nonlowerable_false_conjunction_under_auto_no_error_no_false_proven() {
+    crate::support::isolate();
     let outcome = one(CONJ_NONLOWERABLE_FALSE, "auto", 256);
     assert_ne!(
         outcome.status,
@@ -186,6 +192,7 @@ fn nonlowerable_false_conjunction_under_auto_no_error_no_false_proven() {
 #[cfg(feature = "smt")]
 #[test]
 fn conjunction_goal_lowers_to_smt_and_proves() {
+    crate::support::isolate();
     let outcome = one(CONJ_TRUE, "smt-only", 0);
     assert_eq!(
         outcome.status,
@@ -203,6 +210,7 @@ fn conjunction_goal_lowers_to_smt_and_proves() {
 #[cfg(feature = "smt")]
 #[test]
 fn disjunction_goal_lowers_to_smt_and_proves() {
+    crate::support::isolate();
     let outcome = one(DISJ_TRUE, "smt-only", 0);
     assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
     assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
@@ -216,6 +224,7 @@ fn disjunction_goal_lowers_to_smt_and_proves() {
 #[cfg(feature = "smt")]
 #[test]
 fn negation_control_goal_lowers_to_smt_and_proves() {
+    crate::support::isolate();
     let outcome = one(NEG_TRUE, "smt-only", 0);
     assert_eq!(outcome.status, PropertyStatus::Passed, "{outcome:?}");
     assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
@@ -229,6 +238,7 @@ fn negation_control_goal_lowers_to_smt_and_proves() {
 #[cfg(feature = "smt")]
 #[test]
 fn false_conjunction_is_disproved_at_smt_with_counterexample() {
+    crate::support::isolate();
     let outcome = one(CONJ_FALSE, "smt-only", 0);
     assert_eq!(
         outcome.status,
@@ -250,6 +260,7 @@ fn false_conjunction_is_disproved_at_smt_with_counterexample() {
 #[cfg(feature = "smt")]
 #[test]
 fn false_disjunction_is_disproved_at_smt() {
+    crate::support::isolate();
     let outcome = one(DISJ_FALSE, "smt-only", 0);
     assert_eq!(outcome.status, PropertyStatus::Failed, "{outcome:?}");
     assert_eq!(outcome.proof_tier, PropertyTier::Smt, "{outcome:?}");
@@ -263,6 +274,7 @@ fn false_disjunction_is_disproved_at_smt() {
 #[cfg(feature = "smt")]
 #[test]
 fn nonlowerable_conjunction_smt_only_is_honest_unsupported() {
+    crate::support::isolate();
     // smt-only is terminal: a non-lowerable conjunction must be an HONEST
     // capability-boundary `unsupported`, naming the transcendental, NOT an
     // internal lowering-error leak (chelis#434's failure mode).

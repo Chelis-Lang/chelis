@@ -8,142 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "chelis_runtime_dtype.h"
-/* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
- * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
- * We use the **legacy** hipblasGemmEx signature
- * (`hipblasDatatype_t` parameters, not `hipDataType`) because the
- * wheel-library hipBLAS shipped with `_rocm_sdk_libraries_gfx1151` on
- * this workstation only exports the unsuffixed `hipblasGemmEx`
- * symbol — defining `HIPBLAS_V2` would rewrite calls to
- * `hipblasGemmEx_v2`, an alias the wheel library does not provide,
- * producing an undefined-symbol link error at the manual HIP gate.
- * The legacy API is deprecated but still supported; switching to V2
- * is a separate ROCm-stack-upgrade story. */
-#if __has_include(<hipblas/hipblas.h>)
 #include <hipblas/hipblas.h>
-#define CHELIS_HAS_HIPBLAS_HEADER 1
-#else
-#define CHELIS_HAS_HIPBLAS_HEADER 0
-typedef enum {
-    HIPBLAS_STATUS_SUCCESS = 0
-} hipblasStatus_t;
-typedef struct hipblasContext *hipblasHandle_t;
-typedef enum {
-    HIPBLAS_OP_N = 111,
-    HIPBLAS_OP_T = 112,
-    HIPBLAS_OP_C = 113
-} hipblasOperation_t;
-extern hipblasStatus_t hipblasCreate(hipblasHandle_t *handle);
-extern hipblasStatus_t hipblasDestroy(hipblasHandle_t handle);
-extern hipblasStatus_t hipblasSgemm(
-    hipblasHandle_t handle,
-    hipblasOperation_t transa,
-    hipblasOperation_t transb,
-    int m,
-    int n,
-    int k,
-    const float *alpha,
-    const float *A,
-    int lda,
-    const float *B,
-    int ldb,
-    const float *beta,
-    float *C,
-    int ldc
-);
-extern hipblasStatus_t hipblasSgemmStridedBatched(
-    hipblasHandle_t handle,
-    hipblasOperation_t transa,
-    hipblasOperation_t transb,
-    int m,
-    int n,
-    int k,
-    const float *alpha,
-    const float *A,
-    int lda,
-    long long strideA,
-    const float *B,
-    int ldb,
-    long long strideB,
-    const float *beta,
-    float *C,
-    int ldc,
-    long long strideC,
-    int batchCount
-);
-extern hipblasStatus_t hipblasDgemm(
-    hipblasHandle_t handle,
-    hipblasOperation_t transa,
-    hipblasOperation_t transb,
-    int m,
-    int n,
-    int k,
-    const double *alpha,
-    const double *A,
-    int lda,
-    const double *B,
-    int ldb,
-    const double *beta,
-    double *C,
-    int ldc
-);
-extern hipblasStatus_t hipblasDgemmStridedBatched(
-    hipblasHandle_t handle,
-    hipblasOperation_t transa,
-    hipblasOperation_t transb,
-    int m,
-    int n,
-    int k,
-    const double *alpha,
-    const double *A,
-    int lda,
-    long long strideA,
-    const double *B,
-    int ldb,
-    long long strideB,
-    const double *beta,
-    double *C,
-    int ldc,
-    long long strideC,
-    int batchCount
-);
-/* WS-A3 fallback: minimal legacy hipblasGemmEx surface so generated
- * bf16/f16 matmul code still compiles when the hipblas header is
- * absent. Real builds resolve these symbols against libhipblas at
- * link time. The legacy signature carries `hipblasDatatype_t`
- * (instead of `hipDataType`) — see the rationale at the top of this
- * file for why we avoid the V2 alias. */
-typedef enum {
-    HIPBLAS_R_16F = 150,    /* 16-bit float, real */
-    HIPBLAS_R_16B = 168,    /* 16-bit bfloat, real */
-    HIPBLAS_R_32F = 151,    /* 32-bit float, real */
-    HIPBLAS_R_64F = 152     /* 64-bit float, real */
-} hipblasDatatype_t;
-typedef enum {
-    HIPBLAS_GEMM_DEFAULT = 160
-} hipblasGemmAlgo_t;
-extern hipblasStatus_t hipblasGemmEx(
-    hipblasHandle_t handle,
-    hipblasOperation_t transA,
-    hipblasOperation_t transB,
-    int m,
-    int n,
-    int k,
-    const void *alpha,
-    const void *A,
-    hipblasDatatype_t aType,
-    int lda,
-    const void *B,
-    hipblasDatatype_t bType,
-    int ldb,
-    const void *beta,
-    void *C,
-    hipblasDatatype_t cType,
-    int ldc,
-    hipblasDatatype_t computeType,
-    hipblasGemmAlgo_t algo
-);
+#if !defined(hipblasVersionMajor) || hipblasVersionMajor < 3
+#error "Chelis requires matching official hipBLAS 3+ headers and libraries"
 #endif
+#include "chelis_device_owner.h"
 
 /* Re-use the CPU tensor struct for host-side data. */
 #include "chelis_runtime.h"
@@ -174,148 +43,22 @@ extern hipblasStatus_t hipblasGemmEx(
     } \
 } while (0)
 
-/* GPU tensor: device pointer + shape metadata on host. */
-#define CHELIS_GPU_MAX_DIM 8
-typedef struct {
-    float *data;                    /* device pointer (hipMalloc) */
-    int shape[CHELIS_GPU_MAX_DIM];
-    int strides[CHELIS_GPU_MAX_DIM];
-    int ndim;
-    int dtype;
-    int size;                       /* total elements */
-    int storage_size;               /* backing allocation elements */
-} chelis_gpu_tensor;
-
-/* ---- Allocation / deallocation ---- */
-
-/* Device element width. This delegates to the runtime's single width
- * authority rather than restating the table: a second copy is exactly how
- * chelis#1360 happened, where this function said `bool` was one byte while
- * the emitter still dispatched four-byte kernels over the buffer it sized.
- * `chelis_dtype_size` rejects an unknown tag itself, and a HIP link already
- * pulls in libchelis_runtime.a, so nothing is gained by inlining a copy. */
-static inline size_t chelis_gpu_dtype_size(int dtype) {
-    return (size_t)chelis_dtype_size((chelis_dtype)dtype);
-}
-
-static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {
-    chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor));
-    t->ndim = ndim;
-    t->dtype = dtype;
-    t->size = 1;
-    for (int d = 0; d < ndim; d++) {
-        t->shape[d] = shape[d];
-        t->size *= shape[d];
-    }
-    if (t->size == 0) t->size = 1; /* scalar */
-    t->storage_size = t->size;
-    /* Row-major strides */
-    for (int d = ndim - 1; d >= 0; d--) {
-        t->strides[d] = (d == ndim - 1) ? 1 : t->strides[d + 1] * t->shape[d + 1];
-    }
-    CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * chelis_gpu_dtype_size(dtype)));
-    return t;
-}
-
-/* Allocate a GPU tensor that shares device memory (view, not owned). */
-static inline chelis_gpu_tensor* chelis_gpu_alloc_view(
-    int ndim, const int *shape, int dtype, float *device_data, int storage_size
-) {
-    chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor));
-    t->ndim = ndim;
-    t->dtype = dtype;
-    t->size = 1;
-    for (int d = 0; d < ndim; d++) {
-        t->shape[d] = shape[d];
-        t->size *= shape[d];
-    }
-    if (t->size == 0) t->size = 1;
-    t->storage_size = storage_size;
-    for (int d = ndim - 1; d >= 0; d--) {
-        t->strides[d] = (d == ndim - 1) ? 1 : t->strides[d + 1] * t->shape[d + 1];
-    }
-    t->data = device_data;
-    return t;
-}
-
-/* Free a GPU tensor that OWNS its device memory (from chelis_gpu_alloc).
-   Frees both the device data (hipFree) and the host-side struct (free).
-   Do NOT call this on views — use chelis_gpu_free_view instead. */
-static inline void chelis_gpu_free(chelis_gpu_tensor *t) {
-    if (t) {
-        (void)hipFree(t->data);
-        free(t);
-    }
-}
-
-/* Free a GPU tensor VIEW that BORROWS device memory (from chelis_gpu_alloc_view).
-   Frees only the host-side metadata struct. Does NOT free device data.
-   Movement ops (reshape, permute, expand, stride) create views. */
-static inline void chelis_gpu_free_view(chelis_gpu_tensor *t) {
-    if (t) free(t);
-}
-
-/* ---- Host ↔ Device transfer ---- */
-
-static inline void chelis_host_to_device(chelis_gpu_tensor *dst, const chelis_tensor *src) {
-    chelis_read_view view = chelis_tensor_read_view(src);
-    CHELIS_HIP_CHECK(hipMemcpy(dst->data, view.data,
-                               dst->size * chelis_gpu_dtype_size(dst->dtype),
-                               hipMemcpyHostToDevice));
-}
-
-static inline void chelis_device_to_host(chelis_tensor *dst, const chelis_gpu_tensor *src) {
-    chelis_tensor_write *guard = chelis_tensor_begin_write(dst);
-    chelis_write_view view = chelis_tensor_write_view(guard);
-    CHELIS_HIP_CHECK(hipMemcpy(view.data, src->data,
-                               view.count * chelis_gpu_dtype_size(src->dtype),
-                               hipMemcpyDeviceToHost));
-    chelis_tensor_end_write(guard);
-}
-
-static inline chelis_gpu_tensor* chelis_gpu_clone(const chelis_gpu_tensor *src) {
-    chelis_gpu_tensor *dst = chelis_gpu_alloc(src->ndim, src->shape, src->dtype);
-    for (int d = 0; d < src->ndim; d++) {
-        dst->strides[d] = src->strides[d];
-    }
-    dst->size = src->size;
-    dst->storage_size = src->size;
-    CHELIS_HIP_CHECK(hipMemcpy(
-        dst->data,
-        src->data,
-        src->size * chelis_gpu_dtype_size(src->dtype),
-        hipMemcpyDeviceToDevice
-    ));
-    return dst;
-}
-
-/* ---- Host-side layout helpers ---- */
-
-static inline int chelis_gpu_is_contiguous(const chelis_gpu_tensor *t) {
-    int expected = 1;
-    for (int d = t->ndim - 1; d >= 0; d--) {
-        if (t->strides[d] != expected) return 0;
-        expected *= t->shape[d];
-    }
-    return 1;
-}
-
 /* ---- hipBLAS helpers ---- */
 
 static inline void chelis_hipblas_sgemm_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     hipblasHandle_t handle;
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
     /* hipBLAS is column-major by default. Swap A/B and m/n to preserve row-major semantics. */
-    CHELIS_HIPBLAS_CHECK(hipblasSgemm(
+    CHELIS_HIPBLAS_CHECK(hipblasSgemm_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -323,49 +66,42 @@ static inline void chelis_hipblas_sgemm_row_major(
         m,
         k,
         &alpha,
-        b->data,
+        (const float *)b->data,
         n,
-        a->data,
+        (const float *)a->data,
         k,
         &beta,
-        out->data,
+        (float *)out->data,
         n
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
 
-static inline int chelis_gpu_matrix_slices_contiguous(
+static inline int64_t chelis_gpu_matrix_slices_contiguous(
     const chelis_gpu_tensor *t,
-    int trailing_cols
+    int64_t trailing_cols
 ) {
-    if (t->ndim < 2) return 0;
-    return t->strides[t->ndim - 1] == 1
-        && t->strides[t->ndim - 2] == trailing_cols;
+    if (t->rank < 2) return 0;
+    return t->strides[t->rank - 1] == 1
+        && t->strides[t->rank - 2] == trailing_cols;
 }
 
-/* WS-A3: bf16 matmul with f32 accumulator per spec/04-type-system.md
- * §5.7.1. Operand storage is bf16; alpha/beta and the GEMM accumulate
- * happen at f32; the result is downcast back to bf16 by hipblasGemmEx
- * (cType == HIPBLAS_R_16B, computeType == HIPBLAS_R_32F). hipBLAS is
- * column-major; we swap A/B and m/n to preserve row-major semantics
- * (same trick as `chelis_hipblas_sgemm_row_major`).
- *
- * The `compute_type` parameter on the legacy hipblasGemmEx signature
- * is also a `hipblasDatatype_t` (matching the data-type parameters);
- * `HIPBLAS_R_32F` selects f32 accumulation. */
+/* Reduced-precision storage with the explicitly selected f32 accumulator.
+ * The official hipBLAS API distinguishes hipDataType storage from
+ * hipblasComputeType_t computation; no local declaration fallback exists. */
 static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     hipblasHandle_t handle;
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -374,16 +110,16 @@ static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
         k,
         &alpha,
         b->data,
-        HIPBLAS_R_16B,
+        HIP_R_16BF,
         n,
         a->data,
-        HIPBLAS_R_16B,
+        HIP_R_16BF,
         k,
         &beta,
         out->data,
-        HIPBLAS_R_16B,
+        HIP_R_16BF,
         n,
-        HIPBLAS_R_32F,
+        HIPBLAS_COMPUTE_32F,
         HIPBLAS_GEMM_DEFAULT
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
@@ -391,20 +127,20 @@ static inline void chelis_hipblas_bf16_gemm_f32_acc_row_major(
 
 /* WS-A3: f16 matmul with f32 accumulator per spec §5.7.1. Same shape
  * as the bf16 wrapper above; differs only in the operand/result data
- * type (HIPBLAS_R_16F). */
+ * type (HIP_R_16F). */
 static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     hipblasHandle_t handle;
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    CHELIS_HIPBLAS_CHECK(hipblasGemmEx(
+    CHELIS_HIPBLAS_CHECK(hipblasGemmEx_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -413,16 +149,16 @@ static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
         k,
         &alpha,
         b->data,
-        HIPBLAS_R_16F,
+        HIP_R_16F,
         n,
         a->data,
-        HIPBLAS_R_16F,
+        HIP_R_16F,
         k,
         &beta,
         out->data,
-        HIPBLAS_R_16F,
+        HIP_R_16F,
         n,
-        HIPBLAS_R_32F,
+        HIPBLAS_COMPUTE_32F,
         HIPBLAS_GEMM_DEFAULT
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
@@ -431,10 +167,10 @@ static inline void chelis_hipblas_f16_gemm_f32_acc_row_major(
 static inline void chelis_hipblas_sgemm_batched_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     if (!chelis_gpu_matrix_slices_contiguous(a, k)
         || !chelis_gpu_matrix_slices_contiguous(b, n)
@@ -443,29 +179,27 @@ static inline void chelis_hipblas_sgemm_batched_row_major(
         abort();
     }
 
-    int batch_ndim = out->ndim - 2;
-    int batch_count = 1;
-    for (int d = 0; d < batch_ndim; d++) {
-        batch_count *= out->shape[d];
-    }
+    int64_t batch_ndim = out->rank - 2;
+    if (out->count == 0) return;
+    const int64_t batch_count = out->count / m / n;
 
     hipblasHandle_t handle;
     const float alpha = 1.0f;
     const float beta = 0.0f;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    for (int batch = 0; batch < batch_count; batch++) {
-        int rem = batch;
-        int a_offset = 0;
-        int b_offset = 0;
-        int out_offset = 0;
-        for (int d = batch_ndim - 1; d >= 0; d--) {
-            int coord = rem % out->shape[d];
+    for (int64_t batch = 0; batch < batch_count; batch++) {
+        int64_t rem = batch;
+        int64_t a_offset = 0;
+        int64_t b_offset = 0;
+        int64_t out_offset = 0;
+        for (int64_t d = batch_ndim - 1; d >= 0; d--) {
+            int64_t coord = rem % out->shape[d];
             rem /= out->shape[d];
             a_offset += coord * a->strides[d];
             b_offset += coord * b->strides[d];
             out_offset += coord * out->strides[d];
         }
-        CHELIS_HIPBLAS_CHECK(hipblasSgemm(
+        CHELIS_HIPBLAS_CHECK(hipblasSgemm_64(
             handle,
             HIPBLAS_OP_N,
             HIPBLAS_OP_N,
@@ -473,12 +207,12 @@ static inline void chelis_hipblas_sgemm_batched_row_major(
             m,
             k,
             &alpha,
-            b->data + b_offset,
+            (const float *)b->data + b_offset,
             n,
-            a->data + a_offset,
+            (const float *)a->data + a_offset,
             k,
             &beta,
-            out->data + out_offset,
+            (float *)out->data + out_offset,
             n
         ));
     }
@@ -488,14 +222,14 @@ static inline void chelis_hipblas_sgemm_batched_row_major(
 static inline void chelis_hipblas_sgemm_strided_batched_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k,
-    int batch_count,
-    long long a_batch_stride,
-    long long b_batch_stride,
-    long long out_batch_stride
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch_count,
+    int64_t a_batch_stride,
+    int64_t b_batch_stride,
+    int64_t out_batch_stride
 ) {
     if (!chelis_gpu_matrix_slices_contiguous(a, k)
         || !chelis_gpu_matrix_slices_contiguous(b, n)
@@ -509,7 +243,7 @@ static inline void chelis_hipblas_sgemm_strided_batched_row_major(
     const float beta = 0.0f;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
     /* hipBLAS is column-major by default. Swap A/B and m/n to preserve row-major semantics. */
-    CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched(
+    CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -517,14 +251,14 @@ static inline void chelis_hipblas_sgemm_strided_batched_row_major(
         m,
         k,
         &alpha,
-        b->data,
+        (const float *)b->data,
         n,
         b_batch_stride,
-        a->data,
+        (const float *)a->data,
         k,
         a_batch_stride,
         &beta,
-        out->data,
+        (float *)out->data,
         n,
         out_batch_stride,
         batch_count
@@ -534,27 +268,19 @@ static inline void chelis_hipblas_sgemm_strided_batched_row_major(
 
 /* ---- f64 hipBLAS helpers (WS-A2) ---- */
 
-/* The chelis_gpu_tensor struct's `data` field is typed as `float *`
- * historically, but the underlying device allocation is sized via
- * `chelis_gpu_dtype_size(dtype)` so the same struct holds f32 (4 B) and
- * f64 (8 B) elements. The f64 helpers below cast through `void *` to
- * the right pointer type before calling hipblasDgemm; arithmetic on the
- * cast `double *` advances by 8 bytes per element, so the existing
- * row-major-via-column-major-swap convention is preserved. */
-
 static inline void chelis_hipblas_dgemm_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     hipblasHandle_t handle;
     const double alpha = 1.0;
     const double beta = 0.0;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    CHELIS_HIPBLAS_CHECK(hipblasDgemm(
+    CHELIS_HIPBLAS_CHECK(hipblasDgemm_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -576,10 +302,10 @@ static inline void chelis_hipblas_dgemm_row_major(
 static inline void chelis_hipblas_dgemm_batched_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k
 ) {
     if (!chelis_gpu_matrix_slices_contiguous(a, k)
         || !chelis_gpu_matrix_slices_contiguous(b, n)
@@ -588,11 +314,9 @@ static inline void chelis_hipblas_dgemm_batched_row_major(
         abort();
     }
 
-    int batch_ndim = out->ndim - 2;
-    int batch_count = 1;
-    for (int d = 0; d < batch_ndim; d++) {
-        batch_count *= out->shape[d];
-    }
+    int64_t batch_ndim = out->rank - 2;
+    if (out->count == 0) return;
+    const int64_t batch_count = out->count / m / n;
 
     hipblasHandle_t handle;
     const double alpha = 1.0;
@@ -601,19 +325,19 @@ static inline void chelis_hipblas_dgemm_batched_row_major(
     const double *b_base = (const double *)(const void *)b->data;
     double *out_base = (double *)(void *)out->data;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    for (int batch = 0; batch < batch_count; batch++) {
-        int rem = batch;
-        long long a_offset = 0;
-        long long b_offset = 0;
-        long long out_offset = 0;
-        for (int d = batch_ndim - 1; d >= 0; d--) {
-            int coord = rem % out->shape[d];
+    for (int64_t batch = 0; batch < batch_count; batch++) {
+        int64_t rem = batch;
+        int64_t a_offset = 0;
+        int64_t b_offset = 0;
+        int64_t out_offset = 0;
+        for (int64_t d = batch_ndim - 1; d >= 0; d--) {
+            int64_t coord = rem % out->shape[d];
             rem /= out->shape[d];
-            a_offset += (long long)coord * a->strides[d];
-            b_offset += (long long)coord * b->strides[d];
-            out_offset += (long long)coord * out->strides[d];
+            a_offset += (int64_t)coord * a->strides[d];
+            b_offset += (int64_t)coord * b->strides[d];
+            out_offset += (int64_t)coord * out->strides[d];
         }
-        CHELIS_HIPBLAS_CHECK(hipblasDgemm(
+        CHELIS_HIPBLAS_CHECK(hipblasDgemm_64(
             handle,
             HIPBLAS_OP_N,
             HIPBLAS_OP_N,
@@ -636,14 +360,14 @@ static inline void chelis_hipblas_dgemm_batched_row_major(
 static inline void chelis_hipblas_dgemm_strided_batched_row_major(
     const chelis_gpu_tensor *a,
     const chelis_gpu_tensor *b,
-    chelis_gpu_tensor *out,
-    int m,
-    int n,
-    int k,
-    int batch_count,
-    long long a_batch_stride,
-    long long b_batch_stride,
-    long long out_batch_stride
+    const chelis_gpu_tensor *out,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    int64_t batch_count,
+    int64_t a_batch_stride,
+    int64_t b_batch_stride,
+    int64_t out_batch_stride
 ) {
     if (!chelis_gpu_matrix_slices_contiguous(a, k)
         || !chelis_gpu_matrix_slices_contiguous(b, n)
@@ -656,7 +380,7 @@ static inline void chelis_hipblas_dgemm_strided_batched_row_major(
     const double alpha = 1.0;
     const double beta = 0.0;
     CHELIS_HIPBLAS_CHECK(hipblasCreate(&handle));
-    CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched(
+    CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched_64(
         handle,
         HIPBLAS_OP_N,
         HIPBLAS_OP_N,
@@ -678,6 +402,7 @@ static inline void chelis_hipblas_dgemm_strided_batched_row_major(
     ));
     CHELIS_HIPBLAS_CHECK(hipblasDestroy(handle));
 }
+
 
 /* ---- JIT compilation ---- */
 
@@ -729,8 +454,23 @@ static inline hipModule_t chelis_compile_kernel(const char *source, const char *
 
 static inline void chelis_launch_kernel(
     hipModule_t module, const char *name,
-    dim3 grid, dim3 block, void **args
+    int64_t grid_count, int64_t block_count, void **args
 ) {
+    int device = 0;
+    hipDeviceProp_t properties;
+    CHELIS_HIP_CHECK(hipGetDevice(&device));
+    CHELIS_HIP_CHECK(hipGetDeviceProperties(&properties, device));
+    if (grid_count < 0 || block_count <= 0) {
+        chelis_numeric_trap("numeric trap: domain in launch at i64");
+    }
+    if (grid_count > properties.maxGridSize[0]
+        || block_count > properties.maxThreadsDim[0]
+        || block_count > properties.maxThreadsPerBlock) {
+        chelis_numeric_trap("numeric trap: overflow in launch at i64");
+    }
+    if (grid_count == 0) return;
+    const dim3 grid((unsigned int)grid_count);
+    const dim3 block((unsigned int)block_count);
     hipFunction_t func;
     CHELIS_HIP_CHECK(hipModuleGetFunction(&func, module, name));
     CHELIS_HIP_CHECK(hipModuleLaunchKernel(

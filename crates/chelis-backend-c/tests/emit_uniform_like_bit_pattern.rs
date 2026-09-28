@@ -38,37 +38,78 @@ fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
     build_uniform_like_dag_for(Prim::F32, low, high, seed)
 }
 
+/// `uniform_like(key_from_seed(seed), template, low, high)`.
 fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let template = dag.add_node(
+        decl,
         RiscOp::synth_const(precision, 0.0),
         vec![],
         tensor(precision, 4),
         None,
     );
-    dag.add_node(
-        RiscOp::UniformLike { low, high, seed },
-        vec![template],
+    let rank0 = |precision| TensorType {
+        dims: vec![],
+        precision,
+    };
+    let low = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, low),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let high = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::F32, high),
+        vec![],
+        rank0(Prim::F32),
+        None,
+    );
+    let seed = dag.add_node(
+        decl,
+        RiscOp::synth_const(Prim::Int64, seed as f64),
+        vec![],
+        rank0(Prim::Int64),
+        None,
+    );
+    let key = dag.add_node(
+        decl,
+        RiscOp::KeyFromSeed,
+        vec![seed],
+        rank0(Prim::Key),
+        None,
+    );
+    let draw = dag.add_node(
+        decl,
+        RiscOp::UniformLike,
+        vec![template, low, high, key],
         tensor(precision, 4),
         None,
     );
+    dag.add_root(draw);
     dag
+}
+
+/// The output slot of the graph's draw.
+fn draw_slot(dag: &Dag) -> String {
+    format!("t{}_data", dag.roots()[0].0)
 }
 
 #[test]
 fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
-    let f64_src = emit_dag(
-        &build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17),
-        "uniform_f64",
-    )
-    .unwrap();
+    let f64_dag = build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17);
+    let slot = draw_slot(&f64_dag);
+    let f64_src = emit_dag(&f64_dag, "uniform_f64").unwrap();
     assert!(f64_src.contains("static inline double chelis_uniform_sample_f64("));
-    assert!(f64_src.contains("((double*)t1_data)[i] = chelis_uniform_sample_f64("));
-    assert!(f64_src.contains("chelis_f64_from_bits("));
+    assert!(f64_src.contains(&format!(
+        "((double*){slot})[i] = chelis_uniform_sample_f64("
+    )));
     assert!(
         !f64_src
             .lines()
-            .any(|line| line.contains("t1_data)[i]") && line.contains("sample_f32")),
+            .any(|line| line.contains(&format!("{slot})[i]")) && line.contains("sample_f32")),
         "f64 output must never widen an f32 sample:\n{f64_src}"
     );
 
@@ -76,13 +117,11 @@ fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
         (Prim::F16, "chelis_f32_to_f16"),
         (Prim::Bf16, "chelis_f32_to_bf16"),
     ] {
-        let src = emit_dag(
-            &build_uniform_like_dag_for(precision, 0.1, 0.9, 17),
-            "uniform_reduced",
-        )
-        .unwrap();
+        let dag = build_uniform_like_dag_for(precision, 0.1, 0.9, 17);
+        let slot = draw_slot(&dag);
+        let src = emit_dag(&dag, "uniform_reduced").unwrap();
         assert!(src.contains("chelis_uniform_sample_f32("));
-        assert!(src.contains(&format!("((uint16_t*)t1_data)[i] = {conversion}(")));
+        assert!(src.contains(&format!("((uint16_t*){slot})[i] = {conversion}(")));
     }
 }
 
@@ -99,8 +138,8 @@ fn issue_248_uniform_like_low_arg_emits_exact_bit_pattern() {
 
     let low_bits = (low as f32).to_bits();
     let high_bits = (high as f32).to_bits();
-    let low_needle = format!("chelis_f32_from_bits(0x{low_bits:08x}u)");
-    let high_needle = format!("chelis_f32_from_bits(0x{high_bits:08x}u)");
+    let low_needle = format!("0x{low_bits:08x}");
+    let high_needle = format!("0x{high_bits:08x}");
 
     assert!(
         src.contains(&low_needle),
@@ -169,108 +208,9 @@ fn issue_248_uniform_like_does_not_use_lossy_format() {
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(target_os = "linux")]
-use std::sync::OnceLock;
-#[cfg(target_os = "linux")]
 use support::codegen;
-
-#[cfg(target_os = "linux")]
-fn runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-#[cfg(target_os = "linux")]
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    if let Ok(entries) = fs::read_dir(&deps_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy().to_string();
-            if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-                let meta = entry.metadata()?;
-                let mtime = meta.modified()?;
-                if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
-                    newest = Some((mtime, entry.path()));
-                }
-            }
-        }
-    }
-    let hashed = match newest {
-        Some((_, p)) => p,
-        None => {
-            Command::new(env!("CARGO"))
-                .args(["build", "-p", "chelis-runtime", "--lib"])
-                .status()
-                .map_err(|e| std::io::Error::other(format!("cargo build chelis-runtime: {e}")))?;
-            let entries = fs::read_dir(&deps_dir)?;
-            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy().to_string();
-                if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-                    let meta = entry.metadata()?;
-                    let mtime = meta.modified()?;
-                    if newest.as_ref().is_none_or(|(cur, _)| mtime > *cur) {
-                        newest = Some((mtime, entry.path()));
-                    }
-                }
-            }
-            newest
-                .map(|(_, p)| p)
-                .ok_or_else(|| std::io::Error::other("no libchelis_runtime-*.a after rebuild"))?
-        }
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    match fs::rename(&tmp, canonical) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && canonical.exists() => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn runtime_lib_path() -> PathBuf {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let canonical = target_debug_dir().join("libchelis_runtime.a");
-        ensure_runtime_static_lib(&canonical).unwrap_or_else(|e| {
-            panic!(
-                "failed to materialize libchelis_runtime.a at {}: {e}",
-                canonical.display()
-            )
-        });
-        canonical
-    })
-    .clone()
-}
 
 #[cfg(target_os = "linux")]
 fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<String> {
@@ -278,19 +218,10 @@ fn compile_and_run(test_name: &str, c_source: &str, harness: &str) -> Option<Str
     let dir = probe.path().to_path_buf();
     fs::write(dir.join("kernel.c"), c_source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let include_dir = runtime_include_dir();
-    for hdr in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        let src = fs::read_to_string(include_dir.join(hdr)).unwrap();
-        fs::write(dir.join(hdr), src).unwrap();
-    }
+    let staged = chelis_runtime_bundle::stage(&dir)
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     let bin = dir.join("test_bin");
-    let runtime_lib = runtime_lib_path();
+    let runtime_lib = staged.archive;
     let compile = Command::new("gcc")
         .args([
             "-O2",
@@ -406,16 +337,18 @@ int main(void) {
     let Some(output) = compile_and_run("uniform_like_f64", src, harness) else {
         panic!("emitted f64 C did not compile/run");
     };
+    let bound = |value| chelis_types::scalar_from_f64("test", Prim::F32, value).unwrap();
+    // The draw's key is `key_from_seed(42)`.
+    let key = chelis_types::RandomKey::from_seed(
+        chelis_types::scalar_from_i64("test", Prim::Int64, 42).unwrap(),
+    )
+    .unwrap();
+    let sampled = chelis_types::PreparedUniformLike::new(Prim::F64, 4, bound(2.0), bound(5.0))
+        .unwrap()
+        .apply(key)
+        .unwrap();
     let expected = (0..4)
-        .map(|index| {
-            format!(
-                "{:016x}",
-                chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
-                    .unwrap()
-                    .as_f64_lossy()
-                    .to_bits()
-            )
-        })
+        .map(|index| format!("{:016x}", sampled.scalar_at(index).as_f64_lossy().to_bits()))
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(output.trim(), expected, "emitted source:\n{src}");

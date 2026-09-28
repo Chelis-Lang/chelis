@@ -16,7 +16,7 @@ use super::*;
 /// they are rejected here with a targeted diagnostic.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_reduction_app(
-    list: &deep::List,
+    node: &DeepNode,
     fname: &str,
     env: &mut Env,
     vg: &mut VarGen,
@@ -41,13 +41,13 @@ pub(super) fn infer_reduction_app(
         );
     }
 
-    let kids = children(list);
+    let kids = node.children_slice();
     let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let arg_tys: Vec<Type> = kids[1..]
         .iter()
         .enumerate()
         .map(|(index, arg)| {
-            // Axis slots carry dimension names, typed as axes (`int32`)
+            // Axis slots carry dimension names, typed as axes (`i32`)
             // rather than inferred as values — the named-reduction exemption
             // from the generic path.
             if index >= 1 && symbolic_dim_ref_name(arg).is_some() {
@@ -63,9 +63,9 @@ pub(super) fn infer_reduction_app(
 
     // [05-DIM-3] / [05-OP-29]: this early variadic route bypasses the
     // generic application's registered axis-dtype gate. Apply the same
-    // registry here so every Count axis is int32, including concrete
+    // registry here so every Count axis is i32, including concrete
     // multi-axis calls whose constant values are otherwise extractable.
-    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors) {
+    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, node, subst, errors) {
         return rejected;
     }
 
@@ -78,13 +78,13 @@ pub(super) fn infer_reduction_app(
 /// builtin scheme is arity-3, so this form bypasses the generic HM arity
 /// check (the `infer_permute_app` pattern). The `new` and `anchor` slots
 /// carry dimension *names*, not bound values — like a named reduction
-/// axis they are typed as `int32` axes rather than inferred, and
+/// axis they are typed as `i32` axes rather than inferred, and
 /// `check_expand_signature` reads the actual names back from the arg
 /// exprs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_expand_app(
     callee: &'static str,
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -92,7 +92,7 @@ pub(super) fn infer_expand_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() != 5 {
         return report(
             errors,
@@ -117,7 +117,7 @@ pub(super) fn infer_expand_app(
             // the value environment is a runtime value instead (issue #259
             // scope discrimination, as in the generic-path exemption). A dim
             // name in the size slot is an extent-domain value ([05-DIM-1]),
-            // so it types int64; the name/anchor slots are axis-domain.
+            // so it types i64; the name/anchor slots are axis-domain.
             if index >= 1
                 && symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
             {
@@ -146,9 +146,9 @@ pub(super) fn infer_expand_app(
     ) {
         return err;
     }
-    // The size slot must be an int64 (a literal, a symbolic dim, or a
-    // runtime int64 expression; extent-domain under [05-DIM-1], §4.7.2);
-    // a non-int64 size is a type error the arity-3 scheme would otherwise
+    // The size slot must be an i64 (a literal, a symbolic dim, or a
+    // runtime i64 expression; extent-domain under [05-DIM-1], §4.7.2);
+    // a non-i64 size is a type error the arity-3 scheme would otherwise
     // have caught.
     let size_ty = subst.apply(&arg_tys[2]);
     match size_ty {
@@ -158,10 +158,10 @@ pub(super) fn infer_expand_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
-                            "{callee} expects an int64 size (write Ni64 or cast(N, int64)), got {other}"
+                            "{callee} expects an i64 size (write Ni64 or cast(N, i64)), got {other}"
                         ),
                     ),
                     vec![],
@@ -184,7 +184,7 @@ pub(super) fn infer_expand_app(
     // and arithmetic spellings.
     let size_class = kids
         .get(3)
-        .map(|arg| classify_expand_size(arg, env))
+        .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(
@@ -202,7 +202,7 @@ pub(super) fn infer_expand_app(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_permute_app(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -210,7 +210,7 @@ pub(super) fn infer_permute_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
         return report(
             errors,
@@ -233,6 +233,35 @@ pub(super) fn infer_permute_app(
         return err;
     }
 
+    let mut route_arg_tys = vec![input_ty];
+    route_arg_tys.extend(axis_tys);
+    defer_or_check_shape_route(
+        ShapeRouteKind::Permute,
+        node,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_permute_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let axis_tys: Vec<Type> = arg_tys[1..].to_vec();
+
     for axis_ty in &axis_tys {
         let resolved = subst.apply(axis_ty);
         match resolved {
@@ -242,9 +271,9 @@ pub(super) fn infer_permute_app(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!("permute expects int32 axis indices, got {other}"),
+                        with_node_provenance(
+                            node,
+                            format!("permute expects i32 axis indices, got {other}"),
                         ),
                         vec![],
                     ),
@@ -268,7 +297,7 @@ pub(super) fn infer_permute_app(
         );
     };
 
-    // Uses `extract_int_for_dim` so `cast(N, int32)`-wrapped literal
+    // Uses `extract_int_for_dim` so `cast(N, i32)`-wrapped literal
     // axes reach the OOB-axis check and the unique-axis check at infer
     // time instead of silently falling back to original-dim order (red
     // team round 3 sibling sweep within the spec section 2.4 movement
@@ -332,7 +361,7 @@ pub(super) fn infer_permute_app(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_reshape_app(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -340,7 +369,7 @@ pub(super) fn infer_reshape_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 || kids.len() > 3 {
         return report(
             errors,
@@ -355,177 +384,154 @@ pub(super) fn infer_reshape_app(
     let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let input_var_name = symbolic_dim_ref_name(&kids[1]).map(|s| s.to_string());
-    match type_for_readonly_check(&input_ty, subst) {
-        Type::Prim(precision) => {
-            if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
+    let mut arg_tys = vec![input_ty];
+    if let Some(shape_expr) = kids.get(2) {
+        let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
+        let expected_shape_ty = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+        if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
+            // spec/04 §4.7.5: the slot-mismatch diagnostic names the fix, and
+            // its direction states the slot's demand rather than a
+            // unification-order artifact (chelis#916).
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    with_node_provenance(
+                        node,
+                        format!(
+                            "reshape expects an i64 shape list (write i64-suffixed \
+                             elements, e.g. 2i64, or cast(..., i64)), got {}",
+                            subst.apply(&shape_ty)
                         ),
-                    );
-                }
-                let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
-                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                    return report(errors, error.into());
-                }
-                return Type::Tensor(dims, TensorPrec::Concrete(precision));
-            }
-
-            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
+                    ),
+                    vec![],
+                ),
+            );
         }
-        Type::Tensor(input_dims, precision) => {
-            if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                let dims =
-                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
-                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                    return report(errors, error.into());
-                }
-                if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
-                    let input_numel = subst.static_dim_product(&input_dims);
-                    let target_numel = subst.static_dim_product(&dims);
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            match (target_numel, input_numel) {
-                                (Some(target), Some(input)) => format!(
-                                    "reshape target has {target} elements but input tensor has {input}"
-                                ),
-                                _ => "reshape target element count does not match input tensor"
-                                    .to_string(),
-                            },
-                            vec![],
-                        ),
-                    );
-                }
-                return Type::Tensor(dims, precision);
-            }
-
-            Type::Tensor(vec![Dim::Wildcard], precision)
-        }
+        arg_tys.push(shape_ty);
+    }
+    // Inferring the shape list may have bound the input's own type through a
+    // `shape(input, axis)` element, so the input is read after it.
+    match type_for_readonly_check(&arg_tys[0], subst) {
         Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
-                let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
-                let expected_shape_ty =
-                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-                if let Err(_te) = unify(&shape_ty, &expected_shape_ty, subst) {
-                    // spec/04 §4.7.5: the slot-mismatch diagnostic names the
-                    // fix, and its direction states the slot's demand rather
-                    // than a unification-order artifact (chelis#916).
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::PrecisionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!(
-                                    "reshape expects an int64 shape list (write i64-suffixed \
-                                     elements, e.g. 2i64, or cast(..., int64)), got {}",
-                                    subst.apply(&shape_ty)
-                                ),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                // Inferring the shape list may have bound the input's own
-                // type through a `shape(input, axis)` element. Re-read the
-                // input before deriving the output.
-                if let Type::Tensor(input_dims, precision) = subst.apply(&input_ty) {
-                    let dims = reshape_output_dims(
-                        shape_expr,
-                        input_var_name.as_deref(),
-                        &input_dims,
-                        subst,
-                    );
-                    if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                        return report(errors, error.into());
-                    }
-                    if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
-                        let input_numel = subst.static_dim_product(&input_dims);
-                        let target_numel = subst.static_dim_product(&dims);
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::DimensionMismatch,
-                                match (target_numel, input_numel) {
-                                    (Some(target), Some(input)) => format!(
-                                        "reshape target has {target} elements but input tensor has {input}"
-                                    ),
-                                    _ => "reshape target element count does not match input tensor"
-                                        .to_string(),
-                                },
-                                vec![],
-                            ),
-                        );
-                    }
-                    return Type::Tensor(dims, precision);
-                }
-
+                // chelis#1512: the target list stands on its own, so validate
+                // it here rather than only on the replay. Relocating a
+                // decision is how a check silently stops happening.
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
             }
-            input_ty
+            // The input is still a variable, so neither its domain, the
+            // output dims, nor the element-count rule can be decided yet.
+            // Suspend the route and let the ledger run this same rule once the
+            // operand binds (chelis#2591: publishing `input_ty` here admitted
+            // any operand the variable later became).
+            defer_or_check_shape_route(
+                ShapeRouteKind::Reshape { input_var_name },
+                node,
+                kids,
+                arg_tys,
+                vg,
+                subst,
+                errors,
+                product,
+            )
         }
-        Type::Error(_) => input_ty,
-        _ => report(
+        _ => check_reshape_signature(
+            node,
+            kids,
+            input_var_name.as_deref(),
+            &arg_tys,
+            subst,
             errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                "reshape expects tensor input".to_string(),
-                vec![],
-            ),
         ),
     }
+}
+
+/// `reshape`'s own rule, the single entry the eager pass and the deferred
+/// shape ledger both call.
+///
+/// `arg_tys` is `[input]` or `[input, shape_list]` with the input already
+/// settled: the caller decides whether it can be, and suspends the call when
+/// it cannot. The operand's domain, the output dims and the element count are
+/// one decision, so they live together here rather than being copied onto a
+/// deferred path.
+///
+/// chelis#2591, [05-OP-49]: the operand is a tensor, or a scalar of an active
+/// data element dtype, which `reshape` reads as that dtype's rank-0 tensor.
+/// Any other operand is rejected here, however it reached the call.
+pub(super) fn check_reshape_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    input_var_name: Option<&str>,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input = type_for_readonly_check(&arg_tys[0], subst);
+    let precision = match &input {
+        Type::Tensor(_, precision) => precision.clone(),
+        Type::Prim(precision) if precision.is_data_element_dtype() => {
+            TensorPrec::Concrete(*precision)
+        }
+        Type::Error(witness) => return propagate(witness),
+        other => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_node_provenance(
+                        node,
+                        format!("reshape expects tensor input, got {other}"),
+                    ),
+                    vec![],
+                ),
+            );
+        }
+    };
+    let Some(shape_expr) = kids.get(2) else {
+        // The two-argument form has no target to check against.
+        return Type::Tensor(vec![Dim::Wildcard], precision);
+    };
+    let Type::Tensor(dims, _) = input else {
+        // A scalar operand: the target is checked on its own.
+        let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
+        if let Err(error) = validate_reshape_target_dims(&target, subst) {
+            return report(errors, error.into());
+        }
+        return Type::Tensor(target, precision);
+    };
+    let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
+    if let Err(error) = validate_reshape_target_dims(&target, subst) {
+        return report(errors, error.into());
+    }
+    if subst.static_dim_products_match(&dims, &target) == Some(false) {
+        let input_numel = subst.static_dim_product(&dims);
+        let target_numel = subst.static_dim_product(&target);
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                match (target_numel, input_numel) {
+                    (Some(target), Some(input)) => {
+                        format!("reshape target has {target} elements but input tensor has {input}")
+                    }
+                    _ => "reshape target element count does not match input tensor".to_string(),
+                },
+                vec![],
+            ),
+        );
+    }
+    Type::Tensor(target, precision)
 }
 
 /// `shrink(&x, [[s0, e0], [s1, e1], ...]) -> tensor[e0-s0, e1-s1, ..., p]`
 ///
 /// Per spec/05-risc-primitives.md §2.4, `shrink` slices a sub-tensor whose
 /// rank matches the input and whose i-th axis dim is `end_i - start_i`.
-/// The second argument is a list-of-pair-of-int32 with one entry per input
+/// The second argument is a list-of-pair-of-i32 with one entry per input
 /// axis. Each pair is `[start, end]` with `0 <= start < end <= input_dim[i]`.
 ///
 /// Closes issue Chelis-Lang/chelis#187 on the type-system side: before this
@@ -535,7 +541,7 @@ pub(super) fn infer_reshape_app(
 /// at `crates/chelis-ir/src/lower.rs:4635-4647` reads bounds from `args[1]`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_shrink_app(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -543,7 +549,7 @@ pub(super) fn infer_shrink_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() != 3 {
         return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
@@ -561,6 +567,34 @@ pub(super) fn infer_shrink_app(
         return err;
     }
 
+    let route_arg_tys = vec![input_ty, bounds_ty];
+    defer_or_check_shape_route(
+        ShapeRouteKind::Shrink,
+        node,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_shrink_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let bounds_ty = arg_tys[1].clone();
+
     // The bounds argument must be a `List[List[Int64]]` (extent-domain
     // under [05-DIM-1]).
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
@@ -570,11 +604,11 @@ pub(super) fn infer_shrink_app(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "shrink expects a list of [start, end] int64 bounds pairs \
-                         (write 0i64 or cast(..., int64) on each bound), got {}",
+                        "shrink expects a list of [start, end] i64 bounds pairs \
+                         (write 0i64 or cast(..., i64) on each bound), got {}",
                         subst.apply(&bounds_ty)
                     ),
                 ),
@@ -592,10 +626,7 @@ pub(super) fn infer_shrink_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("shrink expects tensor input, got {other}"),
-                    ),
+                    with_node_provenance(node, format!("shrink expects tensor input, got {other}")),
                     vec![],
                 ),
             );
@@ -624,10 +655,7 @@ pub(super) fn infer_shrink_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("shrink axis {axis} pair {reason}"),
-                    ),
+                    with_node_provenance(node, format!("shrink axis {axis} pair {reason}")),
                     vec![],
                 ),
             );
@@ -639,8 +667,8 @@ pub(super) fn infer_shrink_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "shrink expects {} bounds pairs for rank {} tensor, got {}",
                         dims.len(),
@@ -672,8 +700,8 @@ pub(super) fn infer_shrink_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("shrink axis {axis} bound [{start}, {end}] has negative endpoint"),
                     ),
                     vec![],
@@ -685,8 +713,8 @@ pub(super) fn infer_shrink_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "shrink axis {axis} bound [{start}, {end}] is empty or inverted (start >= end)"
                         ),
@@ -695,15 +723,15 @@ pub(super) fn infer_shrink_app(
                 ),
             );
         }
-        if let Dim::Lit(input_dim) = dim
-            && *end > *input_dim
+        if let Some(input_dim) = subst.observe_dim(dim).known_extent()
+            && *end > input_dim
         {
             return report(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "shrink axis {axis} bound [{start}, {end}] is out of range for input dim {input_dim}"
                         ),
@@ -722,7 +750,7 @@ pub(super) fn infer_shrink_app(
 ///
 /// Per spec/05-risc-primitives.md §2.4, `stride` takes every `s_i`-th
 /// element along axis i; the i-th output dim is `ceil(input_dim[i] /
-/// s_i)`. The strides are passed as variadic int32 args, one per input
+/// s_i)`. The strides are passed as variadic i32 args, one per input
 /// axis. Zero or negative strides are rejected.
 ///
 /// Closes issue Chelis-Lang/chelis#187 on the type-system side -- before
@@ -731,7 +759,7 @@ pub(super) fn infer_shrink_app(
 /// expected 1 args`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_stride_app(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -739,14 +767,13 @@ pub(super) fn infer_stride_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 3 {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                "stride expects a tensor followed by one positive int32 stride per axis"
-                    .to_string(),
+                "stride expects a tensor followed by one positive i32 stride per axis".to_string(),
                 vec![],
             ),
         );
@@ -763,19 +790,48 @@ pub(super) fn infer_stride_app(
         return err;
     }
 
+    let mut route_arg_tys = vec![input_ty];
+    route_arg_tys.extend(stride_tys);
+    defer_or_check_shape_route(
+        ShapeRouteKind::Stride,
+        node,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_stride_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let stride_tys: Vec<Type> = arg_tys[1..].to_vec();
+
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
-            // Stride steps are extent-domain ([05-DIM-1]): int64.
+            // Stride steps are extent-domain ([05-DIM-1]): i64.
             Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_) => {}
             other => {
                 return report(
                     errors,
                     CheckError::new(
                         CheckErrorKind::TypeMismatch,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            format!("stride expects int64 strides (write 2i64), got {other}"),
+                        with_node_provenance(
+                            node,
+                            format!("stride expects i64 strides (write 2i64), got {other}"),
                         ),
                         vec![],
                     ),
@@ -793,10 +849,7 @@ pub(super) fn infer_stride_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("stride expects tensor input, got {other}"),
-                    ),
+                    with_node_provenance(node, format!("stride expects tensor input, got {other}")),
                     vec![],
                 ),
             );
@@ -808,7 +861,7 @@ pub(super) fn infer_stride_app(
     // RUNTIME step's own axis becomes a wildcard. Collapsing every axis to
     // a wildcard let unification fill a runtime axis's extent from a
     // sibling literal axis (see the shrink arm). Uses
-    // `extract_int_for_dim` so `cast(N, int32)`-wrapped literal strides
+    // `extract_int_for_dim` so `cast(N, i32)`-wrapped literal strides
     // reach the positive-stride check at infer time instead of falling
     // back to host runtime (red team round 3 finding R3-HIGH1).
     let strides: Vec<Option<i64>> = kids[2..].iter().map(extract_int_for_dim).collect();
@@ -818,8 +871,8 @@ pub(super) fn infer_stride_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "stride expects {} strides for rank {} tensor, got {}",
                         dims.len(),
@@ -844,8 +897,8 @@ pub(super) fn infer_stride_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!(
                             "stride axis {axis} step {step} must be positive (zero or negative strides are not allowed)"
                         ),
@@ -855,9 +908,11 @@ pub(super) fn infer_stride_app(
             );
         }
         let step_us = *step as usize;
-        match dim {
-            Dim::Lit(input_dim) => {
-                let out = (*input_dim as usize).div_ceil(step_us);
+        // Existing identity steps retain the carrier, including its label.
+        match (step_us, subst.observe_dim(dim).known_extent()) {
+            (1, _) => out_dims.push(dim.clone()),
+            (_, Some(input_dim)) => {
+                let out = (input_dim as usize).div_ceil(step_us);
                 out_dims.push(Dim::Lit(out as i64));
             }
             // chelis#632: only an IDENTITY step (1) passes a symbolic dim
@@ -868,11 +923,7 @@ pub(super) fn infer_stride_app(
             // tripped §4.4.1 rigidity on sig-symbol direct returns; the
             // fresh wildcard's extent is op-declared and runtime-guarded
             // by the chelis#616 machinery.
-            other => out_dims.push(if step_us == 1 {
-                other.clone()
-            } else {
-                Dim::Wildcard
-            }),
+            _ => out_dims.push(Dim::Wildcard),
         }
     }
 
@@ -890,7 +941,7 @@ pub(super) fn infer_stride_app(
 /// finding for issue Chelis-Lang/chelis#187.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_pad_app(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -898,7 +949,7 @@ pub(super) fn infer_pad_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() != 4 {
         return report(errors, CheckError::new(
             CheckErrorKind::ArityMismatch,
@@ -916,6 +967,36 @@ pub(super) fn infer_pad_app(
         return err;
     }
 
+    let route_arg_tys = vec![input_ty, padding_ty, fill_ty];
+    defer_or_check_shape_route(
+        ShapeRouteKind::Pad,
+        node,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_pad_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let padding_ty = arg_tys[1].clone();
+    let fill_ty = arg_tys[2].clone();
+
     // Padding pairs are extent-domain ([05-DIM-1]): List[List[Int64]].
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     let expected_padding_ty = Type::Adt("List".to_string(), vec![int_list]);
@@ -924,11 +1005,11 @@ pub(super) fn infer_pad_app(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "pad expects a list of [lo, hi] int64 padding pairs \
-                         (write 1i64 or cast(..., int64) on each amount), got {}",
+                        "pad expects a list of [lo, hi] i64 padding pairs \
+                         (write 1i64 or cast(..., i64) on each amount), got {}",
                         subst.apply(&padding_ty)
                     ),
                 ),
@@ -946,10 +1027,7 @@ pub(super) fn infer_pad_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("pad expects tensor input, got {other}"),
-                    ),
+                    with_node_provenance(node, format!("pad expects tensor input, got {other}")),
                     vec![],
                 ),
             );
@@ -980,8 +1058,8 @@ pub(super) fn infer_pad_app(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "pad fill must be a scalar of the input tensor precision ({expected_fill_ty}), got {}",
                         subst.apply(&fill_ty)
@@ -1005,10 +1083,7 @@ pub(super) fn infer_pad_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("pad axis {axis} pair {reason}"),
-                    ),
+                    with_node_provenance(node, format!("pad axis {axis} pair {reason}")),
                     vec![],
                 ),
             );
@@ -1020,8 +1095,8 @@ pub(super) fn infer_pad_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "pad expects {} padding pairs for rank {} tensor, got {}",
                         dims.len(),
@@ -1046,27 +1121,24 @@ pub(super) fn infer_pad_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("pad axis {axis} padding [{lo}, {hi}] has negative entry"),
                     ),
                     vec![],
                 ),
             );
         }
-        match dim {
-            Dim::Lit(input_dim) => {
+        match (*lo == 0 && *hi == 0, subst.observe_dim(dim).known_extent()) {
+            (true, _) => out_dims.push(dim.clone()),
+            (_, Some(input_dim)) => {
                 out_dims.push(Dim::Lit(input_dim + lo + hi));
             }
             // chelis#632: only ZERO padding passes a symbolic dim through
             // (identity; mirrors `shape_source_for_axis`'s zero-pad arm).
             // Non-zero padding widens the extent to `d + lo + hi`; see
             // the stride arm above for the full rationale.
-            other => out_dims.push(if *lo == 0 && *hi == 0 {
-                other.clone()
-            } else {
-                Dim::Wildcard
-            }),
+            _ => out_dims.push(Dim::Wildcard),
         }
     }
 
@@ -1076,11 +1148,11 @@ pub(super) fn infer_pad_app(
 /// `reduce_window_*(&x, window_shape, strides)` infer.
 ///
 /// Per `spec/05-risc-primitives.md` §2.3.1:
-/// - `window_shape` and `strides` are `List[int32]` of equal length
+/// - `window_shape` and `strides` are `List[i32]` of equal length
 ///   `n >= 1`.
 /// - The trailing `n` axes of the input are the windowed axes; leading
 ///   `rank - n` axes pass through.
-/// - Each window/stride entry must be a positive int32 literal at
+/// - Each window/stride entry must be a positive i32 literal at
 ///   check time (non-literal arguments fall back to a wildcard output
 ///   shape so runtime checks can still apply).
 /// - Output rank equals input rank. Trailing dim i is
@@ -1089,7 +1161,8 @@ pub(super) fn infer_pad_app(
 ///   §2.3.1.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_reduce_window_app(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     name: &str,
     env: &mut Env,
     vg: &mut VarGen,
@@ -1098,7 +1171,7 @@ pub(super) fn infer_reduce_window_app(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() != 4 {
         return report(
             errors,
@@ -1112,14 +1185,61 @@ pub(super) fn infer_reduce_window_app(
             ),
         );
     }
-    let _func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
+    let func_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let input_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let window_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
     let stride_ty = infer_expr(&kids[3], env, vg, subst, adt_reg, errors, product);
 
-    if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
+    if let Some(err) = propagate_if_error([&func_ty, &input_ty, &window_ty, &stride_ty]) {
         return err;
     }
+
+    let route_arg_tys = vec![input_ty, window_ty, stride_ty];
+    let result = defer_or_check_shape_route(
+        ShapeRouteKind::ReduceWindow {
+            name: name.to_string(),
+        },
+        node,
+        kids,
+        route_arg_tys.clone(),
+        vg,
+        subst,
+        errors,
+        product,
+    );
+    if matches!(result, Type::Error(_)) {
+        return result;
+    }
+
+    // The specialized route owns window/stride/rank diagnostics and its exact
+    // output shape. It does not own a separate dtype-admission policy: consume
+    // the checked fallback scheme through the same helper as ordinary calls.
+    product.record_call_operand_contracts(&func_ty, Some(name), &route_arg_tys, env, subst);
+    if let Err(rejected) =
+        unify_checked_call_contract(expr, &func_ty, &route_arg_tys, vg, subst, errors, product)
+    {
+        return rejected;
+    }
+    product.record_call_result_contracts(&func_ty, Some(name), env, subst);
+    subst.apply(&result)
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_reduce_window_signature(
+    node: &DeepNode,
+    kids: &[deep::Expr],
+    name: &str,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let window_ty = arg_tys[1].clone();
+    let stride_ty = arg_tys[2].clone();
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
@@ -1127,10 +1247,10 @@ pub(super) fn infer_reduce_window_app(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "{name} expects window_shape to be List[int64], got {}",
+                        "{name} expects window_shape to be List[i64], got {}",
                         subst.apply(&window_ty)
                     ),
                 ),
@@ -1143,10 +1263,10 @@ pub(super) fn infer_reduce_window_app(
             errors,
             CheckError::new(
                 CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
-                        "{name} expects strides to be List[int64], got {}",
+                        "{name} expects strides to be List[i64], got {}",
                         subst.apply(&stride_ty)
                     ),
                 ),
@@ -1164,10 +1284,7 @@ pub(super) fn infer_reduce_window_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("{name} expects tensor input, got {other}"),
-                    ),
+                    with_node_provenance(node, format!("{name} expects tensor input, got {other}")),
                     vec![],
                 ),
             );
@@ -1175,7 +1292,7 @@ pub(super) fn infer_reduce_window_app(
     };
 
     // Extract literal window / stride entries. Non-literal arguments
-    // are accepted at infer time (the type is still `List[int64]`) but
+    // are accepted at infer time (the type is still `List[i64]`) but
     // the output shape collapses to wildcards so the host runtime can
     // do the final shape check.
     let window_lit = cons_chain_int_list(&kids[2]);
@@ -1189,8 +1306,8 @@ pub(super) fn infer_reduce_window_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!("{name} requires a non-empty window_shape and strides"),
                 ),
                 vec![],
@@ -1202,8 +1319,8 @@ pub(super) fn infer_reduce_window_app(
             errors,
             CheckError::new(
                 CheckErrorKind::ArityMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!(
                         "{name} window_shape (len {}) and strides (len {}) must agree",
                         window_shape.len(),
@@ -1220,8 +1337,8 @@ pub(super) fn infer_reduce_window_app(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
+                with_node_provenance(
+                    node,
                     format!("{name} window arity {n} exceeds tensor rank {}", dims.len()),
                 ),
                 vec![],
@@ -1234,8 +1351,8 @@ pub(super) fn infer_reduce_window_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("{name} window_shape[{i}] = {w} must be >= 1"),
                     ),
                     vec![],
@@ -1249,10 +1366,7 @@ pub(super) fn infer_reduce_window_app(
                 errors,
                 CheckError::new(
                     CheckErrorKind::DimensionMismatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
-                        format!("{name} strides[{i}] = {s} must be >= 1"),
-                    ),
+                    with_node_provenance(node, format!("{name} strides[{i}] = {s} must be >= 1")),
                     vec![],
                 ),
             );
@@ -1262,18 +1376,17 @@ pub(super) fn infer_reduce_window_app(
     let mut out_dims = Vec::with_capacity(dims.len());
     out_dims.extend(dims[..leading].iter().map(|d| subst.apply_dim(d)));
     for i in 0..n {
-        let resolved = subst.apply_dim(&dims[leading + i]);
-        match &resolved {
-            Dim::Lit(in_dim) => {
+        match subst.observe_dim(&dims[leading + i]).known_extent() {
+            Some(in_dim) => {
                 let w = window_shape[i];
                 let s = strides[i];
-                if *in_dim < w {
+                if in_dim < w {
                     return report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "{name} axis {} input dim {in_dim} < window_shape[{i}] = {w}",
                                     leading + i
@@ -1287,7 +1400,7 @@ pub(super) fn infer_reduce_window_app(
                 // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
                 // output extent is always positive here — the `in_dim < w`
                 // guard above is what rejects the empty-window case.
-                let out = (*in_dim - w) / s + 1;
+                let out = (in_dim - w) / s + 1;
                 out_dims.push(Dim::Lit(out));
             }
             _ => out_dims.push(Dim::Wildcard),
@@ -1443,7 +1556,7 @@ pub(super) enum InnerPairShape {
 /// constrained; those still defer to runtime via `NonLiteral`.
 ///
 /// Inner head values are extracted via [`extract_int_for_dim`], which
-/// peels `cast(N, int32)` / `cast(N, int64)` -- so cast-wrapped int
+/// peels `cast(N, i32)` / `cast(N, i64)` -- so cast-wrapped int
 /// literals participate in the infer-time bounds check rather than
 /// silently falling back to `NonLiteral` (red team round 2 finding
 /// R2-L1; mirrors how reshape extracts dim literals).
@@ -1549,13 +1662,8 @@ pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
     //
     // chelis#1107 amendment: because that head never decodes, the stamp pass
     // carries it as `Expr::UnknownForm`, not `Expr::Node` -- so this reader
-    // needs an `UnknownForm` arm rather than `stamped_parts`. Without it the
-    // rank fell back to 1 on the typed ingress while the normalizing ingress
-    // read the real element count.
+    // needs an `UnknownForm` arm rather than `stamped_parts`.
     match expr {
-        deep::Expr::List(list, _) if list.unknown_tag_symbol() == Some("list") => {
-            Some(children(list).len())
-        }
         deep::Expr::UnknownForm(data) if data.head == "list" => Some(data.children.len()),
         _ => None,
     }
@@ -1567,7 +1675,7 @@ pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
 /// recognizer that matches wins:
 ///
 /// 1. concrete int literal (or `cast(N, int{32,64})`) → `Dim::Lit(N)`;
-/// 2. `cast(shape(input, lit_axis), int64)` where the inner var matches
+/// 2. `cast(shape(input, lit_axis), i64)` where the inner var matches
 ///    the reshape input by name and `lit_axis` is a valid axis of the
 ///    input → the input's dim at that axis (resolved through `subst`);
 /// 3. fallback → `Dim::Wildcard`.
@@ -1586,7 +1694,7 @@ pub(super) fn list_literal_len(expr: &deep::Expr) -> Option<usize> {
 /// Pre-fix the body of `infer_reshape_app` ran a literal-only
 /// recognizer (the now-removed `list_literal_dims`) and fell back to
 /// `vec![Wildcard; rank]` for anything else, including the common
-/// runtime-batch pattern `cast(shape(x, axis), int64)`. That blind spot
+/// runtime-batch pattern `cast(shape(x, axis), i64)`. That blind spot
 /// is chelis#206; this helper closes it. The earlier `Dim::Lit`-only
 /// behavior is also still covered (see the RT-A1W1 CRIT root cause for
 /// chelis#35: `reshape(t, [2, 1, 3])` must yield
@@ -1611,9 +1719,11 @@ pub(super) fn reshape_output_dims(
 }
 
 fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
-    if let Some(value) = dims.iter().find_map(|dim| match subst.apply_dim(dim) {
-        Dim::Lit(value) if value < 0 => Some(value),
-        _ => None,
+    if let Some(value) = dims.iter().find_map(|dim| {
+        subst
+            .observe_dim(dim)
+            .literal_extent()
+            .filter(|value| *value < 0)
     }) {
         return Err(TypeError {
             kind: TypeErrorKind::DimensionMismatch,
@@ -1652,20 +1762,10 @@ pub(super) fn reshape_output_dim(
 pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
     // chelis#1107 (measured, deliberately NOT extended to `UnknownForm`):
     // `(list ...)` is outside the 62-tag vocabulary, so in expression position
-    // BOTH ingresses reject the program before this shape ever matters --
-    // `infer_expr`'s `UnknownForm` arm fires on each. The stamp pass carries
-    // it as `Expr::UnknownForm` and `normalize_nodes_to_lists` preserves that,
-    // so both lanes miss this `List`-only arm identically and both fall back
-    // to the same wildcard shape. The arm is symmetric across carriers and
-    // cannot produce an ingress divergence; it stays live only for
-    // programmatically built `Expr::List` trees, where both lanes see a
-    // `List`. Teaching it `UnknownForm` would make the checker derive a shape
-    // for a form it has already ruled invalid, which is not an improvement.
-    if let deep::Expr::List(list, _) = expr
-        && list.unknown_tag_symbol() == Some("list")
-    {
-        return Some(children(list).iter().collect());
-    }
+    // the checker rejects the program before this shape ever matters --
+    // `infer_expr`'s `UnknownForm` arm fires on it. Deriving a shape for a
+    // form already ruled invalid would not be an improvement, so the
+    // `UnknownForm` spelling falls back to the wildcard shape below.
     let mut elems = Vec::new();
     let mut cursor = expr;
     loop {
@@ -1699,7 +1799,7 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
 
 /// If `expr` has one of the spec/04 §4.7.3 recognized forms
 /// `shape(<var named input_var_name>, <concrete int axis>)` or
-/// `cast(shape(<var named input_var_name>, <concrete int axis>), int64)`
+/// `cast(shape(<var named input_var_name>, <concrete int axis>), i64)`
 /// (the second is an identity cast under [05-DIM-2], kept so the
 /// pre-[05-DIM-2] spelling retains its propagation), return the axis.
 /// Both `cast` and `shape` may surface either as the dedicated tag
@@ -1708,7 +1808,7 @@ pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep
 /// and `cast(N, int{32,64})`.
 ///
 /// Returns `None` when:
-/// - a cast wrapper is present but its target is not `int64`,
+/// - a cast wrapper is present but its target is not `i64`,
 /// - the candidate expression is not a `shape(...)` call,
 /// - the shape's tensor arg is not a `var` matching `input_var_name`,
 /// - the axis is not a concrete non-negative int.
@@ -1763,7 +1863,7 @@ pub(super) fn peel_cast(expr: &deep::Expr) -> Option<(&deep::Expr, &deep::Expr)>
 }
 
 /// Treat `(t-prim {} <name>)` as the target type marker emitted by
-/// `cast(..., int64)` etc. Returns true iff the marker matches `prim`.
+/// `cast(..., i64)` etc. Returns true iff the marker matches `prim`.
 pub(super) fn is_target_ty(expr: &deep::Expr, prim: Prim) -> bool {
     // chelis#1107 amendment: carrier-preserving read.
     let Some((DeepTag::TPrim, _, kids)) = stamped_parts(expr) else {
@@ -1790,21 +1890,21 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
     }
 }
 
-/// Extract an int literal from a Deep expr, looking through `cast(N, int64)`
-/// and `cast(N, int32)` — both are common in Chelis dim lists since integer
-/// literals default to int32 and require an explicit cast for int64 contexts.
+/// Extract an int literal from a Deep expr, looking through `cast(N, i64)`
+/// and `cast(N, i32)` — both are common in Chelis dim lists since integer
+/// literals default to i32 and require an explicit cast for i64 contexts.
 /// `cast` may surface either as the `(cast {} ... ...)` tag or as an `app`
 /// of the `cast` var, depending on how far desugaring has progressed.
 ///
 /// Note: callers in the spec section 2.4 movement family (shrink, pad,
 /// stride, permute, expand) typically unify the surrounding bounds /
-/// strides argument against an `int32`-pinned expected type before
-/// reaching this extractor, so a `cast(N, int64)` endpoint is rejected
+/// strides argument against an `i32`-pinned expected type before
+/// reaching this extractor, so a `cast(N, i64)` endpoint is rejected
 /// at the outer unification step rather than slipping through to here
 /// (red team round 3 HIGH-2 contract note).
 ///
 /// The cast arm recurses through `extract_int_for_dim` so that
-/// `cast(cast(N, int32), int32)` and other doubly-nested forms peel to
+/// `cast(cast(N, i32), i32)` and other doubly-nested forms peel to
 /// their literal at any depth (red team round 3 finding R3-MED2).
 /// Termination is bounded: each recursive call strictly reduces the
 /// expression depth (peels one wrapper layer).
@@ -1817,17 +1917,17 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 ///
 /// | Domain               | Site (approx)                        | User-reachable cast? | Validation                | Host-runtime defense |
 /// |----------------------|--------------------------------------|----------------------|---------------------------|----------------------|
-/// | trace/diagonal axis  | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | diagonal axis        | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | trace axis           | `settled_axis` (`shape_route_result`) | yes                 | rank bounds + diagnostic  | yes (eval)           |
 /// | builtin axis         | `resolve_builtin_axis` (~4154)       | yes                  | rank bounds + diagnostic  | yes (eval)           |
-/// | conv2d output type   | `derive_conv2d_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
-/// | conv2d output type   | `derive_conv2d_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
-/// | conv2d validator     | `extract_typed_scalar_literal`(~5874)| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
-/// | conv2d axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
+/// | conv output type   | `derive_conv_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
+/// | conv output type   | `derive_conv_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv validator     | `conv_parameters`| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
 /// | softmax axis         | softmax arm (~7630)                  | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
 /// | shape axis           | shape arm (~8238)                    | yes (issue #206)     | non-neg + rank bounds     | yes (eval)           |
 /// | split axis           | split arm (~8959)                    | yes                  | rank bounds + diagnostic  | yes (eval)           |
-/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
-/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv spatial out   | `compute_concrete_conv_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
+/// | conv spatial out   | `compute_concrete_conv_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
 /// | reduction axis       | `check_reduce_signature` (~12076)    | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
 /// | grad wrt tuple       | `grad_wrt_indices` (~13793)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
 /// | grad wrt single      | `grad_wrt_indices` (~13814)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |

@@ -55,6 +55,13 @@ Add a private helper next to `shape_a_relaxed_return`:
 fn descend_to_tail_var(expr: &deep::Expr) -> Option<&str>
 ```
 
+> Since superseded. chelis#2198 renamed this helper to
+> `descend_to_tail_parameter`, moved it to
+> `crates/chelis-types/src/infer/app_helpers.rs`, and changed what it
+> compares: sibling branches must agree on one borrowed parameter's binding
+> identity, not on a repeated source name. The rest of this section records
+> the PR #109 design as it was written.
+
 The walker returns `Some(name)` when the expression is a tail-position
 var-ref (after descending through `let`, `if`, and `match`), `None`
 otherwise. Rules:
@@ -90,7 +97,8 @@ bare-var v3 fix scopes, which is out of v3 (and 0.7.9) scope.
 
 `shape_a_relaxed_return` currently dispatches on
 `get_tag(inner_list) == Some("var")`. Replace that check with
-`descend_to_tail_var(inner).is_some()`. The rest of the helper
+`descend_to_tail_var(inner).is_some()` (today
+`descend_to_tail_parameter(inner, &parameter_roots)`). The rest of the helper
 (structural type equality between body's unwrapped return and the
 declared return; structural relaxed-type construction) is unchanged.
 

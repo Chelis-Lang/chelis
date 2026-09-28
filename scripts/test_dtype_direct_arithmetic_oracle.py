@@ -104,8 +104,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_sub_surrogate_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/src/tier2.rs",
-            "add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
-            "lower_add(dag, a, lower_neg(dag, b, ty, parent_span), ty, parent_span)",
+            "add_synth(owner, dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)",
+            "lower_add(owner, dag, a, lower_neg(owner, dag, b, ty, parent_span), ty, parent_span)",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "direct Sub lowering"):
             oracle.validate_source_contracts(self.repo)
@@ -113,8 +113,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_min_surrogate_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-ir/src/tier2.rs",
-            "add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)",
-            "add_synth(dag, RiscOp::MaxElem, vec![a, b], ty.clone(), parent_span)",
+            "add_synth(\n        owner,\n        dag,\n        RiscOp::MinElem,\n        vec![a, b],",
+            "add_synth(\n        owner,\n        dag,\n        RiscOp::MaxElem,\n        vec![a, b],",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "direct MinElem lowering"):
             oracle.validate_source_contracts(self.repo)
@@ -126,6 +126,50 @@ class SourceContractMutationTests(unittest.TestCase):
             "chelis_int_checked_add",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "C checked subtraction"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_evaluator_canonical_nan_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/dtype_semantics.rs",
+            "fn canonicalize_subtraction_f32(value: f32) -> f32 {",
+            "fn preserve_subtraction_f32_nan(value: f32) -> f32 {",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_evaluator_canonical_nan_scope_broadening_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-types/src/dtype_semantics.rs",
+            "FloatBinOp::Sub => canonicalize_subtraction_f32(value),",
+            "_ => canonicalize_subtraction_f32(value),",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "evaluator canonical subtraction NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_wide_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'Prim::F32 => Some("chelis_f32_from_bits(UINT32_C(0x7fc00000))"),',
+            "Prim::F32 => None,",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_c_reduced_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            'Prim::F16 => "UINT16_C(0x7e00)",',
+            'Prim::F16 => "UINT16_C(0xfe00)",',
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C subtraction canonical NaNs"
+        ):
             oracle.validate_source_contracts(self.repo)
 
     def test_c_first_operand_extrema_mutation_fails(self) -> None:
@@ -159,11 +203,73 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "HIP stored-bit extrema"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_hip_ties_away_rounding_restoration_fails(self) -> None:
+        path = "crates/chelis-backend-hip/src/kernels.rs"
+        target = self.repo / path
+        target.write_text(
+            target.read_text()
+            + "\n// obsolete: chelis_u32 round_bit = 0x00008000u;\n"
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_bf16_nan_payload_restoration_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "return (chelis_u16)0x7fc0u;",
+            "return (chelis_u16)((bits >> 16) | 0x0040u);",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_f16_nan_payload_restoration_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "return (chelis_u16)(mantissa == 0 ? ((sign >> 16) | 0x7c00u) : 0x7e00u);",
+            "return (chelis_u16)((sign >> 16) | 0x7c00u | 0x0200u | (mantissa >> 13));",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "HIP narrow direct arithmetic"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_wide_nan_canonicalization_removal_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-hip/src/kernels.rs",
+            "__int_as_float(0x7fc00000)",
+            "a[idx_a] - b[idx_b]",
+            all_matches=True,
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "HIP wide subtraction canonical NaNs"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_hip_reduced_float_matrix_admission_removal_fails(self) -> None:
+        self.mutate(
+            "spec/04-type-system.md",
+            "[05-OP-40] `max_elem`/`min_elem` and their adjoints, [05-OP-41] `sub`",
+            "[05-OP-43] `Relu`/`ReluAdjoint`",
+            all_matches=True,
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "HIP reduced-float target matrix"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
     def test_target_authority_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/compiler.rs",
-            "chelis_types::unimplemented_rejection!(\n                    1306,\n                    \"the Metal direct-subtraction/extrema",
+            "chelis_types::unimplemented_rejection!(\n                    2338,\n                    \"the Metal direct-subtraction/extrema",
             "chelis_types::unimplemented_rejection!(\n                    9999,\n                    \"the Metal direct-subtraction/extrema",
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_retired_hip_rejection_restoration_fails(self) -> None:
+        path = "crates/chelis-compiler-api/src/compiler.rs"
+        target = self.repo / path
+        target.write_text(
+            target.read_text()
+            + "\n// checked signed-integer subtraction needs an exact HIP overflow-trap channel\n"
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "target dispositions"):
             oracle.validate_source_contracts(self.repo)
@@ -171,8 +277,8 @@ class SourceContractMutationTests(unittest.TestCase):
     def test_wire_identity_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-compiler-api/src/schema.rs",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 7;",
-            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 5;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 20;",
+            "pub const WIRE_DAG_SCHEMA_VERSION: u32 = 19;",
         )
         with self.assertRaisesRegex(oracle.OracleFailure, "current WireDag identities"):
             oracle.validate_source_contracts(self.repo)

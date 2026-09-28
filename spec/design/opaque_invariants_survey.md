@@ -131,7 +131,7 @@ gates; the existing grad suite exercises no record forms.)
   pieces for the canonical guard-then-Option producer are record
   beta-reduction and case-of-known-constructor reduction over the
   inlined `if guard then Some(...) else None` (RFC D-TIERB).
-- Property sampling supports bool/int32/int64/f32/f64/string/fixed
+- Property sampling supports bool/i32/i64/f32/f64/string/fixed
   rank-1/2 tensors (`sample_value`, `prove.rs:513-575`); ADT binders
   are `Unsupported` today (`unsupported_type`, `prove.rs:475-499`).
 - `@property` desugars to a `def` carrying

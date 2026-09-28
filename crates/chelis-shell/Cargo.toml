@@ -10,7 +10,7 @@ repository.workspace = true
 chelis-deep.workspace = true
 serde.workspace = true
 bincode = "1"
-semver = "1"
+semver.workspace = true
 
 [lints]
 workspace = true

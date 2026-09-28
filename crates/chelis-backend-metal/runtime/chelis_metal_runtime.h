@@ -192,6 +192,21 @@ static inline id<MTLBuffer> chelis_metal_alloc(size_t bytes) {
     return buf;
 }
 
+/* One zeroed device status word of `bytes` bytes. Kernels that must report a
+ * payload, arithmetic, or hardware-limit failure (the [05-OP-29] Count
+ * kernel) write a nonzero code here and the host checks it after the
+ * launch. The width comes from the emitter's dtype authority, never from a
+ * spelling in this header, and the word is zeroed through the untyped
+ * contents pointer. It is device scratch, not a tensor buffer: the emitter's
+ * no-reuse tensor-allocation plan counts its own chelis_metal_alloc sites,
+ * and this helper is deliberately not one of them. ARC ownership is the
+ * same as above. */
+static inline id<MTLBuffer> chelis_metal_alloc_status_word(size_t bytes) {
+    id<MTLBuffer> buf = chelis_metal_alloc(bytes);
+    memset([buf contents], 0, bytes);
+    return buf;
+}
+
 /* ---- Host <-> device transfer (memcpy on Apple Silicon) ---- */
 
 static inline void chelis_metal_host_to_device(id<MTLBuffer> dst,

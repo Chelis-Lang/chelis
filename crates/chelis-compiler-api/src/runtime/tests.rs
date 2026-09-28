@@ -12,7 +12,7 @@ use chelis_deep::DeepTag;
 fn eval_renderer_demangles_reef_linked_ctor() {
     let mangled = RuntimeValue::Adt {
         ctor: "Pkg__kb__chelis__agent__KellyBenchAgent__Strategy__StrategyState".to_string(),
-        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit],
+        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit].into(),
         field_names: None,
     };
     // human renderer: bare ctor with fields
@@ -25,14 +25,14 @@ fn eval_renderer_demangles_reef_linked_ctor() {
     // nullary reef-linked ctor de-mangles too
     let nullary = RuntimeValue::Adt {
         ctor: "Pkg__pkg__Mod__NoBet".to_string(),
-        fields: vec![],
+        fields: vec![].into(),
         field_names: None,
     };
     assert_eq!(render_value(&nullary), "NoBet");
     // bare / builtin constructor is unchanged (demangle_ident no-op)
     let bare = RuntimeValue::Adt {
         ctor: "None".to_string(),
-        fields: vec![],
+        fields: vec![].into(),
         field_names: None,
     };
     assert_eq!(render_value(&bare), "None");
@@ -40,8 +40,1037 @@ fn eval_renderer_demangles_reef_linked_ctor() {
 
 fn checked_surf(source: &str) -> CheckedProgram {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_types::check_ir_program(&exprs).expect("ir check")
+}
+
+/// chelis#1125: authoring normalization preserves legal structural parameter
+/// lists, so both runtime readers must accept an annotated `Expr::BareList`
+/// without admitting malformed name or metadata layouts.
+#[test]
+fn annotated_bare_list_parameter_preserves_runtime_name_and_declared_type() {
+    use chelis_deep::Span;
+    use chelis_deep::annotations::{MetadataValue, TypeSyntax};
+
+    let span = Span::new(0, 0);
+    let declared_type = Expr::node(
+        DeepTag::TPrim,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name("f64".to_string()), span)],
+        span,
+    );
+    let parameter = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".to_string()), span),
+            Expr::Map(
+                Metadata::from(MetadataValue::Type(
+                    TypeSyntax::try_new(declared_type.clone()).expect("valid declared type"),
+                )),
+                span,
+            ),
+        ],
+        span,
+    );
+
+    assert_eq!(runtime_param_name(&parameter), Some("x"));
+    assert_eq!(param_decl_type_expr(&parameter), Some(&declared_type));
+
+    let malformed_name = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Int(0), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    assert_eq!(runtime_param_name(&malformed_name), None);
+    assert_eq!(param_decl_type_expr(&malformed_name), None);
+}
+
+#[test]
+fn runtime_function_params_reject_nonparameter_carriers_without_filtering() {
+    use chelis_deep::Span;
+    use chelis_deep::ast::UnknownFormData;
+
+    let span = Span::new(0, 0);
+    let invalid_params = [
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "x".to_string(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        })),
+        Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("x".to_string()), span)],
+            span,
+        ),
+    ];
+
+    for parameter in invalid_params {
+        assert_eq!(
+            runtime_param_name(&parameter),
+            None,
+            "only source parameter roles may produce runtime binders"
+        );
+        let function = Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+                Expr::node(
+                    DeepTag::Lit,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Int(1), span)],
+                    span,
+                ),
+            ],
+            span,
+        );
+        assert_eq!(
+            issue_1125_eval_raw_expr(&function)
+                .expect_err("an invalid parameter must reject the function"),
+            "fn params malformed",
+            "an invalid parameter must reject instead of disappearing"
+        );
+    }
+}
+
+fn issue_1125_eval_raw_expr(expr: &Expr) -> Result<RuntimeValue, String> {
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let mut ctx = EvalContext {
+        bindings: Frame::new(),
+        result_producer: None,
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
+        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
+        declared_signatures: UnordMap::new(),
+        adt_fields: UnordMap::new(),
+        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        tensor_bindings: &empty_tensors,
+        session: None,
+        active_declaration_names: Vec::new(),
+        def_kernels: UnordMap::new(),
+        transcript: Vec::new(),
+        transcript_capture: None,
+        resolving_top_levels: Vec::new(),
+        cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
+    };
+    ctx.eval_expr(expr)
+}
+
+fn issue_1125_eval_checked_root(
+    checked: &CheckedProgram,
+    exprs: &[Expr],
+    root: &str,
+) -> Result<RuntimeValue, String> {
+    let empty_tensors = UnordMap::new();
+    let mut definitions = UnordMap::new();
+    register_top_level_defs(
+        exprs,
+        &BTreeMap::new(),
+        None,
+        &mut definitions,
+        &mut Vec::new(),
+        false,
+    );
+    let mut signatures = UnordMap::new();
+    register_declared_signatures(exprs, &mut signatures);
+    let mut ctx = EvalContext {
+        bindings: Frame::new(),
+        result_producer: None,
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
+        program: ProgramScope::new(
+            definitions,
+            checked
+                .type_env()
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
+        ),
+        declared_signatures: signatures,
+        adt_fields: UnordMap::new(),
+        adt_registry: checked.adt_registry().clone(),
+        tensor_bindings: &empty_tensors,
+        session: Some(chelis_ir::host::HostLoweringSession::new(checked)),
+        active_declaration_names: Vec::new(),
+        def_kernels: UnordMap::new(),
+        transcript: Vec::new(),
+        transcript_capture: None,
+        resolving_top_levels: Vec::new(),
+        cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
+    };
+    ctx.resolve_top_level(root)
+}
+
+fn issue_1125_gradient_values(value: &RuntimeValue) -> Vec<f64> {
+    match value {
+        RuntimeValue::Scalar(payload) => vec![payload.as_f64_lossy()],
+        RuntimeValue::Tensor(tensor) => tensor.value.to_f64_lossy_vec(),
+        _ => panic!("expected one scalar or tensor gradient"),
+    }
+}
+
+#[test]
+fn runtime_grad_wrt_reads_the_checked_program() {
+    let checked = checked_surf(
+        "def pair(x: f32, y: f32) -> f32 = mul(x, y)\n\
+         out = grad(pair, wrt=y)(2.0f32, 3.0f32)\n",
+    );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![2.0]);
+}
+
+/// chelis#1125: an explicitly typed binding stamps `surf_binding_type` on the
+/// bound `grad` node, and spec/03 section 1.1 admits that key only on a bind
+/// value. Applying the captured transform splices the node into the callee
+/// slot of a synthesized `app`, where the node gate refuses the key, so the
+/// splice must leave the binding origin behind.
+#[test]
+fn runtime_grad_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "def sq(x: f32) -> f32 = mul(x, x)\n\
+         out = {\n\
+           g: (f32) -> f32 = grad(sq)\n\
+           g(3.0f32)\n\
+         }\n",
+    );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
+}
+
+/// The twin of `runtime_grad_bound_with_an_explicit_type_applies` for the
+/// differentiated function: an explicitly typed local `fn` carries
+/// `surf_binding_type` into the captured closure that the transform installs
+/// as a program definition for lowering.
+#[test]
+fn runtime_grad_of_a_function_bound_with_an_explicit_type_applies() {
+    let checked = checked_surf(
+        "out = {\n\
+           f: (f32) -> f32 = fn (x: f32) -> mul(x, x)\n\
+           grad(f)(3.0f32)\n\
+         }\n",
+    );
+
+    let gradient = issue_1125_eval_checked_root(&checked, checked.exprs(), "out").expect("grad");
+
+    assert_eq!(issue_1125_gradient_values(&gradient), vec![6.0]);
+}
+
+#[test]
+fn runtime_closure_preserves_the_original_checked_function_carrier() {
+    let span = chelis_deep::Span::new(4, 12);
+    let successor = Expr::node(
+        DeepTag::Fn,
+        Metadata::default(),
+        vec![
+            Expr::node(DeepTag::Params, Metadata::default(), vec![], span),
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Int(1), span)],
+                span,
+            ),
+        ],
+        span,
+    );
+    let RuntimeValue::Closure {
+        checked_function: successor_checked,
+        ..
+    } = issue_1125_eval_raw_expr(&successor).expect("successor closure")
+    else {
+        panic!("successor function must evaluate to a closure")
+    };
+
+    assert!(matches!(successor_checked.as_ref(), Expr::Node(..)));
+    assert_eq!(
+        chelis_deep::printer::print_canonical_flat(&[successor_checked.as_ref().clone()]),
+        chelis_deep::printer::print_canonical_flat(&[successor])
+    );
+}
+
+#[test]
+fn runtime_eval_reads_a_decoded_literal_node() {
+    use chelis_deep::Span;
+
+    let span = Span::new(4, 12);
+    let value = Expr::Atom(Atom::Int(7), span);
+    let successor = Expr::node(DeepTag::Lit, Metadata::default(), vec![value], span);
+
+    let successor = issue_1125_eval_raw_expr(&successor).expect("successor literal evaluates");
+    assert_eq!(render_value(&successor), "7");
+}
+
+#[test]
+fn runtime_match_patterns_read_decoded_nodes() {
+    use chelis_deep::Span;
+
+    let span = Span::new(4, 12);
+    let node = |tag, children| Expr::node(tag, Metadata::default(), children, span);
+    let successor = node(
+        DeepTag::Match,
+        vec![
+            node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span)]),
+            node(
+                DeepTag::Arm,
+                vec![
+                    node(DeepTag::PatLit, vec![Expr::Atom(Atom::Int(1), span)]),
+                    Expr::BareList(vec![], span),
+                    node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(42), span)]),
+                ],
+            ),
+        ],
+    );
+    let successor = issue_1125_eval_raw_expr(&successor);
+    assert_eq!(successor.as_ref().map(render_value), Ok("42".to_string()));
+}
+
+/// `(match {} (lit {} scrutinee) (arm {} (pat-var {} flag) guard (lit {} 1))
+/// (arm {} (pat-wild {}) () fallback))`: the first arm's guard is `guard`,
+/// and the second arm is guardless.
+fn guarded_match(scrutinee: bool, guard: Expr, fallback: Expr) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    let node = |tag, children| Expr::node(tag, Metadata::default(), children, span);
+    node(
+        DeepTag::Match,
+        vec![
+            node(DeepTag::Lit, vec![Expr::Atom(Atom::Bool(scrutinee), span)]),
+            node(
+                DeepTag::Arm,
+                vec![
+                    node(
+                        DeepTag::PatVar,
+                        vec![Expr::Atom(Atom::Name("flag".to_string()), span)],
+                    ),
+                    guard,
+                    node(DeepTag::Lit, vec![Expr::Atom(Atom::Int(1), span)]),
+                ],
+            ),
+            node(
+                DeepTag::Arm,
+                vec![
+                    node(DeepTag::PatWild, vec![]),
+                    Expr::BareList(vec![], span),
+                    fallback,
+                ],
+            ),
+        ],
+    )
+}
+
+fn raw_var(name: &str) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    Expr::node(
+        DeepTag::Var,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        span,
+    )
+}
+
+fn raw_int(value: i64) -> Expr {
+    let span = chelis_deep::Span::new(4, 12);
+    Expr::node(
+        DeepTag::Lit,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Int(value), span)],
+        span,
+    )
+}
+
+/// REGRESSION TEST ([04-PAT-2], chelis#2445). The guard reads the binding
+/// its own pattern introduced, and a `false` guard passes control to the next
+/// arm. Before the fix the guard slot was never read, so the first arm won for
+/// both scrutinees.
+#[test]
+fn runtime_match_guard_reads_its_binding_and_false_tries_the_next_arm() {
+    let selected = issue_1125_eval_raw_expr(&guarded_match(true, raw_var("flag"), raw_int(2)));
+    assert_eq!(selected.as_ref().map(render_value), Ok("1".to_string()));
+    let skipped = issue_1125_eval_raw_expr(&guarded_match(false, raw_var("flag"), raw_int(2)));
+    assert_eq!(skipped.as_ref().map(render_value), Ok("2".to_string()));
+}
+
+/// REGRESSION TEST ([04-PAT-2]). A skipped arm's bindings are discarded: the
+/// next arm cannot read `flag`. Before the fix the first arm was selected, so
+/// the fallback never ran.
+#[test]
+fn runtime_match_guard_that_is_false_discards_its_bindings() {
+    let result = issue_1125_eval_raw_expr(&guarded_match(false, raw_var("flag"), raw_var("flag")));
+    let error = result.expect_err("the skipped arm's `flag` must not reach the next arm");
+    assert!(error.contains("flag"), "{error}");
+}
+
+/// REGRESSION TEST, negative parity ([04-PAT-2]). A guard that cannot be
+/// evaluated fails the match rather than reading as `false`, and a guard that
+/// is not a `bool` is rejected rather than read as truthy. Before the fix both
+/// programs returned the first arm's `1`.
+#[test]
+fn runtime_match_guard_that_fails_or_is_not_bool_fails_the_match() {
+    let unbound = issue_1125_eval_raw_expr(&guarded_match(true, raw_var("missing"), raw_int(2)));
+    let error = unbound.expect_err("a failing guard must fail the match");
+    assert!(error.contains("missing"), "{error}");
+    let not_bool = issue_1125_eval_raw_expr(&guarded_match(true, raw_int(7), raw_int(2)));
+    let error = not_bool.expect_err("a non-bool guard must fail the match");
+    assert!(error.contains("match arm guard must be bool"), "{error}");
+}
+
+#[test]
+fn runtime_pattern_reader_matches_every_decoded_pattern() {
+    use chelis_deep::Span;
+
+    let span = Span::new(4, 12);
+    let name = |value: &str| Expr::Atom(Atom::Name(value.to_string()), span);
+    let bool_lit = |value| {
+        Expr::node(
+            DeepTag::PatLit,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Bool(value), span)],
+            span,
+        )
+    };
+    let cases = [
+        (
+            RuntimeValue::Bool(true),
+            Expr::node(
+                DeepTag::PatVar,
+                Metadata::default(),
+                vec![name("bound")],
+                span,
+            ),
+        ),
+        (
+            RuntimeValue::Bool(true),
+            Expr::node(DeepTag::PatWild, Metadata::default(), vec![], span),
+        ),
+        (RuntimeValue::Bool(true), bool_lit(true)),
+        (
+            RuntimeValue::Adt {
+                ctor: "Some".to_string(),
+                fields: vec![RuntimeValue::Bool(true)].into(),
+                field_names: None,
+            },
+            Expr::node(
+                DeepTag::PatCtor,
+                Metadata::default(),
+                vec![
+                    name("Some"),
+                    Expr::node(
+                        DeepTag::PatVar,
+                        Metadata::default(),
+                        vec![name("item")],
+                        span,
+                    ),
+                ],
+                span,
+            ),
+        ),
+        (
+            RuntimeValue::Adt {
+                ctor: "Point".to_string(),
+                fields: vec![RuntimeValue::Bool(true)].into(),
+                field_names: Some(vec!["x".to_string()]),
+            },
+            Expr::node(
+                DeepTag::PatRecord,
+                Metadata::default(),
+                vec![
+                    name("Point"),
+                    Expr::node(
+                        DeepTag::Kv,
+                        Metadata::default(),
+                        vec![name("x"), bool_lit(true)],
+                        span,
+                    ),
+                ],
+                span,
+            ),
+        ),
+        (
+            RuntimeValue::Tuple(
+                vec![
+                    RuntimeValue::Bool(true),
+                    RuntimeValue::String("ok".to_string()),
+                ]
+                .into(),
+            ),
+            Expr::node(
+                DeepTag::PatTuple,
+                Metadata::default(),
+                vec![
+                    bool_lit(true),
+                    Expr::node(DeepTag::PatWild, Metadata::default(), vec![], span),
+                ],
+                span,
+            ),
+        ),
+    ];
+    let adt_fields = UnordMap::new();
+
+    for (value, successor) in cases {
+        let mut successor_bindings = Frame::new();
+        assert_eq!(
+            pattern_matches(&value, &successor, &mut successor_bindings, &adt_fields),
+            Ok(true)
+        );
+    }
+
+    for invalid in [
+        Expr::BareList(vec![name("not-a-pattern")], span),
+        Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: "future-pattern".to_string(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        })),
+        Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![name("not-a-pattern")],
+            span,
+        ),
+    ] {
+        let mut bindings = Frame::new();
+        assert_eq!(
+            pattern_matches(
+                &RuntimeValue::Bool(true),
+                &invalid,
+                &mut bindings,
+                &adt_fields
+            ),
+            Ok(false)
+        );
+        assert!(bindings.is_empty());
+    }
+}
+
+#[test]
+fn runtime_eval_rejects_each_nonruntime_carrier_explicitly() {
+    use chelis_deep::Span;
+    use chelis_deep::ast::{MetaExpr, UnknownFormData};
+
+    let span = Span::new(4, 12);
+    let cases = [
+        (
+            Expr::BareList(vec![Expr::Atom(Atom::Name("item".to_string()), span)], span),
+            "a structural bare list is not a runtime expression",
+        ),
+        (
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-form".to_string(),
+                meta: Metadata::default(),
+                children: vec![],
+                span,
+            })),
+            "unknown form `future-form` is not a runtime expression",
+        ),
+        (
+            Expr::Atom(Atom::Name("leaf".to_string()), span),
+            "bare atom is not a runtime expression",
+        ),
+    ];
+    for (expr, expected) in cases {
+        assert_eq!(
+            issue_1125_eval_raw_expr(&expr).expect_err("nonruntime carrier must reject"),
+            expected
+        );
+    }
+
+    assert!(matches!(
+        issue_1125_eval_raw_expr(&Expr::Map(Metadata::default(), span)),
+        Ok(RuntimeValue::Unit)
+    ));
+    assert!(matches!(
+        issue_1125_eval_raw_expr(&Expr::MetaExpr(
+            MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(Expr::Map(Metadata::default(), span)),
+            },
+            span,
+        )),
+        Ok(RuntimeValue::Unit)
+    ));
+}
+
+#[test]
+fn runtime_nested_owner_readers_reject_malformed_children() {
+    use chelis_deep::Span;
+    use chelis_deep::ast::UnknownFormData;
+
+    let span = Span::new(12, 18);
+    let name = |value: &str| Expr::Atom(Atom::Name(value.to_string()), span);
+    let unknown = || {
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "future-field".to_string(),
+            meta: Metadata::default(),
+            children: vec![],
+            span,
+        }))
+    };
+
+    let mut adt_fields = UnordMap::new();
+    adt_fields.insert("Point".to_string(), vec!["x".to_string()]);
+    let mut bindings = Frame::new();
+    let malformed_pattern = Expr::node(
+        DeepTag::PatRecord,
+        Metadata::default(),
+        vec![name("Point"), unknown()],
+        span,
+    );
+    assert_eq!(
+        pattern_matches(
+            &RuntimeValue::Adt {
+                ctor: "Point".to_string(),
+                fields: vec![RuntimeValue::Bool(true)].into(),
+                field_names: Some(vec!["x".to_string()]),
+            },
+            &malformed_pattern,
+            &mut bindings,
+            &adt_fields,
+        )
+        .expect_err("a malformed pat-record child must not disappear"),
+        "pat-record field must be a decoded `kv` node"
+    );
+    assert!(bindings.is_empty());
+
+    let malformed_record = Expr::node(
+        DeepTag::Record,
+        Metadata::default(),
+        vec![name("Point"), unknown()],
+        span,
+    );
+    assert_eq!(
+        issue_1125_eval_raw_expr(&malformed_record)
+            .expect_err("a malformed record child must not disappear"),
+        "record field must be a decoded `kv` node"
+    );
+
+    let malformed_match = Expr::node(
+        DeepTag::Match,
+        Metadata::default(),
+        vec![
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Bool(true), span)],
+                span,
+            ),
+            unknown(),
+        ],
+        span,
+    );
+    assert_eq!(
+        issue_1125_eval_raw_expr(&malformed_match)
+            .expect_err("a malformed match arm must not disappear"),
+        "match arm must be a decoded `arm` node"
+    );
+}
+
+/// chelis#1829: the interpreter entry derives each definition's kernel
+/// decision once, so the summary probes behind `def_kernel` are bounded by the
+/// number of definitions rather than expanding the call graph as a tree.
+///
+/// Two rows, and each stops the other going vacuous. The tensor row measures
+/// the BOUND, because it still reaches the probe. The scalar row is the
+/// REGRESSION CLASS, because #1829's own provoking definitions are non-tensor,
+/// and after chelis#1835's predicate reorder its count is exactly zero.
+///
+/// Evidentiary status: REGRESSION TEST for the entry point. On the base this
+/// function armed nothing, so the scalar fixture builds hundreds of thousands
+/// of summaries (measured: 398,574 at depth 12) and takes minutes.
+///
+/// The fixture uses one program rather than a composed library plus caller,
+/// because `CheckedProgram::compose` requires a `library_proof_id` that only
+/// the real context pipeline mints and a lib unit test cannot. The exposure
+/// #1693 actually opened, an imported library definition reaching this probe,
+/// is covered end to end by the `csv_io`, `json_io` and `issue_1314_json_bigint`
+/// CLI rows. What this pins is the part those rows cannot: an exact probe count
+/// at the entry that arms the scope.
+///
+/// The negative twin is on the base rather than a mutation: the scalar row's
+/// 398,574 against its 0 here, and the tensor row's own `probes > 0` guard,
+/// which fired on CI when chelis#1835's reorder first made the scalar fixture
+/// stop reaching the probe.
+/// One evaluation of `source`, returning its `result` rendering and the number
+/// of kernel-decision summary probes the interpreter ran.
+///
+/// A large stack so that an unmemoized run reports the probe COUNT rather than
+/// overflowing: the probe recurses once per call-graph level per call site, and
+/// the default test stack aborts the whole process at depth 12.
+fn issue_1829_entry_probe_count(label: &'static str, source: String) -> (String, u64) {
+    std::thread::Builder::new()
+        .name(format!("issue-1829-entry-{label}"))
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            let checked = checked_surf(&source);
+            let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+            let inputs = HostEvaluationInputs {
+                roots: &empty_tensors,
+                bindings: None,
+            };
+            chelis_ir::host::reset_host_summary_probe_builds();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked, None, None, inputs, None, None,
+            )
+            .expect("#1829 fanout fixture evaluates");
+            let probes = chelis_ir::host::host_summary_probe_builds();
+            let result = outcome
+                .host_bindings
+                .get("result")
+                .map(render_value)
+                .expect("#1829 fixture binds `result`");
+            (result, probes)
+        })
+        .expect("#1829 entry probe thread starts")
+        .join()
+        .expect("#1829 entry probe thread completes")
+}
+
+/// A fan-out chain of `depth` definitions, each calling the next from two
+/// argument positions, returning tensors or scalars.
+fn issue_1829_entry_source(depth: usize, tensor_result: bool) -> String {
+    let mut source = String::new();
+    if tensor_result {
+        for level in 0..depth {
+            source.push_str(&format!(
+                "def f{level}(x: tensor[4, f32]) -> tensor[4, f32] = \
+                 add(f{next}(x), f{next}(x))\n",
+                next = level + 1
+            ));
+        }
+        source.push_str(&format!(
+            "def f{depth}(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n"
+        ));
+        source.push_str("seed = reshape(insert(to_tensor([cast(1.0, f32)]), 0, 4i64), [4i64])\n");
+    } else {
+        for level in 0..depth {
+            source.push_str(&format!(
+                "def f{level}(x: i64) -> i64 = add(f{next}(x), f{next}(x))\n",
+                next = level + 1
+            ));
+        }
+        source.push_str(&format!("def f{depth}(x: i64) -> i64 = x\n"));
+        source.push_str("seed = cast(1, i64)\n");
+    }
+    source.push_str("result = f0(seed)\n");
+    source
+}
+
+#[test]
+fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
+    const DEPTH: usize = 12;
+    let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
+
+    // Row 1, the BOUND. A tensor-returning chain reaches the probe, so the
+    // bound is measured rather than asserted over nothing. This row exists in
+    // this shape because chelis#1835's predicate reorder made the probe the
+    // last host-lane predicate asked: the scalar chain below no longer reaches
+    // it, and a receipt whose only fixture stopped reaching it would pass
+    // while measuring zero work. Its own `probes > 0` guard caught exactly
+    // that, on CI.
+    let (tensor_result, tensor_probes) =
+        issue_1829_entry_probe_count("tensor", issue_1829_entry_source(DEPTH, true));
+    eprintln!("#1829 entry tensor definitions={definitions} probes={tensor_probes}");
+    assert_eq!(
+        tensor_result, "tensor(shape=[4], data=[4096.0, 4096.0, 4096.0, 4096.0])",
+        "#1829 tensor fixture must still compute the right answer"
+    );
+    assert!(
+        tensor_probes > 0,
+        "#1829: the fixture must actually reach the kernel-decision probe, or this receipt \
+         would pass without measuring anything"
+    );
+    assert!(
+        tensor_probes <= definitions,
+        "#1829: the interpreter entry must build at most one summary per definition; \
+         {definitions} definitions produced {tensor_probes} builds"
+    );
+
+    // Row 2, the REGRESSION CLASS. #1829's own class is the scalar chain,
+    // because the definitions that provoked it are non-tensor (`Std.Io.Json`).
+    // Keeping it is what stops row 1's retyping from quietly dropping the
+    // class this receipt was written for. Its count is now exactly zero, and
+    // that is the public-entry receipt for the reorder: a definition whose
+    // declared result cannot be a kernel pays no probe at all. On the base it
+    // was 398,574.
+    let (scalar_result, scalar_probes) =
+        issue_1829_entry_probe_count("scalar", issue_1829_entry_source(DEPTH, false));
+    eprintln!("#1829 entry scalar definitions={definitions} probes={scalar_probes}");
+    assert_eq!(
+        scalar_result, "4096",
+        "#1829 scalar fixture must still compute the right answer"
+    );
+    assert_eq!(
+        scalar_probes, 0,
+        "#1829/#1835: a non-tensor definition must pay no kernel-decision probe; the reorder \
+         asks the probe after the declared result type, so this chain reaches none"
+    );
+}
+
+/// Evaluate `source` and return its `result` binding with the number of
+/// definition kernel plannings performed.
+fn def_kernel_plannings(source: &str) -> (String, u64) {
+    let checked = checked_surf(source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    super::eval::take_def_kernel_plannings();
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2392 fixture evaluates");
+    let plannings = super::eval::take_def_kernel_plannings();
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2392 fixture binds `result`");
+    (result, plannings)
+}
+
+/// chelis#2392: a recursive program applies its helpers many times.
+/// `def_kernel` used to skip its memo beneath a recursive caller and re-plan
+/// every applied helper per application. A helper that draws no Random is
+/// planned once however many times the recursion applies it. chelis#2413
+/// gives a drawing helper the same memo: its draw keys read the frame it is
+/// evaluated with, so its kernel no longer depends on the stream position.
+/// chelis#2405 retired the inherited execution exclusion this counted
+/// beneath, so the receipt now counts every planning.
+///
+/// Evidentiary status: REGRESSION TEST for the non-drawing row (it fails on
+/// the #2392 base, where the count grows with the depth) and for the drawing
+/// row (it fails on the #2413 base, which re-planned per application).
+#[test]
+fn issue_2392_kernel_under_recursion_is_planned_once_per_helper() {
+    let program = |depth: i64| {
+        format!(
+            "def double(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
+             def walk(n: i64, x: tensor[4, f32]) -> tensor[4, f32] = if eq(n, 0i64) then x else walk(sub(n, 1i64), double(x))\n\
+             result = tensor_to_scalar(sum(walk({depth}i64, to_tensor([1.0f32, 0.0f32, 0.0f32, 0.0f32])), 0i32))\n"
+        )
+    };
+    let (shallow, shallow_plannings) = def_kernel_plannings(&program(4));
+    let (deep, deep_plannings) = def_kernel_plannings(&program(12));
+    assert_eq!(shallow, "16.0");
+    assert_eq!(deep, "4096.0");
+    assert!(
+        shallow_plannings >= 1,
+        "the fixture must reach the kernel decision"
+    );
+    assert_eq!(
+        shallow_plannings, deep_plannings,
+        "plannings must not grow with the number of applications"
+    );
+}
+
+/// chelis#2393: short-name resolution through the terminal index must agree
+/// with the linear scan it replaced, `terminal_name_matches` over every key
+/// with the exactly-one-match rule, for exact, short, qualified, ambiguous and
+/// absent spellings, and the index is built once per scope however many
+/// names are resolved.
+///
+/// Evidentiary status: DISPOSITION LOCK for the resolution table (the rule is
+/// unchanged) and REGRESSION TEST for the build count (the base had no index
+/// and scanned on every ask).
+#[test]
+fn issue_2393_terminal_index_resolves_like_the_scan() {
+    let keys = [
+        "A__x",
+        "B.x",
+        "A.b__y",
+        "y",
+        "C__y__z",
+        "Pkg__lib__Mod__w",
+        "Pkg.lib.Mod.v",
+        "u",
+        "Other__u",
+        "plain",
+    ];
+    let span = chelis_deep::Span::new(0, 0);
+    let defs = keys
+        .iter()
+        .map(|key| {
+            (
+                (*key).to_owned(),
+                Expr::Atom(chelis_deep::ast::Atom::Int(0), span),
+            )
+        })
+        .collect::<UnordMap<_, _>>();
+    let scope = ProgramScope::new(defs.clone(), UnordMap::new());
+    let scan = |name: &str| {
+        let sorted = defs.to_sorted();
+        let mut matches = sorted
+            .into_iter()
+            .filter(|(key, _)| terminal_name_matches(key, name))
+            .map(|(key, _)| key.clone());
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    };
+    let mut queries = keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+    for short in ["x", "y", "z", "w", "v", "u", "b__y", "plain", "missing", ""] {
+        queries.push(short.to_owned());
+        queries.push(format!("Q__{short}"));
+        queries.push(format!("Q.{short}"));
+    }
+    super::program_scope::take_terminal_index_builds();
+    for query in &queries {
+        assert_eq!(
+            scope.resolve_def_key(query).map(str::to_owned),
+            if defs.contains_key(query.as_str()) {
+                Some(query.clone())
+            } else {
+                scan(query)
+            },
+            "resolution of `{query}`"
+        );
+    }
+    // Spot-check the table itself so a shared bug in both readings shows.
+    assert_eq!(scope.resolve_def_key("x"), None, "`x` is ambiguous");
+    assert_eq!(scope.resolve_def_key("z"), Some("C__y__z"));
+    assert_eq!(scope.resolve_def_key("Q.w"), Some("Pkg__lib__Mod__w"));
+    assert_eq!(scope.resolve_def_key("v"), Some("Pkg.lib.Mod.v"));
+    assert_eq!(scope.resolve_def_key("u"), Some("u"), "an exact key wins");
+    assert_eq!(scope.resolve_def_key("missing"), None);
+    assert_eq!(
+        super::program_scope::take_terminal_index_builds(),
+        1,
+        "the index is built once per scope, not once per ask"
+    );
+}
+
+/// chelis#2204: an anonymous `fn` captures the whole enclosing binding frame
+/// and the list combinators clone the callback once per element, so before
+/// this fix every element deep-copied every binding in scope, including
+/// bindings the callback never mentions. A `fold` was quadratic in whatever
+/// happened to be in scope.
+///
+/// Counted receipt in the shape of chelis#1835's
+/// `host_summary_probe_builds`: `frame_value_copies` counts binding
+/// entries deep-copied by frame clones. The fixture binds one unused list and
+/// folds one closure over `applications` elements; the asymptotic promise is
+/// that the copies do not grow with the application count, asserted as a
+/// comparison between two application counts rather than a machine budget.
+///
+/// Evidentiary status: REGRESSION TEST, proven failing first. With the
+/// counter and this test in place but the frame representation unchanged
+/// (`clone_frame`/`clone_callable` over the by-value `UnordMap` frame), the
+/// receipt read 201 copies at 100 applications and 801 at 400: two frame
+/// copies per element plus the capture. After the fix both read 0.
+///
+/// The nested-let companion fixture keeps the receipt honest: a block that
+/// shadows an enclosing local must still copy that local when it saves the
+/// frame, so a counter that stopped measuring would fail there rather than
+/// pass vacuously here.
+#[test]
+fn issue_2204_frame_copies_do_not_scale_with_closure_applications() {
+    fn evaluate(source: &str, binding: &str) -> (u64, String) {
+        let checked = checked_surf(source);
+        let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+        let inputs = HostEvaluationInputs {
+            roots: &empty_tensors,
+            bindings: None,
+        };
+        super::frame::reset_frame_value_copies();
+        let outcome =
+            evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+                .expect("#2204 fixture evaluates");
+        let copies = super::frame::frame_value_copies();
+        let value = outcome
+            .host_bindings
+            .get(binding)
+            .map(render_value)
+            .unwrap_or_else(|| panic!("#2204 fixture binds `{binding}`"));
+        (copies, value)
+    }
+    fn fold_fixture(applications: usize) -> String {
+        // `unused` is in scope and never read by the closure; before the fix
+        // it was copied on every application anyway.
+        format!(
+            "result = {{\n  unused = range(cast(0, i64), cast(64, i64))\n  \
+             fold(fn (acc: i64, x: i64) -> add(acc, x), cast(0, i64), \
+             range(cast(0, i64), cast({applications}, i64)))\n}}\n"
+        )
+    }
+
+    let (small, small_result) = evaluate(&fold_fixture(100), "result");
+    let (large, large_result) = evaluate(&fold_fixture(400), "result");
+    eprintln!(
+        "#2204 receipt: 100 applications copied {small} entries, 400 applications copied {large}"
+    );
+    assert_eq!(
+        small_result, "4950",
+        "#2204: 100-element fold must still sum correctly"
+    );
+    assert_eq!(
+        large_result, "79800",
+        "#2204: 400-element fold must still sum correctly"
+    );
+    assert!(
+        large <= small,
+        "#2204: frame copies must not grow with closure applications; 100 applications \
+         copied {small} binding entries, 400 applications copied {large}"
+    );
+
+    // Companion: the counter is live. Entering a nested block saves the
+    // enclosing frame, and that frame holds one local, so exactly that copy
+    // is observed.
+    let (nested, nested_result) = evaluate(
+        "result = {\n  a = cast(1, i64)\n  b = {\n    c = cast(2, i64)\n    add(a, c)\n  }\n  b\n}\n",
+        "result",
+    );
+    assert_eq!(
+        nested_result, "3",
+        "#2204: nested-let companion must still compute"
+    );
+    assert!(
+        nested >= 1,
+        "#2204: the frame-copy counter must observe the nested block's frame save, or this \
+         receipt would pass without measuring anything"
+    );
+}
+
+/// chelis#2204: a closure parameter shadows a captured binding of the same
+/// name at the interpreter level, not only inside `Frame`'s own unit tests.
+/// Red-team round 1 on chelis#2208 inverted `Frame::get` to prefer the
+/// outermost scope and the whole crate stayed green except `frame.rs`'s
+/// tests; this fixture is the interpreter-level lock. Under that inversion
+/// `g(3)` returns the captured `n = 7`, giving 77 instead of 37.
+#[test]
+fn issue_2204_closure_parameter_shadows_captured_binding() {
+    let checked = checked_surf(
+        "result = {\n  n = cast(7, i64)\n  g = fn (n: i64) -> n\n  add(mul(g(cast(3, i64)), cast(10, i64)), n)\n}\n",
+    );
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#2204 shadowing fixture evaluates");
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#2204 shadowing fixture binds `result`");
+    assert_eq!(
+        result, "37",
+        "#2204: the closure parameter `n` must shadow the captured `n`; 77 means the captured \
+         scope won the lookup"
+    );
 }
 
 fn manifest_entry_with_path(
@@ -70,7 +1099,7 @@ fn manifest_root_lookup_follows_recursive_list_adt_path() {
     let entry = manifest_entry_with_path("items.1.0", "items", vec![Adt(1), Adt(0)]);
     let bindings = UnordMap::from([(
         "items".to_string(),
-        RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)]),
+        RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)].into()),
     )]);
 
     let value = lookup_runtime_value_for_manifest_root(&entry, &bindings, &UnordMap::new())
@@ -92,93 +1121,26 @@ fn manifest_root_lookup_rejects_a_path_step_for_the_wrong_runtime_shape() {
 }
 
 #[test]
-fn with_seed_uniform_like_evaluates_body() {
+fn keyed_uniform_like_evaluates() {
     let checked = checked_surf(
         r#"
-x = with seed(7i64) {
-  tensor_to_scalar(
-uniform_like(
-  trace(pad_sequences_to([[0.0]], cast(1, int64), cast(0.0, f32)), cast(0, int32), cast(1, int32)),
-  0.0,
-  1.0
-)
+x = tensor_to_scalar(
+  uniform_like(
+    key_from_seed(7i64),
+    trace(pad_sequences_to([[0.0]], cast(1, i64), cast(0.0, f32)), cast(0, i32), cast(1, i32)),
+    0.0,
+    1.0
   )
-}
+)
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("seeded host program should evaluate");
+        .expect("keyed host program should evaluate");
     let value = outcome.host_bindings.get("x").expect("x binding");
     match value.as_f64() {
         Some(v) => assert!((0.0..=1.0).contains(&v), "got {v}"),
         None => panic!("expected float result, got {value:?}"),
     }
-}
-
-/// chelis#771: `literal_seed_i64` reads a `with seed(...)` literal at full
-/// i64 width, peeling the `(lit {type: (t-prim {} int32)} n)` wrapper the
-/// desugarer attaches (desugar.rs:1564-1569) and ignoring the int32 default
-/// meta — so the evaluator's effective u64 seed matches the C lane's
-/// `(uint64_t)n` instead of `eval_lit`'s int32-narrowed value.
-#[test]
-fn literal_seed_read_at_full_i64_width() {
-    use chelis_deep::Span;
-    let sp = Span::new(0, 0);
-    let node = |tag: &str, children: Vec<Expr>| {
-        let mut elements = vec![
-            Expr::Atom(Atom::Name(tag.to_string()), sp),
-            Expr::Map(MetaMap::default(), sp),
-        ];
-        elements.extend(children);
-        Expr::List(List { elements }, sp)
-    };
-    // (lit {type: (t-prim {} int32)} 4294967295) — the exact shape desugar
-    // emits for `seed(4294967295)`.
-    let int32_seed_lit = |n: i64| {
-        let t_int32 = node(
-            "t-prim",
-            vec![Expr::Atom(Atom::Name("int32".to_string()), sp)],
-        );
-        Expr::List(
-            List {
-                elements: vec![
-                    Expr::Atom(Atom::Tag(DeepTag::Lit), sp),
-                    Expr::Map(
-                        MetaMap {
-                            entries: vec![("type".to_string(), t_int32)],
-                        },
-                        sp,
-                    ),
-                    Expr::Atom(Atom::Int(n), sp),
-                ],
-            },
-            sp,
-        )
-    };
-
-    // The peel reads the raw i64 atom regardless of the int32 meta.
-    let lit = int32_seed_lit(4_294_967_295);
-    assert_eq!(literal_seed_i64(&lit), Some(4_294_967_295));
-    assert_eq!(literal_seed_i64(&lit).unwrap() as u64, 4_294_967_295_u64);
-    // Guard against the pre-#771 bug: `eval_lit` would narrow
-    // `4294967295 as i32` = -1, sign-extend, and seed 0xFFFF_FFFF_FFFF_FFFF.
-    assert_ne!(
-        literal_seed_i64(&lit).unwrap() as u64,
-        0xFFFF_FFFF_FFFF_FFFF_u64,
-    );
-    // The exact 2^31 boundary and a bare (unwrapped) int atom both read full.
-    assert_eq!(
-        literal_seed_i64(&int32_seed_lit(2_147_483_648)),
-        Some(2_147_483_648),
-    );
-    assert_eq!(
-        literal_seed_i64(&Expr::Atom(Atom::Int(2_147_483_648), sp)),
-        Some(2_147_483_648),
-    );
-    // Non-literal seed expressions return None, so the caller keeps the
-    // dtype-narrowing `eval_expr` fallback for computed seeds.
-    let var_seed = node("var", vec![Expr::Atom(Atom::Name("s".to_string()), sp)]);
-    assert_eq!(literal_seed_i64(&var_seed), None);
 }
 
 #[test]
@@ -188,11 +1150,11 @@ fn ownership_drop_is_unit_and_does_not_shadow_list_drop_runtime() {
 x = {
   t = to_tensor([cast(1.0, f32), cast(2.0, f32)])
   values = to_list(t)
-  actual = index(values, cast(0, int64))
+  actual = index(values, cast(0, i64))
   _ = drop(t)
   actual
 }
-y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int64))
+y = index(skip([cast(10, i64), cast(20, i64)], cast(1, i64)), cast(0, i64))
 "#,
     );
 
@@ -211,23 +1173,86 @@ y = index(drop([cast(10, int64), cast(20, int64)], cast(1, int64)), cast(0, int6
     );
 }
 
+// ----- chelis#1558: [04-DTYPE-1] owns the unbounded cast target -----
+//
+// Every row below used to assert that the host interpreter accepted
+// `cast(<variable>, p)` under an unbounded binder and actualized `p` at each
+// call site's own concrete dtype. [04-DTYPE-1] says a primitive type position
+// SHALL name an active primitive and that the TYPE CHECKER rejects anything
+// else as a cast target, and [04-DTYPE-2] says an unbounded binder is not a
+// primitive. So those programs never reach the interpreter, and the rows
+// encoded an implementation convenience rather than a decided rule.
+//
+// Each row therefore became two: a negative control asserting the check-time
+// rejection, and a bounded-binder twin that keeps the actualization coverage,
+// because `[p_int: Int]` is a legitimate primitive position under [04-DTYPE-2]
+// and still specializes per call site. The twins are the reason the inversion
+// loses no behavioural coverage.
+
+/// Assert the [04-DTYPE-1] check-time rejection, naming the binder and its
+/// owning declaration. The interpreter is never invoked: a rejected program has
+/// no checked form to evaluate.
+fn expect_unbounded_cast_target_rejection(source: &str, binder: &str, owner: &str) {
+    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let errors = chelis_types::check_ir_program(&exprs)
+        .expect_err("an unbounded binder is not a primitive type position");
+    let subject = format!("cast target `{binder}` in `{owner}` does not name an active primitive");
+    assert!(
+        errors
+            .errors
+            .iter()
+            .any(|error| error.message.contains(&subject) && error.message.contains("04-DTYPE-1")),
+        "expected the [04-DTYPE-1] rejection naming `{binder}` in `{owner}`; got [{}]",
+        errors
+            .errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+}
+
+/// chelis#1558 negative control. **Regression test**: red before the checker
+/// enforced [04-DTYPE-1] for a variable source, when this program checked at
+/// 1.0 and the interpreter actualized `p_int` per call site.
+///
+/// The binder is declared by a `sig` with no bound, which is the form that most
+/// looks like a dtype parameter and is not one.
 #[test]
-fn generic_cast_target_uses_each_calls_concrete_precision() {
+fn unbounded_sig_declared_cast_target_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
+        r#"
+sig recast_int[p_int]: p_int -> List[p_int] -> p_int
+def recast_int(value, witness) = cast(value, p_int)
+i16_value = recast_int(cast(257, i16), [cast(0, i16)])
+"#,
+        "p_int",
+        "recast_int",
+    );
+}
+
+/// chelis#1558 positive twin of the row above. **Disposition lock** on the
+/// behaviour the old row protected: a cast target that IS a legitimate
+/// primitive position actualizes at each call site's own concrete dtype. Green
+/// before and after; only its binder gained the bound [04-DTYPE-2] requires.
+#[test]
+fn bounded_cast_target_uses_each_calls_concrete_precision() {
     let checked = checked_surf(
         r#"
-sig recast_int: p_int -> List[p_int] -> p_int
+sig recast_int[p_int: Int]: p_int -> List[p_int] -> p_int
 def recast_int(value, witness) = cast(value, p_int)
-sig recast_float: p_float -> List[p_float] -> p_float
+sig recast_float[p_float: Float]: p_float -> List[p_float] -> p_float
 def recast_float(value, witness) = cast(value, p_float)
-i16_value = recast_int(cast(257, int16), [cast(0, int16)])
-i64_value = recast_int(cast(4294967297, int64), [cast(0, int64)])
+i16_value = recast_int(cast(257, i16), [cast(0, i16)])
+i64_value = recast_int(cast(4294967297, i64), [cast(0, i64)])
 f32_value = recast_float(cast(1.5, f32), [cast(0.0, f32)])
 f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
 "#,
     );
 
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
-        .expect("generic cast targets should actualize at each call");
+        .expect("bounded cast targets should actualize at each call");
     for (name, expected) in [
         ("i16_value", Prim::Int16),
         ("i64_value", Prim::Int64),
@@ -242,34 +1267,83 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
 }
 
 #[test]
-fn generic_cast_target_does_not_accept_conflicting_precisions() {
+fn tensor_cast_without_actualized_target_rejects_instead_of_reusing_source_dtype() {
+    let error = eval_deep_with_bindings(
+        "cast(value, p)",
+        &[("value", tensor_value(Prim::F32, vec![2], vec![1.0, 2.0]))],
+    )
+    .expect_err("a missing dtype binding must not become an identity cast");
+    assert!(error.contains("cast target `p`"), "{error}");
+}
+
+/// chelis#1558: this row's subject is the PRECISION MISMATCH, not the binder,
+/// so it keeps its subject on a bounded binder where the program is still
+/// admitted far enough to reach it. **Disposition lock**, green before and
+/// after. On an unbounded binder [04-DTYPE-1] now fires first and the mismatch
+/// is never reported, which is what the negative control below records.
+#[test]
+fn bounded_cast_target_does_not_accept_conflicting_precisions() {
     let source = r#"
-def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = choose_and_cast(cast(1, int16), cast(2, int64))
+def choose_and_cast[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = choose_and_cast(cast(1, i16), cast(2, i64))
 "#;
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     let errors = chelis_types::check_ir_program(&exprs)
-        .expect_err("one generic precision cannot actualize to two concrete dtypes");
+        .expect_err("one bounded precision cannot actualize to two concrete dtypes");
     assert!(
         errors.errors.iter().any(|error| {
             let message = error.message.to_ascii_lowercase();
             message.contains("precision mismatch")
-                && message.contains("int16")
-                && message.contains("int64")
+                && message.contains("i16")
+                && message.contains("i64")
         }),
         "the checker should report the conflicting concrete precisions"
     );
 }
 
+/// chelis#1558 negative control for the same program with the bound removed.
+/// **Regression test**: red before this change, when it checked far enough to
+/// report only the precision mismatch. It now fails earlier, on the target.
 #[test]
-fn generic_cast_target_uses_fresh_specialization_for_nested_calls() {
-    let checked = checked_surf(
+fn unbounded_cast_target_is_rejected_before_any_precision_mismatch() {
+    expect_unbounded_cast_target_rejection(
+        r#"
+def choose_and_cast[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = choose_and_cast(cast(1, i16), cast(2, i64))
+"#,
+        "p_int",
+        "choose_and_cast",
+    );
+}
+
+/// chelis#1558 negative control. **Regression test**: a callee binder nested
+/// inside a caller binder is still an unbounded binder in a primitive position.
+#[test]
+fn unbounded_cast_target_in_nested_calls_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def inner[p_int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
-def outer[p_int](witness: List[p_int]) -> int64 =
-  inner(cast(4294967297, int64), [cast(0, int64)])
-value = outer([cast(7, int16)])
+def outer[p_int](witness: List[p_int]) -> i64 =
+  inner(cast(4294967297, i64), [cast(0, i64)])
+value = outer([cast(7, i16)])
+"#,
+        "p_int",
+        "inner",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: a callee's bounded binder
+/// specializes independently of its caller's, which is what the old row proved
+/// and a bound does not change.
+#[test]
+fn bounded_cast_target_uses_fresh_specialization_for_nested_calls() {
+    let checked = checked_surf(
+        r#"
+def inner[p_int: Int](value: p_int, witness: List[p_int]) -> p_int = cast(value, p_int)
+def outer[p_int: Int](witness: List[p_int]) -> i64 =
+  inner(cast(4294967297, i64), [cast(0, i64)])
+value = outer([cast(7, i16)])
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -280,13 +1354,31 @@ value = outer([cast(7, int16)])
     assert_eq!(payload.dtype(), Prim::Int64);
 }
 
+/// chelis#1558 negative control. **Regression test**: an empty container gives
+/// the binder no witness, and the rejection does not depend on one.
 #[test]
-fn generic_cast_target_uses_contextual_specialization_for_empty_container() {
+fn unbounded_cast_target_with_an_empty_container_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
+        r#"
+def empty_witness[p_int](items: List[p_int], value: i64) -> p_int =
+  cast(value, p_int)
+def make_i16() -> i16 = empty_witness([], cast(257, i64))
+value = make_i16()
+"#,
+        "p_int",
+        "empty_witness",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked call result
+/// still supplies the specialization when the container is empty.
+#[test]
+fn bounded_cast_target_uses_contextual_specialization_for_empty_container() {
     let checked = checked_surf(
         r#"
-def empty_witness[p_int](items: List[p_int], value: int64) -> p_int =
+def empty_witness[p_int: Int](items: List[p_int], value: i64) -> p_int =
   cast(value, p_int)
-def make_i16() -> int16 = empty_witness([], cast(257, int64))
+def make_i16() -> i16 = empty_witness([], cast(257, i64))
 value = make_i16()
 "#,
     );
@@ -299,13 +1391,30 @@ value = make_i16()
     assert_eq!(payload.dtype(), Prim::Int16);
 }
 
+/// chelis#1558 negative control. **Regression test**: an ADT argument carrying
+/// the concrete dtype does not make an unbounded binder a primitive position.
 #[test]
-fn generic_cast_target_uses_checked_adt_specialization() {
+fn unbounded_cast_target_behind_an_adt_argument_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
+        r#"
+def option_witness[p_int](item: Option[p_int], value: i64) -> p_int =
+  cast(value, p_int)
+value = option_witness(Some(cast(0, i16)), cast(257, i64))
+"#,
+        "p_int",
+        "option_witness",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: a checked `Option` argument
+/// retains its concrete specialization through a bounded binder.
+#[test]
+fn bounded_cast_target_uses_checked_adt_specialization() {
     let checked = checked_surf(
         r#"
-def option_witness[p_int](item: Option[p_int], value: int64) -> p_int =
+def option_witness[p_int: Int](item: Option[p_int], value: i64) -> p_int =
   cast(value, p_int)
-value = option_witness(Some(cast(0, int16)), cast(257, int64))
+value = option_witness(Some(cast(0, i16)), cast(257, i64))
 "#,
     );
 
@@ -317,13 +1426,30 @@ value = option_witness(Some(cast(0, int16)), cast(257, int64))
     assert_eq!(payload.dtype(), Prim::Int16);
 }
 
+/// chelis#1558 negative control. **Regression test**: passing the generic def
+/// as a `map` callback does not exempt its cast target.
 #[test]
-fn generic_cast_target_survives_map_callback_specialization() {
-    let checked = checked_surf(
+fn unbounded_cast_target_in_a_map_callback_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def recast[p_int](value: p_int) -> p_int = cast(value, p_int)
-values = map(recast, [cast(127, int8)])
-value = index(values, cast(0, int64))
+values = map(recast, [cast(127, i8)])
+value = index(values, cast(0, i64))
+"#,
+        "p_int",
+        "recast",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked `map` callback
+/// type still specializes the bounded closure.
+#[test]
+fn bounded_cast_target_survives_map_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def recast[p_int: Int](value: p_int) -> p_int = cast(value, p_int)
+values = map(recast, [cast(127, i8)])
+value = index(values, cast(0, i64))
 "#,
     );
 
@@ -335,12 +1461,28 @@ value = index(values, cast(0, int64))
     assert_eq!(payload.dtype(), Prim::Int8);
 }
 
+/// chelis#1558 negative control. **Regression test**: the `fold` accumulator
+/// edge is no different from the `map` element edge.
 #[test]
-fn generic_cast_target_survives_fold_callback_specialization() {
-    let checked = checked_surf(
+fn unbounded_cast_target_in_a_fold_callback_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def keep_left[p_int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
-value = fold(keep_left, cast(127, int8), [cast(1, int8)])
+value = fold(keep_left, cast(127, i8), [cast(1, i8)])
+"#,
+        "p_int",
+        "keep_left",
+    );
+}
+
+/// chelis#1558 positive twin. **Disposition lock**: the checked `fold` callback
+/// type still specializes the bounded closure.
+#[test]
+fn bounded_cast_target_survives_fold_callback_specialization() {
+    let checked = checked_surf(
+        r#"
+def keep_left[p_int: Int](left: p_int, right: p_int) -> p_int = cast(left, p_int)
+value = fold(keep_left, cast(127, i8), [cast(1, i8)])
 "#,
     );
 
@@ -352,22 +1494,47 @@ value = fold(keep_left, cast(127, int8), [cast(1, int8)])
     assert_eq!(payload.dtype(), Prim::Int8);
 }
 
+/// chelis#1558 negative control. **Regression test**, and the row whose cause
+/// was misread: the program's only literal cast to a binder is `cast(0, p_int)`
+/// inside `nonnegative[p_int: Int]`, a BOUNDED binder that PR #1545's literal
+/// rule always accepted. What this program trips is its three unbounded defs,
+/// each casting a variable. `keep_left_hof` is named because it is the first
+/// such declaration the checker reaches.
 #[test]
-fn generic_cast_target_survives_every_higher_order_callback_edge() {
-    let checked = checked_surf(
+fn unbounded_cast_target_across_higher_order_edges_is_rejected_at_check_time() {
+    expect_unbounded_cast_target_rejection(
         r#"
 def nonnegative[p_int: Int](value: p_int) -> bool =
   gte(cast(value, p_int), cast(0, p_int))
 def keep_left_hof[p_int](left: p_int, right: p_int) -> p_int =
   cast(left, p_int)
-def singleton[p_int](value: p_int) -> List[p_int] = [cast(value, p_int)]
-def keep_state[p_int](state: p_int, index: int64) -> p_int = cast(state, p_int)
+scanned = scan(keep_left_hof, cast(7, i8), [cast(1, i8)])
+"#,
+        "p_int",
+        "keep_left_hof",
+    );
+}
 
-filtered = filter(nonnegative, [cast(-1, int8), cast(2, int8)])
-scanned = scan(keep_left_hof, cast(7, int8), [cast(1, int8)])
-partitioned = partition(nonnegative, [cast(-1, int8), cast(2, int8)])
-flattened = flat_map(singleton, [cast(3, int8)])
-generated = tensor_scan(cast(9, int8), keep_state, cast(2, int64))
+/// chelis#1558 positive twin. **Disposition lock**: every higher-order callback
+/// edge preserves its checked specialization when the binder carries a bound.
+/// This is the row that proves the inversion costs no behavioural coverage, so
+/// it keeps all five edges the old row exercised.
+#[test]
+fn bounded_cast_target_survives_every_higher_order_callback_edge() {
+    let checked = checked_surf(
+        r#"
+def nonnegative[p_int: Int](value: p_int) -> bool =
+  gte(cast(value, p_int), cast(0, p_int))
+def keep_left_hof[p_int: Int](left: p_int, right: p_int) -> p_int =
+  cast(left, p_int)
+def singleton[p_int: Int](value: p_int) -> List[p_int] = [cast(value, p_int)]
+def keep_state[p_int: Int](state: p_int, index: i64) -> p_int = cast(state, p_int)
+
+filtered = filter(nonnegative, [cast(-1, i8), cast(2, i8)])
+scanned = scan(keep_left_hof, cast(7, i8), [cast(1, i8)])
+partitioned = partition(nonnegative, [cast(-1, i8), cast(2, i8)])
+flattened = flat_map(singleton, [cast(3, i8)])
+generated = tensor_scan(cast(9, i8), keep_state, cast(2, i64))
 "#,
     );
 
@@ -435,14 +1602,14 @@ fn generic_test_assert_eq_float_match_returns_unit() {
 
 #[test]
 fn generic_test_assert_eq_int_match_and_mismatch() {
-    let ok = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(3, int64), "i")"#);
+    let ok = checked_surf(r#"x = test_assert_eq(cast(3, i64), cast(3, i64), "i")"#);
     let outcome = evaluate_host_program(&ok, &UnordMap::new()).expect("int match should eval");
     assert!(matches!(
         outcome.host_bindings.get("x"),
         Some(RuntimeValue::Unit)
     ));
 
-    let bad = checked_surf(r#"x = test_assert_eq(cast(3, int64), cast(5, int64), "i")"#);
+    let bad = checked_surf(r#"x = test_assert_eq(cast(3, i64), cast(5, i64), "i")"#);
     let err =
         evaluate_host_program(&bad, &UnordMap::new()).expect_err("int mismatch should surface Err");
     assert!(
@@ -639,33 +1806,35 @@ fn eval_deep_with_bindings(
 ) -> Result<String, String> {
     let source = format!("probe = {surf_expr}\n");
     let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let Expr::List(def, _) = &exprs[0] else {
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let Expr::Node(def, _) = &exprs[0] else {
         panic!("desugaring a top-level binding yields one def form");
     };
-    // `(def {} <name> <body>)`: the body is the fourth element.
-    let body = def.elements[3].clone();
+    // `(def {} <name> <body>)`: the body is the second child.
+    let body = def.children_slice()[1].clone();
 
     let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
     let mut ctx = EvalContext {
-        bindings: UnordMap::new(),
+        bindings: Frame::new(),
+        result_producer: None,
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
-        top_level_defs: UnordMap::new(),
+        program: ProgramScope::new(UnordMap::new(), UnordMap::new()),
         declared_signatures: UnordMap::new(),
-        type_env: UnordMap::new(),
         adt_fields: UnordMap::new(),
         adt_registry: chelis_types::adt::AdtRegistry::default(),
         tensor_bindings: &empty_tensors,
-        program: None,
+        session: None,
+        active_declaration_names: Vec::new(),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
+        transcript_capture: None,
         resolving_top_levels: Vec::new(),
-        random_seed: None,
-        random_counter: 0,
         cancel: None,
+        failure_kind: RuntimeFailureKind::Ordinary,
     };
     for (name, value) in args {
         ctx.bindings.insert((*name).to_string(), value.clone());
@@ -842,7 +2011,7 @@ fn test_assert_close_tensor_runtime_non_float_tolerance_uses_canonical_renderer(
         ],
     )
     .expect_err("a non-float tolerance must fail defensively at runtime");
-    assert!(error.contains("expected float tolerance, got int32 0"));
+    assert!(error.contains("expected float tolerance, got i32 0"));
 }
 
 #[test]
@@ -927,8 +2096,8 @@ fn first_tensor_shape(outcome: &RuntimeOutcome, name: &str) -> Vec<usize> {
 fn host_runtime_matmul_2x2_identity_passthrough() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(3.0, f32), cast(5.0, f32)], [cast(7.0, f32), cast(11.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -1025,28 +2194,27 @@ y = div(a, b)
 // dispatch itself rejects a mixed pair rather than re-precisioning it.
 
 /// The full check→eval pipeline rejects `div(1.0, 4)` at type-check, so
-/// the const-fold to 0.25 is never reached. `4` is an `int32` literal
-/// (§5.3), making this the same mixed `(f32, int32)` pair as the
+/// the const-fold to 0.25 is never reached. `4` is an `i32` literal
+/// (§5.3), making this the same mixed `(f32, i32)` pair as the
 /// bound-variable form.
 #[test]
 fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
     let decls = chelis_surf::parser::parse_str("out = div(1.0, 4)").expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
-    let err = chelis_types::check_ir_program(&exprs).expect_err(
-        "chelis#458: div(1.0, 4) is a mixed (f32, int32) pair and must be a type error",
-    );
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
+    let err = chelis_types::check_ir_program(&exprs)
+        .expect_err("chelis#458: div(1.0, 4) is a mixed (f32, i32) pair and must be a type error");
     assert!(
         err.errors.iter().any(|e| matches!(
             e.kind,
             chelis_types::errors::CheckErrorKind::PrecisionMismatch
         )),
-        "spec §5.1: mixed (f32, int32) div must surface a PrecisionMismatch; got: {:?}",
+        "spec §5.1: mixed (f32, i32) div must surface a PrecisionMismatch; got: {:?}",
         err.errors
     );
 }
 
 /// Runtime backstop: even if a future type-checker hole let a mixed
-/// `(f32, int32)` scalar pair reach the host evaluator, the closed kernel
+/// `(f32, i32)` scalar pair reach the host evaluator, the closed kernel
 /// dispatcher
 /// must reject it rather than re-precisioning to a 0.25 float fold (the old
 /// 0.9.0 `_ => Prim::F32` fallback). The mixed pair is neither int-int nor
@@ -1056,7 +2224,7 @@ fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() 
     let lhs = RuntimeValue::scalar_like_float(chelis_types::types::Prim::F32, 1.0)
         .expect("f32 scalar 1.0");
     let rhs =
-        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("int32 scalar 4");
+        RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("i32 scalar 4");
     let result = numeric_binop(
         &[lhs, rhs],
         Some(chelis_types::IntBinOp::TruncDiv),
@@ -1064,7 +2232,7 @@ fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() 
     );
     assert!(
         result.is_err(),
-        "chelis#458 / spec §5.1: a mixed (f32, int32) scalar div must be rejected by the \
+        "chelis#458 / spec §5.1: a mixed (f32, i32) scalar div must be rejected by the \
          host dispatch, NOT silently re-precisioned and folded to 0.25; got Ok({result:?})"
     );
 }
@@ -1088,8 +2256,8 @@ y = recip(a)
 fn host_runtime_matmul_2x3_3x2_basic() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -1105,7 +2273,7 @@ y = matmul(a, b)
 fn host_runtime_permute_2x2_transpose_swaps_off_diagonal() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = permute(a, 1, 0)
 "#,
     );
@@ -1120,7 +2288,7 @@ y = permute(a, 1, 0)
 fn host_runtime_permute_2x3_transpose_to_3x2() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
 y = permute(a, 1, 0)
 "#,
     );
@@ -1138,8 +2306,8 @@ y = permute(a, 1, 0)
 fn host_runtime_sum_axis1_reduces_2x3_to_2() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-y = sum(a, cast(1, int32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+y = sum(a, cast(1, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -1152,8 +2320,8 @@ y = sum(a, cast(1, int32))
 fn host_runtime_sum_axis0_reduces_2x3_to_3() {
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-y = sum(a, cast(0, int32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+y = sum(a, cast(0, i32))
 "#,
     );
     let outcome =
@@ -1190,7 +2358,7 @@ cast(0.08847743272781372, f32),
 cast(0.7682217955589294, f32),
 cast(0.49625658988952637, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome_right = evaluate_host_program(&checked_right, &UnordMap::new())
@@ -1249,7 +2417,7 @@ cast(0.13203048706054688, f32),
 cast(0.30742114782333374, f32),
 cast(0.6340786814689636, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome_left = evaluate_host_program(&checked_left, &UnordMap::new())
@@ -1302,19 +2470,19 @@ fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
     assert_eq!(out.value.to_f64_lossy_vec()[0].to_bits(), 1.0_f64.to_bits());
 }
 
-/// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
-/// return the non-NaN operand — unlike `max_reduce`/`min_reduce`, which
-/// PROPAGATE NaN (`tensor_reduce_host` `saw_nan` path). This pins the
-/// documented drop-vs-propagate asymmetry on the eval side; the C lane is
-/// pinned by `reduce_window_max_min_drop_nan` in `chelis-backend-c`. The two
-/// windows `[NaN, 1.0]` and `[2.0, NaN]` must reduce to the finite operand in
-/// either NaN position.
+/// [05-RWIN]: windowed extrema select the first NaN in row-major order and
+/// preserve its exact stored representation.
 #[test]
-fn host_runtime_reduce_window_max_min_drop_nan() {
-    let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![4], vec![f64::NAN, 1.0, 2.0, f64::NAN]),
-        precision: Prim::F32,
-    };
+fn host_runtime_reduce_window_max_min_preserve_first_nan_bits() {
+    let first_nan = f32::from_bits(0xffc1_2345);
+    let second_nan = f32::from_bits(0x7fc5_4321);
+    let tensor = RuntimeTensorValue::from_wide(
+        "test",
+        Prim::F32,
+        vec![4],
+        vec![f64::from(first_nan), 1.0, 2.0, f64::from(second_nan)],
+    )
+    .expect("typed f32 input");
     let max = tensor_reduce_window_host(
         &tensor,
         &[2],
@@ -1324,15 +2492,16 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
     )
     .expect("reduce_window max must evaluate");
     assert_eq!(max.value.shape, vec![2]);
-    assert!(
-        max.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
-        "windowed max must DROP NaN (not propagate); got {:?}",
-        max.value.to_f64_lossy_vec(),
-    );
+    let chelis_types::dtype_semantics::StorageView::F32(max_values) = max.value.storage().view()
+    else {
+        panic!("window extrema must preserve f32 storage");
+    };
     assert_eq!(
-        max.value.to_f64_lossy_vec(),
-        vec![1.0, 2.0],
-        "windowed max drops NaN -> the non-NaN operand",
+        max_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![first_nan.to_bits(), second_nan.to_bits()],
     );
     let min = tensor_reduce_window_host(
         &tensor,
@@ -1342,35 +2511,25 @@ fn host_runtime_reduce_window_max_min_drop_nan() {
         "reduce_window_min",
     )
     .expect("reduce_window min must evaluate");
-    assert!(
-        min.value.to_f64_lossy_vec().iter().all(|v| !v.is_nan()),
-        "windowed min must DROP NaN (not propagate); got {:?}",
-        min.value.to_f64_lossy_vec(),
-    );
+    let chelis_types::dtype_semantics::StorageView::F32(min_values) = min.value.storage().view()
+    else {
+        panic!("window extrema must preserve f32 storage");
+    };
     assert_eq!(
-        min.value.to_f64_lossy_vec(),
-        vec![1.0, 2.0],
-        "windowed min drops NaN -> the non-NaN operand",
+        min_values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        vec![first_nan.to_bits(), second_nan.to_bits()],
     );
 }
 
-/// #170 DECISION-LOCK: f32 `matmul` deliberately keeps an f64 eval
-/// accumulator and does NOT take the #163 `sum` cascade nor downcast to
-/// strict f32. torch's CPU f32 matmul is a BLAS GEMM (strict-f32-left-fold
-/// order, NOT the cascade), and the eval reference intentionally stays at
-/// HIGHER precision (f64): it is the reference, the shipped C backend uses
-/// `cblas_sgemm`, and the matmul eval-vs-C parity oracle uses a TOLERANCE,
-/// not bit-identity, for exactly this expected gap. Downcasting eval to
-/// strict f32 would lower precision, couple the reference to torch's BLAS
-/// version, and still not win bit-identity — so it is rejected.
-///
-/// The absorption probe `[2^24, 1×40, -2^24] · [1×42]` pins this: under the
-/// retained f64 accumulator the forty `1.0`s are preserved (`-> 40.0`);
-/// under a strict-f32 fold they would be absorbed by `2^24` (`-> 0.0`).
-/// This test FAILS if someone "fixes" matmul into strict f32 (or the
-/// cascade), guarding the documented decision.
+/// [05-OP-30] and section 4.1 require the f32 adjacent-pair tree.
+/// For [2^24, forty ones, -2^24], only the first pair loses its unit:
+/// the final two subtrees are 2^24 + 30 and -2^24 + 9, giving 39.
+/// An f64 reference (40) and a left fold (0) both implement different graphs.
 #[test]
-fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
+fn host_runtime_matmul_f32_preserves_canonical_accumulator_tree() {
     let mut lhs_row = vec![16_777_216.0_f64];
     lhs_row.extend(std::iter::repeat_n(1.0_f64, 40));
     lhs_row.push(-16_777_216.0_f64);
@@ -1386,9 +2545,8 @@ fn host_runtime_matmul_f32_keeps_f64_accumulator_not_strict_f32() {
     let out = tensor_matmul_host(&lhs, &rhs).expect("matmul must evaluate");
     assert_eq!(
         out.value.to_f64_lossy_vec(),
-        vec![40.0_f64],
-        "f32 matmul keeps the higher-precision f64 eval accumulator (#170 decision): \
-         the forty 1.0s survive (=> 40.0); a strict-f32 fold would absorb them (=> 0.0)"
+        vec![39.0_f64],
+        "f32 matmul must execute its canonical accumulator tree"
     );
 }
 
@@ -1436,7 +2594,7 @@ fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
 /// A zero extent means zero elements wherever the zero sits, so both shapes
 /// below describe the same empty operand and the derived reduction count is
 /// zero for both. A left-to-right checked fold reaches `BIG * BIG` first,
-/// which is not an int64, and so accepted one permutation while rejecting the
+/// which is not an i64, and so accepted one permutation while rejecting the
 /// other. The C runtime holds the same invariant in
 /// `crates/chelis-runtime/tests/op33_int64_extent_domain.rs`.
 #[test]
@@ -1869,7 +3027,7 @@ fn host_runtime_sum_f32_n1_n2_n3_bit_exact() {
     ] {
         let src = format!(
             "seq = {expr}\n\
-             y = sum(seq, cast(0, int32))\n"
+             y = sum(seq, cast(0, i32))\n"
         );
         let checked = checked_surf(&src);
         let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -1900,7 +3058,7 @@ cast(0.0, f32) / cast(0.0, f32),
 cast(4.0, f32),
 cast(5.0, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome =
@@ -1928,7 +3086,7 @@ cast(-1.0, f32) / cast(0.0, f32),
 cast(2.0, f32),
 cast(3.0, f32)
 ])
-y = sum(seq, cast(0, int32))
+y = sum(seq, cast(0, i32))
 "#,
     );
     let outcome =
@@ -1947,8 +3105,8 @@ fn host_runtime_matmul_shared_axis_mismatch_errors() {
     // Build a 2x3 and a 2x2 — shared axis is 3 vs 2, must fail.
     let checked = checked_surf(
         r#"
-a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, int64), cast(0.0, f32))
-b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, int64), cast(0.0, f32))
+a = pad_sequences_to([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)]], cast(3, i64), cast(0.0, f32))
+b = pad_sequences_to([[cast(1.0, f32), cast(0.0, f32)], [cast(0.0, f32), cast(1.0, f32)]], cast(2, i64), cast(0.0, f32))
 y = matmul(a, b)
 "#,
     );
@@ -1974,7 +3132,7 @@ fn host_runtime_expand_inserts_new_leading_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(10.0, f32), cast(100.0, f32)])
-y = insert(b, cast(0, int32), cast(3, int64))
+y = insert(b, cast(0, i32), cast(3, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -1993,7 +3151,7 @@ fn host_runtime_expand_inserts_trailing_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = insert(b, cast(1, int32), cast(2, int64))
+y = insert(b, cast(1, i32), cast(2, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2016,7 +3174,7 @@ fn host_runtime_insert_singleton_input_adds_an_axis() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(7.0, f32)])
-y = insert(b, cast(0, int32), cast(4, int64))
+y = insert(b, cast(0, i32), cast(4, i64))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2037,8 +3195,8 @@ fn host_runtime_expand_negative_count_errors() {
     let checked = checked_surf(
         r#"
 b = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-negative_count = sub(shape(b, cast(0, int32)), cast(3, int64))
-y = insert(b, cast(0, int32), negative_count)
+negative_count = sub(shape(b, cast(0, i32)), cast(3, i64))
+y = insert(b, cast(0, i32), negative_count)
 "#,
     );
     let err = evaluate_host_program(&checked, &UnordMap::new())
@@ -2111,7 +3269,7 @@ fn host_runtime_softmax_uniform_input_is_uniform_output() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(0.0, f32), cast(0.0, f32), cast(0.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2136,7 +3294,7 @@ fn host_runtime_softmax_two_class_matches_reference() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(1.0, f32), cast(0.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome =
@@ -2161,7 +3319,7 @@ fn host_runtime_softmax_numerical_stability_handles_large_inputs() {
     let checked = checked_surf(
         r#"
 x = to_tensor([cast(1000.0, f32), cast(1000.0, f32)])
-y = softmax(x, cast(0, int32))
+y = softmax(x, cast(0, i32))
 "#,
     );
     let outcome = evaluate_host_program(&checked, &UnordMap::new())
@@ -2288,7 +3446,7 @@ fn host_runtime_softmax_nan_input_propagates_nan() {
 #[test]
 fn host_runtime_softmax_axis_out_of_bounds_errors() {
     // Issue #216: cast-wrapped out-of-bounds softmax axis is now
-    // caught at infer time (the checker peels the `cast(N, int32)`
+    // caught at infer time (the checker peels the `cast(N, i32)`
     // wrapper via `extract_int_for_dim` and applies the rank-bounds
     // check). Pre-fix the cast hid the literal from
     // `extract_int_literal` and the rejection only fired in the
@@ -2297,11 +3455,14 @@ fn host_runtime_softmax_axis_out_of_bounds_errors() {
     // emitting the diagnostic moved upstream.
     let src = r#"
 x = to_tensor([cast(1.0, f32), cast(2.0, f32)])
-y = softmax(x, cast(5, int32))
+y = softmax(x, cast(5, i32))
 "#;
-    let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(src).expect("surf parse"),
-    ));
+    let res = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        )
+        .expect("Surf fixture must desugar"),
+    );
     let infer_err = res.expect_err("softmax with out-of-bounds axis must fail infer-time check");
     let joined = infer_err
         .errors
@@ -2381,7 +3542,7 @@ fn host_runtime_max_reduce_no_nan_is_unchanged() {
 // reject mismatched (dtype, bits) pairs at construction time. The
 // public constructor `RuntimeValue::scalar` is the only checked
 // path; the typed convenience constructors (`int_lit`, `float_lit`,
-// `int64`, `float64`, `scalar_like_*`) are implementation-internal
+// `i64`, `float64`, `scalar_like_*`) are implementation-internal
 // and statically-correct by construction.
 // ----------------------------------------------------------------
 
@@ -2395,12 +3556,12 @@ fn scalar_construction_is_sealed_and_width_checked() {
     // enforce: out-of-width integers trap instead of wrapping, and every
     // constructed scalar reports the dtype it was finalized at.
     let trapped = RuntimeValue::scalar_like_int(Prim::Int8, 200)
-        .expect_err("int8 cannot hold 200; finalize must trap, not wrap");
+        .expect_err("i8 cannot hold 200; finalize must trap, not wrap");
     assert!(
         trapped.contains("overflow"),
         "the trap must carry the branded overflow diagnostic, got: {trapped}"
     );
-    let ok = RuntimeValue::scalar_like_int(Prim::Int8, 127).expect("127 fits int8");
+    let ok = RuntimeValue::scalar_like_int(Prim::Int8, 127).expect("127 fits i8");
     match ok {
         RuntimeValue::Scalar(payload) => assert_eq!(payload.dtype(), Prim::Int8),
         other => panic!("expected RuntimeValue::Scalar, got {other:?}"),
@@ -2436,6 +3597,27 @@ fn scalar_payload_dtype_is_the_storage_variant() {
     assert_eq!(payload.as_f64_lossy(), 1.5);
 }
 
+/// chelis#2413 (B4): a key element, such as the one element of a rank-0 key
+/// tensor a staged host plan captures as a scalar, becomes the key variant,
+/// never a numeric scalar, so a draw reads it as its key and every
+/// diagnostic renders it. `split(key_from_seed(7))`'s left key is
+/// `aa3896172f9a3213` in `key_ref.py`.
+///
+/// Evidentiary status: REGRESSION TEST. At `b005bb19b` the constructor
+/// returned a `Scalar` holding the key and describing it panicked in
+/// `element_ref` ("a random key has no observation form").
+#[test]
+fn a_key_element_is_the_key_variant_and_describes_without_panicking() {
+    let seed = chelis_types::scalar_from_i64("test", Prim::Int64, 7).expect("7 is an i64");
+    let (key, _) = chelis_types::RandomKey::from_seed(seed)
+        .expect("every i64 seeds a key")
+        .split();
+    let value = RuntimeValue::from_scalar_value(chelis_types::ScalarValue::from_key(key));
+    assert!(matches!(value, RuntimeValue::Key(inner) if inner == key));
+    assert_eq!(describe_value(&value), "key(aa3896172f9a3213)");
+    assert_eq!(describe_argument(Some(&value)), "key(aa3896172f9a3213)");
+}
+
 fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
     if prim.is_integer() {
         RuntimeValue::from_scalar_value(
@@ -2452,7 +3634,7 @@ fn numeric_scalar(prim: Prim, integer: i64, float: f64) -> RuntimeValue {
 
 /// chelis#729 Phase 1, dtype-semantics C3: scalar values nested in the
 /// execution wire are dtype-tagged carriers too. Lists, tuples, and ADTs may
-/// not silently widen all integer values to int64 or all floats to f64.
+/// not silently widen all integer values to i64 or all floats to f64.
 #[test]
 fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
     let cases = [
@@ -2460,24 +3642,23 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
         (Prim::Int16, "int16"),
         (Prim::Int32, "int32"),
         (Prim::Int64, "int64"),
-        (Prim::F16, "float16"),
-        (Prim::Bf16, "bfloat16"),
-        (Prim::F32, "float32"),
-        (Prim::F64, "float64"),
+        (Prim::F16, "f16"),
+        (Prim::Bf16, "bf16"),
+        (Prim::F32, "f32"),
+        (Prim::F64, "f64"),
     ];
 
     for (prim, expected_tag) in cases {
         let scalar = numeric_scalar(prim, 7, 1.5);
         let containers = [
-            RuntimeValue::List(vec![scalar.clone()]),
-            RuntimeValue::Tuple(vec![scalar.clone()]),
-            RuntimeValue::Dict(vec![(
-                RuntimeValue::String("value".to_string()),
-                scalar.clone(),
-            )]),
+            RuntimeValue::List(vec![scalar.clone()].into()),
+            RuntimeValue::Tuple(vec![scalar.clone()].into()),
+            RuntimeValue::Dict(
+                vec![(RuntimeValue::String("value".to_string()), scalar.clone())].into(),
+            ),
             RuntimeValue::Adt {
                 ctor: "Boxed".to_string(),
-                fields: vec![scalar],
+                fields: vec![scalar].into(),
                 field_names: Some(vec!["value".to_string()]),
             },
         ];
@@ -2502,7 +3683,10 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
                 })
                 .expect("container has one nested scalar");
             assert_eq!(
-                nested.get("type").and_then(|value| value.as_str()),
+                nested
+                    .get("value")
+                    .and_then(|value| value.get("dtype"))
+                    .and_then(|value| value.as_str()),
                 Some(expected_tag),
                 "nested numeric scalar must keep its own wire tag: {json}"
             );
@@ -2530,16 +3714,15 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
     for prim in dtypes {
         let value = numeric_scalar(prim, 7, if prim == Prim::F64 { 1e100 } else { 1.5 });
         let expected_float = if prim == Prim::F64 { 1e100 } else { 1.5 };
-        let (tensor_prim, _, tensor_data) =
-            nested_list_to_tensor_data(std::slice::from_ref(&value))
+        let (_, tensor_data) =
+            nested_list_to_tensor_data(std::slice::from_ref(&value), prim, &[Some(1)])
                 .expect("to_tensor list ingress");
-        assert_eq!(tensor_prim, prim, "to_tensor must preserve the input dtype");
         match tensor_data {
             ListTensorData::Int(values) => assert_eq!(values, vec![7]),
             ListTensorData::Float(values) => assert_eq!(values, vec![expected_float]),
         }
 
-        let sequences = [RuntimeValue::List(vec![value.clone()])];
+        let sequences = [RuntimeValue::List(vec![value.clone()].into())];
         let (padded_prim, padded_data, _, _) =
             pad_sequences_value(&sequences, &value).expect("pad_sequences ingress");
         assert_eq!(
@@ -2567,25 +3750,25 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
 }
 
 /// Negative-test parity for the exact list bridge: same-family dtypes are
-/// still heterogeneous. Accepting int8 beside int16 or f64 beside f32 would
+/// still heterogeneous. Accepting i8 beside i16 or f64 beside f32 would
 /// perform an implicit cast that the checker never authorized.
 #[test]
 fn list_tensor_bridges_reject_same_family_dtype_substitution() {
     let int8 = numeric_scalar(Prim::Int8, 7, 0.0);
     let int16 = numeric_scalar(Prim::Int16, 7, 0.0);
     assert!(
-        nested_list_to_tensor_data(&[int8.clone(), int16.clone()]).is_err(),
+        nested_list_to_tensor_data(&[int8.clone(), int16.clone()], Prim::Int8, &[Some(2)]).is_err(),
         "to_tensor must reject heterogeneous integer widths"
     );
     assert!(
-        pad_sequences_value(&[RuntimeValue::List(vec![int8])], &int16).is_err(),
+        pad_sequences_value(&[RuntimeValue::List(vec![int8].into())], &int16).is_err(),
         "pad_sequences must reject a different integer pad dtype"
     );
 
     let f64_value = numeric_scalar(Prim::F64, 0, 1e100);
     let f32_pad = numeric_scalar(Prim::F32, 0, 0.0);
     assert!(
-        pad_sequences_to_value(&[RuntimeValue::List(vec![f64_value])], 2, &f32_pad).is_err(),
+        pad_sequences_to_value(&[RuntimeValue::List(vec![f64_value].into())], 2, &f32_pad).is_err(),
         "pad_sequences_to must reject a different float pad dtype"
     );
 }
@@ -2608,10 +3791,10 @@ fn prim_from_name_resolves_active_dtype_names() {
         ("f64", Prim::F64),
         ("f16", Prim::F16),
         ("bf16", Prim::Bf16),
-        ("int8", Prim::Int8),
-        ("int16", Prim::Int16),
-        ("int32", Prim::Int32),
-        ("int64", Prim::Int64),
+        ("i8", Prim::Int8),
+        ("i16", Prim::Int16),
+        ("i32", Prim::Int32),
+        ("i64", Prim::Int64),
         ("bool", Prim::Bool),
     ] {
         assert_eq!(
@@ -2631,9 +3814,12 @@ fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
     let src = r#"
 def main() -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
 "#;
-    let res = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
-        &chelis_surf::parser::parse_str(src).expect("surf parse"),
-    ));
+    let res = chelis_types::check_ir_program(
+        &chelis_surf::desugar::desugar_program(
+            &chelis_surf::parser::parse_str(src).expect("surf parse"),
+        )
+        .expect("Surf fixture must desugar"),
+    );
     assert!(
         res.is_err(),
         "spec §5.1 forbids implicit precision promotion; \
@@ -2731,10 +3917,10 @@ fn render_value_tensor_elements_follow_tag_class() {
 }
 
 /// Tag-vs-bits disagreements print the BITS (spec/05 section 8.1): an
-/// int64-tagged slot holding 187.5 (the live `mean`-of-int64 example,
+/// i64-tagged slot holding 187.5 (the live `mean`-of-i64 example,
 /// chelis#724 territory) renders 187.5, never a truncated 187; a
 /// bool-tagged slot holding 2.0 renders 2.0, never `true`; an
-/// int8-tagged slot holding 400 renders 400.0's bits faithfully rather
+/// i8-tagged slot holding 400 renders 400.0's bits faithfully rather
 /// than a wrapped/saturated lie.
 #[test]
 fn tag_storage_disagreement_is_unconstructible() {
@@ -2744,7 +3930,7 @@ fn tag_storage_disagreement_is_unconstructible() {
     // that state unrepresentable: the construction chokepoint traps at
     // finalize instead, so nothing out-of-domain can reach the renderer.
     let trapped = RuntimeTensorValue::from_wide("test", Prim::Int64, vec![1], vec![187.5])
-        .expect_err("a fractional value in an int64 buffer must Domain-trap");
+        .expect_err("a fractional value in an i64 buffer must Domain-trap");
     assert!(
         trapped.contains("domain"),
         "branded domain trap, got: {trapped}"
@@ -2756,7 +3942,7 @@ fn tag_storage_disagreement_is_unconstructible() {
         "branded domain trap, got: {trapped}"
     );
     let trapped = RuntimeTensorValue::from_wide("test", Prim::Int8, vec![1], vec![400.0])
-        .expect_err("400 in an int8 buffer must Overflow-trap");
+        .expect_err("400 in an i8 buffer must Overflow-trap");
     assert!(
         trapped.contains("overflow"),
         "branded overflow trap, got: {trapped}"
@@ -2975,7 +4161,7 @@ fn int_scalar_of(dtype: Prim, value: i64) -> RuntimeValue {
 fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
     RuntimeValue::Adt {
         ctor: ctor.to_string(),
-        fields,
+        fields: fields.into(),
         field_names: None,
     }
 }
@@ -2985,18 +4171,18 @@ fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
 /// diagnostic and an exit channel agree on every payload.
 #[test]
 fn fo_diag_scalars_carry_their_dtype_and_own_width_digits() {
-    // Exact int64 above 2^53 -- the [#723] case. 9007199254740993 has no
+    // Exact i64 above 2^53 -- the [#723] case. 9007199254740993 has no
     // f64 twin, so a rendering that funnels through double reports
     // ...992.
     let big = int_scalar_of(Prim::Int64, 9_007_199_254_740_993);
-    assert_eq!(describe_value(&big), "int64 9007199254740993");
+    assert_eq!(describe_value(&big), "i64 9007199254740993");
     assert!(
         !describe_value(&big).contains("9007199254740992"),
         "the f64 image must not reach the diagnostic channel"
     );
 
-    assert_eq!(describe_value(&int_scalar_of(Prim::Int32, -5)), "int32 -5");
-    assert_eq!(describe_value(&int_scalar_of(Prim::Int8, 127)), "int8 127");
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int32, -5)), "i32 -5");
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int8, 127)), "i8 127");
 
     // Own-width floats: the f32 prints its shortest-at-f32 digits, and the
     // f64 holding the same f32's image prints the wider, different string.
@@ -3077,16 +4263,24 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
         describe_value(&RuntimeValue::MappedFile(vec![1, 2, 3])),
         "<mapped-file:3>"
     );
+    let checked_function = chelis_deep::parser::parse_str(
+        "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
+    )
+    .expect("parse checked function fixture")
+    .remove(0);
     assert_eq!(
         describe_value(&RuntimeValue::Closure {
+            checked_function: Box::new(checked_function),
             params: vec!["x".to_string()],
             param_types: vec![None],
             return_type: None,
+            checked_signature: None,
+            invocation_contracts: Box::default(),
             body: chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)
             ),
-            env: UnordMap::new(),
+            env: Frame::new(),
             precision_env: UnordMap::new(),
             def_name: None,
         }),
@@ -3099,18 +4293,21 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
 /// kind tag, so nested payloads cannot disagree.
 #[test]
 fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
-    let list = RuntimeValue::List(vec![
-        int_scalar_of(Prim::Int64, 9_007_199_254_740_993),
-        scalar_of(Prim::F32, 0.1f32 as f64),
-        RuntimeValue::Bool(true),
-    ]);
+    let list = RuntimeValue::List(
+        vec![
+            int_scalar_of(Prim::Int64, 9_007_199_254_740_993),
+            scalar_of(Prim::F32, 0.1f32 as f64),
+            RuntimeValue::Bool(true),
+        ]
+        .into(),
+    );
     assert_eq!(
         describe_value(&list),
         format!("list {}", render_value(&list))
     );
     assert_eq!(describe_value(&list), "list [9007199254740993, 0.1, true]");
 
-    let tuple = RuntimeValue::Tuple(vec![int_scalar_of(Prim::Int32, 1), RuntimeValue::Unit]);
+    let tuple = RuntimeValue::Tuple(vec![int_scalar_of(Prim::Int32, 1), RuntimeValue::Unit].into());
     assert_eq!(describe_value(&tuple), "tuple (1, ())");
 
     // Tensors, dicts, and ADTs already name their own shape, so they are
@@ -3128,13 +4325,16 @@ fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
 
     let nested = adt(
         "JList",
-        vec![RuntimeValue::List(vec![
-            adt(
-                "JInt",
-                vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
-            ),
-            adt("JNum", vec![scalar_of(Prim::F64, 1e-7)]),
-        ])],
+        vec![RuntimeValue::List(
+            vec![
+                adt(
+                    "JInt",
+                    vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
+                ),
+                adt("JNum", vec![scalar_of(Prim::F64, 1e-7)]),
+            ]
+            .into(),
+        )],
     );
     assert_eq!(describe_value(&nested), render_value(&nested));
     assert_eq!(
@@ -3145,15 +4345,12 @@ fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
 }
 
 /// `describe_fields` tags every field, because a malformed-shape
-/// diagnostic has to say WHY the shape was rejected: `[int32 5]` under a
+/// diagnostic has to say WHY the shape was rejected: `[i32 5]` under a
 /// `JNum` names the reason an untagged `[5]` does not.
 #[test]
 fn fo_diag_field_lists_tag_every_field() {
     assert_eq!(describe_fields(&[]), "[]");
-    assert_eq!(
-        describe_fields(&[int_scalar_of(Prim::Int32, 5)]),
-        "[int32 5]"
-    );
+    assert_eq!(describe_fields(&[int_scalar_of(Prim::Int32, 5)]), "[i32 5]");
     assert_eq!(
         describe_fields(&[
             scalar_of(Prim::F32, 0.1f32 as f64),
@@ -3179,14 +4376,15 @@ fn fo_diag_argument_slots_name_an_absent_argument() {
 /// that fits is byte-identical to the untruncated form.
 #[test]
 fn fo_diag_truncation_is_owned_by_the_boundary() {
-    let short = RuntimeValue::List(vec![int_scalar_of(Prim::Int32, 1)]);
+    let short = RuntimeValue::List(vec![int_scalar_of(Prim::Int32, 1)].into());
     assert_eq!(describe_value(&short), "list [1]");
     assert!(!describe_value(&short).contains("elided"));
 
     let long = RuntimeValue::List(
         (0..200)
             .map(|i| int_scalar_of(Prim::Int32, i))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
+            .into(),
     );
     let rendered = describe_value(&long);
     assert!(
@@ -3204,4 +4402,285 @@ fn fo_diag_truncation_is_owned_by_the_boundary() {
     let rendered = describe_value(&wide);
     assert!(rendered.ends_with(" more bytes elided)"));
     assert!(rendered.starts_with("string \"\u{1F600}"));
+}
+
+/// [05-OP-57]: checked metadata, never empty payloads, supplies dtype and
+/// hidden extents. Invalid data or missing witnesses cannot choose defaults.
+#[test]
+fn list_tensor_bridges_require_checked_dtype_and_empty_shape_evidence() {
+    let (shape, data) = nested_list_to_tensor_data(&[], Prim::F64, &[Some(0), Some(3)]).unwrap();
+    assert_eq!(shape, vec![0, 3]);
+    assert!(matches!(data, ListTensorData::Float(values) if values.is_empty()));
+    assert!(nested_list_to_tensor_data(&[], Prim::F64, &[Some(0), None]).is_err());
+    assert!(nested_list_to_tensor_data(&[], Prim::F64, &[Some(1)]).is_err());
+    assert!(nested_list_to_tensor_data(&[], Prim::String, &[Some(0)]).is_err());
+    let value = numeric_scalar(Prim::Int8, 1, 0.0);
+    assert!(nested_list_to_tensor_data(&[value], Prim::Int16, &[Some(1)]).is_err());
+}
+
+/// A routed named-axis reduction must not re-fold the whole program.
+///
+/// Preparing a subexpression lowering context folds the pipes in every
+/// definition it admits (chelis#1923). Named-axis routing built one of those
+/// contexts per routed reduction, so a package with `chelis-std` in scope
+/// re-folded all of `chelis-std` on every call (chelis#2207). The context is
+/// now a program-scoped fact of the evaluation context, so the fold is
+/// bounded by the program rather than by the number of lowering ingresses.
+///
+/// The receipt is a count, not a wall clock, so it cannot flake under machine
+/// load. `chelis_ir::lower::program_def_fold_passes` rises once per prepared
+/// context, which is once per whole-program fold.
+///
+/// Failing first, measured on this exact test with only the memo in
+/// `ProgramScope::routing_lowering_context` bypassed so a context is prepared
+/// per ingress as it was before: 1 routed reduction cost 2 whole-program
+/// folds and 40 cost 41, so the assertion below reported "40 routed
+/// reductions cost 41 whole-program definition folds, 1 costs 2". The 39
+/// extra folds for 39 extra reductions are one apiece, which is the defect.
+/// With the memo restored both counts are 2.
+mod issue_2207_routing_lowering_context {
+    use crate::compiler::{eval_selected, wire_values};
+    use crate::schema::{EvalRequest, SourceKind};
+
+    /// A program whose recursion applies one named-axis reduction per step.
+    ///
+    /// `sum(t, rows)` names a *dimension* of the operand rather than a
+    /// runtime value, which is what selects the routing lane; an integer axis
+    /// takes the ordinary host path and exercises none of this.
+    fn source(routed_reductions: u32) -> String {
+        format!(
+            "def rowsum(t: &tensor[rows, f32]) -> f32 = tensor_to_scalar(sum(t, rows))\n\
+             def build() -> tensor[8, f32] = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+             def repeat(n: i64, acc: f32) -> f32 = {{\n\
+             t = build()\n\
+             if n <= 0i64 then acc else repeat(n - 1i64, acc + rowsum(&t))\n\
+             }}\n\
+             answer = repeat({routed_reductions}i64, 0.0f32)\n"
+        )
+    }
+
+    /// Evaluate the program and return its whole-program fold passes.
+    ///
+    /// Two other things are asserted. The answer, because a program that
+    /// failed to evaluate would fold nothing and report a flattering zero.
+    /// And the routing count, because the ordinary host path computes the
+    /// same sum: a fixture that stopped reaching the named-axis lane would
+    /// satisfy the bound below without ever exercising it.
+    fn fold_passes_for(routed_reductions: u32) -> u64 {
+        chelis_ir::lower::reset_program_def_fold_passes();
+        super::super::named_axis::reset_named_axis_routes();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(routed_reductions),
+                bindings: Default::default(),
+            },
+            &["answer".to_string()],
+        )
+        .expect("the routed program evaluates");
+        let passes = chelis_ir::lower::program_def_fold_passes();
+        assert_eq!(
+            super::super::named_axis::named_axis_routes(),
+            u64::from(routed_reductions),
+            "the fixture must reach the named-axis routing lane once per reduction"
+        );
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap(),
+            serde_json::to_value(wire_values::scalar_f32(routed_reductions as f32 * 8.0)).unwrap(),
+            "{routed_reductions} routed reductions over a length-8 tensor of ones"
+        );
+        passes
+    }
+
+    #[test]
+    fn routed_named_axis_reductions_fold_the_program_once() {
+        // A recursive fixture in a debug evaluator needs the stack the other
+        // recursion tests here take, without a runner environment flag.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let one = fold_passes_for(1);
+                let many = fold_passes_for(40);
+                eprintln!("whole-program folds: 1 routed reduction = {one}, 40 = {many}");
+                assert_eq!(
+                    many, one,
+                    "40 routed reductions cost {many} whole-program definition folds, 1 costs {one}"
+                );
+            })
+            .expect("spawn the deep-stack evaluator thread")
+            .join()
+            .expect("the deep-stack evaluator thread completes");
+    }
+}
+
+/// chelis#2439: a `grad` application prepared a fresh subexpression lowering
+/// context, which copies and folds every definition in the program, standard
+/// library included. The context is now a fact of the evaluation context, so
+/// the folds are bounded by the program rather than by the number of
+/// applications. Counted, like chelis#2207's receipt above, not timed.
+///
+/// Failing first, measured on this test with only the memo in
+/// `ProgramScope::transform_lowering_context` bypassed: 1 application cost 3
+/// whole-program folds and 40 cost 42, one per application. With the memo
+/// both counts are 2.
+mod issue_2439_transform_lowering_context {
+    use crate::compiler::{eval_selected, wire_values};
+    use crate::schema::{EvalRequest, SourceKind};
+
+    /// A program whose recursion applies one `grad` per step.
+    fn source(applications: u32) -> String {
+        format!(
+            "def loss(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+             def repeat(n: i64, acc: f32) -> f32 = {{\n\
+             g = grad(loss)(to_tensor([1.0f32, 1.0f32]))\n\
+             if n <= 0i64 then acc else repeat(n - 1i64, acc + tensor_to_scalar(sum(g, 0i32)))\n\
+             }}\n\
+             answer = repeat({applications}i64, 0.0f32)\n"
+        )
+    }
+
+    /// Evaluate the program and return its whole-program fold passes, after
+    /// checking the answer, so an evaluation that failed cannot report a
+    /// flattering zero.
+    fn fold_passes_for(applications: u32) -> u64 {
+        chelis_ir::lower::reset_program_def_fold_passes();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(applications),
+                bindings: Default::default(),
+            },
+            &["answer".to_string()],
+        )
+        .expect("the grad program evaluates");
+        let passes = chelis_ir::lower::program_def_fold_passes();
+        // d/dx sum(x * x) at [1, 1] is [2, 2], so each application adds 4.
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap(),
+            serde_json::to_value(wire_values::scalar_f32(applications as f32 * 4.0)).unwrap(),
+            "{applications} grad applications"
+        );
+        passes
+    }
+
+    #[test]
+    fn repeated_grad_applications_fold_the_program_once() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let one = fold_passes_for(1);
+                let many = fold_passes_for(40);
+                eprintln!("whole-program folds: 1 grad application = {one}, 40 = {many}");
+                assert_eq!(
+                    many, one,
+                    "40 grad applications cost {many} whole-program definition folds, 1 costs {one}"
+                );
+            })
+            .expect("spawn the deep-stack evaluator thread")
+            .join()
+            .expect("the evaluator thread finishes");
+    }
+}
+
+/// chelis#2592: a clone shares containers while preserving field order,
+/// dict pairs, and value semantics after a write.
+#[test]
+fn runtime_value_clone_copies_every_container_in_order() {
+    let original = RuntimeValue::Adt {
+        ctor: "Record".to_string(),
+        fields: vec![
+            RuntimeValue::List(vec![RuntimeValue::int64(1), RuntimeValue::int64(2)].into()),
+            RuntimeValue::Tuple(vec![RuntimeValue::Bool(true), RuntimeValue::Unit].into()),
+            RuntimeValue::Dict(
+                vec![
+                    (
+                        RuntimeValue::String("a".to_string()),
+                        RuntimeValue::int64(3),
+                    ),
+                    (
+                        RuntimeValue::String("b".to_string()),
+                        RuntimeValue::List(Vec::new().into()),
+                    ),
+                ]
+                .into(),
+            ),
+        ]
+        .into(),
+        field_names: Some(vec!["xs".to_string(), "pair".to_string(), "d".to_string()]),
+    };
+    let mut copy = original.clone();
+    let names = |value: &RuntimeValue| match value {
+        RuntimeValue::Adt {
+            ctor, field_names, ..
+        } => (ctor.clone(), field_names.clone()),
+        _ => panic!("the copy of a data-type value is a data-type value"),
+    };
+    assert_eq!(names(&copy), names(&original));
+    assert_eq!(
+        render_value(&copy),
+        "Record([1, 2], (true, ()), dict(a: 3, b: []))"
+    );
+    if let RuntimeValue::Adt { fields, .. } = &mut copy
+        && let RuntimeValue::List(items) = &mut fields[0]
+    {
+        items.push(RuntimeValue::int64(9));
+    }
+    assert_eq!(
+        render_value(&original),
+        "Record([1, 2], (true, ()), dict(a: 3, b: []))"
+    );
+}
+
+/// chelis#2619: a transform's closures are closure-converted against their
+/// own environments. A closure several others reach is staged once, however
+/// many paths reach it: a chain where each closure calls the previous two
+/// reached the first ones along Fibonacci-many paths, which took 75 s and
+/// 8.4 GB at depth 18 before staged values were keyed by value.
+///
+/// Failing first, measured with only the `FrameCaptures::staged` lookup
+/// bypassed: depth 12 staged 431 values; with it, 13.
+mod issue_2619_shared_capture_staging {
+    use crate::compiler::eval_selected;
+    use crate::schema::{EvalRequest, SourceKind};
+
+    fn source(depth: usize) -> String {
+        let mut body = String::from(
+            "  w = to_tensor([1.0f32, 1.0f32])\n  f0 = fn (x: tensor[2, f32]) -> mul(x, w)\n  f1 = fn (x: tensor[2, f32]) -> mul(x, w)\n",
+        );
+        for k in 2..depth {
+            body.push_str(&format!(
+                "  f{k} = fn (x: tensor[2, f32]) -> add(f{}(x), f{}(x))\n",
+                k - 1,
+                k - 2
+            ));
+        }
+        format!(
+            "out = {{\n{body}  grad(fn (x: tensor[2, f32]) -> sum(f{}(x), 0i32))(to_tensor([1.0f32, 2.0f32]))\n}}\n",
+            depth - 1
+        )
+    }
+
+    #[test]
+    fn a_closure_many_closures_reach_is_staged_once() {
+        super::super::transforms::reset_staged_frame_values();
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source(12),
+                bindings: Default::default(),
+            },
+            &["out".to_string()],
+        )
+        .expect("the closure chain evaluates");
+        let staged = super::super::transforms::staged_frame_values();
+        // f11 is Fib(12) = 144 copies of w, so its gradient is [144, 144].
+        assert_eq!(
+            serde_json::to_value(&result.roots[0].value).unwrap()["value"]["data"]["bits"],
+            serde_json::json!(["43100000", "43100000"])
+        );
+        assert!(
+            staged <= 16,
+            "a depth-12 closure chain staged {staged} frame values; one per closure and value is 13"
+        );
+    }
 }

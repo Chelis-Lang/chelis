@@ -4,7 +4,7 @@ use super::*;
 
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn source_of(surf: &str) -> String {
@@ -196,12 +196,12 @@ fn constructor_tensor_input_sampling_preserves_declared_integer_dtype() {
     let expr = sample_raw_input_expr(
         &GenParamKind::Tensor {
             dims: vec![2],
-            precision: "int64".to_string(),
+            precision: "i64".to_string(),
         },
         &mut rng,
     );
     let deep = chelis_deep::printer::print_canonical(&[expr]);
 
-    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(deep.contains("(t-prim {} i64)"), "{deep}");
     assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
 }

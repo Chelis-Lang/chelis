@@ -26,7 +26,7 @@ use chelis_types::{check_linearity, check_typed_program};
 /// Full Surf-to-DAG pipeline. Mirrors `implicit_copy_fanout_v3::surf_to_dag`.
 fn surf_to_dag(source: &str) -> Result<Dag, String> {
     let decls = surf_parse(source).map_err(|e| format!("surf parse: {e:?}"))?;
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
     let checked = chelis_effects::check_program(&checked)
@@ -148,7 +148,7 @@ fn shape_a_broader_negative_control_real_mismatch_still_errors() {
     let source = r#"
 module Repro.ShapeABroaderNegative
 
-def bad[n](x: &tensor[n, f32], y: &tensor[n, int32]) -> tensor[n, f32] = {
+def bad[n](x: &tensor[n, f32], y: &tensor[n, i32]) -> tensor[n, f32] = {
   z = y
   z
 }
@@ -175,7 +175,7 @@ fn shape_a_broader_if_one_branch_genuinely_wrong_still_errors() {
     let source = r#"
 module Repro.ShapeABroaderIfMixed
 
-def bad[n](c: bool, x: &tensor[n, f32], y: &tensor[n, int32]) -> tensor[n, f32] = if c then x else y
+def bad[n](c: bool, x: &tensor[n, f32], y: &tensor[n, i32]) -> tensor[n, f32] = if c then x else y
 "#;
     let result = surf_to_dag(source);
     assert!(

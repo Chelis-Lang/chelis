@@ -69,11 +69,11 @@ fn extracts_list_and_scalar_payloads() {
 #[test]
 fn int_members_accept_both_renderings_at_width() {
     for (prim, ok) in [
-        ("int8", vec!["127", "-128", "0", "100.0"]),
-        ("int16", vec!["32767", "-32768", "100.0"]),
-        ("int32", vec!["2147483647", "-2147483648", "16777217"]),
+        ("i8", vec!["127", "-128", "0", "100.0"]),
+        ("i16", vec!["32767", "-32768", "100.0"]),
+        ("i32", vec!["2147483647", "-2147483648", "16777217"]),
         (
-            "int64",
+            "i64",
             vec![
                 "9223372036854775807",
                 "-9223372036854775808",
@@ -95,29 +95,29 @@ fn int_members_accept_both_renderings_at_width() {
 #[test]
 fn int_rejects_out_of_width_fractional_and_specials() {
     // Width escapes (the chelis#718 compiled-scalar shapes).
-    assert!(!is_member("int8", "128"));
-    assert!(!is_member("int8", "200"));
-    assert!(!is_member("int8", "-129"));
-    assert!(!is_member("int16", "60000"));
-    assert!(!is_member("int32", "4000000000"));
-    // int64 via double: 2^63 reads back out of range (i64::MAX is not
+    assert!(!is_member("i8", "128"));
+    assert!(!is_member("i8", "200"));
+    assert!(!is_member("i8", "-129"));
+    assert!(!is_member("i16", "60000"));
+    assert!(!is_member("i32", "4000000000"));
+    // i64 via double: 2^63 reads back out of range (i64::MAX is not
     // f64-representable; its double rendering rounds UP to 2^63).
-    assert!(!is_member("int64", "9223372036854775808"));
-    assert!(!is_member("int64", "9.223372036854776e18"));
+    assert!(!is_member("i64", "9223372036854775808"));
+    assert!(!is_member("i64", "9.223372036854776e18"));
     // Fractional in an integer buffer (the chelis#724 integer-mean shape).
-    assert!(!is_member("int64", "187.5"));
+    assert!(!is_member("i64", "187.5"));
     // Specials do not exist at integer dtypes.
-    assert!(!is_member("int64", "inf"));
-    assert!(!is_member("int64", "nan"));
-    assert!(!is_member("int64", "not-a-number"));
+    assert!(!is_member("i64", "inf"));
+    assert!(!is_member("i64", "nan"));
+    assert!(!is_member("i64", "not-a-number"));
 }
 
 #[test]
 fn int64_boundary_is_exact_in_integer_rendering() {
-    assert!(is_member("int64", "9223372036854775807"));
-    assert!(!is_member("int64", "9223372036854775808"));
+    assert!(is_member("i64", "9223372036854775807"));
+    assert!(!is_member("i64", "9223372036854775808"));
     // Float-rendered i64::MIN is exactly representable and in range.
-    assert!(is_member("int64", "-9223372036854775808.0"));
+    assert!(is_member("i64", "-9223372036854775808.0"));
 }
 
 // ---------------------------------------------------------------------------
@@ -271,9 +271,9 @@ fn f8e4m3_is_never_a_valid_runtime_dtype() {
 
 #[test]
 fn list_wrapper_prims_normalize_to_the_element_prim() {
-    assert!(is_member("List[int64]", "9007199254740993"));
-    assert!(!is_member("List[int8]", "200"));
-    assert!(is_member("List[List[int64]]", "3000000000"));
+    assert!(is_member("List[i64]", "9007199254740993"));
+    assert!(!is_member("List[i8]", "200"));
+    assert!(is_member("List[List[i64]]", "3000000000"));
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn assert_entry_point_reports_the_offending_token() {
 #[test]
 fn assert_entry_point_passes_clean_payloads() {
     assert_elements_in_domain("f16", "tensor(shape=[2], data=[2048.0, 0.75])", "self-test");
-    assert_elements_in_domain("int64", "[9007199254740993]", "self-test");
+    assert_elements_in_domain("i64", "[9007199254740993]", "self-test");
     assert_elements_in_domain(
         "bool",
         "tensor(shape=[3], data=[1.0, 0.0, 1.0])",

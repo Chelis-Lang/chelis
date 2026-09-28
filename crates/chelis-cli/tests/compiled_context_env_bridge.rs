@@ -161,6 +161,9 @@ fn worker_errors_when_compiled_context_path_is_missing() {
             "CHELIS_TEST_COMPILED_CONTEXT",
             "/nonexistent/path/__chelis_definitely_not_a_real_file__.bin",
         )
+        // chelis#2211: a well-formed digest, so this test still fails on the
+        // missing file rather than on the authentication added since.
+        .env("CHELIS_TEST_COMPILED_CONTEXT_SHA256", PLACEHOLDER_DIGEST)
         .args([
             "__test_file",
             test_file.to_str().expect("utf-8 path"),
@@ -211,6 +214,9 @@ fn worker_errors_when_compiled_context_bytes_are_corrupt() {
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
         .current_dir(&pkg)
         .env("CHELIS_TEST_COMPILED_CONTEXT", &bad_path)
+        // chelis#2211: as above -- a well-formed digest keeps the assertion
+        // pointed at the decode failure these garbage bytes cause.
+        .env("CHELIS_TEST_COMPILED_CONTEXT_SHA256", PLACEHOLDER_DIGEST)
         .args([
             "__test_file",
             test_file.to_str().expect("utf-8 path"),
@@ -237,6 +243,108 @@ fn worker_errors_when_compiled_context_bytes_are_corrupt() {
     assert!(
         stderr.contains("decode") || stderr.contains("CompiledContext"),
         "stderr should mention the decode failure; got: {stderr}"
+    );
+}
+
+/// A syntactically valid digest that matches nothing. Tests that want to reach
+/// the read or decode failure use it so they do not stop at the authentication.
+const PLACEHOLDER_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// (3c) chelis#2211: a handoff path with no digest beside it is refused.
+///
+/// The tempting alternative is to fall back to the unauthenticated decode,
+/// which still re-derives and so looks careful. It is not: re-derivation shows
+/// that a payload's parts agree with each other, not that the payload is the
+/// one the parent wrote. A worker that cannot authenticate its handoff has
+/// nothing to fall back to, so it stops.
+#[test]
+fn worker_refuses_a_compiled_context_it_cannot_authenticate() {
+    let (_dir, pkg) = make_minimal_reef_with_test("phase-h-bridge-no-digest");
+    let test_file = pkg.join("tests/foo.ch");
+
+    let handoff = tempdir().expect("tempdir for handoff");
+    let handoff_path = handoff.path().join("context.bin");
+    fs::write(
+        &handoff_path,
+        b"irrelevant: the digest is checked for presence first",
+    )
+    .expect("write handoff stand-in");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .env("CHELIS_TEST_COMPILED_CONTEXT", &handoff_path)
+        .env_remove("CHELIS_TEST_COMPILED_CONTEXT_SHA256")
+        .args([
+            "__test_file",
+            test_file.to_str().expect("utf-8 path"),
+            "--rel-display",
+            "tests/foo.ch",
+            "--timeout",
+            "30",
+        ])
+        .output()
+        .expect("run __test_file");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "worker MUST NOT run tests against a handoff it cannot authenticate; \
+         exit={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stderr.contains("CHELIS_TEST_COMPILED_CONTEXT_SHA256"),
+        "stderr should name the missing digest variable; got: {stderr}"
+    );
+    assert!(
+        !stdout.contains("\"pass\""),
+        "no test may report a pass on an unauthenticated handoff: {stdout}"
+    );
+}
+
+/// (3d) chelis#2211: a digest that is not a digest is refused before the bytes
+/// are decoded, rather than being padded, truncated, or ignored.
+#[test]
+fn worker_refuses_a_malformed_handoff_digest() {
+    let (_dir, pkg) = make_minimal_reef_with_test("phase-h-bridge-bad-digest");
+    let test_file = pkg.join("tests/foo.ch");
+
+    let handoff = tempdir().expect("tempdir for handoff");
+    let handoff_path = handoff.path().join("context.bin");
+    fs::write(&handoff_path, b"irrelevant").expect("write handoff stand-in");
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .current_dir(&pkg)
+        .env("CHELIS_TEST_COMPILED_CONTEXT", &handoff_path)
+        .env("CHELIS_TEST_COMPILED_CONTEXT_SHA256", "not-a-digest")
+        .args([
+            "__test_file",
+            test_file.to_str().expect("utf-8 path"),
+            "--rel-display",
+            "tests/foo.ch",
+            "--timeout",
+            "30",
+        ])
+        .output()
+        .expect("run __test_file");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "worker MUST NOT accept a malformed digest; exit={:?}\nstdout={stdout}\nstderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        stderr.contains("64 lower-case hex characters"),
+        "stderr should say what a digest has to look like; got: {stderr}"
     );
 }
 

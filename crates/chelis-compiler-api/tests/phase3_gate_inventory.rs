@@ -191,6 +191,11 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
         ),
         (
             "compiler.rs".to_string(),
+            "reject_inexact_device_reduction_cells".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
             "reject_symbolic_windowed_reduce".to_string(),
             true,
         ),
@@ -212,6 +217,11 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
         (
             "compiler.rs".to_string(),
             "reject_unsupported_effect_ops".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsupported_effect_ops_in_host_execution_plan".to_string(),
             true,
         ),
         (

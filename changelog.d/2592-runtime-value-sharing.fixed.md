@@ -1,0 +1,1 @@
+The evaluator now shares list, tuple, record, and dictionary contents when copying values. Fold-built data structures grow in linear time and deeply nested values can be released without overflowing the stack. See [#2592](https://github.com/Chelis-Lang/chelis/issues/2592).

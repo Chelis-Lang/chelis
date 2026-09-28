@@ -288,6 +288,17 @@ one successor owner to the back-edge or result. Source rebindings are display
 names only and cannot overwrite the accumulator's provenance. This removes
 [#1346]'s double-target representation.
 
+A list-building loop's step (`list_push` for `map` and `scan`, `list_extend`
+for `flat_map`, `filter_step`, `partition_step`) moves its item into the
+accumulator. The emitter's accumulator ABI therefore declares only consuming
+entry points, `chelis_list_push_moved` and `chelis_list_extend_moved`, so the
+move cannot be realized as a retaining copy that leaves the moved owner live
+(chelis#2508). A `filter` step releases the item its predicate rejects.
+`filter_step` and `partition_step` read the item after the predicate, so the
+predicate is lowered one scope deeper than the item: no use of the item there
+is its last, and a consuming use, such as a by-value call to a named
+definition, receives its own copy (chelis#2577).
+
 ### Manifested roots
 
 After [#912]'s root manifest exists, ownership lowering appends one terminal
@@ -404,6 +415,29 @@ children exactly once; accessors returning by-value `chelis_value` clone exactly
 finalizers release each stored child exactly once. Because child sets cannot be
 mutated after construction, a value cannot be inserted into itself or create a
 cycle through a later update.
+
+That sentence is about values, and the consuming container entry points below
+do not contradict it, but the reason is worth stating because it is the
+argument the whole last-use optimisation rests on and it is not obvious from
+either half.
+
+A consuming entry point mutates an allocation, not a live value. The operand
+it rewrites is one the verifier proved dead at that point, so no value whose
+child set anyone can still read changes, and [05-OP-44]'s premise is intact at
+the level it speaks about. What changes is the allocation, which the emitter
+reuses for the result instead of allocating a second one and copying.
+
+Acyclicity survives that reuse, and not by assumption. Suppose an in-place
+push made a container `X` reachable from the child `c` it just gained. The
+push does not change `c`, so `X` was already reachable from `c` beforehand.
+Every edge in this heap graph is a strong-owner edge, since each stored child
+is retained by its holder and released by its holder's finalizer, so that
+path ends in a heap-resident strong owner of `X`. The moved operand is a
+second owner on top of it, so the strong count is at least two and the
+in-place arm never runs: the entry point clones and releases instead. The
+same argument covers every child a merge adds, and it is why the runtime's
+count test is the whole check rather than one of several. A value still
+cannot be inserted into itself.
 
 ## C5. Target opaque C ownership ABI
 
@@ -540,6 +574,186 @@ post-dominance, not source scope alone:
 - a tail call happens only after all non-argument frame owners are terminated;
   and
 - a manifested root consumes its owner before process teardown.
+
+The consumed operand of a container-producing builtin (a row of the ownership
+IR's `CONTAINER_CONSUMERS` table: `append`, `concat` and `skip` at the list
+kind, `dict_insert`, `dict_merge` and `dict_remove` at the dictionary kind,
+and `string_concat` at the string kind) is moved
+into the builtin when the scheduler places that owner's terminal directly
+after the application: lowering borrows every builtin operand, and the
+last-use scheduler upgrades the borrow to a move and drops the terminal, so
+the verifier re-checks the move as it would any other (no live borrow, no
+later use). The move establishes only the borrow half of exclusivity. The
+sharing half is the runtime's: as with tensor reuse in C6, the consuming entry
+point (`chelis_list_append_owned`, `chelis_list_concat_owned`,
+`chelis_list_drop_owned`, `chelis_dict_insert_owned`,
+`chelis_dict_merge_owned`, `chelis_dict_remove_owned`,
+`chelis_string_concat_owned`, private to the emitter like the accumulator
+ABI)
+re-checks the strong-owner count and mutates in place only at one, otherwise
+cloning and releasing the consumed input; a right-hand side that aliases the
+consumed left-hand side is such a retained owner and takes the same cloning
+path. A retained alias, whether a tuple, an option, an ADT, or a callee that
+stored the container, therefore never observes a mutation, and no static rule
+inside one unit has to prove exclusivity for a parameter whose callers may
+have retained it. A runtime `refcount == 1` test on its own is not this rule:
+without the verified move it cannot exclude an un-retained borrow, which is
+what chelis#943 measured and rejected.
+
+Each row names its own heap kind, and the match requires that kind on both
+the application's result and the named operand. The kind is not read off the
+application, because result-class-equals-operand-class is a weaker test than
+membership: `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list
+and return a list without being consumers, and a future
+`concat(tensor, tensor) -> tensor` would satisfy it while needing a different
+entry point entirely. Naming the kind keeps the tensor `concat` that shares
+the label `builtin:concat` out of the table by construction rather than by an
+emitter guard firing after the scheduler has already retired the operand's
+terminal. Adding a heap kind to the table is therefore never a row edit
+alone: the kind owes its own consuming entry points, with the same
+in-place-at-count-one and otherwise-clone-and-release behaviour, before any
+row naming it can land, and it owes an answer for any derived state or
+interior pointer its representation publishes.
+
+Membership is narrower than "produces its own kind". A row is for a callable
+whose result is its operand with an edit applied, so that reusing the
+allocation replaces a copy of the whole operand with the edit alone. The edit
+need not grow the container: `append`, `concat`, `dict_insert`, `dict_merge`
+and `string_concat` add, `dict_remove` deletes a keyed entry and `skip`
+deletes a leading run, but in each the surviving content is carried over in
+place rather than rebuilt.
+
+A callable whose result is a positional sub-range of its operand is a row only
+where reusing the allocation removes the copy. Two distinct facts decide it,
+and only one is normative.
+
+The normative one is [05-OP-44]'s closed heap-kind universe. A sub-range that
+shares its operand's buffer needs a private storage kind behind the handle, as
+`TensorStorage` already is behind a `Tensor` descriptor, so it is an amendment
+to that atom and to `spec/registry/c_heap_lifetime.md` before it is a row here.
+It is also unsound against the rows that already exist: `ys = take(xs, 3)`
+sharing `xs`'s buffer stands at its own strong count of one, so
+`chelis_list_append_owned(ys, v)` takes the in-place arm, writes slot 3, and
+clobbers `xs[3]`.
+
+The other is whether an exclusive offset earns its complexity, and for `skip`
+it now does. An offset carried inside the single allocation, reached only
+through the `builtin:skip` row, needs no new heap kind and conflicts with
+nothing normative: it moves only in `chelis_list_drop_owned`, only at strong
+count one, only under a verified move, so there is never a second handle over
+one buffer and the clobber above cannot arise. Its result is the operand's
+suffix, so the surviving content needs no move at all, which is what makes the
+call O(count) where the cloning path is O(length). A retired prefix would
+otherwise stay allocated until the list dies, so the entry point compacts once
+the prefix exceeds the live window, rebuilding the buffer at the live length.
+That bounds the waste over the **allocation** rather than the length, which
+matters because the allocation is what the ledger reports: a compaction that
+drained in place would keep the original capacity and leave a one-element list
+holding the buffer of the list it was skipped from. The cost is amortised O(1)
+per skipped element. [#2334] delivered it.
+
+`take` is not a row and does not need to be: its result is a prefix, so the
+in-place form is a truncation with no offset involved, and its callers are one
+standard-library wrapper and two examples. `string_slice` and `string_trim` are
+not rows either, because a string carries the derived state described below and
+a sub-range of one is not the single mutation a sub-range of a list is. Those
+three remain dispositions rather than derivations and could be revisited on
+their own evidence.
+
+The string row carries an obligation neither of the other kinds has, and it
+is the reason a heap kind is not interchangeable here. `RuntimeString` stores
+derived state beside its bytes: `nul_terminated`, which `chelis_string_data`
+serves as an interior pointer, and `char_count`, which the character-indexed
+`chelis_string_len` returns and which `chelis_string_slice` reads to decide
+whether byte indices are character indices. A list or a dictionary has no such
+field, so appending to one is a single mutation, while
+`chelis_string_concat_owned` maintains all three together or leaves the string
+describing itself wrongly. `char_count` gains the right-hand side's count,
+which is exact because concatenating two UTF-8 sequences concatenates their
+scalar sequences and creates no scalar at the seam. A stale count is invisible
+to any ASCII fixture, because ASCII makes bytes and characters agree, so the
+tests that cover it are multibyte by construction.
+
+The interior pointer is the one published surface this optimisation can
+invalidate. `chelis_string_data` returns a pointer into `nul_terminated`,
+which an in-place growth may reallocate.
+
+The safe condition is not that generated code never holds such a pointer
+across a statement, because it does. `chelis_json_compare_strings`, emitted
+verbatim by `append_json_canonical_object_helpers`, binds two of them and
+reads both across a `while` loop and the statements after it. The condition
+that actually holds is narrower: no interior pointer in generated code is
+derived from an operand a `CONTAINER_CONSUMERS` row can move. Those two point
+into single-character slices the helper allocates and releases itself, which
+no `string_concat` can consume, so nothing can grow the buffer under them.
+
+Adding `skip` puts a list operand under the same question, and lists answer it
+by publishing no interior pointer at all: `chelis_list_index` returns a
+`chelis_value` by value and the layout behind `chelis_list` is opaque, so
+there is nothing for an advanced offset to invalidate. The string case remains
+the one with a published interior pointer, and it remains the reason a kind
+whose public surface hands one out with a longer contract would need a
+different answer before taking a row.
+
+An in-place growth invalidates such a pointer exactly as the cloning path
+already does by releasing the consumed input, and the consuming entry point
+is private to the emitter, so no published-ABI caller can reach it. A new
+emitted call site owes this check: if it derives an interior pointer from a
+value that a row's operand position can name, that pointer must not outlive
+the consuming call. A kind whose public surface hands out an interior pointer
+with a longer contract would need a different answer before it could take a
+row here.
+
+Reading the allocation ledger as an oracle for these rows needs one caution.
+A `resize` event at a consuming entry point's site is the only signal that
+separates the in-place arm from the cloning one; allocation counts cannot,
+because the cloning arm's extra allocation is indistinguishable from any
+other. `chelis_string_concat_owned` therefore records that event on every
+in-place return, including an empty right-hand side that changes no byte, so
+for strings the absence of the event means the cloning arm ran.
+
+`chelis_list_drop_owned` records on the same rule and for the same reason. A
+skip on its own frees nothing, so most of its events repeat the figure the list
+already had and are purely the arm signal; the compaction rebuilds the buffer at
+the live length, and that one records a real shrink.
+
+A cursor gives a second reading the per-call caution does not forbid. Over a
+whole walk the consuming arm allocates no list at all while the cloning arm
+allocates one per step, so an allocation count against a known baseline
+separates them in aggregate even though one extra allocation cannot be
+attributed in isolation. That is the form chelis#2334's receipt takes.
+
+The dictionary entry points are uneven on this, so the same reading does not
+carry to them. `chelis_dict_merge_owned` records on every in-place return;
+`chelis_dict_insert_owned` records only when it pushes, not when it replaces
+an existing key; and `chelis_dict_remove_owned` never records. For those two,
+a zero count still means "cloned, or edited nothing". chelis#2252 owns
+closing the gap.
+
+One obligation belongs to `dict_insert` alone. The cloning
+`chelis_dict_insert` releases the value it replaces before cloning the
+incoming one, which is safe because the caller still owns the incoming value.
+The consuming entry point clones first and releases second: the two may be
+the same heap value held exactly once, and releasing first would free it
+before the clone reads it.
+
+A second obligation belongs to every row that removes content rather than
+adding it, which is now `dict_remove` and `skip`. `chelis_dict_remove_owned`
+releases the removed entry's key and value itself, and
+`chelis_list_drop_owned` releases each element it retires, because in both the
+consumed container keeps its allocation and no finalizer will reach those
+children again. The cloning entry points leave that to the caller's own
+release of the untouched input, which is why the obligation appears only on
+the consuming side.
+
+`skip` adds one corollary the dictionary case does not have, because its
+removal leaves the allocation holding slots the container no longer owns: the
+list's finalizer walks the live window rather than the allocation. Walking the
+allocation would release each retired element a second time, against
+[05-OP-44]'s "releases each stored child exactly once", and it is observable
+only when a list is finalized while a retired prefix survives -- a cursor
+walked to the end compacts that prefix away, so the shape that catches it is a
+partial skip released afterwards.
 
 The runtime's test-only allocation ledger records allocation identity, kind,
 size, retain/release events, live owners, and peak live bytes. It is compiled
@@ -811,8 +1025,9 @@ and per-test execution receipts; zero matches, ignored/skipped outcomes,
 listing-only evidence, and forged supervisor transcripts fail closed. The
 separate forged `__main__` and forged import-transcript controls prove that
 only the oracle-owned callback receipt can certify Python test execution. The
-blocking `compiled-value-ownership-phase0-oracle` job retains its stable
-identity while invoking the Phase 1 oracle. The receipt is valid only when the
+`compiled-value-ownership-phase0-oracle` job retains its identity in
+`heavy-e2e.yml`, invoking Phase 2 and the launch subset daily at 03:17 UTC or
+on manual dispatch. It is not a required PR check. The receipt is valid only when the
 Phase 1 oracle and all supporting representation, dtype, rejection, capacity,
 and fast-gate checks pass on the same committed head.
 
@@ -951,7 +1166,7 @@ exit zero and final line `COMPILED VALUE OWNERSHIP ORACLE: PASS`.
 |---|---|
 | [#543] | Phase 1 adds tensor heap cloning/finalization and closes all five aggregate-tensor rows, including the function-internal tensor-literal temporary. The top-level tuple missing-`main` observation is [#545], not an ownership-oracle row |
 | [#544] | Phase 1 makes aggregate child clone/release balance independent of count, capacity growth, and nesting |
-| [#1206] | Phase 2 balances the depth-one recursive frame with real scope-exit `Drop`; Phase 3 moves dead frame releases before tail calls and proves the depths 32/128/288 peak live bytes independent of recursion depth. Runtime-valued `with seed` remains [#735] syntax/semantics work; recursive-host operation support remains [#729]/[#730] capability work |
+| [#1206] | Phase 2 balances the depth-one recursive frame with real scope-exit `Drop`; Phase 3 moves dead frame releases before tail calls and proves the depths 32/128/288 peak live bytes independent of recursion depth. Recursive-host operation support remains [#729]/[#730] capability work |
 | [#1214] | Phase 3 removes backend-local eligibility and executes the shared caller-storage negative on HIP hardware. [#1172] owns the span-key cause that can over-broaden hints; Surf reachability is exposure evidence, not another ownership mechanism |
 | [#1222] | closed instance; Phase 0 onward retains teardown/alias regressions |
 | [#1344] | closed instance; Phase 0 onward retains captured-borrow regressions |
@@ -1023,3 +1238,4 @@ the future oracle, or make a child reproducer green. Its PR body says
 [#1352]: https://github.com/Chelis-Lang/chelis/issues/1352
 [#1356]: https://github.com/Chelis-Lang/chelis/issues/1356
 [#1362]: https://github.com/Chelis-Lang/chelis/issues/1362
+[#2334]: https://github.com/Chelis-Lang/chelis/issues/2334

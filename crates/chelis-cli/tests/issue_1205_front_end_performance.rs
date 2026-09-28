@@ -28,7 +28,7 @@ fn issue_1205_source(operations: usize, flat: bool) -> String {
     ];
     if flat {
         lines.push(
-            "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+            "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
              if gte(i, 5i64) then s else {"
                 .to_string(),
         );
@@ -47,7 +47,7 @@ fn issue_1205_source(operations: usize, flat: bool) -> String {
             body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
         }
         lines.push(format!(
-            "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+            "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
              if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
         ));
     }
@@ -144,7 +144,7 @@ fn issue_1205_corpus_is_canonical_and_checks_clean() {
     for (name, source) in [("nested_check", &nested), ("flat_check", &flat)] {
         let (success, report) = check_report(source, name, false);
         assert!(success, "{name} must check successfully: {report}");
-        assert_eq!(report["score"], 1, "{name} must earn a perfect score");
+        assert_eq!(report["score"], 1.0, "{name} must earn a perfect score");
         assert!(
             report["errors"]
                 .as_array()

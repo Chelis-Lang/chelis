@@ -71,6 +71,31 @@ use tempfile::{TempDir, tempdir};
 /// and therefore auto-syncs with `workspace.package.version` on bumps.
 pub use chelis_compiler_api::COMPILER_VERSION;
 
+/// Return the injective C ABI symbol for an authored Chelis definition.
+///
+/// The emitter encodes the authored UTF-8 bytes as lowercase hexadecimal so
+/// source names never borrow platform or C implementation namespaces.
+pub fn authored_c_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
+/// Locate the owned implementation body for an authored Chelis definition.
+///
+/// `host_body_definition` intentionally accepts an exact C symbol so its
+/// synthetic parser controls remain independent of ABI policy. Generated-C
+/// tests should use this wrapper instead of reconstructing the owned-body
+/// symbol from the source spelling.
+pub fn authored_host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    host_body_definition(
+        emitted,
+        &format!("{}__chelis_owned_body", authored_c_symbol(name)),
+    )
+}
+
 pub fn package_std() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/chelis-std")
@@ -327,11 +352,15 @@ pub fn make_app(dir_name: &str) -> (TempDir, PathBuf, PathBuf) {
     let dir = tempdir().expect("tempdir");
     let app_pkg = dir.path().join(dir_name);
     fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+    // Reef package names are lowercase ASCII with internal hyphens.
+    let package_name = dir_name.to_ascii_lowercase().replace('_', "-");
     write_file(
         &app_pkg.join("reef.toml"),
         &format!(
-            r#"[package]
-name = "{dir_name}"
+            r#"schema = "1"
+
+[package]
+name = "{package_name}"
 version = "0.1.0"
 compiler = "={COMPILER_VERSION}"
 module_prefix = "Demo"
@@ -384,7 +413,7 @@ pub fn link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proces
     cmd.arg("-O2");
     cmd.args(&toolchain.compile_flags);
     cmd.arg(source);
-    cmd.args(["-L.", "-lchelis_runtime"]);
+    cmd.arg(out_dir.join("libchelis_runtime.a"));
     cmd.args(&toolchain.link_flags);
     cmd.args(["-o", binary]);
     cmd.status().expect("host compiler should run")
@@ -538,7 +567,7 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 // their declared dtype's value set. No finalize logic, no traps, no
 // formatting rules (formatting faithfulness is chelis#732's contract, not
 // this checker's; a value-preserving formatting lie like `750.0` for an
-// int64 is IN domain here).
+// i64 is IN domain here).
 //
 // FROZEN AT chelis#729 PHASE 0 EXIT: the API below
 // (`assert_elements_in_domain(prim, printed, context)` plus the pure
@@ -564,7 +593,7 @@ pub fn stub_toolchain(home: &Path, ver: &str) {
 pub const DOMAIN_PRINT_TRUNCATION_SLACK: f64 = 0.0;
 
 /// Strip `List[...]` wrappers (the drivers pass return types like
-/// `List[int64]` for `to_list` rows) down to the element prim name.
+/// `List[i64]` for `to_list` rows) down to the element prim name.
 fn normalize_prim(prim: &str) -> &str {
     let mut p = prim.trim();
     while let Some(inner) = p.strip_prefix("List[").and_then(|s| s.strip_suffix(']')) {
@@ -653,10 +682,10 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
                 })
             },
         ),
-        "int64" => int_violation(t, "int64", i64::MIN as i128, i64::MAX as i128),
-        "int32" => int_violation(t, "int32", i32::MIN as i128, i32::MAX as i128),
-        "int16" => int_violation(t, "int16", i16::MIN as i128, i16::MAX as i128),
-        "int8" => int_violation(t, "int8", i8::MIN as i128, i8::MAX as i128),
+        "i64" => int_violation(t, "i64", i64::MIN as i128, i64::MAX as i128),
+        "i32" => int_violation(t, "i32", i32::MIN as i128, i32::MAX as i128),
+        "i16" => int_violation(t, "i16", i16::MIN as i128, i16::MAX as i128),
+        "i8" => int_violation(t, "i8", i8::MIN as i128, i8::MAX as i128),
         "f8e4m3" => Some(format!(
             "`{t}` claims dtype f8e4m3, which the checker rejects (spec/04 §1.1.1); \
              no runtime value may carry it"
@@ -737,7 +766,7 @@ fn int_violation(t: &str, prim: &str, min: i128, max: i128) -> Option<String> {
         return Some(format!("`{t}` is fractional; {prim} holds integers only"));
     }
     // Width bounds compared in f64. For widths below 64 bits both bounds
-    // are exactly representable. For int64 the exclusive upper bound 2^63
+    // are exactly representable. For i64 the exclusive upper bound 2^63
     // is exact in f64 while i64::MAX is not; every integral f64 strictly
     // below 2^63 is <= i64::MAX (the f64 grid near 2^63 steps by 1024),
     // so `d < 2^63` is the correct membership test.
@@ -765,5 +794,171 @@ pub fn assert_elements_in_domain(prim: &str, printed: &str, context: &str) {
                  §C1 (chelis#729 Phase 0 detector)."
             );
         }
+    }
+}
+
+/// One emitted host body's DEFINITION, located by NAME rather than by its
+/// exact parameter list, returned from the definition's first character to
+/// the end of `emitted`. Callers slice their own end.
+///
+/// The emitted file carries a forward declaration and a definition for the
+/// same symbol, so the name alone is ambiguous; the definition is the
+/// occurrence whose parameter list is followed by `{` instead of `;`.
+///
+/// Matching the full signature instead is what chelis#1808 and chelis#1820
+/// were: chelis#1799 gave every host body a `chelis_rng_state` parameter, and
+/// a literal match on the old parameter list then failed before the row
+/// counted anything, reporting a changed SIGNATURE as a missing definition. A
+/// precondition that cannot tell a changed signature from a missing or
+/// relocated body is worse than no precondition, so this one keys on the
+/// structure it actually needs. chelis#1810 established the shape in
+/// `runtime_extent_slice_b.rs` and chelis#1834 closed its two misreads there;
+/// this carries the same two closures, shared. When that file next moves, it
+/// can drop its private copy for this one.
+///
+/// The two misreads, both closed here. A match with no left word boundary
+/// accepts `g_run__chelis_owned_body(` as `run__chelis_owned_body`, and the
+/// wrong function's body then satisfies the caller's assertions for the wrong
+/// reason. And taking the first `)` as the end of the parameter list mistakes
+/// a nested parenthesis for the end of the signature, so the `{` test fails
+/// and this reports a body that is present as having left the host lane --
+/// chelis#1808's own misdiagnosis in a new spelling.
+///
+/// A third shape is unmodelled and stays that way deliberately. Neither
+/// closure describes what sits BETWEEN the `)` and the `{`, and `trim_start`
+/// consumes only whitespace, so a definition carrying an attribute or a
+/// calling convention there -- `void f(int x) __attribute__((hot)) {` -- is
+/// rejected and produces misread two's wrong diagnosis again. Nothing in
+/// `crates/chelis-backend-c/src/` emits `__attribute__` or `__asm__`, so it is
+/// latent rather than live; a case would pin a spelling the emitter does not
+/// have. If one ever appears, this is where it lands.
+pub fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    /// The `)` that closes the first `(` in `text`, counting nesting.
+    fn closing_paren(text: &str) -> Option<usize> {
+        let open = text.find('(')?;
+        let mut depth = 0usize;
+        for (offset, byte) in text.bytes().enumerate().skip(open) {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(offset);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let needle = format!("{name}(");
+    let mut at = 0;
+    while let Some(found) = emitted[at..].find(&needle) {
+        let start = at + found;
+        at = start + needle.len();
+        let preceded_by_identifier = emitted[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphanumeric() || previous == '_');
+        if preceded_by_identifier {
+            continue;
+        }
+        let rest = &emitted[start..];
+        if let Some(close) = closing_paren(rest)
+            && rest[close + 1..].trim_start().starts_with('{')
+        {
+            return rest;
+        }
+    }
+    panic!(
+        "no definition of `{name}` in the emitted C: a forward declaration alone means the body \
+         is not emitted here:\n{emitted}"
+    );
+}
+
+/// [05-RNG-2]'s key derivations and draw words, and the f32 arms of
+/// [05-OP-8] and [05-OP-37] over them, transcribed from
+/// `briefs/switch-design-probes/key_ref.py` (the design pass's transcription of
+/// `spec/design/randomness_explicit_keys.md`) and the spec/05 atom text. It
+/// shares no code with any lane, so expected draws come from the text, never
+/// from the implementation. `worked_values_match_key_ref_py` in
+/// `dropout_fixed_stream_cli.rs` pins it against `key_ref.py`'s printed values.
+pub mod key_ref {
+    pub fn splitmix64(x: u64) -> u64 {
+        let x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        x ^ (x >> 31)
+    }
+
+    // Spelled out from the definition rather than through `rotate_left`.
+    #[allow(clippy::manual_rotate)]
+    fn rotl64(x: u64, r: u32) -> u64 {
+        (x << r) | (x >> (64 - r))
+    }
+
+    /// `key_from_seed(seed)`: the seed's two's-complement bits, unmixed.
+    pub fn key_from_seed(seed: i64) -> u64 {
+        seed as u64
+    }
+
+    pub fn derive(k: u64, j: u64) -> u64 {
+        splitmix64(k ^ rotl64(splitmix64(j), 29))
+    }
+
+    /// `split_key(k) = (derive(k, 0), derive(k, 1))`.
+    pub fn split(k: u64) -> (u64, u64) {
+        (derive(k, 0), derive(k, 1))
+    }
+
+    /// `fold_in(k, n) = derive(derive(k, 2), n)`.
+    pub fn fold_in(k: u64, n: i64) -> u64 {
+        derive(derive(k, 2), n as u64)
+    }
+
+    /// `split_keys(k, n)`: row `j` is `fold_in(k, j)`.
+    pub fn split_n(k: u64, n: i64) -> Vec<u64> {
+        (0..n).map(|j| fold_in(k, j)).collect()
+    }
+
+    pub fn word(k: u64, i: u64) -> u64 {
+        splitmix64(k ^ rotl64(splitmix64(i), 41))
+    }
+
+    /// The high 53 bits of `word(k, i)` over 2^53, exact in f64.
+    pub fn unit(k: u64, i: u64) -> f64 {
+        (word(k, i) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// [05-OP-8] at f32: `fma(high - low, round_f32(u), low)`, one rounding.
+    pub fn uniform_f32(k: u64, count: usize, low: f32, high: f32) -> Vec<f32> {
+        (0..count as u64)
+            .map(|i| (high - low).mul_add(unit(k, i) as f32, low))
+            .collect()
+    }
+
+    /// [05-OP-8] at f64: `fma(high - low, u, low)`.
+    pub fn uniform_f64(k: u64, count: usize, low: f64, high: f64) -> Vec<f64> {
+        (0..count as u64)
+            .map(|i| (high - low).mul_add(unit(k, i), low))
+            .collect()
+    }
+
+    /// [05-OP-37] at f32: drop when `round_f32(u) < rate`, else
+    /// `input / (1 - rate)` with the denominator finalized first.
+    pub fn dropout_f32(k: u64, input: &[f32], rate: f32) -> Vec<f32> {
+        let denom = 1.0_f32 - rate;
+        input
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                if (unit(k, i as u64) as f32) < rate {
+                    0.0
+                } else {
+                    x / denom
+                }
+            })
+            .collect()
     }
 }

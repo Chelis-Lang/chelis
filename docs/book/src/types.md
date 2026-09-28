@@ -11,7 +11,7 @@ first. The full surface is in the [Type System Reference](type-reference.md).
 - No implicit broadcasting. Shapes must match; change rank with `insert`, `reshape`, or
   `permute`.
 - Named tensor dimensions are nominal. `batch` and `seq` match only by name, not by size.
-- Integer literals default to `int32`, float literals to `f32`.
+- Integer literals default to `i32`, float literals to `f32`.
 
 ## Tensor types
 
@@ -30,13 +30,28 @@ The canonical Deep form names each dimension and the precision:
 (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))
 ```
 
+An empty List keeps its declared element dtype when converted to a tensor:
+
+```chelis-surf
+empty_values: List[f64] = []
+empty_tensor = to_tensor(empty_values)
+empty_rows: List[List[f64]] = [[], []]
+empty_matrix = to_tensor(empty_rows)
+```
+
+These tensors have shapes `[0]` and `[2, 0]`, both with dtype `f64`.
+`eval --json` exposes the dtype even when there are no elements to print.
+Eval and `build --target c` reject unconstrained `to_tensor([])`; declare the List
+element type as above.
+A missing inner extent is an error; empty payloads do not supply shape evidence.
+
 ## A small typed program
 
 ```chelis-surf
-def add_vec(x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
+def add_vec[n](x: tensor[n, f32], y: tensor[n, f32]) -> tensor[n, f32] = add(x, y)
 ```
 
-Both arguments share the named dimension `n`, so the checker requires the two inputs to
+Both arguments share the dimension variable `n`, so the checker requires the two inputs to
 have the same length and gives the result that same length.
 
 ## Reading the Deep shape
@@ -47,10 +62,11 @@ A `def` with annotations desugars to a signature plus the function. The signatur
 ```chelis-deep-fragment
 (defsig {}
   add_vec
+  (n)
   (t-fn {}
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))
-    (t-tensor {} (d-name {} n) (t-prim {} f32))))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))
+    (t-tensor {} (d-var {} n) (t-prim {} f32))))
 ```
 
 ## Dimension polymorphism
@@ -68,6 +84,27 @@ the dtypes it may be instantiated at:
 ```chelis-surf
 def double_ints[p: Int](x: p) -> p = add(x, x)
 ```
+
+A bounded dtype can also be a tensor cast target. The cast preserves the shape;
+each call supplies its own concrete target dtype:
+
+```chelis-surf
+def convert[p: Numeric](values: tensor[3, i32], witness: p) -> tensor[3, p] = cast(values, p)
+as_float = convert(to_tensor([1, 2, 3]), 0.0f64)
+as_integer = convert(to_tensor([1, 2, 3]), 0i64)
+```
+
+A separate signature supplies the same dtype evidence when the function builds a List
+internally, including an empty List:
+
+```chelis-surf
+sig empty_like[n, p: Numeric]: p -> tensor[n, p]
+def empty_like(x) = to_tensor(skip([x], 1i64))
+empty_f64 = empty_like(0.0f64)
+empty_int64 = empty_like(0i64)
+```
+
+An unbounded `[p]` is not a dtype guarantee and cannot be a cast target.
 
 ## Where to go next
 

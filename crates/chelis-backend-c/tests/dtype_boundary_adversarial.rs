@@ -43,7 +43,9 @@ fn mat(r: usize, c: usize, p: Prim) -> TensorType {
 #[test]
 fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let _ = dag.add_node(
+        decl,
         RiscOp::synth_const(
             TensorType {
                 dims: vec![DimInfo::Lit(4)],
@@ -76,7 +78,9 @@ fn c_backend_admits_f16_tensor_with_uint16_storage_post_ws_1() {
 #[test]
 fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let _ = dag.add_node(
+        decl,
         RiscOp::synth_const(
             TensorType {
                 dims: vec![DimInfo::Lit(4)],
@@ -115,7 +119,9 @@ fn c_backend_admits_bf16_tensor_with_uint16_storage_post_ws_1() {
 #[test]
 fn ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         TensorType {
@@ -127,6 +133,7 @@ fn ws_a4_c_backend_emits_int8_tensor_via_int8_t_no_silent_downgrade() {
     // A bare Load+root is not enough — `verify` rejects dangling
     // loads — so wrap it in a Copy that consumes `a`.
     dag.add_node(
+        decl,
         RiscOp::Copy,
         vec![a],
         TensorType {
@@ -195,13 +202,16 @@ fn matmul_info_struct_carries_accumulator_field_post_ws_a1() {
 #[test]
 fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(2, 3, Prim::F64).precision, 1.0),
         vec![],
         mat(2, 3, Prim::F64),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(3, 4, Prim::F64).precision, 1.0),
         vec![],
         mat(3, 4, Prim::F64),
@@ -226,7 +236,7 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
     } else {
         panic!("expected BlasMatmul");
     }
-    let _matmul = dag.add_node(matmul_op, vec![a, b], mat(2, 4, Prim::F64), None);
+    let _matmul = dag.add_node(decl, matmul_op, vec![a, b], mat(2, 4, Prim::F64), None);
 
     // Catch the panic if the backend rejects; otherwise inspect the source.
     let emit_result = std::panic::catch_unwind(|| emit_dag(&dag, "test_fn"));
@@ -243,8 +253,8 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
             // single-precision GEMM. Source data is `double*`; calling
             // sgemm on double data is silent data corruption.
             let src: String = src;
-            let mentions_sgemm = src.contains("cblas_sgemm");
-            let mentions_dgemm = src.contains("cblas_dgemm");
+            let mentions_sgemm = src.contains("cblas_sgemm(");
+            let mentions_dgemm = src.contains("cblas_dgemm(");
             assert!(
                 !mentions_sgemm || mentions_dgemm,
                 "C backend silently emitted cblas_sgemm (single precision) for an \
@@ -268,13 +278,16 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
 #[test]
 fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         mat(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat(3, 4, Prim::Bf16).precision, 1.0),
         vec![],
         mat(3, 4, Prim::Bf16),
@@ -288,14 +301,14 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         Prim::Bf16,
     )
     .expect("bf16 matmul default constructs (accumulator=f32 per §5.7.1)");
-    let _matmul = dag.add_node(matmul_op, vec![a, b], mat(2, 4, Prim::Bf16), None);
+    let _matmul = dag.add_node(decl, matmul_op, vec![a, b], mat(2, 4, Prim::Bf16), None);
     let src = emit_dag(&dag, "test_fn").unwrap();
     assert!(
         src.contains("chelis_bf16_to_f32"),
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
-        src.contains("cblas_sgemm"),
+        src.contains("cblas_sgemm("),
         "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(

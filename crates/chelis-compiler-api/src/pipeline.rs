@@ -106,6 +106,8 @@ pub enum PreparationError {
         source: String,
         error: chelis_surf::parser::ParseError,
     },
+    SurfDesugar(chelis_surf::desugar::DesugarError),
+    DeepSelector(chelis_surf::resugar::ResugarError),
     /// A Deep text ingress rejection: a lex/parse failure, or a role-stamp
     /// failure that means the text never denoted a well-formed AST
     /// (chelis#1088).
@@ -117,7 +119,10 @@ impl PreparationError {
     pub fn surf_source(&self) -> Option<&str> {
         match self {
             Self::SurfParse { source, .. } => Some(source),
-            Self::DeepParse(_) | Self::Expansion(_) => None,
+            Self::SurfDesugar(_)
+            | Self::DeepSelector(_)
+            | Self::DeepParse(_)
+            | Self::Expansion(_) => None,
         }
     }
 }
@@ -126,6 +131,8 @@ impl fmt::Display for PreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SurfParse { error, .. } => write!(formatter, "{error}"),
+            Self::SurfDesugar(error) => write!(formatter, "{error}"),
+            Self::DeepSelector(error) => write!(formatter, "{error}"),
             Self::DeepParse(error) => write!(formatter, "{error}"),
             Self::Expansion(error) => write!(formatter, "{error}"),
         }
@@ -189,7 +196,13 @@ impl fmt::Display for PipelineRejection {
         match self {
             Self::Cancelled { .. } => formatter.write_str(chelis_types::EVAL_CANCELLED_MSG),
             Self::Preparation(error) => write!(formatter, "{error}"),
-            Self::Type { fitness } => write!(formatter, "Type errors: {:?}", fitness.errors),
+            // [04-FIT-26]: one projected line per diagnostic, never `{:?}`.
+            Self::Type { fitness } => {
+                match crate::check_report::render_check_errors(&fitness.errors) {
+                    Ok(lines) => write!(formatter, "Type errors:\n{lines}"),
+                    Err(reason) => write!(formatter, "Type errors: {reason}"),
+                }
+            }
             Self::Effects { errors } => {
                 write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
             }
@@ -329,6 +342,8 @@ pub fn prepare_source(
             // here rather than reaching the checker as an untyped carrier.
             let exprs =
                 chelis_deep::parse_and_stamp_file(source).map_err(PreparationError::DeepParse)?;
+            chelis_surf::resugar::validate_grad_selector_consistency(&exprs)
+                .map_err(PreparationError::DeepSelector)?;
             Ok(prepare_deep(exprs, entry))
         }
     }
@@ -339,7 +354,16 @@ pub fn prepare_surf_decls(
     decls: &[chelis_surf::ast::Decl],
     entry: Option<&str>,
 ) -> Result<PreparedProgram, PreparationError> {
-    let desugared = chelis_surf::desugar::desugar_program(decls);
+    prepare_surf_decls_with_context(decls, &[], entry)
+}
+
+pub fn prepare_surf_decls_with_context(
+    decls: &[chelis_surf::ast::Decl],
+    context: &[chelis_deep::Expr],
+    entry: Option<&str>,
+) -> Result<PreparedProgram, PreparationError> {
+    let desugared = chelis_surf::desugar::desugar_program_with_context(decls, context)
+        .map_err(PreparationError::SurfDesugar)?;
     let expanded =
         chelis_macros::expand_program(&desugared, &chelis_macros::ExpansionOptions::default())
             .map_err(PreparationError::Expansion)?
@@ -371,6 +395,47 @@ pub fn lower_checked(
 ) -> Result<LoweredCompilation, PipelineRejection> {
     pipeline_bail_if_cancelled("lower")?;
     let result = chelis_pipeline_core::lower_checked(checked, mode);
+    pipeline_bail_if_cancelled("lower")?;
+    result.map_err(PipelineRejection::from)
+}
+
+/// C host selection preserves fixed-control plans from the actual lowering;
+/// ordinary sources retain the core's value-root validation.
+pub fn lower_checked_for_c_execution(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    PipelineRejection,
+> {
+    pipeline_bail_if_cancelled("lower")?;
+    let result = chelis_pipeline_core::lower_checked_for_c_execution(checked, manifest, mode);
+    pipeline_bail_if_cancelled("lower")?;
+    result.map_err(PipelineRejection::from)
+}
+
+/// Optional captures use the same C selection and ordinary root guards.
+#[cfg(feature = "compilation-trace")]
+pub(crate) fn lower_checked_for_c_execution_with_trace(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    PipelineRejection,
+> {
+    pipeline_bail_if_cancelled("lower")?;
+    let result =
+        chelis_pipeline_core::lower_checked_for_c_execution_with_trace(checked, manifest, mode);
     pipeline_bail_if_cancelled("lower")?;
     result.map_err(PipelineRejection::from)
 }

@@ -15,7 +15,7 @@ use chelis_types::check_ir_program;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -90,7 +90,7 @@ fn other_unsupported_precision_does_not_pretend_to_be_f8e4m3_path() {
     // the f8e4m3-specific message. Currently every active dtype is
     // supported by `is_valid_*`, so we check the diagnostic doesn't
     // mention the f8e4m3 deferral phrase for an int-precision cast.
-    let src = "def main() -> int32 = cast(1, int32)";
+    let src = "def main() -> i32 = cast(1, i32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {

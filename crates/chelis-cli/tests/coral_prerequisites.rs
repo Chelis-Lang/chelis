@@ -17,7 +17,7 @@ fn coral_prerequisites() {
 
 type Column =
   | FloatCol(tensor[4, f32])
-  | IntCol(tensor[4, int64])
+  | IntCol(tensor[4, i64])
 
 def get_float(c: Column) -> tensor[4, f32] = match c with {
   | FloatCol(t) => t
@@ -65,7 +65,7 @@ value = make_dict()
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, bool] =
+def filter_bools(mask: tensor[4, bool], indices: tensor[2, i64]) -> tensor[2, bool] =
   gather(mask, indices, 0)
 "#,
     );
@@ -91,8 +91,8 @@ def filter_bools(mask: tensor[4, bool], indices: tensor[2, int64]) -> tensor[2, 
 
 import Std.Tensor.Construct (arange)
 
-ar_0_4 = arange(cast(0, int32), cast(4, int32))
-ar_2_6 = arange(cast(2, int32), cast(6, int32))
+ar_0_4 = arange(cast(0, i32), cast(4, i32))
+ar_2_6 = arange(cast(2, i32), cast(6, i32))
 "#,
     );
     Command::cargo_bin("chelis")
@@ -186,7 +186,7 @@ fn coral_where_indices_all_false_returns_empty_tensor() {
     // Previously this panicked the evaluator because `numel` floored zero-
     // length tensors to 1, tripping the length assertion in `from_vec`.
     // After the 3t cleanup fix, the evaluator honors the zero dimension and
-    // the empty mask path produces a legitimate `tensor[0, int64]`.
+    // the empty mask path produces a legitimate `tensor[0, i64]`.
     let (_dir, reef_home, app_pkg) = make_app("coral-where-indices-empty");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -319,7 +319,7 @@ fn coral_comparison_ops_broadcast_tensor_scalar() {
         r#"module Demo.Main
 
 def mk_xs() -> tensor[3, f32] = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
-def mk_ints() -> tensor[3, int64] = (to_tensor([cast(1, int64), cast(2, int64), cast(3, int64)]) : tensor[3, int64])
+def mk_ints() -> tensor[3, i64] = (to_tensor([cast(1, i64), cast(2, i64), cast(3, i64)]) : tensor[3, i64])
 def mk_bools() -> tensor[3, bool] = to_tensor([true, false, true])
 
 xs_print = mk_xs()
@@ -331,7 +331,7 @@ gte_mask = gte(mk_xs(), 2.0)
 lte_mask = lte(mk_xs(), 2.0)
 cmplt_mask = cmplt(mk_xs(), 2.0)
 gt_left = gt(1.5, mk_xs())
-gt_ints = gt(mk_ints(), cast(1, int64))
+gt_ints = gt(mk_ints(), cast(1, i64))
 eq_bools = eq(mk_bools(), true)
 "#,
     );
@@ -402,7 +402,7 @@ eq_bools = eq(mk_bools(), true)
 }
 
 /// Negative parity for the comparison-op broadcast: mismatched precision
-/// (e.g. `tensor[3, f32]` vs `int64` scalar) must still be rejected, so a
+/// (e.g. `tensor[3, f32]` vs `i64` scalar) must still be rejected, so a
 /// silent precision coercion can't sneak in. Ordered comparisons on bool
 /// tensors must also still error (bool ordering has no defined meaning;
 /// only `eq`/`neq` accept bool).
@@ -411,7 +411,7 @@ eq_bools = eq(mk_bools(), true)
 fn coral_comparison_ops_reject_mismatched_precision() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-mismatch");
 
-    // f32 tensor vs int64 scalar must fail.
+    // f32 tensor vs i64 scalar must fail.
     // Issue #207: type errors now produce exit 2; assert on stdout
     // content only (the dedicated invariant test covers the exit code).
     write_file(
@@ -419,7 +419,7 @@ fn coral_comparison_ops_reject_mismatched_precision() {
         r#"module Demo.Main
 
 xs = (to_tensor([1.0, 2.0, 3.0]) : tensor[3, f32])
-bad = gt(xs, cast(1, int64))
+bad = gt(xs, cast(1, i64))
 "#,
     );
     Command::cargo_bin("chelis")
@@ -469,9 +469,18 @@ bad = gt(bools, true)
 /// tensor signature; the existing v0.2.5 broadcast test just hides this
 /// because it uses an untyped top-level binding (`gt_left = ...`) whose
 /// inferred type is never checked against any signature.
+/// chelis#1506 INVERTS this gate. The six programs above are the form
+/// `[05-OP-36]` calls a type error, so the compiler now refuses them and names
+/// the replacement. Coral has source that depends on the old acceptance; the
+/// migration is the explicit spelling, and the second half of this test proves
+/// the migration type checks so the pin bump has somewhere to go.
+///
+/// EVIDENTIARY STATUS: REGRESSION for the rejection half, which was a clean
+/// `"score": 1` with `"errors": []` on the base `9b9e7bd56`; DISPOSITION LOCK
+/// for the migration half, which checked clean before and after.
 #[test]
 #[ignore = "manual gate: Coral prerequisite and regression acceptance suite exceeds the default inner-loop budget"]
-fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
+fn coral_comparison_ops_reject_a_scalar_operand_and_name_the_replacement() {
     let (_dir, reef_home, app_pkg) = make_app("coral-cmp-broadcast-issue5");
     write_file(
         &app_pkg.join("src/main.ch"),
@@ -492,6 +501,35 @@ def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
         .env("CHELIS_REEF_HOME", &reef_home)
         .current_dir(&app_pkg)
         .args(["check", app_pkg.join("src/main.ch").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[05-OP-36]"))
+        .stdout(predicate::str::contains(
+            "does not admit a scalar beside a tensor",
+        ));
+
+    // The migration Coral takes, in the same package, so the pin bump can
+    // point at a spelling this compiler accepts.
+    let (_migrated_dir, migrated_home, migrated_pkg) = make_app("coral-cmp-explicit-issue5");
+    write_file(
+        &migrated_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([1.5]), 0i32, 3i64))
+def below() -> tensor[3, bool] = gt(expand(to_tensor([1.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.5]), 0i32, 3i64))
+def lt_left() -> tensor[3, bool] = lt(expand(to_tensor([2.5]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), expand(to_tensor([2.0]), 0i32, 3i64))
+def eq_left() -> tensor[3, bool] = eq(expand(to_tensor([2.0]), 0i32, 3i64), to_tensor([1.0, 2.0, 3.0]))
+"#,
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &migrated_home)
+        .current_dir(&migrated_pkg)
+        .args(["check", migrated_pkg.join("src/main.ch").to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"score\": 1"))

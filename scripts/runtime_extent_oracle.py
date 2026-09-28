@@ -40,9 +40,19 @@ from typing import Callable, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_baseline.json"
 BASELINE_PATH_PHASE_B = REPO_ROOT / "scripts/runtime_extent_oracle_baseline_phase_b.json"
+TARGETS_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_targets.json"
+# `c` remains a nameable phase and is deliberately absent from SLICE_PHASES.
+# Slice C was withdrawn rather than deferred: `expand` broadcasts a singleton
+# axis and `insert` raises rank, so neither primitive produces a deferred
+# shape and no phase-C corpus will ever be written. `final` selects
+# SLICE_PHASES, so while `c` sat there the completion oracle refused on a
+# corpus nobody owed. Naming the retired phase still reaches this oracle's
+# own refusal, which says the phase has no registered corpus and names the
+# ones that do; an argparse choice error would say nothing about why.
 PHASES = ("a", "b", "c", "final")
-SLICE_PHASES = ("a", "b", "c")
+SLICE_PHASES = ("a", "b")
 PASS_MARKER = "RUNTIME EXTENT ORACLE: PASS"
+SHORT_MARKER = "RUNTIME EXTENT ORACLE: RECEIPTS PASS, ROWS SHORT OF EXIT"
 HIP_HARDWARE_COMMAND = (
     "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- "
     "--ignored --test-threads=1"
@@ -248,7 +258,7 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "vmap.shared_shape_bound.concrete_c_emit",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
         ),
         _row(
@@ -335,6 +345,48 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
 
     rows = (
         _row(
+            "producer.insert.claim_effects.eval",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.insert.claim_effects.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order",
+        ),
+        _row(
+            "producer.insert.forwarded_axis.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
+            "producer.insert.forwarded_axis.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership",
+        ),
+        _row(
+            "producer.input_entry.eval_c",
+            "executes_exactly",
+            EXECUTES,
+            "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes",
+        ),
+        _row(
+            "producer.insert.site",
+            "lane_divergent",
+            EXECUTES,
+            "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim",
+        ),
+        _row(
+            "producer.missing_axis",
+            "ice",
+            TERMINAL_CONTROL,
+            "ir_producer_guard_sites.missing_result_axis_is_a_checked_error",
+        ),
+        _row(
             "class.load_load.c",
             "silent_unguarded",
             EXECUTES,
@@ -361,7 +413,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.load_op_output.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval",
         ),
         _row(
@@ -379,13 +431,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.op_output_op_output.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c",
         ),
         _row(
             "class.op_output_op_output.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval",
         ),
         _row(
@@ -403,78 +455,87 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.splice_f_of_n_n.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
         ),
         _row(
             "class.splice_f_of_n_n.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
         ),
         _row(
             "expand.arith_size.named_claim.c",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c",
         ),
         _row(
             "expand.arith_size.named_claim.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval",
         ),
         _row(
             "expand.foreign_claim.same_tensor_set_axis.c",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+            EXECUTES,
+            "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         ),
         _row(
             "expand.foreign_claim.same_tensor_set_axis.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         ),
         _row(
             "expand.kept_axis.op_declared_source.c",
             "ice",
-            "ice",
+            EXECUTES,
             "cli_slice_b.issue_665_expand_over_stride_builds_and_runs",
         ),
+        # An explicit BASELINE CORRECTION, not a relabelled improvement. This
+        # row recorded `main` as `ice` and that was wrong: measured on
+        # `3dc3f54f6`, `chelis eval --file` of chelis#665's program prints
+        # `shape=[6, 3]` and exits zero. The only eval-lane reader of the
+        # legacy walk was the binding inference, which does not abort, and no
+        # command-line program reaches an eval-lane version of the failure
+        # because `chelis eval --file` binds no inputs and every extent is
+        # concrete by then. The receipt is a disposition lock; the `.c` row
+        # above carries the byte-for-byte parity assertion that gives the pair
+        # its teeth.
         _row(
             "expand.kept_axis.op_declared_source.eval",
-            "ice",
-            "ice",
+            EXECUTES,
+            EXECUTES,
             "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         ),
         _row(
             "expand.literal_claim.cross_tensor_read.c",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.issue_1374_cross_tensor_read_traps_on_c",
+            EXECUTES,
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         ),
         _row(
             "expand.literal_claim.cross_tensor_read.eval",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval",
+            EXECUTES,
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
         ),
         _row(
             "expand.literal_claim.inlined_root.c",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c",
+            EXECUTES,
+            "literal_claim.literal_result_claim_contract",
         ),
-        # B2h: the eval twin of the driven row. The value-binding form applies
-        # `f` through the kernel the C lane emits for it, and the literal input
-        # extent is checked at the kernel's entry by the DAG evaluator, the
-        # eval analogue of the C ABI preamble.
+        # The Eval fixture owns an independent literal result at insert.
+        # The C ABI fixture below separately declares a literal input extent;
+        # that input obligation remains an entry guard.
         _row(
             "expand.literal_claim.exported_kernel.eval",
             "silent_unguarded",
             EXECUTES,
-            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+            "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval",
         ),
         _row(
             "expand.literal_claim.exported_kernel.c",
@@ -485,19 +546,19 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.literal_claim.inlined_root.eval",
             "lane_divergent",
-            "lane_divergent",
-            "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval",
+            EXECUTES,
+            "literal_claim.literal_result_claim_contract",
         ),
         _row(
             "expand.named_claim.cross_tensor_read.c",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c",
+            EXECUTES,
+            "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         ),
         _row(
             "expand.named_claim.cross_tensor_read.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
         ),
         _row(
@@ -509,7 +570,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.piped_shape_read.lint_fix",
             "nonconforming_rejection",
-            "nonconforming_rejection",
+            EXECUTES,
             "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds",
         ),
         _row(
@@ -543,6 +604,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         ),
         _row(
+            "expand.positional.replacement.shape_size.eval_c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_broadcast.singleton_broadcast_contract",
+        ),
+        _row(
             "expand.positional.replacement_zero.c",
             "silent_unguarded",
             EXECUTES,
@@ -557,19 +624,19 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.record_projection.size",
             "nonconforming_rejection",
-            "nonconforming_rejection",
+            EXECUTES,
             "cli_slice_b.a_record_projection_is_an_admissible_expand_size",
         ),
         _row(
             "expand.shape_derived.declared_result_survives.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         ),
         _row(
             "expand.shape_derived.declared_result_survives.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         ),
         # B2h: the eval effect rows stay at baseline. `chelis eval` emits a
@@ -668,10 +735,2141 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
         ),
         _row(
+            "guard.local.numeric_carriers.eval_c",
+            "silent_unguarded",
+            EXECUTES,
+            "exec_c.numeric_local_extent_claims_execute_exactly",
+        ),
+        _row(
+            "claim.literal.same_shape_producer.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
+        ),
+        _row(
+            "claim.literal.same_shape_producer.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer",
+        ),
+        _row(
+            "claim.named.nested_fresh_result.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
+        ),
+        _row(
+            "claim.named.nested_fresh_result.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
+        ),
+        _row(
+            "claim.named.same_shape_producer.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
+        ),
+        _row(
+            "claim.named.same_shape_producer.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer",
+        ),
+        _row(
+            "claim.named.same_shape_producer.inlined_root.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer",
+        ),
+        _row(
+            "claim.named.same_shape_producer.inlined_root.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer",
+        ),
+        # chelis#1948: the returned same-shape primitive owns its declared
+        # result guard. Every runtime row is split by lane even though one
+        # dedicated test executes both; the relation/verification controls
+        # remain independent IR receipts.
+        _row(
+            "claim.same_shape.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly",
+        ),
+        _row(
+            "claim.same_shape.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_fusion_and_dce",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.interior.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.an_interior_named_result_claim_splits_the_fusion_chain",
+        ),
+        _row(
+            "claim.same_shape.fusion.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_fusion_and_dce",
+        ),
+        _row(
+            "claim.same_shape.distinct_paths.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution",
+        ),
+        _row(
+            "claim.same_shape.distinct_paths.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution",
+        ),
+        _row(
+            "claim.same_shape.no_origin.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.no_origin.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_disagreement.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_disagreement.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim",
+        ),
+        _row(
+            "claim.same_shape.operand_one.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add",
+        ),
+        _row(
+            "claim.same_shape.operand_one.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add",
+        ),
+        _row(
+            "claim.same_shape.rank_zero.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation",
+        ),
+        _row(
+            "claim.same_shape.repeated_path.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim",
+        ),
+        _row(
+            "claim.same_shape.repeated_path.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim",
+        ),
+        _row(
+            "claim.same_shape.reversed.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
+        ),
+        _row(
+            "claim.same_shape.reversed.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.blas.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_blas_region_still_specializes_and_executes",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.literal.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.named.trap.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_1948_same_shape.dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.dense_gather.unclaimed.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.unclaimed_dense_gather_region_still_specializes_and_executes",
+        ),
+        _row(
+            "claim.same_shape.specialization.named.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_specialization_and_dce",
+        ),
+        _row(
+            "claim.same_shape.specialization.named.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.named_result_claim_traps_after_specialization_and_dce",
+        ),
+        _row(
+            "claim.same_shape.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_1948_same_shape.a_statically_refuted_same_shape_result_is_a_dimension_mismatch",
+        ),
+        _row(
+            "claim.same_shape.structure.dedup",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_1948_same_shape.identical_members_deduplicate_but_distinct_paths_remain",
+        ),
+        _row(
+            "claim.same_shape.structure.malformed",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "ir_issue_1948_same_shape.malformed_same_shape_relations_are_verifier_errors",
+        ),
+        # chelis#2110: a local tensor ascription is its own producer-owned
+        # obligation. It remains separate from inferred metadata and from a
+        # function-result claim, survives every activation/rebuild/artifact
+        # boundary, and traps at the initializer operation on both host lanes.
+        _row(
+            "claim.local_ascription.provenance",
+            "silent_unguarded",
+            EXECUTES,
+            "surf_issue_2110_local_ascription_provenance.explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata",
+        ),
+        _row(
+            "claim.local_ascription.checker_transport",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.runtime_dependent_local_ascription_retains_exact_authored_claim",
+        ),
+        _row(
+            "claim.local_ascription.control_match.checker",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.authored_ascriptions_inside_match_arms_reach_the_checked_program",
+        ),
+        _row(
+            "claim.local_ascription.checked_rewrites",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.checker_owned_ascription_survives_clone_serialization_and_checker_rewrites",
+        ),
+        _row(
+            "claim.local_ascription.deep.origin",
+            "silent_unguarded",
+            EXECUTES,
+            "types_issue_2110_local_ascription.hand_authored_deep_type_metadata_is_an_explicit_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.deep.runtime.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.runtime.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c",
+        ),
+        _row(
+            "claim.local_ascription.deep.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_2110_local_ascription.hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build",
+        ),
+        _row(
+            "claim.local_ascription.direct.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_grad.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.direct_vmap.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.initializer_alias.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        ),
+        _row(
+            "claim.local_ascription.initializer_alias.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation",
+        ),
+        _row(
+            "claim.local_ascription.return_alias.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        ),
+        _row(
+            "claim.local_ascription.return_alias.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer",
+        ),
+        _row(
+            "claim.local_ascription.inlined.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.inlined.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.uninvoked.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.local_closure.uninvoked.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.untaken.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.untaken.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.selected.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.selected.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_selected.c",
+            EXECUTES,
+            EXECUTES,
+            "exec_c.a_selected_runtime_branch_emits_its_local_ascription_guard_on_c",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_selected.eval",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_2110_local_ascription.selected_runtime_branch_executes_its_local_ascription_guard",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_selected.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_helper_untaken.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_untaken.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c",
+        ),
+        _row(
+            "claim.local_ascription.control_if.runtime_untaken.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.untaken_runtime_branch_does_not_execute_its_local_ascription_guard",
+        ),
+        _row(
+            "claim.local_ascription.control_match.untaken.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.untaken.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.selected.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.selected.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation",
+        ),
+        _row(
+            "claim.local_ascription.control_match.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.control_match.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.trap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_effect_order.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.shadowing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.shadowing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.trap.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        ),
+        _row(
+            "claim.local_ascription.host_initializer_alias.trap.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner",
+        ),
+        _row(
+            "claim.local_ascription.inferred_result.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.inferred_result.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.named.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent",
+        ),
+        _row(
+            "claim.local_ascription.named.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent",
+        ),
+        _row(
+            "claim.local_ascription.same_shape_consumer.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        ),
+        _row(
+            "claim.local_ascription.same_shape_consumer.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim",
+        ),
+        _row(
+            "claim.local_ascription.dead.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps",
+        ),
+        _row(
+            "claim.local_ascription.dead.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps",
+        ),
+        _row(
+            "claim.local_ascription.axis_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order",
+        ),
+        _row(
+            "claim.local_ascription.axis_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order",
+        ),
+        _row(
+            "claim.local_ascription.agreeing.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.agreeing.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.wildcard.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation",
+        ),
+        _row(
+            "claim.local_ascription.wildcard.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim",
+        ),
+        _row(
+            "claim.local_ascription.agreeing_literal_result.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly",
+        ),
+        _row(
+            "claim.local_ascription.agreeing_literal_result.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly",
+        ),
+        _row(
+            "claim.local_ascription.static_refutation",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_issue_2110_local_ascription.a_static_local_disagreement_is_a_checker_error_on_every_entry_lane",
+        ),
+        _row(
+            "claim.local_ascription.lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+        ),
+        _row(
+            "claim.local_ascription.activation_identity",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.each_inlined_activation_gets_a_distinct_one_owner_local_claim",
+        ),
+        _row(
+            "claim.local_ascription.alias_liveness",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.aliasing_and_dead_value_elimination_retain_the_initializer_obligation",
+        ),
+        _row(
+            "claim.local_ascription.rebuilds",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.rebuild_cse_dce_and_specialization_preserve_the_exact_site",
+        ),
+        _row(
+            "claim.local_ascription.fusion",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+        ),
+        _row(
+            "claim.local_ascription.grad_pruning",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.grad_pruning_preserves_a_dead_except_for_trap_local_site",
+        ),
+        _row(
+            "claim.local_ascription.ownership_lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.ownership_lowering_keeps_the_claim_live_through_its_initializer_owner",
+        ),
+        _row(
+            "claim.local_ascription.host_kernel",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.host_evaluation_kernel_carries_the_same_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.host_partition",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.staged_host_partition_retains_the_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes",
+        ),
+        _row(
+            "claim.local_ascription.host_partition.nondata",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_staged_partition.host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts",
+        ),
+        _row(
+            "claim.local_ascription.vmap",
+            "silent_unguarded",
+            EXECUTES,
+            "ir_issue_2110_local_ascription.vmap_shifts_the_local_claim_and_initializer_axis_together",
+        ),
+        _row(
+            "claim.local_ascription.inferred_metadata.structure",
+            EXECUTES,
+            EXECUTES,
+            "ir_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_ascription_site",
+        ),
+        _row(
+            "claim.local_ascription.native_malformed",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "ir_issue_2110_local_ascription.malformed_local_claim_roles_are_rejected_by_the_native_verifier",
+        ),
+        _row(
+            "claim.local_ascription.cache_composition",
+            "silent_unguarded",
+            EXECUTES,
+            "api_issue_2110_local_ascription_cache.stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations",
+        ),
+        _row(
+            "claim.local_ascription.composed_identity_collision",
+            "silent_unguarded",
+            EXECUTES,
+            "api_issue_2110_local_ascription_cache.composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities",
+        ),
+        _row(
+            "claim.local_ascription.wire_roundtrip",
+            "silent_unguarded",
+            EXECUTES,
+            "wire_issue_2110_local_ascription.local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields",
+        ),
+        _row(
+            "claim.local_ascription.wire_live_lowering",
+            "silent_unguarded",
+            EXECUTES,
+            "wire_issue_2110_local_ascription_projection.compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+        ),
+        # Round 1's P1. A RUNTIME padding bound is a different witness from
+        # a literal one, and the rows are separate because the claim's
+        # precondition is the bound rather than the operand: lowering stamped
+        # the claim and `host::rank_preserving_movement_type`'s Pad arm minted
+        # over it, so the exported and value-binding forms were silent while
+        # the inlined root trapped. Both lanes are `silent_unguarded` here,
+        # unlike the literal-bound rows below: with the declared dim replaced
+        # by a minted `_rt_pad_dim_N_A`, the C movement plan's target check
+        # compares against that minted dim and passes, so C returned the
+        # undeclared shape at exit zero too.
+        _row(
+            "pad.runtime_bound_claim.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
+        # The C lane's baseline is `lane_divergent` rather than
+        # `silent_unguarded`: it did not return a wrong shape, it aborted at
+        # the movement plan's generic target check, reporting the allocation
+        # instead of the claim and with no [04-NUM-9] context line, while eval
+        # printed the padded shape at exit zero.
+        _row(
+            "pad.literal_claim.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes",
+        ),
+        _row(
+            "pad.literal_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes",
+        ),
+        # chelis#1907. The runtime-zero reproducer silently returned the
+        # unstrided input on Eval while compiled C already raised the stride
+        # operation's exact domain failure. The shared receipt also exercises
+        # a runtime-negative step and proves both invalid values preempt a
+        # disagreeing result claim before allocation or access.
+        _row(
+            "stride.runtime_zero.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
+        ),
+        _row(
+            "stride.runtime_zero.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes",
+        ),
+        # Red-team round 1 on PR #2111 found the cross-axis half of #1907:
+        # Eval compared axis 0's result claim before validating axis 1's
+        # runtime step, while C validated the complete vector first. The
+        # negative receipt crosses zero and negative axis-1 values with an
+        # earlier axis-0 mismatch; the positive receipt keeps runtime unit
+        # and non-unit multi-axis execution as non-vacuity controls.
+        _row(
+            "stride.multi_axis_nonpositive.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_nonpositive.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_positive.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
+        ),
+        _row(
+            "stride.multi_axis_positive.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes",
+        ),
+        # chelis#1931. A positive non-unit stride under a disagreeing declared
+        # result returned the undeclared extent on Eval. C rejected only at
+        # the movement target backstop, without [04-NUM-9]'s claim context.
+        # The receipt covers literal and runtime carriers plus a nonzero axis.
+        _row(
+            "stride.nonunit_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",
+        ),
+        _row(
+            "stride.nonunit_claim.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes",
+        ),
+        # chelis#1837 and chelis#1930: a declared result claim the LOWERED
+        # graph fixes to another extent is rejected when the activation is
+        # lowered, before any execution, with one fatal diagnostic both host
+        # lanes render byte-identically. `spec/04-type-system.md` section 4.7
+        # makes a violation proven from literals a type error, and section
+        # 4.7.2 conditions its guard on a claim "that is not statically proven
+        # equal to `size`", so these rows were never the guard's. The checker
+        # reaches that verdict wherever it can SEE the extent; an extent that
+        # becomes literal only because a call supplied concrete arguments is
+        # one it cannot see, which is why the rejection sits at lowering.
+        # `claim.literal.kernel_entry.checker` below is the partition's other
+        # half.
+        _row(
+            "concat.literal_claim.inlined_root.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "concat.literal_claim.inlined_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        # chelis#1930's two lanes had two different baselines for one defect:
+        # eval returned the undeclared shape at exit zero, the C build failed
+        # inside the IR verifier's per-owner size check.
+        _row(
+            "pad.identity_axis.literal_claim.inlined_root.c",
+            "ice",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "pad.identity_axis.literal_claim.inlined_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
+        ),
+        # The smallest member of the class: the body is the parameter, so no
+        # operation exists for a guard to attach to and the refuting extent is
+        # `ExtentOrigin::Literal` rather than `OpComputed`.
+        _row(
+            "claim.literal.identity_root.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.identity_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
+        ),
+        # `pad.literal_claim` above in the VALUE-BINDING form, which stages its
+        # argument across the host boundary and so keeps section 4.7.2's guard.
+        # The inlined root hands the operation a literal instead, and chelis
+        # #1911 recorded the resulting lane divergence as residual: eval
+        # trapped for a comparison that could never hold while the C build
+        # failed in the verifier.
+        _row(
+            "pad.literal_claim.inlined_root.c",
+            "lane_divergent",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "pad.literal_claim.inlined_root.eval",
+            "lane_divergent",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        # A NAMED claim is refutable once chelis#1800 has resolved its
+        # declaring witness to a number. The unresolved form stays a guard and
+        # is the control inside the same receipt.
+        _row(
+            "claim.named.resolved.inlined_root.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.named.resolved.inlined_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
+        ),
+        # Only a named call hands the lowerer a callee name. A pipe stage, an
+        # AD or vectorization boundary and a host-applied root do not, so the
+        # diagnostic's owner slot reads `the signature` there; the receipt
+        # asserts both spellings.
+        _row(
+            "claim.literal.nameless_activation.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.nameless_activation.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
+        ),
+        # One row, not a pair, and no lane suffix: the verdict is the CHECKER's,
+        # no lane varies it, and the program never reaches a lane. That is the
+        # shape chelis#1836's `route.untied` rows use for the same reason.
+        #
+        # Its baseline EQUALS its exit state, which is the one honest reading
+        # here and has six precedents in phase A (`expand.negative.static`,
+        # `reshape.negative.runtime_eval_c`, `wire.legacy_v6.rejected` among
+        # them): this program was already refused, correctly and with the right
+        # diagnostic, on `0820ee28e`. It is C5's "Invalid-program controls
+        # remain `rejects_exactly`" rather than a defect that moved, and
+        # recording a start state it never occupied would claim a transition
+        # that did not happen.
+        #
+        # This row is a CONTROL, not a repair. B2c changed nothing about the
+        # program it names; the row exists because it is the PARTITION's other
+        # half, and it fails only if a later change lets lowering reach a case
+        # the checker owns. A literal parameter extent makes the body's own
+        # result type computable, so the checker refuses the signature before
+        # lowering runs at all, which is why the kernel-entry call sites cannot
+        # reach the rejection above.
+        _row(
+            "claim.literal.kernel_entry",
+            TERMINAL_CONTROL,
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.nested_and_unused.eval_c",
+            "silent_unguarded",
+            EXECUTES,
+            "literal_claim.literal_claim_transport_survives_nested_and_unused_calls",
+        ),
+        _row(
+            "guard.local.declaration_order.eval_c",
+            "lane_divergent",
+            EXECUTES,
+            "exec_c.local_reshape_guards_follow_declaration_order",
+        ),
+        _row(
             "shrink.to_end.nonzero_start",
             "silent_unguarded",
             "rejects_exactly",
             "ir_sources.to_end_shrink_end_requires_a_literal_zero_start",
+        ),
+        # Chelis#1797. The compiled lane already reported section 2.4.1's
+        # overshoot; the eval lane answered it with a PANIC under a free or an
+        # agreeing result claim, and with a claim mismatch under a disagreeing
+        # one. The row therefore starts `lane_divergent`, and both halves now
+        # print the same two lines for all three claim spellings.
+        _row(
+            "shrink.runtime_bound.overshoot.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_eval",
+        ),
+        _row(
+            "shrink.runtime_bound.overshoot.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c",
+        ),
+        # chelis#1836. A shape-computed route whose operand is still an
+        # unresolved type variable when the route runs published the call's own
+        # result variable, so a false declared shape checked at score 1 with no
+        # errors on `6abca2406` and the runtime extent guard was the only thing
+        # left to catch it. Four provenances, one per row: the two `match`
+        # destructurings, the record field, and the chelis#1577 `copy` gate.
+        # Single rows rather than `.c`/`.eval` pairs: the verdict is a CHECKER
+        # rejection that no lane varies, and the programs never reach a lane.
+        _row(
+            "route.untied.sum.match",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee",
+        ),
+        _row(
+            "route.untied.matmul.match",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee",
+        ),
+        _row(
+            "route.untied.sum.record",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_record_field_sum_operand_is_tied_to_the_bound_target",
+        ),
+        _row(
+            "route.untied.sum.copy",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        # chelis#1836 through chelis#1690's operand gates. A suspended
+        # `DeferredOperandGate::ShapeRoute` publishes a fresh result variable,
+        # which is this issue's third provenance, so each of these routes
+        # became a new instance when chelis#1690 landed. All three were
+        # measured at score 1 with no errors on `e0a482248`, this branch's
+        # base. `scatter` is the fourth gated route and is not registered: it
+        # was not probed.
+        _row(
+            "route.untied.gather.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        _row(
+            "route.untied.trace.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        _row(
+            "route.untied.scatter_replace.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        # chelis#1805: a tensor operand whose PRECISION is a type variable. The
+        # dtype validators reject only a concrete inadmissible dtype and the
+        # readiness predicate answers ready for a tensor whatever its precision
+        # holds, so a float-only route reached through an unbounded `[p]` binder
+        # checked clean and the compiled C lane printed `f = 2` for a true
+        # 2.3333333. All four rows were measured accepted at score 1 on
+        # `0820ee28e`. Each is a CHECKER verdict that no lane varies, so each is
+        # one row rather than a pair.
+        #
+        # chelis#1942 replaces body inspection with a declared family contract
+        # checked during ordinary inference. The original unbounded definitions
+        # now fail at the declaration; explicitly bounded helpers retain the
+        # restriction through indirect and transitive calls. The dedicated CLI
+        # target also executes the five valid counterparts through eval and C.
+        _row(
+            "dtype.late_precision.instantiation",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation",
+        ),
+        _row(
+            "dtype.late_precision.binds_one_application_later",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_precision_that_binds_one_application_later_is_decided_on_binding",
+        ),
+        _row(
+            "dtype.late_precision.declared_bound",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_bounded_precision_binder_is_decided_by_its_family_at_once",
+        ),
+        _row(
+            "dtype.late_precision.family_routes",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation",
+        ),
+        _row(
+            "dtype.late_precision.authored_contract",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_declared_operation_bounds.insufficient_authored_contracts_are_rejected_without_a_call_site",
+        ),
+        _row(
+            "dtype.late_precision.indirect_and_transitive",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_declared_operation_bounds.invalid_function_value_chain_lambda_and_field_calls_stop_before_execution",
+        ),
+        # chelis#1822: the C preparation's `Expand` arm was gated on NO axis
+        # carrying a real name, so a signature binder on a kept axis sent the
+        # node to the pass-through arm and the operand's pre-expand extent was
+        # stamped over the expanded axis. Only the C lane moved, so only the C
+        # lane has a row for the two consumer forms; each receipt asserts the
+        # eval lane as its byte-identity twin. The no-consumer form had nothing
+        # to verify, so its prepared type reached codegen and the pair diverged
+        # rather than failing the build, which is why both its lanes are rows.
+        _row(
+            "expand.named_bystander.consumer.c",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_c",
+        ),
+        _row(
+            "expand.named_bystander.axis_zero.c",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too",
+        ),
+        _row(
+            "expand.named_bystander.no_consumer.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
+        ),
+        _row(
+            "expand.named_bystander.no_consumer.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
+        ),
+        # chelis#1801. A nullary root whose extent arrives through a nested
+        # helper's claim: the callee's instantiation variable met the inner
+        # helper's runtime extent, nothing bound it, and def-level
+        # generalization quantified it, so the root had no ABI and both lanes
+        # dropped it in silence. `spec/04-type-system.md` section 3.2 now
+        # makes that variable denote the extent it met.
+        _row(
+            "root.dim_variable.nested_helper.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.nested_helper.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval",
+        ),
+        # The same root reached through a polymorphic named def passed as an
+        # ARGUMENT, so the callee variable this application minted aliases to
+        # one the argument's own instantiation minted and that root is what
+        # denotes the extent. chelis#1925's round 1 found this spelling still
+        # dropped after the first repair.
+        _row(
+            "root.dim_variable.polymorphic_argument.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.polymorphic_argument.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval",
+        ),
+        # The same root whose extent a RESULT-ONLY binder names, which
+        # chelis#1925's round-1 verification found LANE DIVERGENT on
+        # `0820ee28e`: the C lane emitted an entry point and printed the value
+        # while eval refused the same program with `missing symbolic dimension
+        # binding \`seq\``. Both halves therefore start `lane_divergent` and
+        # both now print the same line. Section 4.7 requires that agreement and
+        # section 4.7.3 forbids a verdict that turns on a function boundary;
+        # `main` already absorbed the one-call-shallower spelling.
+        _row(
+            "root.dim_variable.result_only_binder.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.result_only_binder.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval",
+        ),
+        # The same root through a THREE-member alias class, which is
+        # chelis#1925's round-2 P1. `apply3` carries two polymorphic function
+        # arguments beside the data one, so where the runtime-extent argument
+        # sits decides which member roots the class when the meeting is
+        # recorded. Every ordering was dropped in silence on `main`; the
+        # receipt asserts the three render IDENTICALLY, because an
+        # order-dependent absorption is the defect section 4.7.3 forbids and
+        # three separate rows could all stay green through it.
+        _row(
+            "root.dim_variable.argument_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c",
+        ),
+        _row(
+            "root.dim_variable.argument_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
+        ),
+        # chelis#1771. A declared literal result extent reached through a block
+        # tail, a let binding or a callee body. The `<op>` slot resolves to the
+        # lowered primitive and the guard takes that primitive's source
+        # position, so an effect bound after it is observed only when the guard
+        # passes. All six were `silent_unguarded`: both lanes printed the
+        # produced extent under a denying declaration and exited zero.
+        _row(
+            "return.block_bodied.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_on_a_block_bodied_return",
+        ),
+        _row(
+            "return.block_bodied.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_on_a_block_bodied_return",
+        ),
+        _row(
+            "return.block_bodied.effect_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_before_an_effect_that_follows_the_producing_operation",
+        ),
+        _row(
+            "return.block_bodied.effect_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_before_an_effect_that_follows_the_producing_operation",
+        ),
+        _row(
+            "return.call_bodied.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.the_c_lane_traps_on_a_call_bodied_return",
+        ),
+        _row(
+            "return.call_bodied.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_traps_on_a_call_bodied_return",
+        ),
+        # #1771/#1945: select the actual branch producer and carry each
+        # caller's literal obligations to that producer inside a shared
+        # callee. The call-order rows already rejected on the baseline, but
+        # observed following effects before rejecting: that rejection did
+        # not conform to the required observable ordering.
+        _row(
+            "return.if.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_selected_if_result_claims",
+        ),
+        _row(
+            "return.if.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.c_selected_if_result_claims",
+        ),
+        _row(
+            "return.match.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.eval_selected_match_result_claims",
+        ),
+        _row(
+            "return.match.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_return_boundary.c_selected_match_result_claims",
+        ),
+        _row(
+            "return.call_bodied.effect_order.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
+        ),
+        _row(
+            "return.call_bodied.effect_order.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed",
+        ),
+        _row(
+            "return.shared_callee.literal.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.eval_shared_callee_result_claims_are_invocation_scoped",
+        ),
+        _row(
+            "return.shared_callee.literal.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_return_boundary.c_shared_callee_result_claims_are_invocation_scoped",
+        ),
+        # #1771/#1945 continuation: measured eval and linked C baselines
+        # silently accept inherited claims across the pure-helper route.
+        _row(
+            "return.pure_helper.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_pure_helper.eval_inherited_result_claim_enters_pure_helpers",
+        ),
+        _row(
+            "return.pure_helper.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_pure_helper.c_inherited_result_claim_enters_pure_helpers",
+        ),
+        # #1771/#1945 final callback and delayed-selection matrix. Eval
+        # already transported the caller's claim through named/literal
+        # callbacks and isolated repeated invocations; generated C silently
+        # accepted each denying claim. Both lanes silently accepted a denying
+        # identity-callback result after evaluating its actual, and silently
+        # accepted denying claims after selecting an already-produced value.
+        # The composed callback/body-selection rows already conformed on the
+        # measured base and close a coverage gap. C aggregate tuple projection
+        # rejected with `tuple-get` rather than the selected field's producer.
+        # The checked combined polymorphic fixture reached a silent Eval
+        # acceptance and a nonconforming C rejection before this slice.
+        # Selection before production and rank-zero/no-claim cases were
+        # conforming controls on the baseline and remain explicit receipts.
+        _row(
+            "return.callback.inherited.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_inherited_claim_reaches_named_and_literal_callbacks",
+        ),
+        _row(
+            "return.callback.inherited.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_inherited_claim_reaches_named_and_literal_callbacks",
+        ),
+        _row(
+            "return.callback.identity.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_identity_callback_checks_claim_after_actual_preparation",
+        ),
+        _row(
+            "return.callback.identity.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_identity_callback_checks_claim_after_actual_preparation",
+        ),
+        _row(
+            "return.callback.shared.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_shared_callback_claims_are_invocation_local",
+        ),
+        _row(
+            "return.callback.shared.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_shared_callback_claims_are_invocation_local",
+        ),
+        _row(
+            "return.selected.delayed.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_delayed_selection_guards_only_the_selected_value",
+        ),
+        _row(
+            "return.selected.delayed.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.c_delayed_selection_guards_only_the_selected_value",
+        ),
+        _row(
+            "return.callback.composed_selection.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_inherited_callback_claim_waits_for_body_selection",
+        ),
+        _row(
+            "return.callback.composed_selection.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_inherited_callback_claim_waits_for_body_selection",
+        ),
+        _row(
+            "return.selected.before_production.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.eval_selection_before_production_forwards_only_to_the_selected_arm",
+        ),
+        _row(
+            "return.selected.before_production.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_selection_before_production_forwards_only_to_the_selected_arm",
+        ),
+        _row(
+            "return.selected.tuple_projection.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer",
+        ),
+        _row(
+            "return.selected.tuple_projection.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.c_tuple_projection_retains_only_the_selected_producer",
+        ),
+        _row(
+            "return.callback.aggregate_interface.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load",
+        ),
+        _row(
+            "return.callback.rank_zero.no_claim.eval_c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.rank_zero_identity_without_a_result_claim_executes_both_lanes",
+        ),
+        _row(
+            "return.callback.rank_zero.host_effect.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_result_callable_selection.c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects",
+        ),
+        _row(
+            "return.callback.polymorphic.combined.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_result_callable_selection.eval_combined_precision_rank_callback_claims_actualize_each_callsite",
+        ),
+        _row(
+            "return.callback.polymorphic.combined.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_result_callable_selection.c_combined_precision_rank_callback_claims_actualize_each_callsite",
+        ),
+        # chelis#1923 and chelis#1791: pipe application semantics.
+        # `spec/02-surf-syntax.md` section 0.1 says a pipe IS first-argument
+        # insertion, and every consumer that met a `pipe` node reconstructed
+        # that application for itself, not all the same way. The checker typed
+        # a bare-name stage from the callee's FUNCTION type instead, so every
+        # rule keyed on an application's arguments was lost downstream of it;
+        # the lowerer bound the accumulator to a synthesized variable, so a
+        # callee's own shape source stopped resolving. The two `to_tensor`
+        # rows are the checker face, `expand_source` and `lint_fix` the
+        # lowerer face. Both lanes carry a row wherever the pair diverged.
+        _row(
+            "pipe.bare_name_stage.to_tensor.expand.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.expand.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.sum.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.to_tensor.sum.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs",
+        ),
+        _row(
+            "pipe.bare_name_stage.expand_source.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
+        ),
+        _row(
+            "pipe.bare_name_stage.expand_source.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source",
+        ),
+        _row(
+            "pipe.bare_name_stage.lint_fix.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds",
+        ),
+        # chelis#1791 half B: `check_expand_signature` matches the operand's
+        # type before applying the size rule and its unresolved-operand arm
+        # returns early, so in pipe position the rule was dropped and a
+        # sourceless size reached the lowerer. The fold above repairs it
+        # without touching that rule, because after the fold the operand is
+        # resolved. One row, not a lane pair: this is a checker verdict, and
+        # no lane varies once check rejects.
+        _row(
+            "expand.sourceless_size.pipe_position",
+            "nonconforming_rejection",
+            "rejects_exactly",
+            "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+        ),
+        # chelis#1788. One signature spelling `seq` on two parameter axes. In
+        # the split-kernel tuple form each tensor leaf is lowered from its own
+        # subexpression, so no DAG on this lane ever saw the binder twice: C
+        # exited zero printing both outputs while eval refused, and eval refused
+        # with a private sentence rather than the [04-NUM-9] pair. The
+        # one-kernel twin already carried the correct rendering and is the lock
+        # that the fix reproduces it without double-guarding.
+        _row(
+            "entry.host_tuple.repeated_binder.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_c",
+        ),
+        _row(
+            "entry.host_tuple.repeated_binder.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval",
+        ),
+        _row(
+            "entry.kernel.repeated_binder.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
+        ),
+        _row(
+            "entry.kernel.repeated_binder.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes",
+        ),
+        # #1788 residual: host entry owns every signature obligation before
+        # body/helper execution. Eval already enforced these measured claims;
+        # C omitted mixed witnesses or reported a later unrelated failure.
+        # The enrolled target also checks literal/binder precedence, valid
+        # independent signatures, unused witnesses and argument/body effects.
+        _row(
+            "entry.host_helper.unused_witness.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.unused_witness.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses",
+        ),
+        _row(
+            "entry.host_helper.signature_order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.host_helper.signature_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.mixed_helpers_fail_in_signature_order",
+        ),
+        _row(
+            "entry.higher_order.invocation.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.higher_order.invocation.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim",
+        ),
+        _row(
+            "entry.inline_callback.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
+        _row(
+            "entry.inline_callback.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation",
+        ),
+        # chelis#1821: the gradient splice imported the forward activation and
+        # rooted it nowhere, so the entry-point DCE removed it together with the
+        # carrier holding its witness claims. The `live_forward` pair separates
+        # the case where the whole forward chain is dead from the case where the
+        # forward VALUES live and only the claim's carrier is unrooted; a repair
+        # that kept reachability alone would close the first and leave the
+        # second.
+        #
+        # The `wrt` ARGUMENT KIND is an axis of this corpus, enumerated from
+        # the SPEC's category rather than from what a round happened to find.
+        # Three rounds each found an unrecorded execution mode by varying that
+        # kind, so a list grown witness by witness is the wrong
+        # representation: `spec/04-type-system.md` lines 991-995 defines the
+        # category as a "differentiable target", and the kinds it admits are a
+        # float tensor of any rank, a float PRIM scalar, and an aggregate of
+        # those (tuple, record, nested record, and a record with a
+        # non-differentiable leaf). Each is crossed with single and multi
+        # target.
+        #
+        # The three kinds are measured to behave differently and none folds
+        # into another. A rank-0 `tensor[f32]` cotangent retains tensor
+        # identity while a float prim cotangent crosses the typed
+        # tensor-to-scalar boundary. The mixed-target receipt checks those
+        # distinct public types and their written order. Every aggregate
+        # spelling behaves identically, so one value covers all five of them.
+        #
+        # Every evaluator and generated-C cell retains the authored activation
+        # contract. The two primitive-scalar C rows use the existing DAG
+        # cotangent reconstruction route and are executable exit receipts.
+        #
+        # #1788 round-1 baseline e5cf8a51: eval enforces the lambda entry,
+        # while beta-reduced C skips its signature and unused actual effects.
+        _row(
+            "entry.beta.literal.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals",
+        ),
+        _row(
+            "entry.beta.order.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order",
+        ),
+        _row(
+            "entry.beta.scopes.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.scopes.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent",
+        ),
+        _row(
+            "entry.beta.actual.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
+        _row(
+            "entry.beta.actual.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry",
+        ),
+        # #1788 round-2 baseline 46bdc8a5: substituting a broader callable
+        # actual erased the narrower formal's invocation-entry contract on
+        # both host lanes. The three receipts separate one literal witness
+        # from transport through aliases/local callables/wrappers and from a
+        # multi-argument repeated binder. Each also checks eager argument
+        # evaluation and excludes body/later effects on failure.
+        _row(
+            "entry.indirect.literal.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.literal.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transport.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.transport.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
+        _row(
+            "entry.indirect.repeated_binder.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals",
+        ),
+        # #1788 round-3 baseline f77ef306: C's checked adapter retained the
+        # narrower formal boundary, but Eval attached that boundary only to a
+        # Closure. Direct and locally bound grad values are both Transform
+        # values; each receipt checks the failing length-three input and the
+        # agreeing length-two control with exact argument/later-effect counts.
+        _row(
+            "entry.indirect.transform.direct.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.direct.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "entry.indirect.transform.local.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary",
+        ),
+        _row(
+            "grad.wrt_tensor.single.dead_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_eval",
+        ),
+        _row(
+            "grad.wrt_tensor.single.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_c",
+        ),
+        _row(
+            "grad.wrt_tensor.single.live_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval",
+        ),
+        _row(
+            "grad.wrt_tensor.single.live_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c",
+        ),
+        # #1920/#1924: runtime transform lowering formerly used an inferred
+        # result binder in place of the authored result signature. Both
+        # interface witnesses existed, but no declared equality formed before
+        # AD/DCE. Passing authored signatures separately restores the same
+        # activation obligation for tensor and aggregate target selections.
+        # Historical baseline states and row identities remain unchanged.
+        _row(
+            "grad.wrt_tensor.multi.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_tensor.multi.dead_forward.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent",
+        ),
+        # #1932, recovered exactly from PR #1912 round 3. Vmap cloned each
+        # authored ConstTensor payload while prepending the batch dimension,
+        # so Eval panicked on cardinality and C reached a nonconforming
+        # constant trap before the entry witness. The one receipt hashes the
+        # 290-byte source, executes the refuted activation, and proves
+        # agreeing zero/nonzero cotangents plus direct-grad and no-witness
+        # controls through Eval and compiled C.
+        _row(
+            "grad.mapped.entry_witness.refuted.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_zero.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_zero.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_nonzero.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.agree_nonzero.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted_reordered.eval",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.mapped.entry_witness.refuted_reordered.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes",
+        ),
+        _row(
+            "grad.wrt_aggregate.single.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.single.dead_forward.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.multi.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        _row(
+            "grad.wrt_aggregate.multi.dead_forward.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent",
+        ),
+        # #1934: primitive-scalar cotangents use the existing typed DAG pack
+        # route, retaining the same forward claim and their scalar identity.
+        _row(
+            "grad.wrt_prim_scalar.single.dead_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        _row(
+            "grad.wrt_prim_scalar.single.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        # Multiple selections preserve complete cotangent groups in written
+        # order, including repeated targets and mixed scalar/tensor structures.
+        _row(
+            "grad.wrt_prim_scalar.multi.dead_forward.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        _row(
+            "grad.wrt_prim_scalar.multi.dead_forward.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c",
+        ),
+        # Main ecf213c18's exact tensor-target witnesses: agreeing independent
+        # calls passed eval but falsely joined `n` on C; ordered entry failure
+        # already named load on C but reached elementwise work on eval; the
+        # computed-only claim reached later elementwise failure on both lanes.
+        # The pre-v12 authored-signature draft also regressed the agreeing
+        # evaluator case. These rows retain main's states, not that draft's.
+        _row(
+            "grad.independent_calls.agree.eval",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.agree.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.entry_order.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.entry_order.c",
+            EXECUTES,
+            EXECUTES,
+            "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.computed_claim.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        ),
+        _row(
+            "grad.independent_calls.computed_claim.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c",
+        ),
+        # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
+        # rank-0 placeholder whose contract is to be refused so the definition
+        # routes to the host lane. chelis#1693's staged host-source partition
+        # runs ahead of the decision that reads that signal and cannot carry
+        # the marker, so both lanes rejected a program that checks at 1.0.
+        _row(
+            "staged.dynamic_to_tensor.vmap_column.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
+        ),
+        _row(
+            "staged.dynamic_to_tensor.vmap_column.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
+        ),
+        # chelis#2608 and chelis#1900: a named host result claim reads its
+        # binder's first tensor-parameter witness, and a literal claim on an
+        # unwitnessed wildcard pass-through keeps its token. Both executed
+        # the wrong extent at exit 0 on `7807ca4ff`.
+        _row(
+            "claim.named.host_result.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.named.host_result.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.unwitnessed_pass_through.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.unwitnessed_pass_through.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes",
+        ),
+        # chelis#2598: a tensor a list combinator returns, or nests in its
+        # result, has that combinator as its producer. At base a projected
+        # element ended in an internal provenance error or an abort.
+        _row(
+            "claim.combinator_result.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator",
+        ),
+        _row(
+            "claim.combinator_result.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator",
+        ),
+        # chelis#2512: a pass-through axis restamped under another binder is
+        # guarded by the restamping operation. At base the lanes failed
+        # untyped, differently, at the later consumer.
+        _row(
+            "claim.restamped_axis.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        ),
+        _row(
+            "claim.restamped_axis.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation",
+        ),
+        # Independent named binders retain separate C declarations per scope.
+        _row(
+            "entry.merged_scopes.declaration.c",
+            "silent_unguarded",
+            EXECUTES,
+            "exec_c.issue_1788_two_scopes_in_one_function_share_one_declaration",
         ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
@@ -694,328 +2892,206 @@ def corpus_digest(rows: Sequence[CorpusRow], phase: str) -> str:
     return hashlib.sha256(canonical_corpus_bytes(rows, phase)).hexdigest()
 
 
-def _capacity_tests() -> tuple[str, ...]:
-    return (
-        "a_typed_permanent_disposition_cannot_move_between_families",
-        "adding_or_removing_a_public_serialized_f64_field_changes_the_census",
-        "capacity_census_authority::tests::duplicate_numeric_registration_is_not_one_authority",
-        "capacity_census_authority::tests::each_exact_final_class_is_recognized",
-        "capacity_census_authority::tests::nonnumeric_registration_cannot_hide_numeric_flags",
-        "capacity_census_authority::tests::numeric_registration_requires_exact_normative_atom_and_anchor",
-        "capacity_census_authority::tests::tagged_transport_registration_is_exact_in_every_descriptor_field",
-        "capacity_census_authority::tests::zero_or_multiple_final_classes_fail",
-        "count_wire_axes_are_registered_without_inheriting_the_permanent_disposition",
-        "managed_python::tests::absent_configuration_uses_checkout_venv",
-        "managed_python::tests::existing_non_python_configuration_is_rejected",
-        "managed_python::tests::external_configured_interpreter_wins",
-        "managed_python::tests::invalid_explicit_configuration_does_not_fall_back",
-        "managed_python::tests::missing_fallback_diagnostic_names_path_and_uv_setup",
-        "managed_python::tests::relative_configured_interpreter_resolves_from_workspace",
-        "permanent_wire_disposition_is_bound_to_the_complete_descriptor_set",
-        "wire_schema_numeric_fields_match_the_reviewed_baseline",
+def render_baseline(spec: PhaseSpec) -> str:
+    """The exact bytes one phase's checked baseline file must hold.
+
+    The baseline is derived data: every field comes from the reviewed
+    ``generated_phase_<p>_corpus()``. Writing it by hand is how chelis#1588
+    and chelis#1742 both started, so ``--write-baseline`` renders it and a
+    self-test asserts the checked files are byte-identical to this rendering.
+    The digest is never typed; it is always ``corpus_digest``'s answer for
+    the corpus the writer is serializing.
+    """
+
+    payload = {
+        "schema_version": 1,
+        "corpus_sha256": corpus_digest(spec.corpus, spec.phase),
+        "rows": [
+            {
+                "id": row.id,
+                "baseline": row.baseline,
+                f"phase_{spec.phase}": row.exit_state,
+                "receipt": row.receipt,
+            }
+            for row in spec.corpus
+        ],
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def write_baseline(phase: str, registry: Mapping[str, PhaseSpec] | None = None) -> Path:
+    """Rewrite one phase's checked baseline from its generated corpus.
+
+    This regenerates derived data after a reviewed corpus edit. It is not a
+    way to silence a digest-drift failure: the reviewed source is the corpus
+    in this file, and phase A's digest stays pinned by
+    ``FROZEN_PHASE_A_DIGEST`` in the self-test suite, which this writer
+    cannot move.
+    """
+
+    active = PHASE_REGISTRY if registry is None else registry
+    spec = active.get(phase)
+    if spec is None:
+        raise OracleFailure(f"phase {phase!r} has no registered corpus to write")
+    spec.baseline_path.write_text(render_baseline(spec))
+    return spec.baseline_path
+
+
+_SELECTOR_MODES = ("all", "substring", "exact")
+_TARGET_KINDS = ("test", "lib")
+_ROW_REQUIRED = {"phase", "id", "package", "kind", "file", "selector", "expected"}
+_ROW_OPTIONAL = {"list_only", "note"}
+
+
+def load_target_manifest(path: Path | None = None) -> tuple[Mapping[str, object], ...]:
+    """Read and structurally validate the reviewed test-target manifest.
+
+    The manifest holds one row per cargo target the oracle runs: which test
+    binary it selects, how it selects, and the exact set of per-test receipts
+    that selection must produce. Two independent readers enforce it. This one
+    turns each row into the command the oracle executes, so the command and
+    the expectation cannot disagree. The other is
+    ``crates/chelis-types/tests/runtime_extent_target_manifest.rs``, which
+    parses the named sources and fails ``--fast`` when a rename, an addition
+    under a substring selector, or a new ``#[ignore]`` moves a row's real
+    inventory away from ``expected``. Before chelis#1742 the expectations were
+    Python tuples that only this oracle read, and two merges drifted them.
+    """
+
+    manifest_path = TARGETS_PATH if path is None else path
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise OracleFailure(f"cannot read target manifest {manifest_path}: {error}") from error
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "targets"}:
+        raise OracleFailure("target manifest must contain exactly schema_version and targets")
+    if payload["schema_version"] != 1:
+        raise OracleFailure(f"unsupported target manifest schema {payload['schema_version']!r}")
+    rows = payload["targets"]
+    if not isinstance(rows, list) or not rows:
+        raise OracleFailure("target manifest must hold a non-empty targets list")
+    seen: set[tuple[str, str]] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise OracleFailure(f"target manifest row {index} is not an object")
+        keys = set(row)
+        if not _ROW_REQUIRED <= keys or not keys <= _ROW_REQUIRED | _ROW_OPTIONAL:
+            raise OracleFailure(f"target manifest row {index} has the wrong fields: {sorted(keys)}")
+        if row["phase"] not in PHASES:
+            raise OracleFailure(f"target manifest row {index} names unknown phase {row['phase']!r}")
+        if row["kind"] not in _TARGET_KINDS:
+            raise OracleFailure(f"target manifest row {index} has unknown kind {row['kind']!r}")
+        identity = (row["phase"], row["id"])
+        if identity in seen:
+            raise OracleFailure(f"target manifest repeats target {identity[1]!r} in phase {identity[0]!r}")
+        seen.add(identity)
+        selector = row["selector"]
+        if not isinstance(selector, dict) or selector.get("mode") not in _SELECTOR_MODES:
+            raise OracleFailure(f"target {row['id']!r} has an unknown selector {selector!r}")
+        if selector["mode"] == "substring":
+            if set(selector) != {"mode", "value"} or not isinstance(selector["value"], str):
+                raise OracleFailure(f"target {row['id']!r} needs one substring selector value")
+        elif set(selector) != {"mode"}:
+            raise OracleFailure(f"target {row['id']!r} carries an unused selector value")
+        expected = row["expected"]
+        if (
+            not isinstance(expected, list)
+            or not expected
+            or not all(isinstance(name, str) for name in expected)
+        ):
+            raise OracleFailure(f"target {row['id']!r} must name at least one expected test")
+        if sorted(expected) != list(expected) or len(set(expected)) != len(expected):
+            raise OracleFailure(f"target {row['id']!r} expected tests must be sorted and unique")
+        source = row["file"]
+        if not isinstance(source, str) or not source.startswith(f"crates/{row['package']}/"):
+            raise OracleFailure(f"target {row['id']!r} file must live under its own package")
+        if not (REPO_ROOT / source).is_file():
+            raise OracleFailure(f"target {row['id']!r} names a missing source file {source!r}")
+        if row.get("list_only") and selector["mode"] != "substring":
+            # `--ignored --list` names its tests with one filter, so
+            # `target_argv` reads `selector["value"]` for a listed row.
+            # Without this the loader admits the row and the command builder
+            # dies on a bare KeyError instead of a named failure.
+            raise OracleFailure(
+                f"target {row['id']!r} is listed, which needs a substring selector"
+            )
+        if row["kind"] == "test" and f"crates/{row['package']}/tests/" not in source:
+            raise OracleFailure(f"target {row['id']!r} is an integration target outside tests/")
+    return tuple(rows)
+
+
+def target_argv(row: Mapping[str, object]) -> tuple[str, ...]:
+    """The exact cargo command one manifest row selects.
+
+    An ``exact`` row's names go AFTER ``--``, where the harness takes any
+    number of filters. Cargo itself accepts a single ``[TESTNAME]``
+    positional, so a multi-name row placed before ``--`` is rejected outright
+    with "unexpected argument" and the target never runs. A ``substring``
+    row's one value stays before ``--``, which is the form its command has
+    always had.
+    """
+
+    selector = row["selector"]
+    mode = selector["mode"]
+    target_selection = (
+        ["--test", Path(row["file"]).stem] if row["kind"] == "test" else ["--lib"]
+    )
+    head = ["cargo", "test", "-p", row["package"], *target_selection]
+    if row.get("list_only"):
+        tail = [selector["value"], "--", "--ignored", "--list"]
+    elif mode == "exact":
+        tail = ["--", "--exact", "--nocapture", *row["expected"]]
+    elif mode == "substring":
+        tail = [selector["value"], "--", "--nocapture"]
+    else:
+        tail = ["--", "--nocapture"]
+    return tuple([*head, *tail])
+
+
+def manifest_targets(
+    phase: str, rows: Sequence[Mapping[str, object]] | None = None
+) -> tuple[TestTarget, ...]:
+    manifest = load_target_manifest() if rows is None else tuple(rows)
+    selected = tuple(row for row in manifest if row["phase"] == phase)
+    if not selected:
+        raise OracleFailure(f"target manifest registers no target for phase {phase!r}")
+    return tuple(
+        TestTarget(
+            id=str(row["id"]),
+            argv=target_argv(row),
+            expected_tests=tuple(row["expected"]),
+            list_only=bool(row.get("list_only", False)),
+        )
+        for row in selected
     )
 
 
 def self_test_target(python: str = sys.executable) -> TestTarget:
-    """The oracle's own unit suite. Shared by every phase, so run once."""
+    """The oracle's own unit suite. Shared by every phase, so run once.
+
+    It declares no expected tests, so it is the one target the manifest does
+    not own: ``validate_target_receipt`` checks only its exit status, and
+    there is no per-test expectation that could drift.
+    """
 
     return TestTarget("self_tests", (python, "scripts/test_runtime_extent_oracle.py"))
 
 
 def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
-    return (
-        self_test_target(python),
-        TestTarget(
-            "ir",
-            ("cargo", "test", "-p", "chelis-ir", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
-            (
-                "input_axis_eval_does_not_read_tensor_elements",
-                "input_axis_expand_verifies_and_evaluates_from_shape_metadata",
-                "input_axis_owner_and_slot_validation_fail_closed",
-                "input_axis_vmap_shifts_literal_axis",
-                "movement_ops_reject_unowned_runtime_extent_inputs",
-                "node_expand_verifies_and_evaluates_from_int64_scalar_input",
-                "vmap_keeps_shape_bound_shared_and_shifts_its_axis",
-                "vmap_rejects_element_derived_extent",
-                "vmap_shares_shape_extent_across_bound_and_ordinary_uses",
-                "zero_literal_expand_is_valid_and_empty",
-            ),
-        ),
-        TestTarget(
-            "host_actualization",
-            (
-                "cargo",
-                "test",
-                "-p",
-                "chelis-ir",
-                "--lib",
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-                "--",
-                "--exact",
-                "--nocapture",
-            ),
-            (
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-            ),
-        ),
-        TestTarget(
-            "cli",
-            ("cargo", "test", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
-            # `insert_def_body_wrong_rank_names_the_callee` is NOT a receipt
-            # for any phase-a row. The row it sits beside,
-            # `expand.rank_ascription`, asserts that a wrong-rank ascription is
-            # refused, which `shape_sourced_insert_rejects_wrong_rank_ascription`
-            # proves; the def-body test asserts something else, that on the
-            # route where a declared result reaches the call as an expected
-            # result the diagnostic names the callee, and it pins chelis#1277
-            # S2a's own seed extension. It is listed only because this target
-            # runs the whole file and the receipt check requires the observed
-            # test set to EQUAL the expected one.
-            (
-                "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
-                "insert_def_body_wrong_rank_names_the_callee",
-                "negative_extent_remains_a_static_type_error",
-                "shape_sourced_insert_rejects_wrong_rank_ascription",
-                "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
-                "vmap_accepts_shape_and_shared_scalar_extent_sources",
-                "vmap_rejects_element_derived_extent_at_public_checker",
-                "vmap_rejects_helper_result_derived_from_tensor_elements",
-                "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
-                "zero_extent_is_check_clean_and_evaluates_to_empty_tensor",
-            ),
-        ),
-        TestTarget(
-            "runtime_negative",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "issue_616_runtime_reshape_c_parity",
-                "issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",
-                "--", "--exact", "--nocapture",
-            ),
-            ("issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",),
-        ),
-        TestTarget(
-            "rank_poly",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test", "rank_poly_tier3",
-                "issue_383_vmap_two_stage_named_reduce_regression_matrix", "--", "--exact", "--nocapture",
-            ),
-            ("issue_383_vmap_two_stage_named_reduce_regression_matrix",),
-        ),
-        TestTarget(
-            "symbolic_window",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "issue_368_grad_concat_windows",
-                "issue_368_runtime_symbolic_window_grad_is_half_everywhere",
-                "--", "--exact", "--nocapture",
-            ),
-            ("issue_368_runtime_symbolic_window_grad_is_half_everywhere",),
-        ),
-        TestTarget(
-            "wire",
-            ("cargo", "test", "-p", "chelis-compiler-api", "--test", "wire_dag_v7_runtime_extents", "--", "--nocapture"),
-            (
-                "v6_display_string_expand_payload_is_rejected_before_op_decode",
-                "v7_expand_rejects_forbidden_carriers_slots_and_cardinality",
-                "v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners",
-                "v7_input_axis_round_trips_as_typed_structure",
-                "v7_movement_ops_reject_unowned_runtime_extent_inputs",
-                "v7_node_extent_round_trips_only_from_rank_zero_int64",
-                "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start",
-            ),
-        ),
-        TestTarget(
-            "wire_capacity",
-            ("cargo", "test", "-p", "chelis-compiler-api", "--test", "capacity_census_wire", "--", "--nocapture"),
-            _capacity_tests(),
-        ),
-        TestTarget(
-            "hip_codegen",
-            (
-                "cargo", "test", "-p", "chelis-backend-hip", "--test", "codegen_structure",
-                "s5_input_axis_expand_reads_witness_metadata", "--", "--exact", "--nocapture",
-            ),
-            ("s5_input_axis_expand_reads_witness_metadata",),
-        ),
-        TestTarget(
-            "hip_accept",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::tests::hip_seam_accepts_input_axis_expand_extent", "--", "--exact", "--nocapture",
-            ),
-            ("compiler::tests::hip_seam_accepts_input_axis_expand_extent",),
-        ),
-        TestTarget(
-            "hip_reject",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt",),
-        ),
-        TestTarget(
-            "metal_accept",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent",),
-        ),
-        TestTarget(
-            "metal_reject",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt",),
-        ),
-        TestTarget(
-            "hip_manual_inventory",
-            (
-                "cargo", "test", "-p", "chelis-backend-hip", "--test", "gpu_correctness",
-                "g5_", "--", "--ignored", "--list",
-            ),
-            (
-                "g5_expand_add_stride_zero",
-                "g5_input_axis_expand_executes_from_witness_metadata",
-            ),
-            list_only=True,
-        ),
-    )
+    return (self_test_target(python), *manifest_targets("a"))
 
 
 def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
-    return (
-        self_test_target(python),
-        TestTarget(
-            "ir_sources",
-            (
-                "cargo", "test", "-p", "chelis-ir", "--test",
-                "runtime_extent_slice_b_sources", "--", "--nocapture",
-            ),
-            (
-                "every_risc_op_yields_exactly_one_source_per_output_axis",
-                "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
-                "expand_insert_maps_later_output_axes_to_input_minus_one",
-                "external_axis_names_the_exact_load_not_a_string_match",
-                "full_axis_symbolic_shrink_is_op_computed_not_pass_through",
-                "identity_stride_one_and_zero_pad_pass_the_input_axis_through",
-                "input_axis_and_scalar_input_sources_validate_their_slots",
-                "omitted_or_duplicated_output_axis_source_fails_before_emission",
-                "op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
-                "reduction_and_count_shift_kept_output_axes_back_to_their_input_axis",
-                "to_end_shrink_end_requires_a_literal_zero_start",
-                "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice",
-            ),
-        ),
-        # `runtime_extent_slice_b_classes.rs` locks the DERIVATION rather than
-        # any lane's output, and it is where C5 property 7's rebuild-survival
-        # property is expressible at all: the derivation is a `chelis-ir`
-        # entry point and `chelis-cli` has no `chelis-ir` dependency to call
-        # it before and after a pass. The row's receipt therefore carries an
-        # `ir_classes.` prefix. Named with `--exact` rather than run whole,
-        # for the reason `exec_c` below gives: the receipt check requires the
-        # observed test set to EQUAL the expected one, and that file holds
-        # thirty-odd derivation tests this phase's oracle does not own.
-        TestTarget(
-            "ir_classes",
-            (
-                "cargo", "test", "-p", "chelis-ir", "--test",
-                "runtime_extent_slice_b_classes", "--", "--nocapture", "--exact",
-                "every_rebuild_pass_preserves_the_derived_classes",
-            ),
-            ("every_rebuild_pass_preserves_the_derived_classes",),
-        ),
-        TestTarget(
-            "cli_slice_b",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "runtime_extent_slice_b", "--", "--nocapture",
-            ),
-            (
-                "a_class_with_no_movement_bound_consumer_still_guards_on_c",
-                "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
-                "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
-                "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
-                "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
-                "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
-                "a_local_unit_extent_claim_traps_at_its_operation_on_c",
-                "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
-                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
-                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
-                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
-                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
-                "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
-                "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
-                "a_zero_positional_replacement_declares_an_empty_axis_on_c",
-                "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
-                "an_earlier_trap_preempts_the_extent_guard_on_eval",
-                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
-                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
-                "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
-                "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
-                "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
-                "c_independent_trap_after_a_mismatch_loses",
-                "c_independent_trap_before_a_mismatch_wins",
-                "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
-                "issue_597_positional_same_rank_replacement_executes_on_c",
-                "load_load_named_class_guards_every_non_canonical_member_on_eval",
-                "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
-                "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
-                "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
-                "two_classes_sharing_one_node_keep_separate_guards_on_c",
-                "two_classes_sharing_one_node_keep_separate_guards_on_eval",
-                "two_expands_over_one_operand_axis_share_one_guard",
-            ),
-        ),
-        # A CLI-rooted program is not the exported kernel: `def main() =
-        # f(...)` over literal tensors inlines the def, every extent becomes a
-        # literal, and the classes disappear, so guard placement and rendering
-        # on C are proved by DRIVEN rows that compile the exported kernel and
-        # call it with runtime inputs. This target is where those rows live.
-        # `exec_compile` is a large shared binary, so this target names its
-        # four rows with `--exact` rather than running the whole file: the
-        # receipt check requires the observed set to EQUAL the expected one,
-        # and an unfiltered run would tie this phase's oracle to every
-        # unrelated numeric row in that file.
-        TestTarget(
-            "exec_c",
-            (
-                "cargo", "test", "-p", "chelis-backend-c", "--test",
-                "exec_compile", "--", "--nocapture", "--exact",
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
-                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
-                "an_all_interface_class_runs_when_its_witnesses_agree",
-                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
-                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
-            ),
-            (
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
-                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
-                "an_all_interface_class_runs_when_its_witnesses_agree",
-                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
-                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
-            ),
-        ),
-    )
+    return (self_test_target(python), *manifest_targets("b"))
+
+
+PHASE_B_DEFERRED: Mapping[str, str] = {}
 
 
 PHASE_A_DEFERRED: Mapping[str, str] = {
     "expand.input_axis.metal_device": (
         "runtime_extents.md C2.5: no Metal device-path expand row executes until "
         "chelis#1383 lands expand emission and symbolic-dim Load support"
-    ),
-    "vmap.shared_shape_bound.concrete_c_emit": (
-        "runtime_extents.md C2.7: the guard this row waits on is Slice B's, so "
-        "Slice A records it at its main baseline"
     ),
 }
 
@@ -1033,7 +3109,7 @@ PHASE_REGISTRY: Mapping[str, PhaseSpec] = {
         corpus=generated_phase_b_corpus(),
         baseline_path=BASELINE_PATH_PHASE_B,
         targets=phase_b_targets,
-        deferred={},
+        deferred=PHASE_B_DEFERRED,
     ),
 }
 
@@ -1219,6 +3295,23 @@ def validate_target_receipt(target: TestTarget, completed: subprocess.CompletedP
         )
 
 
+def validate_deferral_keys(spec: PhaseSpec) -> None:
+    """Every `deferred` key names a row of the phase it defers.
+
+    A key with no row defers nothing and reads as though it did, so a typo
+    would hide a real shortfall rather than record it. Round 2 of chelis#1912
+    found this unchecked for both phases; it costs one set difference.
+    """
+
+    ids = {row.id for row in spec.corpus}
+    orphans = sorted(set(spec.deferred) - ids)
+    if orphans:
+        raise SystemExit(
+            f"phase {spec.phase!r} defers row ids that its corpus does not "
+            f"contain, so they defer nothing: {', '.join(orphans)}"
+        )
+
+
 def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestTarget]) -> None:
     available = {
         f"{target.id}.{test}"
@@ -1228,6 +3321,546 @@ def validate_receipt_coverage(rows: Sequence[CorpusRow], targets: Sequence[TestT
     missing = sorted({row.receipt for row in rows} - available)
     if missing:
         raise OracleFailure(f"corpus rows have no executable receipt: {missing}")
+
+
+_CLAIM_BARRIER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/axis_sources.rs"
+_CLAIM_BARRIER_ALL_PRODUCER_CLAIMS = """\
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+"""
+_CLAIM_BARRIER_LITERAL_AND_LOCAL = """\
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+"""
+_CLAIM_BARRIER_NAMED_AND_LITERAL = """\
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim,
+"""
+_SPECIALIZER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/specialize.rs"
+_BLAS_REGION_BARRIER = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_producers,
+                info.replaced_region(node.id),
+            )
+"""
+_BLAS_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+"""
+_DENSE_GATHER_REGION_BARRIER = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(&claimed_producers, info.replaced_region(node.id))
+        {
+"""
+_DENSE_GATHER_REGION_BARRIER_REMOVED = """\
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+"""
+_LOCAL_ASCRIPTION_PROVENANCE_SOURCE = REPO_ROOT / "crates/chelis-surf/src/desugar.rs"
+_LOCAL_ASCRIPTION_PROVENANCE = """\
+                        let value = with_metadata_value(
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
+                            M::SurfBindingType(Spanned::new(
+                                BindingTypeOrigin::Explicit,
+                                type_expr_span(ty),
+                            )),
+                        );
+"""
+_LOCAL_ASCRIPTION_PROVENANCE_REMOVED = """\
+                        let value = with_metadata_value(
+                            inject_type_metadata(value, self.desugar_body_annotation_type(ty)),
+                            M::SurfBindingType(Spanned::new(
+                                BindingTypeOrigin::Inferred,
+                                type_expr_span(ty),
+                            )),
+                        );
+"""
+_LOCAL_ASCRIPTION_CHECKER_SOURCE = REPO_ROOT / "crates/chelis-types/src/infer/checked.rs"
+_LOCAL_ASCRIPTION_CHECKER_TRANSPORT = """\
+        local_tensor_ascriptions: product.local_tensor_ascriptions.clone(),
+"""
+_LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED = """\
+        local_tensor_ascriptions: Vec::new(),
+"""
+_LOCAL_ASCRIPTION_LOWER_SOURCE = REPO_ROOT / "crates/chelis-ir/src/lower.rs"
+_LOCAL_ASCRIPTION_LIBRARY_CARRIER = """\
+        local_tensor_ascriptions: program.local_tensor_ascriptions().to_vec(),
+"""
+_LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED = """\
+        local_tensor_ascriptions: Vec::new(),
+"""
+_LOCAL_ASCRIPTION_CONTEXT_COMPOSITION = """\
+    ctx.local_tensor_ascriptions = Arc::new(local_tensor_ascriptions);
+"""
+_LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED = """\
+    ctx.local_tensor_ascriptions =
+        Arc::new(new_program.local_tensor_ascriptions().to_vec());
+"""
+_LOCAL_ASCRIPTION_ATTACHMENT = """\
+                                self.dag.add_shape_dep(owner, *token);
+"""
+_LOCAL_ASCRIPTION_ATTACHMENT_REMOVED = """\
+                                // Controlled mutation: omit initializer ownership.
+"""
+_LOCAL_ASCRIPTION_EVAL_SOURCE = REPO_ROOT / "crates/chelis-ir/src/eval.rs"
+_LOCAL_ASCRIPTION_EVAL_OBSERVATION = """\
+    if observed != claimed {
+        return Err(format!(
+            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\\n\\
+             numeric trap: domain in {} at i64",
+            claim.claim, claim.op, claim.op,
+        ));
+    }
+"""
+_LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED = """\
+    let _ = (axis, claim, observed, claimed);
+"""
+_LOCAL_ASCRIPTION_C_SOURCE = REPO_ROOT / "crates/chelis-backend-c/src/emit.rs"
+_LOCAL_ASCRIPTION_C_OBSERVATION = """\
+        self.emit_local_dim_guards_matching(id, extents, false);
+"""
+_LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED = """\
+        // Controlled mutation: omit producer-owned local guards.
+"""
+_LOCAL_ASCRIPTION_ARTIFACT_SOURCE = REPO_ROOT / "crates/chelis-compiler-api/src/compiler.rs"
+_LOCAL_ASCRIPTION_ARTIFACT_CONVERSION = """\
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id,
+                    binding,
+                    claim,
+                    axis: chelis_ir::dag::RtAxis::Lit(axis),
+                } => WireExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: *ascription_id,
+                    binding: binding.clone(),
+                    claim: claim.clone(),
+                    axis: WireRtAxis::Lit { value: *axis },
+                },
+"""
+_LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED = """\
+                chelis_ir::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => {
+                    WireExtentWitnessSite::LiteralResultClaim
+                }
+"""
+
+
+def _replace_unique_mutation(
+    source: str,
+    anchor: str,
+    replacement: str,
+    label: str,
+) -> str:
+    if source.count(anchor) != 1:
+        raise OracleFailure(f"{label} mutation anchor is missing or ambiguous")
+    return source.replace(anchor, replacement, 1)
+
+
+def remove_named_claim_from_producer_barrier(source: str) -> str:
+    """Controlled mutation: omit named result claims from the central barrier."""
+
+    return _replace_unique_mutation(
+        source,
+        _CLAIM_BARRIER_ALL_PRODUCER_CLAIMS,
+        _CLAIM_BARRIER_LITERAL_AND_LOCAL,
+        "claimed-producer barrier",
+    )
+
+
+def remove_local_claim_from_producer_barrier(source: str) -> str:
+    """Controlled mutation: omit local ascriptions from every rewrite barrier."""
+
+    return _replace_unique_mutation(
+        source,
+        _CLAIM_BARRIER_ALL_PRODUCER_CLAIMS,
+        _CLAIM_BARRIER_NAMED_AND_LITERAL,
+        "local-ascription producer barrier",
+    )
+
+
+def remove_local_ascription_provenance(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_PROVENANCE,
+        _LOCAL_ASCRIPTION_PROVENANCE_REMOVED,
+        "local-ascription provenance",
+    )
+
+
+def remove_local_ascription_checker_transport(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_CHECKER_TRANSPORT,
+        _LOCAL_ASCRIPTION_CHECKER_TRANSPORT_REMOVED,
+        "local-ascription checker transport",
+    )
+
+
+def remove_local_ascription_library_carrier(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_LIBRARY_CARRIER,
+        _LOCAL_ASCRIPTION_LIBRARY_CARRIER_REMOVED,
+        "local-ascription lowered-library carrier",
+    )
+
+
+def remove_local_ascription_context_composition(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION,
+        _LOCAL_ASCRIPTION_CONTEXT_COMPOSITION_REMOVED,
+        "local-ascription contextual composition",
+    )
+
+
+def remove_local_ascription_attachment(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_ATTACHMENT,
+        _LOCAL_ASCRIPTION_ATTACHMENT_REMOVED,
+        "local-ascription lower-let attachment",
+    )
+
+
+def remove_local_ascription_eval_observation(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_EVAL_OBSERVATION,
+        _LOCAL_ASCRIPTION_EVAL_OBSERVATION_REMOVED,
+        "local-ascription Eval observation",
+    )
+
+
+def remove_local_ascription_c_observation(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_C_OBSERVATION,
+        _LOCAL_ASCRIPTION_C_OBSERVATION_REMOVED,
+        "local-ascription C observation",
+    )
+
+
+def remove_local_ascription_artifact_conversion(source: str) -> str:
+    return _replace_unique_mutation(
+        source,
+        _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION,
+        _LOCAL_ASCRIPTION_ARTIFACT_CONVERSION_REMOVED,
+        "local-ascription artifact conversion",
+    )
+
+
+def validate_claimed_producer_barrier_mutation(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B detects a named-claim omission in the central barrier."""
+
+    original = _CLAIM_BARRIER_SOURCE.read_text()
+    mutated = remove_named_claim_from_producer_barrier(original)
+    command = (
+        "cargo",
+        "test",
+        "-p",
+        "chelis-ir",
+        "--test",
+        "issue_1948_same_shape_result_claim_sources",
+        "named_result_claim_traps_after_specialization_and_dce",
+        "--",
+        "--exact",
+        "--nocapture",
+    )
+    try:
+        _CLAIM_BARRIER_SOURCE.write_text(mutated)
+        completed = _run_text(runner, command)
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            raise OracleFailure(
+                "claimed-producer barrier mutation escaped the specialization receipt"
+            )
+        if "specialization must not eliminate a named claimed producer" not in output:
+            raise OracleFailure(
+                "claimed-producer barrier mutation failed for an unrelated reason"
+            )
+    finally:
+        _CLAIM_BARRIER_SOURCE.write_text(original)
+    if _CLAIM_BARRIER_SOURCE.read_text() != original:
+        raise OracleFailure("claimed-producer barrier mutation did not restore its source")
+
+
+def remove_specializer_region_barrier(source: str, recognizer: str) -> str:
+    """Controlled mutation: let one recognizer bypass claimed producers."""
+
+    anchors = {
+        "blas": (_BLAS_REGION_BARRIER, _BLAS_REGION_BARRIER_REMOVED),
+        "dense_gather": (
+            _DENSE_GATHER_REGION_BARRIER,
+            _DENSE_GATHER_REGION_BARRIER_REMOVED,
+        ),
+    }
+    try:
+        anchor, replacement = anchors[recognizer]
+    except KeyError as error:
+        raise OracleFailure(
+            f"unknown specialization barrier mutation {recognizer!r}"
+        ) from error
+    if source.count(anchor) != 1:
+        raise OracleFailure(
+            f"{recognizer} specialization barrier mutation anchor is missing or ambiguous"
+        )
+    return source.replace(anchor, replacement, 1)
+
+
+def validate_specializer_region_barrier_mutations(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove Phase B covers both multi-node specialization recognizers."""
+
+    cases = (
+        (
+            "blas",
+            "blas_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+        (
+            "dense_gather",
+            "dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce",
+        ),
+    )
+    original = _SPECIALIZER_SOURCE.read_text()
+    for recognizer, test in cases:
+        command = (
+            "cargo",
+            "test",
+            "-p",
+            "chelis-ir",
+            "--test",
+            "issue_1948_same_shape_result_claim_sources",
+            test,
+            "--",
+            "--exact",
+            "--nocapture",
+        )
+        try:
+            _SPECIALIZER_SOURCE.write_text(
+                remove_specializer_region_barrier(original, recognizer)
+            )
+            completed = _run_text(runner, command)
+            output = f"{completed.stdout}\n{completed.stderr}"
+            if completed.returncode == 0:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation escaped its receipt"
+                )
+            if "a declined replacement must leave a valid executable graph" not in output:
+                raise OracleFailure(
+                    f"{recognizer} specialization barrier mutation failed for an unrelated reason"
+                )
+        finally:
+            _SPECIALIZER_SOURCE.write_text(original)
+        if _SPECIALIZER_SOURCE.read_text() != original:
+            raise OracleFailure(
+                f"{recognizer} specialization barrier mutation did not restore its source"
+            )
+
+
+def _validate_controlled_mutation(
+    *,
+    label: str,
+    source_path: Path,
+    mutate: Callable[[str], str],
+    command: tuple[str, ...],
+    expected_failure: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    original = source_path.read_text()
+    mutated = mutate(original)
+    try:
+        source_path.write_text(mutated)
+        completed = _run_text(runner, command)
+        output = f"{completed.stdout}\n{completed.stderr}"
+        if completed.returncode == 0:
+            raise OracleFailure(f"{label} mutation escaped its executable receipt")
+        if expected_failure not in output:
+            raise OracleFailure(f"{label} mutation failed for an unrelated reason")
+    finally:
+        source_path.write_text(original)
+    if source_path.read_text() != original:
+        raise OracleFailure(f"{label} mutation did not restore its source")
+
+
+def validate_local_ascription_layer_mutations(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Prove #2110 fails closed when any required transport layer is removed."""
+
+    cases = (
+        (
+            "local-ascription provenance",
+            _LOCAL_ASCRIPTION_PROVENANCE_SOURCE,
+            remove_local_ascription_provenance,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-surf",
+                "--test",
+                "issue_2110_local_ascription_provenance",
+                "explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "left: Inferred",
+        ),
+        (
+            "local-ascription checker transport",
+            _LOCAL_ASCRIPTION_CHECKER_SOURCE,
+            remove_local_ascription_checker_transport,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-types",
+                "--test",
+                "issue_2110_local_ascription_obligations",
+                "runtime_dependent_local_ascription_retains_exact_authored_claim",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "expected one local tensor ascription, got []",
+        ),
+        (
+            "local-ascription lower-let attachment",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_attachment,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "test lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer ... FAILED",
+        ),
+        (
+            "local-ascription lowered-library carrier",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_library_carrier,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--test",
+                "issue_2110_local_ascription_cache",
+                "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "the production lowered-library carrier must retain the checked obligations",
+        ),
+        (
+            "local-ascription contextual composition",
+            _LOCAL_ASCRIPTION_LOWER_SOURCE,
+            remove_local_ascription_context_composition,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--test",
+                "issue_2110_local_ascription_cache",
+                "contextual_lowering_carries_dependency_local_obligations_into_inlined_helpers",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "contextual helper inlining must use the checked dependency obligation",
+        ),
+        (
+            "local-ascription rebuild and liveness barrier",
+            _CLAIM_BARRIER_SOURCE,
+            remove_local_claim_from_producer_barrier,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-ir",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "fusion must retain one exact site",
+        ),
+        (
+            "local-ascription Eval observation",
+            _LOCAL_ASCRIPTION_EVAL_SOURCE,
+            remove_local_ascription_eval_observation,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "eval: local ascription must trap",
+        ),
+        (
+            "local-ascription C observation",
+            _LOCAL_ASCRIPTION_C_SOURCE,
+            remove_local_ascription_c_observation,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-cli",
+                "--test",
+                "issue_2110_local_ascription_claim",
+                "direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "c: local ascription must trap",
+        ),
+        (
+            "local-ascription artifact conversion",
+            _LOCAL_ASCRIPTION_ARTIFACT_SOURCE,
+            remove_local_ascription_artifact_conversion,
+            (
+                "cargo",
+                "test",
+                "-p",
+                "chelis-compiler-api",
+                "--lib",
+                "compiler::tests::native_wire_projection_preserves_live_local_ascription_claims",
+                "--",
+                "--exact",
+                "--nocapture",
+            ),
+            "native lowering projects the local claim into WireDag",
+        ),
+    )
+    for label, source_path, mutate, command, expected_failure in cases:
+        _validate_controlled_mutation(
+            label=label,
+            source_path=source_path,
+            mutate=mutate,
+            command=command,
+            expected_failure=expected_failure,
+            runner=runner,
+        )
 
 
 def _run_text(
@@ -1298,9 +3931,40 @@ def validate(
     registry: Mapping[str, PhaseSpec] | None = None,
     targets: Sequence[TestTarget] | None = None,
     require_clean: bool = True,
+    allow_shortfall: bool = False,
 ) -> tuple[str, str]:
+    """Run one phase's obligations and report.
+
+    ``allow_shortfall`` separates the two ways a phase can be red. Every
+    receipt, digest and lattice obligation still fails the run. Only the
+    recorded row shortfall, which is the tracker's published state rather
+    than a regression, is downgraded to a report: the run prints the head,
+    the corpus digests and the rows still short, ends with ``SHORT_MARKER``
+    instead of ``PASS_MARKER``, and returns zero. It is what lets a nightly
+    job enforce the receipts of a phase whose rows have not all landed;
+    without it the phase's real drift and its expected shortfall would be
+    the same red, which is the confusion chelis#1742 is about. Phase
+    ``final`` refuses the flag: the completion oracle may not excuse its
+    own short rows.
+
+    No registered phase records a shortfall today, so the nightly job passes
+    the flag nowhere and demands ``PASS`` from both phases. The flag stays
+    because the next phase to register a corpus starts with rows short of
+    exit, and because retiring it would retire the only difference between
+    a landing row and a drifted receipt; its behaviour is held by the
+    self-tests' synthetic short rows rather than by a live phase.
+    """
+
     if phase not in PHASES:
         raise OracleFailure(f"unsupported phase {phase!r}")
+    if phase == "final" and allow_shortfall:
+        # `final` is the class completion oracle. A completion claim that
+        # excuses its own short rows is not a completion claim, so the flag
+        # that lets a nightly hold a still-landing phase is refused here
+        # outright rather than quietly ignored.
+        raise OracleFailure(
+            "phase 'final' is the completion oracle and cannot allow a row shortfall"
+        )
 
     # The lattice binds the whole recorded chain on every invocation, so a
     # leftward move in a later phase fails an earlier phase's run too.
@@ -1308,6 +3972,7 @@ def validate(
 
     selected = selected_specs(phase, registry)
     for spec in selected:
+        validate_deferral_keys(spec)
         load_and_validate_baseline(spec)
 
     if targets is None:
@@ -1325,12 +3990,16 @@ def validate(
     for target in selected_targets:
         completed = _run_text(runner, target.argv)
         validate_target_receipt(target, completed)
+    if registry is None and targets is None and phase in ("b", "final"):
+        validate_claimed_producer_barrier_mutation(runner)
+        validate_specializer_region_barrier_mutations(runner)
+        validate_local_ascription_layer_mutations(runner)
 
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)
     ]
-    if shortfall:
-        listed = ", ".join(f"{p}:{row}" for p, row in shortfall)
+    listed = ", ".join(f"{p}:{row}" for p, row in shortfall)
+    if shortfall and not allow_shortfall:
         raise OracleFailure(
             f"phase {phase!r} has {len(shortfall)} row(s) short of an exit state: {listed}"
         )
@@ -1348,16 +4017,52 @@ def validate(
         )
     print(f"runtime_extent_corpus_sha256={digest}", flush=True)
     print(f"runtime_extent_hip_manual_gate={HIP_HARDWARE_COMMAND}", flush=True)
-    print(PASS_MARKER, flush=True)
+    if shortfall:
+        print(f"runtime_extent_rows_short={len(shortfall)}", flush=True)
+        print(f"runtime_extent_rows_short_list={listed}", flush=True)
+        print(SHORT_MARKER, flush=True)
+    else:
+        print(PASS_MARKER, flush=True)
     return head, digest
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Runtime-extent class oracle for chelis#1277. Phase A's wire "
+            "capacity leg executes the Python binding facade through the "
+            "interpreter PYO3_PYTHON names, falling back to the checkout's "
+            ".venv, NOT through the interpreter running this script. That "
+            "interpreter needs the facade's dependencies: uv pip install "
+            "--python <that interpreter> -r bindings/python/pyproject.toml. "
+            "Without them the leg fails with a ModuleNotFoundError that "
+            "reads like a census defect."
+        )
+    )
     parser.add_argument("--phase", required=True, choices=PHASES)
+    parser.add_argument(
+        "--allow-shortfall",
+        action="store_true",
+        help=(
+            "report a recorded row shortfall instead of failing on it, so a "
+            "job can enforce a phase's receipts while its rows are still "
+            "landing; every other obligation still fails the run"
+        ),
+    )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help=(
+            "rewrite the selected phase's checked baseline from its generated "
+            "corpus instead of validating, for use after a reviewed corpus edit"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        validate(args.phase)
+        if args.write_baseline:
+            print(f"wrote {write_baseline(args.phase)}", flush=True)
+            return 0
+        validate(args.phase, allow_shortfall=args.allow_shortfall)
     except OracleFailure as error:
         print(f"RUNTIME EXTENT ORACLE: FAIL: {error}", file=sys.stderr)
         return 1

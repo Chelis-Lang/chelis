@@ -37,7 +37,7 @@ fn assert_both(program: &[Expr], expected: Option<&str>, label: &str) {
 
 fn assert_surf(source: &str, expected: Option<&str>) {
     assert_both(
-        &desugar_program(&parse_str(source).expect("Surf")),
+        &desugar_program(&parse_str(source).expect("Surf")).expect("Surf fixture must desugar"),
         expected,
         source,
     );
@@ -49,13 +49,13 @@ fn assert_deep(source: &str, expected: &str, label: &str) {
 
 fn binder_program(bounds: &str, literal_meta: &str, literal: &str) -> String {
     format!(
-        "(defsig {{dtype_bounds: {{p: {bounds}}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
+        "(defsig {{dtype_bounds: {{p: {bounds}}}}} scale (p) (t-fn {{}} (t-var {{}} p) (t-var {{}} p)))\n\
          (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}}))\n\
            (cast {{}} (lit {{{literal_meta}type: (t-var {{}} p)}} {literal}) (t-var {{}} p))))\n"
     )
 }
 
-const FORGED_LOCAL_NEG: &str = "(defsig {dtype_bounds: {p: float}} scale (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
+const FORGED_LOCAL_NEG: &str = "(defsig {dtype_bounds: {p: float}} scale (p) (t-fn {} (t-fn {} (t-var {} p) (t-var {} p)) (t-var {} p) (t-var {} p)))\n\
      (def {} scale (fn {} (params {} (neg {type: (t-fn {} (t-var {} p) (t-var {} p))}) (x {type: (t-var {} p)}))\n\
        (cast {} (app {} (var {} neg) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n";
 
@@ -83,7 +83,7 @@ fn unbounded_binders_reject_every_literal_polarity_and_kind() {
         assert_surf(&source, Some("[04-DTYPE-1]"));
     }
     assert_surf(
-        "sig f: p -> p\ndef f(x) = cast(0.1, p)\n",
+        "sig f[p]: p -> p\ndef f(x) = cast(0.1, p)\n",
         Some("[04-DTYPE-1]"),
     );
 }
@@ -94,9 +94,11 @@ fn only_the_exact_adopting_relation_can_stamp_a_binder_literal() {
         "def f[p: Float](x: p) -> p = (0.1 : p)\n",
         Some("[04-INF-6]"),
     );
+    let malformed = binder_program("float", "surf_literal_style: 1, ", "0.1");
+    let error = parse_and_stamp_file(&malformed).expect_err("malformed marker rejects at ingress");
+    assert!(error.to_string().contains("surf_literal_style"));
     for (label, marker) in [
         ("explicit", "surf_literal_style: \"explicit\", "),
-        ("malformed", "surf_literal_style: 1, "),
         ("missing", ""),
     ] {
         assert_deep(&binder_program("float", marker, "0.1"), "[04-INF-6]", label);
@@ -113,11 +115,11 @@ fn adoption_does_not_cross_binders_or_computed_operands() {
     for (label, source) in [
         (
             "wrong binder",
-            "(defsig {dtype_bounds: {p: float, q: float}} f (t-fn {} (t-var {} p) (t-var {} q) (t-var {} q)))\n(def {} f (fn {} (params {} (x {type: (t-var {} p)}) (y {type: (t-var {} q)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} q))))\n",
+            "(defsig {dtype_bounds: {p: float, q: float}} f (p q) (t-fn {} (t-var {} p) (t-var {} q) (t-var {} q)))\n(def {} f (fn {} (params {} (x {type: (t-var {} p)}) (y {type: (t-var {} q)})) (cast {} (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1) (t-var {} q))))\n",
         ),
         (
             "computed operand",
-            "(defsig {dtype_bounds: {p: float}} f (t-fn {} (t-var {} p) (t-var {} p)))\n(def {} f (fn {} (params {} (x {type: (t-var {} p)})) (cast {} (app {} (var {} add) (var {} x) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
+            "(defsig {dtype_bounds: {p: float}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))\n(def {} f (fn {} (params {} (x {type: (t-var {} p)})) (cast {} (app {} (var {} add) (var {} x) (lit {surf_literal_style: \"unsuffixed\", type: (t-var {} p)} 0.1)) (t-var {} p))))\n",
         ),
     ] {
         assert_deep(source, "[04-INF-6]", label);
@@ -149,8 +151,12 @@ fn adopted_integer_literals_fit_every_family_member() {
             );
         }
     }
+    // [04-LIT-2]: a float literal adopted by a `Float` binder must also be
+    // finite at every member of the family. 65504 is f16's largest value; 1e10
+    // rounds to infinity there.
+    assert_surf("def f[p: Float](x: p) -> p = cast(65504.0, p)\n", None);
     assert_surf(
         "def f[p: Float](x: p) -> p = cast(10000000000.0, p)\n",
-        None,
+        Some("[04-LIT-2]"),
     );
 }

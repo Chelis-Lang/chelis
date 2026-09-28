@@ -250,7 +250,7 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 **Structured fitness score with per-property components.** The 0-1 fitness score is broken into components in the fitness JSON: dimension score, effect score, linearity score, differentiability score, syntax score. Agents see which property failed and focus repair on that specific issue. The aggregate score is still computed for RLVR reward; the components are exposed for agent introspection and trajectory analysis.
 
-**Reproducibility manifests.** `chelis manifest program.ch` extracts all `Random`-effect-annotated operations from the typed AST into a structured JSON report: which operations introduce randomness, which seed handlers cover them, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. Finance product feature for model validation teams. Full design: `chelis_reproducibility_manifests.md`.
+**Reproducibility manifests.** `chelis manifest program.ch` extracts every random draw from the typed AST into a structured JSON report: which operations draw, which key each consumes and the `key_from_seed` root it derives from, and whether the computation is fully reproducible. `chelis manifest --check` exits 0/1 for CI gating. Finance product feature for model validation teams. Full design: `chelis_reproducibility_manifests.md`.
 
 **Executable properties as spec (trust stack Level 2).** Properties are first-class Chelis functions annotated with `@property`. They define what "correct" means for the implementation they accompany. `chelis prove` discovers properties, generates type-directed random inputs, and verifies each property holds. Scalar interval/order guards additionally direct the generator into their declared machine-representable domain, with strict spacing computed at the binder dtype; unsupported, inconsistent, or unrepresentable scalar guard shapes fail closed, and machine records disclose accepted/attempted/rejected counts. Three categories: domain invariants (output bounds, conservation laws), spec correspondence (optimized impl matches simple reference impl), and behavioral constraints (monotonicity, continuity, symmetry). Properties are the primary artifact the customer interacts with for verification of AI-generated code. Generated code is not reviewed directly — properties are reviewed, and the toolchain enforces agreement. Full design: `chelis_trust_stack.md`.
 
@@ -258,7 +258,7 @@ stay in `chelis-std` because every domain needs dates and exact arithmetic.
 
 **Canonical references and properties co-located with domain shells.** Every domain shell that targets standard, well-defined models ships two co-located artifact directories: `references/` (simple, obviously-correct reference implementations) and `properties/` (invariants and `matches_reference` checks). These are not separate packages. Customers verify their own (or AI-generated) optimized implementations against the shell's references via `chelis prove`. Customers write their own references only for proprietary models. Convention applies to Shoals (finance), Octant (LaTeX bridge), and any future vertical shell. Full design: `chelis_reference_implementations_spec.md`.
 
-**Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with seed(n)` for Random (already used), `with_deterministic_random(sequence)` for exact output testing, `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
+**Effect-polymorphic test handlers.** Standardized pattern for replacing effects with test doubles: `with_mock_io(trace)` for IO, `with_cpu_fallback` for Resource(GPU). Randomness needs no handler: a test passes a fixed key such as `key_from_seed(n)`, or calls a randomized function's pure layer with chosen noise for exact output testing. The effect system guarantees substitution safety. Library functions in `Std.Test`, documented in SKILL.md.
 
 **Lazy list fusion (future compiler optimization).** The tensor DAG fuses elementwise tensor operations. The host lane (lists, strings) is eager and creates intermediate allocations for chained `map`/`filter`/`fold`. A future compiler pass could fuse host-lane list operation chains into single-pass traversals, eliminating intermediates. Same principle as tensor fusion, applied to the host lane. Low priority — becomes relevant when profiling shows list allocation as a bottleneck in Coral string columns or Hull AST processing.
 
@@ -381,6 +381,8 @@ Planned public-style target for Phase 3:
 - checked-program upgrade: downstream passes consume annotated Deep with type metadata
 - algebraic-effect boundary handling for `Random` and `Resource(Device)`
 - `with seed(...)` for seeded stochastic regions and `with device(...)` for resource regions
+  (explicit random keys later replaced `Random` and `with seed(...)`; see
+  `randomness_explicit_keys.md`)
 
 ### Phase 2 surface beyond the initial 2a subset
 
@@ -397,7 +399,7 @@ Shipped after the initial 2a subset:
 Designed but not yet shipped (the checker implements a bounded subset; see
 `spec/04-type-system.md` §7.1):
 
-- broader effect inference/checking beyond the initial `Random` / `Resource(Device)` subset
+- broader effect inference/checking beyond the initial `Resource(Device)` subset
 - `Diff` as a fully specified effect surface (it remains a compiler capability today)
 - `Accum` as a user-visible effect surface (it remains internal-only today)
 
@@ -482,12 +484,11 @@ helper.
 
 Current 2d performance boundary:
 
-- batched `matmul` is correct on both backends and specializes to runtime-sized BLAS when
-  the operands have contiguous trailing matrix slices
+- batched `matmul` is correct on both backends and specializes to runtime-sized BLAS
 - the C backend emits a host loop over `cblas_sgemm` for batched matmul; HIP defaults to
-  `hipblasSgemmStridedBatched` on uniformly strided batched layouts (Perf-F1, shipped)
-  and retains the per-batch hipBLAS helper loop only as a fallback for broadcasted
-  leading axes or otherwise non-uniform leading strides
+  typed `hipblasSgemmStridedBatched` after explicitly materializing BLAS operands into
+  owned contiguous device slots; the per-batch hipBLAS helper loop remains for forms
+  outside the strided plan, including symbolic matrix dimensions
 
 ---
 
@@ -503,7 +504,7 @@ The ~12 Tier 1 RISC primitives (`add`, `mul`, `exp`, etc.) are language-native b
 the compiler decomposes them, the AD engine has adjoint rules for them, and the C/HIP
 backends emit specialized code for them.
 The Tier 2 derived built-ins (`relu`, `sigmoid`, `softmax`, `matmul`, `layer_norm`,
-`conv2d`) are in the core because the compiler recognizes them by name and decomposes
+`conv`) are in the core because the compiler recognizes them by name and decomposes
 them to RISC primitives during IR lowering.
 The type checker knows their signatures.
 The optimizer can fuse them.
@@ -579,9 +580,10 @@ belongs in a library.
 ### Grey area: shipped Phase 2a effects vs later extensibility
 
 The shipped Phase 2a surface is intentionally closed and compiler-known:
-`Random`, `Accum`, `IO`, and `Resource(Device)` live in the type layer. `Random` and
-`Resource(Device)` are the Phase 2a boundary-checked effects; `IO` is the shipped Phase
-3 host-side debugging/logging effect.
+`Accum`, `IO`, `Test`, and `Resource(Device)` live in the type layer. `Resource(Device)`
+is the boundary-checked handler effect; `IO` is the shipped Phase
+3 host-side debugging/logging effect. Randomness is not an effect: random primitives are
+pure functions of explicit keys (`spec/05-risc-primitives.md` [05-RNG-1]).
 This is narrower than the longer-term design space.
 User-defined effects remain deferred; the current compiler knows both the effect
 mechanism and the concrete built-in effect vocabulary it ships.

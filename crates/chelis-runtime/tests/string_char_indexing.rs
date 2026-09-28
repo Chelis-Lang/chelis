@@ -22,16 +22,29 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::process::Command;
+use std::ptr;
 
 use chelis_runtime::{
-    chelis_string, chelis_string_data, chelis_string_from_cstr, chelis_string_len,
-    chelis_string_release, chelis_string_slice,
+    chelis_char_code, chelis_char_from_code, chelis_string, chelis_string_data,
+    chelis_string_from_cstr, chelis_string_from_utf8, chelis_string_len, chelis_string_release,
+    chelis_string_slice,
 };
+
+const INVALID_BOUNDARY_CHILD: &str = "CHELIS_UNICODE_STRING_BOUNDARY_CHILD";
 
 /// Build a runtime string from Rust text at the real FFI boundary.
 fn make(text: &str) -> chelis_string {
     let owned = CString::new(text).expect("test inputs contain no interior NUL");
     unsafe { chelis_string_from_cstr(owned.as_ptr() as *const c_char) }
+}
+
+fn make_bytes(bytes: &[u8]) -> chelis_string {
+    unsafe { chelis_string_from_utf8(bytes.as_ptr(), bytes.len() as i64) }
+}
+
+unsafe fn read_bytes(value: chelis_string, len: usize) -> Vec<u8> {
+    unsafe { std::slice::from_raw_parts(chelis_string_data(value).cast::<u8>(), len).to_vec() }
 }
 
 fn read(value: chelis_string) -> String {
@@ -91,6 +104,120 @@ fn string_len_counts_characters_not_bytes() {
     assert_eq!("aé日🙂".len(), 10);
     // Scalar values, not graphemes: "e" + COMBINING ACUTE ACCENT.
     assert_eq!(char_len("e\u{301}"), 2);
+}
+
+#[test]
+fn length_aware_strings_and_character_codes_cover_nul_and_non_bmp_scalars() {
+    unsafe {
+        let nul = make_bytes(b"a\0b");
+        assert_eq!(read_bytes(nul, 3), b"a\0b");
+        assert_eq!(chelis_string_len(nul), 3);
+
+        let emoji = make("😀");
+        assert_eq!(chelis_char_code(emoji), 0x1f600);
+        let rebuilt = chelis_char_from_code(0x1f600);
+        assert_eq!(read_bytes(rebuilt, "😀".len()), "😀".as_bytes());
+
+        chelis_string_release(nul);
+        chelis_string_release(emoji);
+        chelis_string_release(rebuilt);
+    }
+}
+
+#[test]
+fn invalid_unicode_string_boundary_child() {
+    let Ok(case) = std::env::var(INVALID_BOUNDARY_CHILD) else {
+        return;
+    };
+    match case.as_str() {
+        "negative-length" => unsafe {
+            let _ = chelis_string_from_utf8(ptr::null(), -1);
+        },
+        "null-nonempty" => unsafe {
+            let _ = chelis_string_from_utf8(ptr::null(), 1);
+        },
+        "invalid-utf8" => unsafe {
+            let bytes = [0xff_u8];
+            let _ = chelis_string_from_utf8(bytes.as_ptr(), 1);
+        },
+        "char-code-empty" => unsafe {
+            let value = make("");
+            let _ = chelis_char_code(value);
+        },
+        "char-code-multiple" => unsafe {
+            let value = make("ab");
+            let _ = chelis_char_code(value);
+        },
+        "char-from-code-negative" => unsafe {
+            let _ = chelis_char_from_code(-1);
+        },
+        "char-from-code-surrogate" => unsafe {
+            let _ = chelis_char_from_code(0xd800);
+        },
+        "char-from-code-too-large" => unsafe {
+            let _ = chelis_char_from_code(0x11_0000);
+        },
+        other => panic!("unknown child case {other}"),
+    }
+    panic!("invalid Unicode string boundary case `{case}` returned instead of terminating");
+}
+
+#[test]
+fn invalid_unicode_string_boundaries_fail_closed_with_domain_diagnostics() {
+    let test_binary = std::env::current_exe().expect("current test binary");
+    for (case, expected) in [
+        (
+            "negative-length",
+            "Domain: chelis_string_from_utf8 requires a nonnegative byte length",
+        ),
+        (
+            "null-nonempty",
+            "Domain: chelis_string_from_utf8 received a null nonempty buffer",
+        ),
+        (
+            "invalid-utf8",
+            "Domain: chelis_string_from_utf8 requires valid UTF-8",
+        ),
+        (
+            "char-code-empty",
+            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+        ),
+        (
+            "char-code-multiple",
+            "Domain: char_code requires exactly one Unicode scalar value [05-OP-58]",
+        ),
+        (
+            "char-from-code-negative",
+            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+        ),
+        (
+            "char-from-code-surrogate",
+            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+        ),
+        (
+            "char-from-code-too-large",
+            "Domain: char_from_code requires a Unicode scalar value [05-OP-58]",
+        ),
+    ] {
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "invalid_unicode_string_boundary_child",
+                "--nocapture",
+            ])
+            .env(INVALID_BOUNDARY_CHILD, case)
+            .output()
+            .unwrap_or_else(|error| panic!("run child `{case}`: {error}"));
+        assert!(
+            !output.status.success(),
+            "invalid Unicode string boundary case `{case}` returned success"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected),
+            "invalid Unicode string boundary case `{case}` lost `{expected}`:\n{stderr}"
+        );
+    }
 }
 
 #[test]

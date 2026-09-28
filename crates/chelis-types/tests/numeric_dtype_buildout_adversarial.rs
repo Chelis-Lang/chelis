@@ -19,7 +19,7 @@ use chelis_types::check_ir_program;
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -38,18 +38,18 @@ fn err_messages(rep: &chelis_types::infer::InferResult) -> Vec<String> {
 // token at i64/f64 precision so that out-of-range literals can be
 // diagnosed before defaulting".
 //
-// In a contextual int8 position (§5.6), the literal `200` overflows
-// int8 (max 127). The implementation must error.
+// In a contextual i8 position (§5.6), the literal `200` overflows
+// i8 (max 127). The implementation must error.
 // ----------------------------------------------------------------
 
 #[test]
 fn ws_b2_int8_context_accepts_out_of_range_literal_silent_overflow() {
-    // Per spec §5.6 + §5.3, [1, 2, 200] in a tensor[3, int8] context
+    // Per spec §5.6 + §5.3, [1, 2, 200] in a tensor[3, i8] context
     // should emit a range-overflow diagnostic. If it doesn't, the
-    // implementation silently truncates 200 → -56 (int8 wrap), which is
+    // implementation silently truncates 200 → -56 (i8 wrap), which is
     // exactly the silent-data-loss class the WS-A0 D1 rule was added
     // to prevent.
-    let src = "xs: tensor[3, int8] = [1, 2, 200]";
+    let src = "xs: tensor[3, i8] = [1, 2, 200]";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -58,8 +58,8 @@ fn ws_b2_int8_context_accepts_out_of_range_literal_silent_overflow() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.6 + §5.3: literal 200 is out of int8 range when contextually \
-         inferred as int8; must produce a diagnostic. Currently: silent acceptance \
+        "spec §5.6 + §5.3: literal 200 is out of i8 range when contextually \
+         inferred as i8; must produce a diagnostic. Currently: silent acceptance \
          (truncation to -56). errs={errs:?}"
     );
     assert!(
@@ -71,7 +71,7 @@ fn ws_b2_int8_context_accepts_out_of_range_literal_silent_overflow() {
 
 #[test]
 fn ws_b2_int16_context_accepts_out_of_range_literal_silent_overflow() {
-    let src = "xs: tensor[3, int16] = [1, 2, 70000]";
+    let src = "xs: tensor[3, i16] = [1, 2, 70000]";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -80,7 +80,7 @@ fn ws_b2_int16_context_accepts_out_of_range_literal_silent_overflow() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.6 + §5.3: literal 70000 is out of int16 range; must be a \
+        "spec §5.6 + §5.3: literal 70000 is out of i16 range; must be a \
          type error. Currently: silent acceptance. errs={errs:?}"
     );
     assert!(
@@ -92,8 +92,8 @@ fn ws_b2_int16_context_accepts_out_of_range_literal_silent_overflow() {
 
 #[test]
 fn ws_b2_int8_context_negative_out_of_range_literal_silent_overflow() {
-    // int8 range is [-128, 127]. -200 is out of range.
-    let src = "xs: tensor[3, int8] = [1, 2, -200]";
+    // i8 range is [-128, 127]. -200 is out of range.
+    let src = "xs: tensor[3, i8] = [1, 2, -200]";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -102,27 +102,27 @@ fn ws_b2_int8_context_negative_out_of_range_literal_silent_overflow() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.6 + §5.3: literal -200 is out of int8 range; must be a \
+        "spec §5.6 + §5.3: literal -200 is out of i8 range; must be a \
          type error. errs={errs:?}"
     );
 }
 
 #[test]
 fn ws_b2_int8_context_at_boundary_accepted() {
-    // int8 range is [-128, 127]. 127 is the boundary.
-    let src = "xs: tensor[3, int8] = [125, 126, 127]";
+    // i8 range is [-128, 127]. 127 is the boundary.
+    let src = "xs: tensor[3, i8] = [125, 126, 127]";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    assert!(res.is_ok(), "int8 boundary 127 must type-check cleanly");
+    assert!(res.is_ok(), "i8 boundary 127 must type-check cleanly");
 }
 
 #[test]
 fn ws_b2_int8_context_at_boundary_negative_accepted() {
     // Surf parses -128 as `(neg 128)`, where the inner literal 128
-    // overflows int8 (max 127). Whether this is rejected or admitted
+    // overflows i8 (max 127). Whether this is rejected or admitted
     // depends on whether the contextual rule applies inside `neg`.
     // Pin the actual behavior.
-    let src = "xs: tensor[3, int8] = [-128, -127, -126]";
+    let src = "xs: tensor[3, i8] = [-128, -127, -126]";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match &res {
@@ -130,16 +130,16 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
         Err(rep) => err_messages(rep),
     };
     // Either:
-    //   (a) int8 boundary -128 admitted (the parser/desugarer folds the
+    //   (a) i8 boundary -128 admitted (the parser/desugarer folds the
     //       sign into the literal, or the contextual rule sees -128 as
     //       a single literal), or
-    //   (b) int8 -128 errors because the literal-128 inner overflows.
+    //   (b) i8 -128 errors because the literal-128 inner overflows.
     // Document which one ships. If (b), this is a footgun: user-facing
-    // -128 is rejected at the int8 boundary because of a parser quirk.
+    // -128 is rejected at the i8 boundary because of a parser quirk.
     if res.is_err() {
         panic!(
-            "boundary footgun: int8 boundary value -128 (i8::MIN) is rejected \
-             because the parser produces (neg 128) and 128 overflows int8 max. \
+            "boundary footgun: i8 boundary value -128 (i8::MIN) is rejected \
+             because the parser produces (neg 128) and 128 overflows i8 max. \
              User-facing literal -128 should be admitted as i8::MIN; \
              errs={errs:?}"
         );
@@ -150,7 +150,7 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
 // CRITICAL: spec §5.7.2 — integer matmul must be a TYPE error.
 //
 // Spec: "The active matmul signature does not admit integer operand
-// precisions (int8, int16, int32, int64)." This is a type-check
+// precisions (i8, i16, i32, i64)." This is a type-check
 // rule, not a backend or IR-verify rule.
 //
 // The IR verify layer rejects integer matmul, but ideally this should
@@ -161,9 +161,9 @@ fn ws_b2_int8_context_at_boundary_negative_accepted() {
 #[test]
 fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
     let src = r#"
-        a: tensor[2, 3, int8] = [[1i8, 2i8, 3i8], [4i8, 5i8, 6i8]]
-        b: tensor[3, 2, int8] = [[1i8, 2i8], [3i8, 4i8], [5i8, 6i8]]
-        out: tensor[2, 2, int8] = matmul(&a, &b)
+        a: tensor[2, 3, i8] = [[1i8, 2i8, 3i8], [4i8, 5i8, 6i8]]
+        b: tensor[3, 2, i8] = [[1i8, 2i8], [3i8, 4i8], [5i8, 6i8]]
+        out: tensor[2, 2, i8] = matmul(&a, &b)
     "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -173,14 +173,14 @@ fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.7.2: matmul on int8 operands must be a type error. \
+        "spec §5.7.2: matmul on i8 operands must be a type error. \
          Currently the type checker accepts it (rejection happens later \
          at IR-verify or codegen). errs={errs:?}"
     );
     assert!(
         errs.iter()
-            .any(|m| m.contains("§5.7.2") || m.contains("integer") || m.contains("int8")),
-        "matmul-int8 type-check rejection must cite §5.7.2 or mention integer; \
+            .any(|m| m.contains("§5.7.2") || m.contains("integer") || m.contains("i8")),
+        "matmul-i8 type-check rejection must cite §5.7.2 or mention integer; \
          got: {errs:?}"
     );
 }
@@ -188,9 +188,9 @@ fn ws_a4_matmul_int8_must_be_rejected_with_spec_5_7_2_diagnostic() {
 #[test]
 fn ws_a4_matmul_int32_must_be_rejected_with_spec_5_7_2_diagnostic() {
     let src = r#"
-        a: tensor[2, 3, int32] = [[1, 2, 3], [4, 5, 6]]
-        b: tensor[3, 2, int32] = [[1, 2], [3, 4], [5, 6]]
-        out: tensor[2, 2, int32] = matmul(&a, &b)
+        a: tensor[2, 3, i32] = [[1, 2, 3], [4, 5, 6]]
+        b: tensor[3, 2, i32] = [[1, 2], [3, 4], [5, 6]]
+        out: tensor[2, 2, i32] = matmul(&a, &b)
     "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -200,13 +200,13 @@ fn ws_a4_matmul_int32_must_be_rejected_with_spec_5_7_2_diagnostic() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.7.2: matmul on int32 operands must be a type error; \
+        "spec §5.7.2: matmul on i32 operands must be a type error; \
          got no errors"
     );
     assert!(
         errs.iter()
-            .any(|m| m.contains("§5.7.2") || m.contains("integer") || m.contains("int32")),
-        "matmul-int32 rejection must cite §5.7.2 or integer; got: {errs:?}"
+            .any(|m| m.contains("§5.7.2") || m.contains("integer") || m.contains("i32")),
+        "matmul-i32 rejection must cite §5.7.2 or integer; got: {errs:?}"
     );
 }
 
@@ -217,18 +217,18 @@ fn ws_a4_matmul_int32_must_be_rejected_with_spec_5_7_2_diagnostic() {
 // accumulator precision."
 //
 // Spec table column: "Result precision" reads "operand precision (`bf16`)"
-// for the float lane and "int32" for int8/int16. The text and table
-// AGREE for int8/int16 (both → int32) and for int32, int64, f32, f64
+// for the float lane and "i32" for i8/i16. The text and table
+// AGREE for i8/i16 (both → i32) and for i32, i64, f32, f64
 // (where operand == accumulator). They DISAGREE for bf16/f16 (table
 // says operand = bf16; text says result = accumulator = f32).
 // ----------------------------------------------------------------
 
 #[test]
 fn ws_b2_reduce_sum_int8_result_precision_must_be_int32_per_spec_5_7_1() {
-    // Per spec §5.7.1 row "int8": Result precision is int32.
-    // The implementation should type sum(tensor[N, int8]) as
-    // tensor[..., int32], not tensor[..., int8].
-    let src = "xs: tensor[3, int8] = [1i8, 2i8, 3i8]\nout: tensor[int32] = sum(&xs, 0)";
+    // Per spec §5.7.1 row "i8": Result precision is i32.
+    // The implementation should type sum(tensor[N, i8]) as
+    // tensor[..., i32], not tensor[..., i8].
+    let src = "xs: tensor[3, i8] = [1i8, 2i8, 3i8]\nout: tensor[i32] = sum(&xs, 0)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -237,16 +237,16 @@ fn ws_b2_reduce_sum_int8_result_precision_must_be_int32_per_spec_5_7_1() {
     };
     assert!(
         errs.is_empty(),
-        "spec §5.7.1: reduce_sum on int8 must yield int32 result; \
-         binding to tensor[int32] should type-check; got errors: {errs:?}"
+        "spec §5.7.1: reduce_sum on i8 must yield i32 result; \
+         binding to tensor[i32] should type-check; got errors: {errs:?}"
     );
 }
 
 #[test]
 fn ws_b2_reduce_sum_int8_result_must_not_be_int8_per_spec_5_7_1() {
-    // The contrapositive: binding sum(int8 tensor) to tensor[int8]
-    // must error per spec §5.7.1 (result precision = accumulator = int32).
-    let src = "xs: tensor[3, int8] = [1i8, 2i8, 3i8]\nout: tensor[int8] = sum(&xs, 0)";
+    // The contrapositive: binding sum(i8 tensor) to tensor[i8]
+    // must error per spec §5.7.1 (result precision = accumulator = i32).
+    let src = "xs: tensor[3, i8] = [1i8, 2i8, 3i8]\nout: tensor[i8] = sum(&xs, 0)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -255,15 +255,15 @@ fn ws_b2_reduce_sum_int8_result_must_not_be_int8_per_spec_5_7_1() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.7.1: sum(int8) result is int32, not int8; binding to \
-         tensor[int8] must error. Got: no errors (the type checker \
-         types sum(int8) as int8, contradicting §5.7.1)."
+        "spec §5.7.1: sum(i8) result is i32, not i8; binding to \
+         tensor[i8] must error. Got: no errors (the type checker \
+         types sum(i8) as i8, contradicting §5.7.1)."
     );
 }
 
 #[test]
 fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
-    let src = "xs: tensor[3, int16] = [1i16, 2i16, 3i16]\nout: tensor[int16] = sum(&xs, 0)";
+    let src = "xs: tensor[3, i16] = [1i16, 2i16, 3i16]\nout: tensor[i16] = sum(&xs, 0)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let errs = match res {
@@ -272,8 +272,8 @@ fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
     };
     assert!(
         !errs.is_empty(),
-        "spec §5.7.1: sum(int16) result is int32, not int16; binding to \
-         tensor[int16] must error."
+        "spec §5.7.1: sum(i16) result is i32, not i16; binding to \
+         tensor[i16] must error."
     );
 }
 
@@ -281,11 +281,11 @@ fn ws_b2_reduce_sum_int16_result_must_not_be_int16_per_spec_5_7_1() {
 // CRITICAL: spec §5.5 canonical decimal suffix rule — integer-typed suffixes only.
 // ----------------------------------------------------------------
 
-/// §5.5: canonical decimal `255i8` should bind at int8. Then `255i8 +
+/// §5.5: canonical decimal `255i8` should bind at i8. Then `255i8 +
 /// 255i16` is a precision mismatch per §5.4 and must error.
 #[test]
 fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
-    let src = "out: int16 = 255i8 + 255i16";
+    let src = "out: i16 = 255i8 + 255i16";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -303,7 +303,7 @@ fn ws_b1_decimal_suffix_mixed_precision_addition_rejected_per_spec_5_4() {
 
 #[test]
 fn ws_b1_float_token_with_int_suffix_is_parse_error_per_spec_5_5() {
-    let src = "out: int8 = 1.0i8";
+    let src = "out: i8 = 1.0i8";
     // Per §5.5, this MUST fail at lex/parse time.
     let parse_res = parse_str(src);
     assert!(
@@ -331,7 +331,7 @@ fn ws_b1_mixed_float_suffix_addition_rejected_per_spec_5_4() {
 
 #[test]
 fn ws_b1_mixed_int_suffix_addition_rejected_per_spec_5_4() {
-    let src = "out: int32 = 1i8 + 1i32";
+    let src = "out: i32 = 1i8 + 1i32";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -369,7 +369,7 @@ fn ws_a0_f8e4m3_in_contextual_tensor_position_rejected() {
 
 #[test]
 fn ws_b1_unsigned_suffix_u8_lex_rejected_per_spec_1_1_2() {
-    let src = "out: int8 = 42u8";
+    let src = "out: i8 = 42u8";
     let parse_res = parse_str(src);
     assert!(
         parse_res.is_err(),
@@ -379,7 +379,7 @@ fn ws_b1_unsigned_suffix_u8_lex_rejected_per_spec_1_1_2() {
 
 #[test]
 fn ws_b1_unsigned_suffix_u16_lex_rejected_per_spec_1_1_2() {
-    let src = "out: int16 = 42u16";
+    let src = "out: i16 = 42u16";
     let parse_res = parse_str(src);
     assert!(
         parse_res.is_err(),

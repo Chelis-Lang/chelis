@@ -270,9 +270,9 @@ def probability(x: f32) -> Option[Probability] =
 /// short-circuited the no-invariant case to Passed; this pins the parity).
 #[test]
 fn type_broken_deep_module_with_no_invariant_errors_not_silent_pass() {
-    // `bad` returns f32 from an int32 body: a hard type error, and there is no
+    // `bad` returns f32 from an i32 body: a hard type error, and there is no
     // opaque type / invariant in sight.
-    let surf = "module M\nexport (bad)\ndef bad(x: int32) -> f32 = x\n";
+    let surf = "module M\nexport (bad)\ndef bad(x: i32) -> f32 = x\n";
     let (code, records) = prove_deep_json(surf, &[]);
     assert_eq!(
         code, 3,

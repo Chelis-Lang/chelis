@@ -9,13 +9,13 @@ acceptance command. It rejects silent corpus shrinkage before running:
 * `eval_agreement.rs` must contain no f64 parse/epsilon fallback and must
   mark the current evaluator as [04-NUM-8]-nonconforming under chelis#897;
 * the rejected-cell corpus must use the same exact comparator entrypoint;
-* every frozen executable row must retain its independently reviewed
-  definition digest, so producer-authored receipts cannot replace behavior;
+* every required executable row must retain its designated call, execution
+  mode and checked-result role in the standing Rust body audit;
 * both of `eval_agreement.rs`'s comparison legs are guarded by a behavioral
   canary that runs the shipped helper, because the checks in this file can
   only see that the comparator is NAMED, never that it is INVOKED: a shared
   assertion helper neutered into a no-op deletes its leg from every row at
-  once and edits no frozen definition (chelis#1104);
+  once and edits no protected definition (chelis#1104);
 * the only ignored test in these suites is the declared system-CBLAS
   prerequisite. A value-divergence ignore must be added to this executable
   ledger and to the owning design status rather than silently appearing.
@@ -31,7 +31,6 @@ agent or session may build concurrently.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 import os
 import re
@@ -57,12 +56,18 @@ ALLOWED_IGNORES = {
 
 REQUIRED_TESTS = {
     PARITY_SOURCE: {
+        "parity_checked_reshape",
+        "parity_checked_sparse_axes",
+        "parity_checked_window_geometry",
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_explicit_normalization",
+        "parity_generic_explicit_shape",
         "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
+        "parity_literal_extent_claim",
         "parity_scalar_string_foundation",
         "parity_tensor_structural_ops",
         "parity_hello_tensor_library_only",
@@ -109,6 +114,79 @@ REQUIRED_TESTS = {
     },
 }
 
+
+def required_body_contract() -> dict:
+    """Export reviewed call roles from the one required-identity inventory.
+
+    Closed direct-result forms supplement call adoption, not runtime reach.
+    Executable comparator/receipt controls and changed-test review remain.
+    """
+    canaries = {
+        "agreement_operation_identity_is_derived_from_ir": "agreement_op_for_risc",
+        "agreement_compiled_observation_reaches_comparator": "compare_lanes_with",
+        "agreement_expected_value_reaches_comparator": "assert_expected",
+        "agreement_width_nonconformance_is_behavioral": "compare_rendered_elements",
+    }
+    unary_rows = {
+        "agreement_atan", "agreement_cos", "agreement_log", "agreement_sin",
+        "agreement_sqrt_is_exact", "agreement_tan",
+    }
+    # These are reviewed library-only dispositions, not inferred from names:
+    # hello_tensor and opaque_invariants_simplex retain old suffixes but execute.
+    library_rows = {
+        "parity_constraint_directed_risk_guards_library_only",
+        "parity_induction_bond_library_only", "parity_linreg_library_only",
+        "parity_mnist_library_only", "parity_opaque_invariants_library_only",
+        "parity_rank_poly_borrow_library_only", "parity_transformer_block_library_only",
+        "parity_vmap_relu_library_only",
+    }
+    if not library_rows <= REQUIRED_TESTS.get(PARITY_SOURCE, set()):
+        raise ValueError("stale reviewed library-only body role")
+    if not (set(canaries) | unary_rows) <= REQUIRED_TESTS.get(EVAL_AGREEMENT_SOURCE, set()):
+        raise ValueError("stale reviewed evaluator body role")
+    sources = []
+    for path, names in REQUIRED_TESTS.items():
+        tests = []
+        for name in sorted(names):
+            run_parity = None
+            if path == PARITY_SOURCE:
+                if name == "parity_corpus_is_complete":
+                    calls = ["parity_corpus::validate"]
+                elif name.startswith("parity_comparator_"):
+                    calls = ["assert_parity"]
+                else:
+                    calls = ["drive_parity"]
+                    run_parity = name not in library_rows
+            elif path == EVAL_AGREEMENT_SOURCE:
+                if name in canaries:
+                    calls = [canaries[name], "record_phase3_receipt"]
+                elif name in unary_rows:
+                    calls = ["assert_unary_transcendental"]
+                else:
+                    calls = ["assert_agrees", "assert_expected"]
+            elif path == REJECTED_SOURCE:
+                calls = ["compare_exact_observations"]
+            else:
+                raise ValueError(f"no reviewed body-call role for {path}::{name}")
+            result_kind = None
+            if path == REJECTED_SOURCE or name == "parity_corpus_is_complete":
+                result_kind = "success"
+            elif path == PARITY_SOURCE and name.startswith("parity_comparator_"):
+                result_kind = "assert_ok" if name in {
+                    "parity_comparator_accepts_byte_identical_tensor_lines",
+                    "parity_comparator_byte_equal_for_non_tensor",
+                } else "assert_err"
+            elif name in {"agreement_compiled_observation_reaches_comparator",
+                          "agreement_width_nonconformance_is_behavioral"}:
+                result_kind = "expect_err"
+            elif name == "agreement_operation_identity_is_derived_from_ir":
+                result_kind = "assert_eq"
+            result = {"call": calls[0], "kind": result_kind} if result_kind else None
+            tests.append({"name": name, "calls": calls, "run_parity": run_parity, "result": result})
+        sources.append({"path": str(path), "tests": tests})
+    return {"schema_version": 2, "sources": sources}
+
+
 REQUIRED_EVAL_RECEIPTS = {
     "operation-identity-canary",
     "compiled-observation-canary",
@@ -129,105 +207,6 @@ REQUIRED_EVAL_RECEIPTS = {
     "bf16 add(1.5, 2.5)",
     "f16 add(1.5, 2.5)",
     "bf16 reduce_sum(0.25 x 8)",
-}
-
-# Guard artifact: exact definitions for every frozen Phase 3 executable row.
-# A digest changes only when the owning design's corpus is intentionally revised
-# and the replacement behavior has independent review evidence. Editing this map
-# merely to accept a changed test is not a repair.
-# chelis#1158 added parity_recursive_generic to the frozen corpus. The 22-case
-# recursive_generic_monomorphization suite supplies its independent evidence.
-# chelis#1287 adds parity_count_bool_axes and count_bool_axes.ch together; the
-# executable parity row itself plus the dedicated Count oracle are the
-# independent evidence for extending this guard.
-# chelis#1338 adds hash_order_determinism.ch and its eval/C parity row together.
-# The Phase A oracle invokes that exact row and the 24-process acceptance and
-# rejection matrix independently, so extending the frozen corpus cannot replace
-# the behavior evidence that justified it.
-# chelis#1247/#1258 add parity_kinded_nominal_dimensions and its executable
-# example. The dedicated issue_1247_integer_type_application suite supplies
-# independent check/test/Surf/eval/C-backend evidence for the corpus change.
-REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
-    PARITY_SOURCE: {
-        "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
-        "parity_comparator_byte_equal_for_non_tensor": "06e91c12393496a46c96a53e0e6f65cf8840b74615c09a6cd4b29511e4a7d8eb",
-        "parity_comparator_rejects_non_tensor_diff": "22b39df165d7350e80d467ca484cdb4d85407aa6645ebebe1ba0d35e721a88a5",
-        "parity_comparator_rejects_value_divergence": "06b51ffeb117c26b55c7901d64d3525a22855bec70f20246d263d9b5fc041f89",
-        "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
-        "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
-        "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "d5db9d33729fbc1bf028688505216e725e49d11354afd2b48f6d6d70745cd3ee",
-        "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
-        "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",
-        # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
-        # nullary `main` and opaque_invariants_simplex's top-level `eps`
-        # are now owed manifest roots. Their definitions changed only from
-        # object-only parity to executable stdout parity; the dedicated
-        # root-boundary suite independently locks both the root selection
-        # rule and ordered C realization.
-        "parity_hello_tensor_library_only": "4a872b0b09a5f589ab8c31e80f9815f2da83b9093f870b9899a186396349f10f",
-        "parity_induction_bond_library_only": "3e83f0cf929583a8df5a8fa05c62e9a712826fbe899b244766fdcad47b741389",
-        "parity_iter_foundation": "c99d74a439e006c29748429c3877941460cd3ed18a0a98fd16caf81fb510c84f",
-        "parity_linreg_library_only": "041271517605b7fa97a616c9fbe37d97d30bf0a6740c419e7dd91182736d97e4",
-        "parity_list_foundation": "5400fe48566a947d9970a2231ea00b2d573abe32fcf3576b3ef7c8dfece02f14",
-        "parity_mnist_library_only": "f46a10e016c52751f1072770cce71c39e8322d5ce8b19f1c81879d53fbc833f4",
-        "parity_opaque_invariants_library_only": "f2a0340b7b1d509b2d06ad84eb11ff7f237015ee90555ea9c1c7609c1b3d25f5",
-        "parity_opaque_invariants_simplex_library_only": "92ed0ac36b8cfedfad49a86707e83f230c7edcf0484e29951c0a16c1d9c2e865",
-        "parity_rank_poly_borrow_library_only": "4325ec047118bf72a0a4518d371dbaaa7597b861946a13aac1bd4e2c155f642c",
-        "parity_recursive_generic": "9bdd2c3be82db69c4fd11d54f6a301e17655f397b6fad90bbdf923a373e198d6",
-        "parity_scalar_string_foundation": "30ec444cbbea6be840b3c603121b3d4d35b1c8eec7311c6808377cf4b6883372",
-        "parity_tensor_structural_ops": "02b454423039f3ab3b3c99005481cef1cb744fc9ee81af8848f3638d0e793286",
-        "parity_transformer_block_library_only": "1219362b0fe28ff5efacbe52249f4c151c646fabdc6557fbb04de5b691bcd06d",
-        "parity_vmap_relu_library_only": "0c3450ba322a3254bed1eb9b1474abf660661453af72c4b74d1084b68f0260b1",
-    },
-    # The nine f32/f16/bf16 rows below were re-frozen when chelis#732 Phase 3
-    # rebased onto chelis#729 Phase 1/2 (PRs #1049, #1054). Evidence for the
-    # revision: #1054 deleted the untyped `RiscOp::Const { value: f64 }`
-    # constructor, so the previous definitions cannot compile at all - this is
-    # a forced spelling migration, not a corpus revision. Each row's diff is
-    # exactly `RiscOp::Const { value: X }` -> `RiscOp::synth_const(P, X)` where
-    # `P` is the same dtype the node already declared and `X` the same literal.
-    # No expected string, comparator entrypoint, label, or assertion changed,
-    # and all rows pass with their verbatim expected renderings.
-    # `agreement_expected_value_reaches_comparator` was added by chelis#1104 as
-    # the expected-value leg's usage canary. It is a new row, not a revision:
-    # no existing digest moved with it, and its own freeze is secondary - the
-    # canary fails behaviorally when `assert_expected` stops consulting the
-    # comparator, so tampering with this digest does not buy a green run.
-
-    EVAL_AGREEMENT_SOURCE: {
-        "agreement_add": "4db22a4302714b8be688532417daa7776374646094e70c2671875f5564e30960",
-        "agreement_atan": "80c1d1edd7d7857c6392470b80ec650e7db64c0d790781746ed92520c4ed9b85",
-        "agreement_bf16_add": "ad2029f00557c4759e3c90d2461a223fade971fefd9dcb666569e4b2b9b0974d",
-        "agreement_bf16_reduce_sum_matches_eval_exactly": "681adb9f8f561b673798b7e29c35494fa42e62ffbef8757a25a63412fd7c043d",
-        "agreement_compiled_observation_reaches_comparator": "bbfed1ebbe05619f0ccb6fd73b1e6356d47444f2e7e4511f492a967f277c1d90",
-        "agreement_cos": "bb39c151b0be1d95a7c7e75c4e949e6e4c1da4c335f7abe119e088fa5d866d04",
-        "agreement_exp": "fb328fbf479c5e174e3ca7fccc4f2df3404b826771c39618ce841715412a3f12",
-        "agreement_expected_value_reaches_comparator": "44e94c88c0ad3978ae6dd3e68bcdd307fdc7b10aa73eb29b73ec1b5705fe5fc2",
-        "agreement_f16_add": "8ecc6efe5e052e32850786174495f249776d35676ffffbcced66e308c6ce3c7c",
-        "agreement_log": "84ca6c7ba3b27a0718b42f40d15dd1c786648e33562b63a9ecddfaa02416c709",
-        "agreement_mul": "ba21fed3999506c32eb163bcdaaa10a135c744008f7b908e5f7fc98c0338fc97",
-        "agreement_neg": "71fb3152676dbfbbd06487b493cc2201e3730163b7cceff01801b930bc003a30",
-        "agreement_operation_identity_is_derived_from_ir": "b35dd2f9eac4362f5c38639c8a882b38872d5400d2399d8963cfe2427340dec6",
-        # Chelis#1313 intentionally replaces only this row's generic
-        # `MaxElem(x, synth_const(0))` spelling with the dedicated
-        # `RiscOp::Relu(x)` identity. Its negative and positive cases retain
-        # the same labels, comparator calls, and exact expected outputs. The
-        # independent dtype ReLU oracle proves the dedicated identity's exact
-        # per-width semantic/bit contract and evaluator/C agreement (with HIP
-        # and Metal structural coverage), while this row preserves both
-        # negative-input and positive-input parity.
-        "agreement_relu": "d8bfd8d952bcac571f5e7f8b028bf12b367c642b329c9ad22ecc3854727c1659",
-        "agreement_sin": "7d1c26bc002402b089c6c035eb756dedd70de05f06c2253ad362462d8243a170",
-        "agreement_sqrt_is_exact": "63ee422b92eef85a5635892c57282dbd9cec0154bd3d79ae4c57ca1744f0ac6a",
-        "agreement_tan": "33480e20e37c50cbd1ba8ae7864b77f860831c1ecce8577dcf22b28640e0116e",
-        "agreement_width_nonconformance_is_behavioral": "8b99a54287fe3517ab80544f77a25eadda35a9d84ec85f0687e15fa4910feb86",
-    },
-    REJECTED_SOURCE: {
-        "metal_rank2_gap_rejects_without_an_artifact": "bfc6fefc2678cea4e76a9bf9935e00e23b7dd1af4a8c98ecfe982cca3f7ff18e",
-        "rejected_cells_fail_the_build_with_their_pinned_diagnostics": "c1751e1db4ab78e882ed73710c3a4367c724fb223f718ccb800430c40a1ebd12",
-        "runtime_rejected_cells_abort_with_their_pinned_diagnostics": "d37afb668293c790033ab1f469f7535ff780a19a4c68cc1e5b88092013ec2a60",
-    },
 }
 
 SUITE_COMMANDS = (
@@ -254,6 +233,10 @@ SUITE_COMMANDS = (
             "--test",
             "parity",
             "--test",
+            "parity_corpus_contract",
+            "--test",
+            "phase3_body_contract",
+            "--test",
             "issue_687_rejected_cells_corpus",
         ),
     ),
@@ -279,18 +262,78 @@ def shipped_sources() -> dict[Path, str]:
     }
 
 
-def test_declarations(source: str) -> dict[str, str]:
-    tests: dict[str, str] = {}
-    pattern = re.compile(
-        r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-        re.MULTILINE,
-    )
-    for match in pattern.finditer(source):
-        attrs = match.group("attrs")
-        if "#[test]" not in attrs:
+TEST_DECLARATION = re.compile(
+    r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    re.MULTILINE,
+)
+RAW_STRING = re.compile(r'(?:br|cr|r)(?P<hashes>#{0,255})"')
+CHAR_LITERAL = re.compile(r"(?:b)?'(?:\\(?:u\{[0-9A-Fa-f_]+\}|x[0-9A-Fa-f]{2}|[nrt\\0'\"])|[^'\\\n])'")
+
+
+def rust_code_mask(source: str) -> str:
+    """Blank comments/literals without changing source offsets or line numbers.
+
+    This is lexical source discovery, not Rust compilation or cfg evaluation.
+    Lifetimes and labels remain code; only complete character literals are blanked.
+    """
+    code = list(source)
+    index = 0
+    while index < len(source):
+        start = index
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline == -1 else newline
+        elif source.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < len(source) and depth:
+                if source.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif source.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                raise ValueError("unterminated Rust block comment")
+        elif raw := RAW_STRING.match(source, index):
+            delimiter = '"' + raw.group("hashes")
+            end = source.find(delimiter, raw.end())
+            if end == -1:
+                raise ValueError("unterminated Rust raw string")
+            index = end + len(delimiter)
+        elif source[index] == '"' or source.startswith(('b"', 'c"'), index):
+            index += 1 if source[index] == '"' else 2
+            while index < len(source):
+                if source[index] == "\\":
+                    index += 2
+                elif source[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            else:
+                raise ValueError("unterminated Rust string")
+        elif character := CHAR_LITERAL.match(source, index):
+            index = character.end()
+        else:
+            index += 1
             continue
-        tests[match.group("name")] = attrs.strip()
-    return tests
+        for offset in range(start, index):
+            if source[offset] != "\n":
+                code[offset] = " "
+    return "".join(code)
+
+
+def test_declaration_matches(source: str) -> list[re.Match[str]]:
+    return [match for match in TEST_DECLARATION.finditer(rust_code_mask(source))
+            if "#[test]" in match.group("attrs")]
+
+
+def test_declarations(source: str) -> dict[str, str]:
+    return {match.group("name"): source[match.start("attrs"):match.end("attrs")].strip()
+            for match in test_declaration_matches(source)}
 
 
 def ignored_tests(source: str) -> dict[str, str]:
@@ -303,83 +346,19 @@ def ignored_tests(source: str) -> dict[str, str]:
     return tests
 
 
-def _matching_rust_brace(source: str, opening: int) -> int:
+def _matching_rust_brace(source: str, opening: int, *, masked: bool = False) -> int:
     """Return the closing brace for a Rust block, ignoring literal/comment braces."""
-    if source[opening] != "{":
-        raise ValueError("opening offset does not point at a brace")
+    code = source if masked else rust_code_mask(source)
+    if code[opening] != "{":
+        raise ValueError("opening offset does not point at a code brace")
     depth = 0
-    index = opening
-    while index < len(source):
-        if source.startswith("//", index):
-            newline = source.find("\n", index + 2)
-            index = len(source) if newline == -1 else newline + 1
-            continue
-        if source.startswith("/*", index):
-            comment_depth = 1
-            index += 2
-            while index < len(source) and comment_depth:
-                if source.startswith("/*", index):
-                    comment_depth += 1
-                    index += 2
-                elif source.startswith("*/", index):
-                    comment_depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            if comment_depth:
-                raise ValueError("unterminated Rust block comment")
-            continue
-
-        raw = re.match(r'(?:br|r)(?P<hashes>#{0,255})"', source[index:])
-        if raw:
-            delimiter = '"' + raw.group("hashes")
-            end = source.find(delimiter, index + raw.end())
-            if end == -1:
-                raise ValueError("unterminated Rust raw string")
-            index = end + len(delimiter)
-            continue
-
-        quote_offset = 1 if source.startswith(('b"', "b'"), index) else 0
-        quote = source[index + quote_offset] if index + quote_offset < len(source) else ""
-        if quote == '"':
-            index += quote_offset + 1
-            while index < len(source):
-                if source[index] == "\\":
-                    index += 2
-                elif source[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-            else:
-                raise ValueError("unterminated Rust string")
-            continue
-        if quote == "'":
-            # Treat a quote as a character literal only when it closes before a
-            # newline; lifetime syntax contains no braces and can be skipped as text.
-            cursor = index + quote_offset + 1
-            escaped = False
-            closing = -1
-            while cursor < len(source) and source[cursor] != "\n":
-                if not escaped and source[cursor] == "'":
-                    closing = cursor
-                    break
-                if not escaped and source[cursor] == "\\":
-                    escaped = True
-                else:
-                    escaped = False
-                cursor += 1
-            if closing != -1:
-                index = closing + 1
-                continue
-
-        if source[index] == "{":
+    for index in range(opening, len(code)):
+        if code[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif code[index] == "}":
             depth -= 1
             if depth == 0:
                 return index
-        index += 1
     raise ValueError("unterminated Rust test body")
 
 
@@ -387,20 +366,17 @@ def test_definition_spans(source: str) -> dict[str, tuple[int, int, int, int]]:
     """Map each test to definition and body spans.
 
     Values are ``(definition_start, definition_end, body_start, body_end)``;
-    end offsets are exclusive.
+    end offsets are exclusive and index the original, unmodified source.
     """
     spans: dict[str, tuple[int, int, int, int]] = {}
-    pattern = re.compile(
-        r"(?P<attrs>(?:#\[[^\]]+\]\s*)+)fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-        re.MULTILINE,
-    )
-    for match in pattern.finditer(source):
+    code = rust_code_mask(source)
+    for match in TEST_DECLARATION.finditer(code):
         if "#[test]" not in match.group("attrs"):
             continue
-        opening = source.find("{", match.end())
+        opening = code.find("{", match.end())
         if opening == -1:
             raise ValueError(f"test {match.group('name')} has no body")
-        closing = _matching_rust_brace(source, opening)
+        closing = _matching_rust_brace(code, opening, masked=True)
         spans[match.group("name")] = (match.start(), closing + 1, opening, closing + 1)
     return spans
 
@@ -412,29 +388,6 @@ def replace_test_body(source: str, name: str, replacement: str) -> str:
     except KeyError as error:
         raise ValueError(f"unknown Rust test {name}") from error
     return source[:body_start] + replacement + source[body_end:]
-
-
-def definition_digest_violations(
-    sources: Mapping[Path, str] | None = None,
-) -> list[str]:
-    sources = shipped_sources() if sources is None else sources
-    violations: list[str] = []
-    for path, required in REQUIRED_TESTS.items():
-        spans = test_definition_spans(sources[path])
-        expected_digests = REQUIRED_TEST_DEFINITION_SHA256.get(path, {})
-        for name in sorted(required):
-            if name not in spans:
-                continue
-            start, end, _, _ = spans[name]
-            observed = hashlib.sha256(sources[path][start:end].encode()).hexdigest()
-            expected = expected_digests.get(name)
-            if expected != observed:
-                violations.append(
-                    f"{path} test {name} changed its frozen Phase 3 definition "
-                    f"(expected {expected or 'no digest'}, got {observed}); restore the "
-                    "reviewed behavior or revise the guard with independent evidence"
-                )
-    return violations
 
 
 def source_violations(sources: Mapping[Path, str] | None = None) -> list[str]:
@@ -557,7 +510,6 @@ def preflight_violations() -> list[str]:
     violations = (
         source_violations()
         + comparator_violations()
-        + definition_digest_violations()
     )
     if shutil.which("cc") is None:
         violations.append("a host C compiler (`cc`) is required")

@@ -35,15 +35,30 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
     crate::optimize::dead_code_eliminate(&specialized)
 }
 
+/// Preserve primitive arithmetic while applying the structural rewrites.
+///
+/// [05-OP-30] and section 4.1 pin the contraction tree and stored-width
+/// product. Recognizing its shape does not prove that a vendor GEMM has
+/// those bits, so exact C preparation cannot synthesize `BlasMatmul`.
+/// Existing explicit backend nodes are not constructed by this pass.
+pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
+    let cleaned = eliminate_closed_list_noops(dag);
+    let gathered = replace_dense_gather_patterns(&cleaned);
+    let lowered = lower_unmatched_one_hot(&gathered);
+    crate::optimize::dead_code_eliminate(&lowered)
+}
+
 /// Eliminate only the M1 closed-list no-ops:
 /// identity Cast, identity Reshape, and identity Permute.
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
-        if let Some(source) = identity_source(node, dag) {
+        if let Some(source) = identity_source(node, dag, claimed_producers[node.id.0]) {
             let mapped = id_map[&source];
             id_map.insert(node.id, mapped);
             append_node_provenance(&mut out, mapped, node);
@@ -51,6 +66,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
 
         let new_id = out.add_node(
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -68,6 +84,7 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -79,7 +96,10 @@ pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
     out
 }
 
-fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
+fn identity_source(node: &DagNode, dag: &Dag, owns_result_claim: bool) -> Option<NodeId> {
+    if owns_result_claim {
+        return None;
+    }
     if node.inputs.len() != 1 {
         return None;
     }
@@ -123,10 +143,23 @@ fn identity_source(node: &DagNode, dag: &Dag) -> Option<NodeId> {
 
 fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
-        if let Some(info) = detect_matmul_pattern(dag, node.id) {
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            && matched_region_is_claim_free(
+                &claimed_producers,
+                info.replaced_region(node.id),
+            )
+            // Empty contractions (including [05-OP-51]'s zero-channel
+            // convolution) retain their RISC zero/empty result. BlasMatmul's
+            // verified domain requires positive matrix dimensions.
+            && [&info.m, &info.n, &info.k]
+                .into_iter()
+                .all(|dimension| dimension.as_concrete() != Some(0))
+        {
             let a = id_map[&info.a];
             let b = id_map[&info.b];
             // The matmul-pattern detector recognizes the
@@ -134,29 +167,29 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             // The accumulator on the synthesized BlasMatmul follows the
             // accumulator pinned on the source `Sum` node so the WS-A0
             // §5.7.1 default propagates through specialization.
-            let accumulator = match &dag.get(node.id).map(|n| &n.op) {
-                Some(RiscOp::Sum { accumulator, .. }) => *accumulator,
-                _ => node.output_type.precision,
-            };
             let new_id = out.add_node(
+                node.owner.remap(&id_map),
                 RiscOp::BlasMatmul {
                     batch_dims: info.batch_dims.clone(),
                     m: info.m.clone(),
                     n: info.n.clone(),
                     k: info.k.clone(),
-                    accumulator,
+                    accumulator: info.accumulator,
                 },
                 vec![a, b],
                 node.output_type.clone(),
                 node.span_id.clone(),
             );
             append_consumed_provenance(&mut out, new_id, dag, node, &info);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -174,6 +207,7 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -187,25 +221,33 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
 
 fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
-        if let Some(info) = detect_dense_gather_pattern(dag, node.id) {
+        if let Some(info) = detect_dense_gather_pattern(dag, node.id)
+            && matched_region_is_claim_free(&claimed_producers, info.replaced_region(node.id))
+        {
             let values = id_map[&info.values];
             let indices = id_map[&info.indices];
             let new_id = out.add_node(
+                node.owner.remap(&id_map),
                 RiscOp::Gather { axis: 0 },
                 vec![values, indices],
                 node.output_type.clone(),
                 node.span_id.clone(),
             );
             append_dense_gather_provenance(&mut out, new_id, dag, node, &info);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -223,6 +265,7 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -236,18 +279,23 @@ fn replace_dense_gather_patterns(dag: &Dag) -> Dag {
 
 fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
         if let RiscOp::OneHot { vocab } = node.op {
             let indices = id_map[&node.inputs[0]];
-            let new_id = lower_one_hot_node(&mut out, indices, node, vocab);
+            let new_id =
+                lower_one_hot_node(&mut out, node.owner.remap(&id_map), indices, node, vocab);
+            out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+            out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
             id_map.insert(node.id, new_id);
             continue;
         }
 
         let remapped_inputs: Vec<NodeId> = node.inputs.iter().map(|id| id_map[id]).collect();
         let new_id = out.add_node(
+            node.owner.remap(&id_map),
             node.op.clone(),
             remapped_inputs,
             node.output_type.clone(),
@@ -265,6 +313,7 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
         }
         // chelis#384/#397: preserve shape-derived `expand` shape-only deps.
         out.preserve_shape_deps(new_id, &node.shape_deps, &id_map);
+        out.preserve_result_claim_deps(new_id, &node.result_claim_deps, &id_map);
         id_map.insert(node.id, new_id);
     }
 
@@ -276,7 +325,13 @@ fn lower_unmatched_one_hot(dag: &Dag) -> Dag {
     out
 }
 
-fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: usize) -> NodeId {
+fn lower_one_hot_node(
+    out: &mut Dag,
+    owner: crate::dag::Owner,
+    indices: NodeId,
+    source: &DagNode,
+    vocab: usize,
+) -> NodeId {
     assert!(vocab > 0, "one_hot vocab must be nonzero");
     let indices_ty = out
         .get(indices)
@@ -301,42 +356,21 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
 
     for class in 0..vocab {
         let class_id = out.add_node(
+            owner,
             RiscOp::synth_const(indices_ty.precision, class as f64),
             vec![],
             indices_ty.clone(),
             source.span_id.clone(),
         );
-        let lt_l = out.add_node(
-            RiscOp::CmpLt,
+        let eq_bool = out.add_node(
+            owner,
+            RiscOp::Compare(crate::dag::ComparisonKind::Eq),
             vec![indices, class_id],
             bool_ty.clone(),
             source.span_id.clone(),
         );
-        let lt_r = out.add_node(
-            RiscOp::CmpLt,
-            vec![class_id, indices],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let neq = out.add_node(
-            RiscOp::MaxElem,
-            vec![lt_l, lt_r],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let one = out.add_node(
-            RiscOp::synth_const(bool_ty.precision, 1.0),
-            vec![],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
-        let eq_bool = out.add_node(
-            RiscOp::CmpLt,
-            vec![neq, one],
-            bool_ty.clone(),
-            source.span_id.clone(),
-        );
         let eq_f32 = out.add_node(
+            owner,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -348,6 +382,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let col = out.add_node(
+            owner,
             RiscOp::Expand {
                 axis: vocab_axis,
                 size: RtDim::Lit(1),
@@ -357,6 +392,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let padded = out.add_node(
+            owner,
             RiscOp::zero_pad(
                 source.output_type.precision,
                 indices_ty
@@ -373,6 +409,7 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
         append_node_provenance(out, padded, source);
         accumulated = Some(match accumulated {
             Some(prev) => out.add_node(
+                owner,
                 RiscOp::Add,
                 vec![prev, padded],
                 source.output_type.clone(),
@@ -395,6 +432,8 @@ struct MatmulInfo {
     m: DimExpr,
     n: DimExpr,
     k: DimExpr,
+    sum: NodeId,
+    accumulator: Prim,
     mul: NodeId,
     expand_a: NodeId,
     expand_b: NodeId,
@@ -408,6 +447,45 @@ struct DenseGatherInfo {
     expand_one_hot: NodeId,
     expand_values: NodeId,
     one_hot: NodeId,
+}
+
+/// A multi-node specializer may replace a matched region only when no node it
+/// bypasses owns a declared-result obligation.
+///
+/// Producer claims are observable traps, not ordinary liveness roots. Keeping
+/// an interior producer alive after its consumer has been replaced disconnects
+/// the trap from execution, while transferring the claim to a different
+/// primitive changes §4.7 attribution. The complete named-and-literal
+/// classification therefore gates every region replacement at the match
+/// boundary. One-node expansions such as `lower_unmatched_one_hot` instead
+/// remap the source node's dependencies onto their replacement result.
+fn matched_region_is_claim_free(
+    claimed_producers: &[bool],
+    replaced_region: impl IntoIterator<Item = NodeId>,
+) -> bool {
+    replaced_region.into_iter().all(|id| {
+        !*claimed_producers
+            .get(id.0)
+            .expect("matched specialization region belongs to the input DAG")
+    })
+}
+
+impl MatmulInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [output, self.sum, self.mul, self.expand_a, self.expand_b]
+    }
+}
+
+impl DenseGatherInfo {
+    fn replaced_region(&self, output: NodeId) -> [NodeId; 5] {
+        [
+            output,
+            self.mul,
+            self.expand_one_hot,
+            self.expand_values,
+            self.one_hot,
+        ]
+    }
 }
 
 fn detect_dense_gather_pattern(dag: &Dag, sum_id: NodeId) -> Option<DenseGatherInfo> {
@@ -528,7 +606,9 @@ fn detect_dense_gather_operands(
 }
 
 fn dims_equivalent(lhs: &DimInfo, rhs: &DimInfo) -> bool {
-    DimExpr::from(lhs).normalized_key() == DimExpr::from(rhs).normalized_key()
+    // A single axis is a resolved literal or an unresolved symbol, never a
+    // product. This pattern comparison is not storage-capacity authority.
+    DimExpr::from(lhs) == DimExpr::from(rhs)
 }
 
 fn expand_extent_matches_inserted_axis(dag: &Dag, node: &DagNode, axis: usize) -> bool {
@@ -563,10 +643,29 @@ fn expand_extent_matches_inserted_axis(dag: &Dag, node: &DagNode, axis: usize) -
     }
 }
 
-fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
-    let sum_node = dag.get(sum_id)?;
-    let sum_axis = match &sum_node.op {
-        RiscOp::Sum { axis, .. } => *axis,
+fn detect_matmul_pattern(dag: &Dag, output_id: NodeId) -> Option<MatmulInfo> {
+    let output_node = dag.get(output_id)?;
+    // Low-precision matmul now represents its f32 accumulator faithfully:
+    // Cast(Sum(Mul(...))) restores operand storage after the reduction.
+    // Accelerator selection consumes that complete graph, never an invalid
+    // low-precision Sum whose result disagrees with its accumulator.
+    let sum_node = match &output_node.op {
+        RiscOp::Cast { new_precision }
+            if matches!(new_precision, Prim::Bf16 | Prim::F16) && output_node.inputs.len() == 1 =>
+        {
+            let input = dag.get(output_node.inputs[0])?;
+            if input.output_type.precision != Prim::F32
+                || input.output_type.dims != output_node.output_type.dims
+                || *new_precision != output_node.output_type.precision
+            {
+                return None;
+            }
+            input
+        }
+        _ => output_node,
+    };
+    let (sum_axis, accumulator) = match &sum_node.op {
+        RiscOp::Sum { axis, accumulator } => (*axis, *accumulator),
         _ => return None,
     };
     if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
@@ -579,7 +678,7 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     // here. Other precisions (F8e4m3) fall through to the generic
     // expand+mul+sum path until a backend lift covers them.
     if !matches!(
-        sum_node.output_type.precision,
+        output_node.output_type.precision,
         Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
     ) {
         return None;
@@ -621,12 +720,12 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     }
     let a_ty = &dag.get(a)?.output_type;
     let b_ty = &dag.get(b)?.output_type;
-    // Operand precisions must match the sum (BLAS dispatch is by
-    // accumulator dtype) and must be in the BLAS-admitted set
-    // (sum_node.output_type.precision is already filtered to that set
-    // above).
-    if a_ty.precision != sum_node.output_type.precision
-        || b_ty.precision != sum_node.output_type.precision
+    // The backend result and operands share storage precision. The Sum
+    // independently pins arithmetic width; low-precision storage is restored
+    // only by the explicit final Cast matched above.
+    if a_ty.precision != output_node.output_type.precision
+        || b_ty.precision != output_node.output_type.precision
+        || mul_node.output_type.precision != a_ty.precision
     {
         return None;
     }
@@ -656,6 +755,8 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
         m,
         n,
         k,
+        sum: sum_node.id,
+        accumulator,
         mul: mul_id,
         expand_a: expand_a_id,
         expand_b: expand_b_id,
@@ -696,12 +797,17 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
+        | RiscOp::Mod
+            | RiscOp::Bitwise(_)
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
+        | RiscOp::GuardedFail { .. }
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Relu
         | RiscOp::ReluAdjoint
-        | RiscOp::CmpLt
         | RiscOp::Neg
         | RiscOp::Recip
         | RiscOp::Exp
@@ -715,8 +821,15 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Floor
         | RiscOp::Ceil
         | RiscOp::Round
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
+        | RiscOp::UniformBoundAdjoint { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::SplitN { .. }
+        | RiscOp::KeySelect
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Sum { .. }
@@ -759,6 +872,9 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         // never matrix data, so it is not a contiguous-matrix-slice source
         // (chelis#513/#558).
         | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Count { .. } => false,
     }
 }
@@ -771,7 +887,10 @@ fn append_consumed_provenance(
     info: &MatmulInfo,
 ) {
     append_node_provenance(out, target, sum_node);
-    for id in [info.mul, info.expand_a, info.expand_b] {
+    for id in [info.sum, info.mul, info.expand_a, info.expand_b] {
+        if id == sum_node.id {
+            continue;
+        }
         if let Some(node) = dag.get(id) {
             append_node_provenance(out, target, node);
         }
@@ -806,8 +925,43 @@ fn append_node_provenance(out: &mut Dag, target: NodeId, source: &DagNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{Dag, DimExpr, DimInfo, TensorType};
+    use crate::dag::{Dag, DeclId, DimExpr, DimInfo, TensorType};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn single_axis_equivalence_preserves_resolved_values_and_symbol_identity() {
+        let same = [
+            (DimInfo::Lit(0), DimInfo::Named("empty".into(), Some(0))),
+            (DimInfo::Lit(7), DimInfo::Named("n".into(), Some(7))),
+            (
+                DimInfo::Named("n".into(), Some(7)),
+                DimInfo::Named("m".into(), Some(7)),
+            ),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("n".into(), None),
+            ),
+        ];
+        let different = [
+            (DimInfo::Lit(7), DimInfo::Lit(8)),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("n".into(), Some(7)),
+            ),
+            (
+                DimInfo::Named("n".into(), None),
+                DimInfo::Named("m".into(), None),
+            ),
+        ];
+        for (lhs, rhs) in same {
+            assert!(dims_equivalent(&lhs, &rhs));
+            assert!(dims_equivalent(&rhs, &lhs));
+        }
+        for (lhs, rhs) in different {
+            assert!(!dims_equivalent(&lhs, &rhs));
+            assert!(!dims_equivalent(&rhs, &lhs));
+        }
+    }
 
     fn mat(r: usize, c: usize) -> TensorType {
         TensorType {
@@ -827,6 +981,84 @@ mod tests {
         TensorType {
             dims: vec![DimInfo::Lit(n)],
             precision: Prim::Int32,
+        }
+    }
+
+    fn literal_result_claim(dag: &mut Dag, decl: DeclId, axis: i32, required: i64) -> NodeId {
+        dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(axis),
+                requirements: vec![
+                    chelis_types::scalar_from_i64("test", Prim::Int64, required).unwrap(),
+                ],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn every_identity_noop_respects_the_shared_named_claim_barrier() {
+        for op in [
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Sym("n".into())],
+            },
+            RiscOp::Permute { axes: vec![0] },
+        ] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let tensor = TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            };
+            let input = dag.add_node(
+                decl,
+                RiscOp::Load { name: "x".into() },
+                Vec::new(),
+                tensor.clone(),
+                None,
+            );
+            let claim = dag.add_node(
+                decl,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::ResultClaim {
+                        claim: "n".into(),
+                        axis: RtAxis::Lit(0),
+                    },
+                    parameter: "x".into(),
+                    axis: RtAxis::Lit(0),
+                    requirements: Vec::new(),
+                    claims: Vec::new(),
+                },
+                vec![input],
+                TensorType {
+                    dims: Vec::new(),
+                    precision: Prim::Int64,
+                },
+                None,
+            );
+            let producer = dag.add_node(decl, op.clone(), vec![input], tensor, None);
+            dag.add_shape_dep(producer, claim);
+            dag.add_root(producer);
+
+            let specialized = eliminate_closed_list_noops(&dag);
+            let retained = specialized
+                .nodes()
+                .iter()
+                .find(|node| node.op == op)
+                .expect("a named claimed identity producer must not be eliminated");
+            assert_eq!(retained.shape_deps.len(), 1);
         }
     }
 
@@ -884,19 +1116,23 @@ mod tests {
     #[test]
     fn identity_cast_does_not_hide_matmul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(2, 3).precision, 1.0),
             vec![],
             mat(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -906,6 +1142,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -915,6 +1152,7 @@ mod tests {
             None,
         );
         let ca = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -923,6 +1161,7 @@ mod tests {
             None,
         );
         let cb = dag.add_node(
+            decl,
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
@@ -930,8 +1169,9 @@ mod tests {
             t3(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ca, cb], t3(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -966,21 +1206,78 @@ mod tests {
     }
 
     #[test]
+    fn matmul_specialization_preserves_literal_result_claim() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let claim = literal_result_claim(&mut dag, decl, 0, 3);
+        let a_ty = mat(2, 3);
+        let b_ty = mat(3, 4);
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            a_ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            b_ty.clone(),
+            None,
+        );
+        let result = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
+        dag.add_shape_dep(result, claim);
+        dag.add_root(result);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([
+            (
+                "a".to_string(),
+                crate::eval::TensorValue::from_vec(vec![2, 3], vec![1.0; 6]),
+            ),
+            (
+                "b".to_string(),
+                crate::eval::TensorValue::from_vec(vec![3, 4], vec![1.0; 12]),
+            ),
+        ]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `3`: claimed = 3"), "{before}");
+
+        let specialized = specialize_for_blas(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `3`: claimed = 3"), "{after}");
+    }
+
+    #[test]
     fn symbolic_matmul_specializes_to_runtime_dim_blas() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             symbolic_mat("m", "k"),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             symbolic_mat("k", "n"),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::InputAxis {
@@ -993,6 +1290,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::InputAxis {
@@ -1004,8 +1302,15 @@ mod tests {
             symbolic_t3("m", "k", "n"),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], symbolic_t3("m", "k", "n"), None);
+        let mul = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![ea, eb],
+            symbolic_t3("m", "k", "n"),
+            None,
+        );
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1043,25 +1348,30 @@ mod tests {
     #[test]
     fn noncontiguous_operand_stays_on_generic_path() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let base_a = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 2).precision, 1.0),
             vec![],
             mat(3, 2),
             None,
         );
         let a = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![base_a],
             mat(2, 3),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(mat(3, 4).precision, 1.0),
             vec![],
             mat(3, 4),
             None,
         );
         let ea = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(4),
@@ -1071,6 +1381,7 @@ mod tests {
             None,
         );
         let eb = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(2),
@@ -1079,8 +1390,9 @@ mod tests {
             t3(2, 3, 4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], t3(2, 3, 4), None);
         let sum = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1103,21 +1415,24 @@ mod tests {
     #[test]
     fn rank4_symbolic_batched_matmul_specializes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = symbolic_t4("batch", "heads", "seq", "dim");
         let b_ty = symbolic_t4("batch", "heads", "dim", "seq");
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1148,28 +1463,31 @@ mod tests {
     #[test]
     fn terminal_drop_markers_do_not_block_matmul_specialization() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a_ty = mat(8, 16);
         let b_ty = mat(16, 4);
         let a = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             a_ty.clone(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             b_ty.clone(),
             None,
         );
-        let out = crate::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+        let out = crate::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
         let mul = dag
             .nodes()
             .iter()
             .find(|node| matches!(node.op, RiscOp::Mul))
             .expect("tier2 matmul contains mul")
             .id;
-        dag.add_node(RiscOp::Drop, vec![mul], t3(8, 16, 4), None);
+        dag.add_node(decl, RiscOp::Drop, vec![mul], t3(8, 16, 4), None);
         dag.add_root(out);
 
         let specialized = specialize_for_blas(&dag);
@@ -1187,7 +1505,9 @@ mod tests {
     #[test]
     fn one_hot_dense_gather_specializes_before_matmul() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -1196,6 +1516,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1203,8 +1524,15 @@ mod tests {
             vec_i32(4),
             None,
         );
-        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
         let one_hot_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(3),
@@ -1214,6 +1542,7 @@ mod tests {
             None,
         );
         let values_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),
@@ -1223,12 +1552,14 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![one_hot_exp, values_exp],
             t3(4, 2, 3),
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 1,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1278,9 +1609,11 @@ mod tests {
     }
 
     #[test]
-    fn one_hot_similar_tree_with_wrong_reduction_axis_does_not_false_match_gather() {
+    fn dense_gather_specialization_preserves_literal_result_claim() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "values".into(),
             },
@@ -1289,6 +1622,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1296,8 +1630,15 @@ mod tests {
             vec_i32(4),
             None,
         );
-        let one_hot = dag.add_node(RiscOp::OneHot { vocab: 2 }, vec![indices], mat(4, 2), None);
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
         let one_hot_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 2,
                 size: RtDim::Lit(3),
@@ -1307,6 +1648,7 @@ mod tests {
             None,
         );
         let values_exp = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Lit(4),
@@ -1316,12 +1658,115 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
+            RiscOp::Mul,
+            vec![one_hot_exp, values_exp],
+            t3(4, 2, 3),
+            None,
+        );
+        let claim = literal_result_claim(&mut dag, decl, 0, 5);
+        let gathered = dag.add_node(
+            decl,
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            mat(4, 3),
+            None,
+        );
+        dag.add_shape_dep(gathered, claim);
+        dag.add_root(gathered);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([
+            (
+                "values".to_string(),
+                crate::eval::TensorValue::from_vec(
+                    vec![2, 3],
+                    vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
+                ),
+            ),
+            (
+                "indices".to_string(),
+                crate::eval::TensorValue::from_vec(vec![4], vec![0.0, 1.0, 0.0, 1.0]),
+            ),
+        ]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `5`: claimed = 5"), "{before}");
+
+        let specialized = specialize_for_exact_arithmetic(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `5`: claimed = 5"), "{after}");
+    }
+
+    #[test]
+    fn one_hot_similar_tree_with_wrong_reduction_axis_does_not_false_match_gather() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let values = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "values".into(),
+            },
+            vec![],
+            mat(2, 3),
+            None,
+        );
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(4),
+            None,
+        );
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 2 },
+            vec![indices],
+            mat(4, 2),
+            None,
+        );
+        let one_hot_exp = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 2,
+                size: RtDim::Lit(3),
+            },
+            vec![one_hot],
+            t3(4, 2, 3),
+            None,
+        );
+        let values_exp = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(4),
+            },
+            vec![values],
+            t3(4, 2, 3),
+            None,
+        );
+        let product = dag.add_node(
+            decl,
             RiscOp::Mul,
             vec![one_hot_exp, values_exp],
             t3(4, 2, 3),
             None,
         );
         let not_gather = dag.add_node(
+            decl,
             RiscOp::Sum {
                 axis: 2,
                 accumulator: chelis_types::types::Prim::F32,
@@ -1357,7 +1802,9 @@ mod tests {
     #[test]
     fn unmatched_one_hot_lowers_to_primitive_ir() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -1366,6 +1813,7 @@ mod tests {
             None,
         );
         let one_hot = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 3 },
             vec![indices],
             TensorType {
@@ -1403,5 +1851,54 @@ mod tests {
             after[specialized.roots().first().expect("root")].to_f64_lossy_vec(),
             vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
+    }
+
+    #[test]
+    fn unmatched_one_hot_specialization_preserves_literal_result_claim() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let claim = literal_result_claim(&mut dag, decl, 0, 4);
+        let indices = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            vec_i32(3),
+            None,
+        );
+        let one_hot = dag.add_node(
+            decl,
+            RiscOp::OneHot { vocab: 3 },
+            vec![indices],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_shape_dep(one_hot, claim);
+        dag.add_root(one_hot);
+        assert!(crate::verify::verify(&dag).is_empty());
+
+        let inputs = chelis_unord::UnordMap::from([(
+            "indices".to_string(),
+            crate::eval::TensorValue::from_vec(vec![3], vec![2.0, 0.0, 1.0]),
+        )]);
+        let before = crate::eval::eval_tensor(&dag, &inputs).unwrap_err();
+        assert!(before.contains("extent `4`: claimed = 4"), "{before}");
+
+        let specialized = specialize_for_exact_arithmetic(&dag);
+        assert!(specialized.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtentWitness {
+                    site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                    ..
+                }
+            )
+        }));
+        let after = crate::eval::eval_tensor(&specialized, &inputs).unwrap_err();
+        assert!(after.contains("extent `4`: claimed = 4"), "{after}");
     }
 }

@@ -25,46 +25,37 @@ use chelis_types::check_ir_program;
 
 // ─── structural Deep AST helpers ─────────────────────────────────────────
 
-fn list_tag(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
-        return None;
-    };
+fn node_tag(expr: &Expr) -> Option<&str> {
     // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
+    // head string.
+    expr.tag().map(|tag| tag.as_str())
 }
 
-/// The `type:` metadata value of a node whose element 1 is a meta map.
+/// The `type:` metadata value of a stamped node.
 fn node_type_meta(expr: &Expr) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
-        return None;
-    };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    node.meta().ty().map(|ty| ty.expression())
 }
 
 /// The builtin callee name of an `(app {…} (var {…} <name>) …)` node, or
 /// `None` when `expr` is not such an app.
 fn app_callee_name(expr: &Expr) -> Option<&str> {
-    if list_tag(expr) != Some("app") {
+    if node_tag(expr) != Some("app") {
         return None;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(app, _) = expr else {
         return None;
     };
-    let callee = list.elements.get(2)?;
-    if list_tag(callee) != Some("var") {
+    let callee = app.children_slice().first()?;
+    if node_tag(callee) != Some("var") {
         return None;
     }
-    let Expr::List(var_list, _) = callee else {
+    let Expr::Node(var, _) = callee else {
         return None;
     };
-    match var_list.elements.get(2) {
+    match var.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -74,26 +65,17 @@ fn app_callee_name(expr: &Expr) -> Option<&str> {
 fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     f(expr);
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                visit(child, f);
-            }
-        }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                visit(value, f);
-            }
+            map.visit_expressions(&mut |value, _| visit(value, f));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                visit(value, f);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| visit(value, f));
             visit(&meta.expr, f);
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                visit(value, f);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| visit(value, f));
             for child in node.children_iter() {
                 match child {
                     chelis_deep::node::ChildRef::Expr(expr)
@@ -112,9 +94,7 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                visit(value, f);
-            }
+            data.meta.visit_expressions(&mut |value, _| visit(value, f));
             for child in &data.children {
                 visit(child, f);
             }
@@ -124,18 +104,18 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 }
 
 fn is_named_def(expr: &Expr, def_name: &str) -> bool {
-    if list_tag(expr) != Some("def") {
+    if node_tag(expr) != Some("def") {
         return false;
     }
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(def, _) = expr else {
         return false;
     };
-    matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
+    matches!(def.children_slice().first(), Some(Expr::Atom(Atom::Name(name), _)) if name == def_name)
 }
 
 fn checked_def(src: &str, def_name: &str) -> Expr {
     let decls = parse_str(src).expect("surf parse");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check");
     checked
         .exprs()
@@ -152,7 +132,7 @@ fn app_type_tags(def: &Expr, callee_name: &str) -> Vec<String> {
     visit(def, &mut |node| {
         if app_callee_name(node) == Some(callee_name)
             && let Some(ty) = node_type_meta(node)
-            && let Some(tag) = list_tag(ty)
+            && let Some(tag) = node_tag(ty)
         {
             tags.push(tag.to_string());
         }
@@ -168,7 +148,7 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
     visit(def, &mut |node| {
         if app_callee_name(node).is_some()
             && let Some(ty) = node_type_meta(node)
-            && list_tag(ty) == Some("t-var")
+            && node_tag(ty) == Some("t-var")
         {
             found = true;
         }
@@ -177,7 +157,7 @@ fn any_app_type_is_bare_tvar(def: &Expr) -> bool {
 }
 
 const SEPARATE_SIG_SDPA: &str = "\
-sig sdpa: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
+sig sdpa[s, d, p: Float]: tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, d, p] -> tensor[s, s, p] -> tensor[s, d, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -191,7 +171,7 @@ def sdpa(q, k, v, scale) = {
 // separate `sig`). The ordinary annotation path already resolves its body
 // to tensor types.
 const INLINE_TYPED_SDPA: &str = "\
-def sdpa(q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {
+def sdpa[s, d](q: tensor[s, d, f32], k: tensor[s, d, f32], v: tensor[s, d, f32], scale: tensor[s, s, f32]) -> tensor[s, d, f32] = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
   weights = softmax(mul(scores, scale), -1)

@@ -43,13 +43,13 @@ def source_contracts() -> tuple[SourceContract, ...]:
         SourceContract(
             "dedicated lowering",
             "crates/chelis-ir/src/tier2.rs",
-            ("add_synth(dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)",),
-            ("lower_max_elem(dag, x, zero",),
+            ("add_synth(owner, dag, RiscOp::Relu, vec![x], ty.clone(), parent_span)",),
+            ("lower_max_elem(owner, dag, x, zero",),
         ),
         SourceContract(
             "dedicated adjoint",
             "crates/chelis-ir/src/grad.rs",
-            ("let dx = dag.add_node(RiscOp::ReluAdjoint, vec![x, g]",),
+            ("let dx = dag.add_node(node.owner, RiscOp::ReluAdjoint, vec![x, g]",),
             ("RiscOp::MaxElem => \"max_elem\",\n        RiscOp::Relu =>",),
         ),
         SourceContract(
@@ -100,7 +100,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "HIP all-width selection",
             "crates/chelis-backend-hip/src/kernels.rs",
             (
-                "pub fn relu(kernel_name: &str, kind: ElemKind)",
+                "pub fn relu(rank: usize, kernel_name: &str, kind: ElemKind)",
                 "pub fn relu_reduced(",
                 "pub fn relu_adjoint_reduced(",
                 "out[i] = is_positive ? g[idx_g] : (unsigned short)0;",

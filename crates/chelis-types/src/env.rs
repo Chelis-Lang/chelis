@@ -1,11 +1,13 @@
 //! Type environment: maps variable names to type schemes.
 
 use chelis_unord::{UnordMap, UnordSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::session::DeclarationDiagnosticOwner;
 use crate::types::*;
-use crate::unify::Subst;
+use crate::unify::{GenericParameter, Subst};
 
 #[cfg(feature = "generalize-sweep-oracle")]
 thread_local! {
@@ -51,7 +53,7 @@ pub(crate) fn generalize_sweep_env_visits() -> usize {
 /// A runtime `expand` size has a backend representation only when its
 /// extent is recoverable: either it folds to a compile-time constant, or
 /// it provably derives from an in-scope tensor's `shape(t, axis)` read.
-/// A *truly sourceless* runtime scalar (a bare `int32`/`int64` parameter)
+/// A *truly sourceless* runtime scalar (a bare `i32`/`i64` parameter)
 /// has neither, so it must be rejected at check time to keep
 /// check↔build↔eval in sync. The discriminator is PROVENANCE, not the
 /// surface spelling: `let-bound`, `cast`-wrapped, and arithmetic spellings
@@ -72,17 +74,78 @@ pub enum SizeProvenance {
     ShapeSourced,
 }
 
-/// Lexical type-variable scope for resolving source annotations during one
-/// check. A top-level `defsig` owns the names; cloned [`Env`] values carry the
-/// scope through nested `fn`/`let`/`match` inference and discard it when that
-/// declaration's cloned environment is dropped.
+/// The checker identities owned by one declaration binder list.
+///
+/// A `defsig` binder list is intentionally unkinded: the same source spelling
+/// may occur in type, dimension, and rank positions. Each role therefore owns
+/// a distinct internal identity, while every ordinary annotation resolver in
+/// the declaration reuses this one object. No annotation is allowed to mint a
+/// second identity for a listed name.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DeclarationBinderIdentities {
+    pub(crate) type_vars: UnordMap<String, TypeVar>,
+    pub(crate) dim_vars: UnordMap<String, DimVar>,
+    pub(crate) rank_vars: UnordMap<String, RankVar>,
+}
+
+impl DeclarationBinderIdentities {
+    pub(crate) fn contains_name(&self, name: &str) -> bool {
+        self.type_vars.contains_key(name)
+            || self.dim_vars.contains_key(name)
+            || self.rank_vars.contains_key(name)
+    }
+
+    pub(crate) fn type_names(&self) -> UnordMap<TypeVar, String> {
+        self.type_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, var)| (*var, name.clone()))
+            .collect()
+    }
+
+    pub(crate) fn dim_names(&self) -> UnordMap<DimVar, String> {
+        self.dim_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, var)| (*var, name.clone()))
+            .collect()
+    }
+
+    pub(crate) fn rank_names(&self) -> UnordMap<RankVar, String> {
+        self.rank_vars
+            .to_sorted()
+            .into_iter()
+            .map(|(name, var)| (*var, name.clone()))
+            .collect()
+    }
+
+    fn complete(&mut self, binder_names: &UnordSet<String>, var_gen: &mut VarGen) {
+        for name in binder_names.to_sorted() {
+            self.type_vars
+                .entry(name.clone())
+                .or_insert_with(|| var_gen.fresh_tvar());
+            self.dim_vars
+                .entry(name.clone())
+                .or_insert_with(|| var_gen.fresh_dvar());
+            self.rank_vars
+                .entry(name.clone())
+                .or_insert_with(|| var_gen.fresh_rvar());
+        }
+    }
+}
+
+/// Lexical declaration-binder scope for resolving source annotations during
+/// one check. A top-level `defsig` owns the identities; cloned [`Env`] values
+/// carry the scope through nested `fn`/`let`/`match` inference and discard it
+/// when that declaration's cloned environment is dropped.
 ///
 /// This is deliberately check-time-only. It must never enter a serialized
 /// [`crate::TypeEnv`], because a later stacked check owns a different set of
 /// declarations and therefore a different lexical binder scope.
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
-    binders: Option<UnordSet<String>>,
+    identities: Option<DeclarationBinderIdentities>,
+    diagnostic_owner: Option<DeclarationDiagnosticOwner>,
 }
 
 /// Constructor identity selected by declaration/import scope.
@@ -97,10 +160,19 @@ struct ConstructorBinding {
     scheme: Scheme,
 }
 
+/// Private structure used only to check the body of a rejected declaration.
+#[derive(Debug, Clone)]
+pub(crate) struct RejectedSignature {
+    pub(crate) scheme: Scheme,
+    pub(crate) witness: crate::errors::ErrorWitness,
+}
+
 /// Type environment (Γ): maps names to polymorphic type schemes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Env {
-    bindings: UnordMap<String, Scheme>,
+    // Schemes are immutable once bound. Lexical snapshots copy the name map,
+    // while sharing signature bodies until a scope replaces its own binding.
+    bindings: UnordMap<String, Arc<Scheme>>,
     /// Active constructor bindings, separate from ordinary value lookup.
     ///
     /// Every exact owner remains available so constructor syntax can select by
@@ -125,34 +197,41 @@ pub struct Env {
     /// nested lexical clones, and omitted from cached checker state.
     #[serde(skip)]
     type_resolution_scope: TypeResolutionScope,
+    /// Rejected declarations still have usable body constraints. These frames
+    /// belong to this check only and never become cached/public signatures.
+    #[serde(skip)]
+    rejected_signatures: UnordMap<String, Arc<RejectedSignature>>,
     /// Declared result trusted only while checking a linker-reserved
     /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
     /// #1298. Never serialized or exposed to entry source.
     #[serde(skip)]
     exact_stdlib_expected_result: Option<Type>,
-    /// chelis#260: the source name bound to each declared dimension
-    /// parameter of a signature, keyed by definition name.
+    /// Checker identities introduced while each `defsig` was resolved, keyed
+    /// by definition name.
     ///
-    /// Recorded when a `defsig` is resolved, where the names are still in
-    /// scope, and consumed after instantiation so a declared-dim diagnostic
-    /// can say `n` and `m` rather than `d44` and `d45`. The `DimVar` keys are
-    /// PRE-generalization; `instantiate_scheme` supplies the
-    /// original-to-fresh hop that makes them comparable to what a check on an
-    /// instantiated signature actually sees. Checker state only, never
-    /// serialized.
+    /// The stored identities are PRE-generalization. `instantiate_scheme`
+    /// supplies the original-to-fresh hop for all three variable kinds, and
+    /// body setup completes names absent from the outer signature. Keeping
+    /// type/dimension/rank in one object prevents an ordinary annotation from
+    /// receiving lexical permission without declaration-owned identity.
     #[serde(skip)]
-    declared_dim_names: UnordMap<String, UnordMap<DimVar, String>>,
-    /// chelis#260 Site 2: the same provenance for TYPE parameters. Kept
-    /// separate from `declared_dim_names` because the two are consumed by
-    /// different diagnostics and a signature may declare either alone.
-    ///
-    /// chelis#1486 / [04-INF-6]: the second consumer. Membership is the
-    /// checker's record of which variables in a declaration's scheme are
-    /// AUTHORED binders rather than inference holes, so a hole ([04-INF-5])
-    /// is absent here and is never subject to the rigidity check. Checker
-    /// state only, never serialized.
+    declared_binder_identities: UnordMap<String, DeclarationBinderIdentities>,
+    /// Members of the recursive group being inferred whose declared header
+    /// omits a type, each with the provisional scheme
+    /// [`Self::bind_holed_group_member`] bound it at, shared with its binding
+    /// so a lexical snapshot does not copy it.
     #[serde(skip)]
-    declared_type_names: UnordMap<String, UnordMap<TypeVar, String>>,
+    holed_group_members: UnordMap<String, Arc<Scheme>>,
+    /// The declared dtype-family bound of each binder variable those members
+    /// share, read from the header when it was bound. The group's completion
+    /// can identify the variable with a sibling's copy of it before the
+    /// member's contract is decided, and the binding then carries the merged
+    /// family, not the declared one.
+    #[serde(skip)]
+    holed_declared_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
+    /// The inference level of the recursive group being inferred.
+    #[serde(skip)]
+    group_level: Option<u32>,
     /// The composed `fresh TypeVar -> source name` map for the definition
     /// currently being inferred.
     ///
@@ -163,6 +242,15 @@ pub struct Env {
     /// source name across that gap.
     #[serde(skip)]
     active_declared_type_names: UnordMap<TypeVar, String>,
+    /// The dtype-family bound each of those binders was AUTHORED with, read
+    /// before the body is inferred (`None` for an unbounded binder).
+    ///
+    /// [04-INF-6] quantifies a binder over the instantiations its declaration
+    /// admits, so a body rule that must hold at every instantiation (a literal
+    /// pattern's, chelis#2442) reads this snapshot rather than the variable's
+    /// current restriction, which a body constraint may already have narrowed.
+    #[serde(skip)]
+    active_declared_type_bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -229,10 +317,15 @@ pub(crate) enum TopLevelValueVisibility<'a> {
 /// each kind of quantifier that a caller can need to read back.
 ///
 /// The type-variable renaming maps to a `Type` because a quantified type
-/// variable may instantiate to any type; a quantified dimension variable
-/// always instantiates to another dimension variable, so that renaming is
-/// `DimVar` to `DimVar`.
-type InstantiatedScheme = (Type, Vec<(TypeVar, Type)>, Vec<(DimVar, DimVar)>);
+/// variable may instantiate to any type. Dimension and rank quantifiers each
+/// instantiate to a fresh variable of the same kind.
+#[derive(Clone)]
+pub(crate) struct InstantiatedScheme {
+    pub(crate) ty: Type,
+    pub(crate) tvars: Vec<(TypeVar, Type)>,
+    pub(crate) dvars: Vec<(DimVar, DimVar)>,
+    pub(crate) rvars: Vec<(RankVar, RankVar)>,
+}
 
 impl Env {
     pub fn new() -> Self {
@@ -241,7 +334,7 @@ impl Env {
 
     /// Look up a name. Returns None if unbound.
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings.get(name)
+        self.bindings.get(name).map(Arc::as_ref)
     }
 
     /// Look up the active constructor owner and scheme for an exact name.
@@ -267,15 +360,26 @@ impl Env {
     /// Install the binder set owned by the declaration whose body is about to
     /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
     /// sibling declaration or back into a reusable library snapshot.
-    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&UnordSet<String>>) {
-        self.type_resolution_scope.binders = binders.cloned();
+    pub(crate) fn set_type_resolution_scope(
+        &mut self,
+        identities: Option<&DeclarationBinderIdentities>,
+        diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+    ) {
+        self.type_resolution_scope.identities = identities.cloned();
+        self.type_resolution_scope.diagnostic_owner = diagnostic_owner.cloned();
     }
 
-    /// Binder names visible to a nested source annotation in this lexical
-    /// environment. Absence means closed input: named `t-var`/`d-var`/
-    /// `d-rank` nodes do not allocate inference variables.
-    pub(crate) fn type_resolution_binders(&self) -> Option<&UnordSet<String>> {
-        self.type_resolution_scope.binders.as_ref()
+    /// Declaration-owned identities visible to a nested source annotation.
+    /// Absence means closed input: named `t-var`/`d-var`/`d-rank` nodes do not
+    /// allocate inference variables.
+    pub(crate) fn type_resolution_binders(&self) -> Option<&DeclarationBinderIdentities> {
+        self.type_resolution_scope.identities.as_ref()
+    }
+
+    /// Diagnostic identity shared by every annotation resolver in the active
+    /// declaration body.
+    pub(crate) fn type_resolution_diagnostic_owner(&self) -> Option<&DeclarationDiagnosticOwner> {
+        self.type_resolution_scope.diagnostic_owner.as_ref()
     }
 
     pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {
@@ -358,6 +462,13 @@ impl Env {
             .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
     }
 
+    pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &Subst) -> bool {
+        self.bindings
+            .to_sorted()
+            .into_iter()
+            .any(|(_, scheme)| type_carries_dim_name(&subst.semantic_type(&scheme.body), name))
+    }
+
     /// Look up an imported or qualified name by its unique terminal segment.
     pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
         let mut matches = self
@@ -366,18 +477,48 @@ impl Env {
             .into_iter()
             .filter_map(|(key, value)| terminal_name_matches(key, name).then_some(value));
         let first = matches.next()?;
-        matches.next().is_none().then_some(first)
+        matches.next().is_none().then_some(first.as_ref())
     }
 
     /// Extend the environment with a new binding.
     pub fn bind(&mut self, name: String, scheme: Scheme) {
+        self.bind_shared(name, Arc::new(scheme));
+    }
+
+    fn bind_shared(&mut self, name: String, scheme: Arc<Scheme>) {
+        self.rejected_signatures.remove(&name);
         self.bindings.insert(name, scheme);
+    }
+
+    pub(crate) fn bind_rejected_signature(
+        &mut self,
+        name: String,
+        recovery: crate::deep_type::RejectedSignatureType,
+        subst: &mut Subst,
+    ) {
+        let scheme = self.generalize(&recovery.ty, subst);
+        self.bind(
+            name.clone(),
+            Scheme::mono(crate::errors::propagate(&recovery.witness)),
+        );
+        self.rejected_signatures.insert(
+            name,
+            Arc::new(RejectedSignature {
+                scheme,
+                witness: recovery.witness,
+            }),
+        );
+    }
+
+    pub(crate) fn rejected_signature(&self, name: &str) -> Option<&RejectedSignature> {
+        self.rejected_signatures.get(name).map(Arc::as_ref)
     }
 
     /// Bind a constructor in both structural constructor position and the
     /// ordinary value environment used by bare/nullary references.
     pub(crate) fn bind_constructor(&mut self, name: String, owner: String, scheme: Scheme) {
-        self.bindings.insert(name.clone(), scheme.clone());
+        self.rejected_signatures.remove(&name);
+        self.bindings.insert(name.clone(), Arc::new(scheme.clone()));
         let candidates = self.constructor_bindings.entry(name).or_default();
         candidates.retain(|candidate| candidate.owner != owner);
         candidates.push(ConstructorBinding { owner, scheme });
@@ -490,83 +631,344 @@ impl Env {
         self.bindings.remove(name);
     }
 
-    /// chelis#260: record the source names of a signature's declared dim
-    /// parameters, so a later diagnostic on the instantiated signature can
-    /// render them.
-    pub(crate) fn record_declared_dim_names(
+    /// Record the identities introduced while resolving a declaration's
+    /// signature. Body setup remaps every occurrence-derived identity through
+    /// the scheme instantiation and completes all roles absent from the outer
+    /// signature.
+    pub(crate) fn record_declared_binder_identities(
         &mut self,
         name: &str,
-        names: UnordMap<DimVar, String>,
+        identities: DeclarationBinderIdentities,
     ) {
-        if !names.is_empty() {
-            self.declared_dim_names.insert(name.to_string(), names);
+        if !identities.type_vars.is_empty()
+            || !identities.dim_vars.is_empty()
+            || !identities.rank_vars.is_empty()
+        {
+            self.declared_binder_identities
+                .insert(name.to_string(), identities);
         }
     }
 
-    /// Resolve a definition's declared dim-parameter names against the fresh
-    /// variables a given instantiation minted (chelis#260).
+    /// chelis#2584, chelis#2590: bind `name`, a member of the recursive group
+    /// being inferred whose declared header omits a type, at its provisional
+    /// type. Returns whether the header had an omitted type.
     ///
-    /// `dvar_mapping` is the original-to-fresh pairing returned by
-    /// [`Self::instantiate_scheme`]. The result is keyed by the
-    /// FRESH variables, which is what a post-instantiation check reports on.
-    /// An empty map means the names were never recorded; callers fall back to
-    /// the internal id rather than inventing a name.
-    pub(crate) fn declared_dim_names_for(
-        &self,
-        name: &str,
-        dvar_mapping: &[(DimVar, DimVar)],
-    ) -> UnordMap<DimVar, String> {
-        let Some(original) = self.declared_dim_names.get(name) else {
-            return UnordMap::new();
-        };
-        dvar_mapping
-            .iter()
-            .filter_map(|(from, to)| original.get(from).map(|n| (*to, n.clone())))
-            .collect()
-    }
-
-    /// chelis#260 Site 2: record the source names of a signature's declared
-    /// TYPE parameters, the analogue of [`Self::record_declared_dim_names`].
+    /// [04-INF-5] makes an omitted type whatever the body determines, and
+    /// types an in-group reference "at the member's provisional monomorphic
+    /// type, as [04-INF-2] provides for a recursive call". [04-INF-2] keeps the
+    /// two kinds of signature variable apart. An authored binder admits no
+    /// substitute, so the header's binders are instantiated once, at fresh
+    /// variables minted inside the component's level, which the member's own
+    /// body and its own references share; a sibling's reference takes a copy
+    /// of them that the component's completion identifies with them
+    /// (`infer::group_link::sibling_instance`), so a call that swaps two of
+    /// them identifies them, which [04-INF-6] rejects. An inference hole admits
+    /// the caller's own type or a fully concrete one, so the provisional
+    /// scheme quantifies the holes alone: the member's body and each in-group
+    /// reference take their own instance, and the component's completion
+    /// decides each reference's instance against the body's
+    /// (`infer::group_link`). A header that omits nothing is the member's
+    /// scheme already, and keeps it: polymorphic recursion over its binders
+    /// stays available to a declaration whose every type is written.
     ///
-    /// chelis#1486 / [04-INF-6]: also the record of which variables are
-    /// AUTHORED binders, so the post-body rigidity check can render them and
-    /// an inference hole ([04-INF-5]) is excluded by construction.
-    pub(crate) fn record_declared_type_names(
+    /// The declaration's binder identities are re-pointed at the shared
+    /// instantiation, which is how the body's annotations and its rigidity
+    /// check name the same variables its in-group callers bind.
+    pub(crate) fn bind_holed_group_member(
         &mut self,
         name: &str,
-        names: UnordMap<TypeVar, String>,
-    ) {
-        if !names.is_empty() {
-            self.declared_type_names.insert(name.to_string(), names);
-        }
-    }
-
-    /// Resolve a definition's declared type-parameter names against the fresh
-    /// variables a given instantiation minted (chelis#260 Site 2).
-    ///
-    /// `tvar_mapping` is the original-to-fresh pairing from
-    /// [`Self::instantiate_scheme`]. It maps to a `Type` rather than a
-    /// `TypeVar`, so a quantifier instantiated to anything but a bare
-    /// variable simply has no fresh variable to name and is skipped: a
-    /// concrete type renders itself and needs no provenance.
-    ///
-    /// An empty map means the declaration authored no type binder, so under
-    /// [04-INF-6] nothing in it is rigid.
-    pub(crate) fn declared_type_names_for(
-        &self,
-        name: &str,
-        tvar_mapping: &[(TypeVar, Type)],
-    ) -> UnordMap<TypeVar, String> {
-        let Some(original) = self.declared_type_names.get(name) else {
-            return UnordMap::new();
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> bool {
+        let Some(header) = self.lookup(name).cloned() else {
+            return false;
         };
-        tvar_mapping
+        let binders = self.declared_binder_identities.get(name).cloned();
+        let binder_tvars = binders
+            .as_ref()
+            .map(|b| {
+                b.type_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let binder_dvars = binders
+            .as_ref()
+            .map(|b| {
+                b.dim_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let binder_rvars = binders
+            .as_ref()
+            .map(|b| {
+                b.rank_vars
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let omits_a_type = header.tvars.iter().any(|v| !binder_tvars.contains(v))
+            || header.dvars.iter().any(|v| !binder_dvars.contains(v))
+            || header.rvars.iter().any(|v| !binder_rvars.contains(v));
+        if !omits_a_type {
+            return false;
+        }
+        // The one instantiation mechanism mints the shared variables and
+        // carries each binder's dtype bound and dimension label to them. It
+        // records no obligation, because the header's constraints are not
+        // passed to it; they are renamed onto the provisional scheme instead,
+        // which each in-group use then owes.
+        let shared = self.instantiate_scheme(
+            &Scheme {
+                constraints: Vec::new(),
+                ..header.clone()
+            },
+            var_gen,
+            inference_subst,
+        );
+        let mut renaming = Subst::new();
+        for (from, to) in &shared.tvars {
+            renaming
+                .insert_type(*from, to.clone())
+                .expect("a fresh provisional renaming is valid");
+        }
+        for (from, to) in &shared.dvars {
+            renaming.insert_dim(*from, Dim::Var(*to));
+        }
+        for (from, to) in &shared.rvars {
+            renaming.insert_rank(*from, vec![Dim::Rank(*to)]);
+        }
+        let hole_tvars = shared
+            .tvars
             .iter()
-            .filter_map(|(from, to)| match to {
-                Type::Var(fresh) => original.get(from).map(|n| (*fresh, n.clone())),
+            .filter(|(from, _)| !binder_tvars.contains(from))
+            .filter_map(|(_, to)| match to {
+                Type::Var(fresh) => Some(*fresh),
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let provisional = Scheme {
+            tvar_restrictions: hole_tvars
+                .iter()
+                .filter_map(|var| {
+                    inference_subst
+                        .tvar_restriction(*var)
+                        .map(|restriction| (*var, restriction))
+                })
+                .collect(),
+            tvars: hole_tvars,
+            dvars: shared
+                .dvars
+                .iter()
+                .filter(|(from, _)| !binder_dvars.contains(from))
+                .map(|(_, to)| *to)
+                .collect(),
+            rvars: shared
+                .rvars
+                .iter()
+                .filter(|(from, _)| !binder_rvars.contains(from))
+                .map(|(_, to)| *to)
+                .collect(),
+            constraints: header
+                .constraints
+                .iter()
+                .map(|constraint| constraint.map_types(|ty| renaming.apply(ty)))
+                .collect(),
+            body: shared.ty.clone(),
+        };
+        let provisional = Arc::new(provisional);
+        self.bind_shared(name.to_string(), Arc::clone(&provisional));
+        if let Some(original) = binders {
+            let mut repointed = DeclarationBinderIdentities::default();
+            for (source_name, var) in original.type_vars.to_sorted() {
+                if let Some((_, Type::Var(fresh))) =
+                    shared.tvars.iter().find(|(from, _)| from == var)
+                {
+                    repointed.type_vars.insert(source_name.clone(), *fresh);
+                    let declared = header
+                        .tvar_restrictions
+                        .iter()
+                        .find(|(restricted, _)| restricted == var)
+                        .map(|(_, restriction)| *restriction);
+                    self.holed_declared_bounds.insert(*fresh, declared);
+                }
+            }
+            for (source_name, var) in original.dim_vars.to_sorted() {
+                if let Some((_, fresh)) = shared.dvars.iter().find(|(from, _)| from == var) {
+                    repointed.dim_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            for (source_name, var) in original.rank_vars.to_sorted() {
+                if let Some((_, fresh)) = shared.rvars.iter().find(|(from, _)| from == var) {
+                    repointed.rank_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            self.declared_binder_identities
+                .insert(name.to_string(), repointed);
+        }
+        self.holed_group_members
+            .insert(name.to_string(), provisional);
+        true
+    }
+
+    /// Enter the recursive group whose members are about to be bound at their
+    /// provisional types, inferred at `level`.
+    pub(crate) fn begin_group_level(&mut self, level: u32) {
+        self.group_level = Some(level);
+    }
+
+    /// The level of the recursive group being inferred: an in-group
+    /// reference's instance of a hole, and a sibling reference's copy of a
+    /// member's type, is lowered to it, so it stays monomorphic until the
+    /// group completes, as the group's own variables do.
+    pub(crate) fn group_level(&self) -> Option<u32> {
+        self.group_level
+    }
+
+    /// The dtype-family bound the header of a holed member of the group being
+    /// inferred declares for its binder variable `var`, or `None` when `var`
+    /// is no such binder or declares none.
+    pub(crate) fn declared_group_binder_bound(&self, var: TypeVar) -> Option<TypeVarRestriction> {
+        self.holed_declared_bounds.get(&var).copied().flatten()
+    }
+
+    /// Whether `name` is bound at its provisional type by
+    /// [`Self::bind_holed_group_member`] while its group is inferred.
+    pub(crate) fn is_holed_group_member(&self, name: &str) -> bool {
+        self.holed_group_members.contains_key(name)
+    }
+
+    /// Whether a reference to `name` that resolved to `scheme` is an in-group
+    /// reference to a member bound by [`Self::bind_holed_group_member`], and
+    /// not to a local binding that shadows it.
+    pub(crate) fn is_holed_group_reference(&self, name: &str, scheme: &Scheme) -> bool {
+        self.holed_group_members
+            .get(name)
+            .is_some_and(|provisional| {
+                provisional.tvars == scheme.tvars
+                    && provisional.dvars == scheme.dvars
+                    && provisional.rvars == scheme.rvars
+                    && provisional.body == scheme.body
+            })
+    }
+
+    /// The authored binders of every member bound by
+    /// [`Self::bind_holed_group_member`], with their source names: every
+    /// in-group reference shares them, so they are no member's
+    /// inference-introduced type parameters.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn holed_group_binders(
+        &self,
+    ) -> (
+        Vec<(String, TypeVar)>,
+        Vec<(String, DimVar)>,
+        Vec<(String, RankVar)>,
+    ) {
+        let mut tvars = Vec::new();
+        let mut dvars = Vec::new();
+        let mut rvars = Vec::new();
+        for (name, _) in self.holed_group_members.to_sorted() {
+            if let Some(binders) = self.declared_binder_identities.get(name) {
+                for (source, var) in binders.type_vars.to_sorted() {
+                    tvars.push((source.clone(), *var));
+                }
+                for (source, var) in binders.dim_vars.to_sorted() {
+                    dvars.push((source.clone(), *var));
+                }
+                for (source, var) in binders.rank_vars.to_sorted() {
+                    rvars.push((source.clone(), *var));
+                }
+            }
+        }
+        (tvars, dvars, rvars)
+    }
+
+    /// The group is complete or aborted: its members' provisional bindings
+    /// are replaced, and their binder identities are the shared variables the
+    /// completed schemes quantify.
+    pub(crate) fn end_holed_group(&mut self) {
+        self.holed_group_members = UnordMap::default();
+        self.holed_declared_bounds = UnordMap::default();
+        self.group_level = None;
+    }
+
+    /// The declared dtype-family bound of the authored binder variable `var`:
+    /// the header's, for a binder a holed group member shares, and otherwise
+    /// the bound it carries now, before its body runs.
+    pub(crate) fn declared_binder_bound(
+        &self,
+        var: TypeVar,
+        subst: &Subst,
+    ) -> Option<TypeVarRestriction> {
+        match self.holed_declared_bounds.get(&var) {
+            Some(declared) => *declared,
+            None => subst.tvar_restriction(var),
+        }
+    }
+
+    /// Build the declaration-owned identity object used by every ordinary
+    /// annotation resolver and every post-body rigidity check.
+    ///
+    /// Signature occurrences retain the exact fresh identities minted by
+    /// scheme instantiation. Every listed name absent from a role in the
+    /// signature receives one fresh declaration-owned identity for that role.
+    /// The same spelling may therefore be used independently as a type,
+    /// dimension, or rank variable, as the unkinded binder-list contract
+    /// requires.
+    pub(crate) fn declared_binder_identities_for_body(
+        &self,
+        name: &str,
+        binder_names: &UnordSet<String>,
+        instantiation: Option<&InstantiatedScheme>,
+        var_gen: &mut VarGen,
+    ) -> DeclarationBinderIdentities {
+        let mut resolved = DeclarationBinderIdentities::default();
+        if self.holed_group_members.contains_key(name)
+            && let Some(shared) = self.declared_binder_identities.get(name)
+        {
+            // The provisional binding quantifies only the omitted types, so
+            // its binder identities are the shared variables themselves.
+            resolved = shared.clone();
+        } else if let (Some(original), Some(instantiation)) =
+            (self.declared_binder_identities.get(name), instantiation)
+        {
+            for (source_name, original_var) in original.type_vars.to_sorted() {
+                if let Some(Type::Var(fresh)) = instantiation
+                    .tvars
+                    .iter()
+                    .find_map(|(from, to)| (*from == *original_var).then_some(to))
+                {
+                    resolved.type_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            for (source_name, original_var) in original.dim_vars.to_sorted() {
+                if let Some((_, fresh)) = instantiation
+                    .dvars
+                    .iter()
+                    .find(|(from, _)| *from == *original_var)
+                {
+                    resolved.dim_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+            for (source_name, original_var) in original.rank_vars.to_sorted() {
+                if let Some((_, fresh)) = instantiation
+                    .rvars
+                    .iter()
+                    .find(|(from, _)| *from == *original_var)
+                {
+                    resolved.rank_vars.insert(source_name.clone(), *fresh);
+                }
+            }
+        }
+        resolved.complete(binder_names, var_gen);
+        resolved
     }
 
     /// Park the composed map for the definition now being inferred, so the
@@ -582,6 +984,38 @@ impl Env {
         &self.active_declared_type_names
     }
 
+    /// Park the authored dtype-family bound of each binder in
+    /// [`Self::active_declared_type_names`].
+    pub(crate) fn set_active_declared_type_bounds(
+        &mut self,
+        bounds: UnordMap<TypeVar, Option<TypeVarRestriction>>,
+    ) {
+        self.active_declared_type_bounds = bounds;
+    }
+
+    /// The authored binder of the definition now being inferred that `var`
+    /// currently denotes, with its source name and authored bound. `None` for
+    /// a variable no authored binder resolves to, which is a flexible
+    /// inference variable rather than a rigid binder.
+    pub(crate) fn authored_type_binder(
+        &self,
+        var: TypeVar,
+        subst: &Subst,
+    ) -> Option<(&str, Option<TypeVarRestriction>)> {
+        self.active_declared_type_names
+            .to_sorted()
+            .into_iter()
+            .find(|(declared, _)| subst.apply(&Type::Var(**declared)) == Type::Var(var))
+            .map(|(declared, name)| {
+                let bound = self
+                    .active_declared_type_bounds
+                    .get(declared)
+                    .copied()
+                    .flatten();
+                (name.as_str(), bound)
+            })
+    }
+
     /// Instantiate a scheme into the caller's inference substitution so
     /// quantified semantic restrictions follow the fresh variables.
     pub fn instantiate(
@@ -590,7 +1024,7 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> Type {
-        self.instantiate_scheme(scheme, var_gen, inference_subst).0
+        self.instantiate_scheme(scheme, var_gen, inference_subst).ty
     }
 
     /// Instantiate a scheme and return the fresh type minted for each
@@ -604,17 +1038,16 @@ impl Env {
         var_gen: &mut VarGen,
         inference_subst: &Subst,
     ) -> (Type, Vec<(TypeVar, Type)>) {
-        let (ty, tvar_mapping, _) = self.instantiate_scheme(scheme, var_gen, inference_subst);
-        (ty, tvar_mapping)
+        let instantiated = self.instantiate_scheme(scheme, var_gen, inference_subst);
+        (instantiated.ty, instantiated.tvars)
     }
 
     /// The one instantiation mechanism (chelis#260 / chelis#1292).
     ///
-    /// Every quantifier is renamed here and nowhere else, so the two jobs the
-    /// callers above need cannot drift apart: #1292's installation of
-    /// quantified type-variable restrictions onto the fresh variables, and
-    /// #260's original-to-fresh dimension pairing that lets a diagnostic
-    /// recover the source name of a declared dim parameter.
+    /// Every quantifier is renamed here and nowhere else, so the consumers
+    /// cannot drift apart: #1292's installation of quantified type-variable
+    /// restrictions and the original-to-fresh type/dimension/rank pairings
+    /// needed for declaration-owned binder identity.
     ///
     /// Keeping them in one body is deliberate. Both were separately-authored
     /// copies of this loop at one point, and a second copy is exactly how a
@@ -622,9 +1055,9 @@ impl Env {
     /// compiles, and the only symptom is a program that should have been
     /// rejected type-checking.
     ///
-    /// Callable directly by a site that needs more than one of the renamings
-    /// at once, which is why it is crate-visible rather than a further
-    /// projection beside the ones above.
+    /// Callable directly by sites that need the complete instantiation,
+    /// which is why it is crate-visible rather than another projection beside
+    /// the ones above.
     pub(crate) fn instantiate_scheme(
         &self,
         scheme: &Scheme,
@@ -648,8 +1081,27 @@ impl Env {
                     .narrow_tvar_restriction(fresh_var, *restriction)
                     .expect("a fresh instantiation variable carries no prior dtype bound");
             }
+            // [04-LIN-10]: a generic's type parameter stays key-free at every
+            // instantiation. The mark lives on the quantified variable, which
+            // generalization marked, so a builtin or constructor scheme, never
+            // generalized, carries none.
+            if let Type::Var(fresh_var) = fresh
+                && let Some(origin) = inference_subst.key_free_origin(tv)
+            {
+                inference_subst.forbid_key_instantiation(fresh_var, origin);
+            }
             tvar_mapping.push((tv, fresh));
         }
+        // chelis#1654: renaming the quantifiers is exactly what turns a
+        // scheme-level obligation into one this USE owes, so it is done here,
+        // in the one instantiation mechanism, for the reason stated above:
+        // a second copy of this loop that dropped the obligations would
+        // compile, and the only symptom would be a program that should have
+        // been rejected type-checking.
+        //
+        // The renaming is applied AFTER the dimension and rank quantifiers are
+        // inserted below, so a constraint whose carried type mentions one gets
+        // that variable renamed too.
         let mut dvar_mapping = Vec::with_capacity(scheme.dvars.len());
         for &dv in &scheme.dvars {
             // Mint the variable directly rather than destructuring
@@ -659,13 +1111,34 @@ impl Env {
             let fresh_dv = var_gen.fresh_dvar();
             dvar_mapping.push((dv, fresh_dv));
             subst.insert_dim(dv, Dim::Var(fresh_dv));
+            if let Some(axis) = inference_subst.mapped_axis(dv) {
+                // The renaming substitution must recognize the old identity
+                // while rewriting the scheme body, and the active inference
+                // substitution must recognize the fresh identity afterward.
+                subst.mark_mapped_axis(dv, axis);
+                inference_subst.mark_mapped_axis(fresh_dv, axis);
+            } else {
+                inference_subst.copy_dimension_label(dv, fresh_dv);
+            }
         }
+        let mut rvar_mapping = Vec::with_capacity(scheme.rvars.len());
         for &rv in &scheme.rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
             // call site gets its own rank (Tier-2 rank polymorphism).
-            subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
+            let fresh_rv = var_gen.fresh_rvar();
+            rvar_mapping.push((rv, fresh_rv));
+            subst.insert_rank(rv, vec![Dim::Rank(fresh_rv)]);
         }
-        (subst.apply(&scheme.body), tvar_mapping, dvar_mapping)
+        for constraint in &scheme.constraints {
+            let renamed = constraint.map_types(|ty| subst.apply(ty));
+            inference_subst.record_collection_contract(renamed);
+        }
+        InstantiatedScheme {
+            ty: subst.apply(&scheme.body),
+            tvars: tvar_mapping,
+            dvars: dvar_mapping,
+            rvars: rvar_mapping,
+        }
     }
 
     /// Collect all free type variables across all bindings in the environment.
@@ -723,11 +1196,39 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
-        let level_scheme = self.generalize_by_levels(ty, subst);
+        self.generalize_owned(ty, subst, None)
+    }
+
+    /// Generalize one deferred declaration using only the contract instances
+    /// created while that declaration was inferred.
+    ///
+    /// Recursive siblings share one inference level, so level membership alone
+    /// cannot distinguish two fully monomorphic checked function values. The
+    /// driver records each member's exact instance IDs and supplies them here.
+    pub(crate) fn generalize_with_collection_contracts(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: &[crate::unify::CollectionContractId],
+    ) -> Scheme {
+        self.generalize_owned(ty, subst, Some(owned_contracts))
+    }
+
+    fn generalize_owned(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> Scheme {
+        let (level_scheme, ledger_removals) = self.generalize_by_levels(ty, subst, owned_contracts);
         #[cfg(feature = "generalize-sweep-oracle")]
         GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
             if enabled.get() {
-                let sweep_scheme = self.generalize_by_sweep(ty, subst);
+                let (sweep_scheme, _) = self.generalize_by_sweep(ty, subst, owned_contracts);
+                assert_eq!(
+                    level_scheme.constraints, sweep_scheme.constraints,
+                    "level-based collection obligations diverged from the reference environment sweep"
+                );
                 assert_eq!(
                     level_scheme.tvars, sweep_scheme.tvars,
                     "level-based type quantifiers diverged from the reference environment sweep"
@@ -750,26 +1251,133 @@ impl Env {
                 );
             }
         });
+        // Transport contracts this scheme now owns have moved off the
+        // inference-local contract ledger. Each later instantiation installs a
+        // fresh renamed instance with its own application identity.
+        //
+        // The exact instance IDs come back from the split. Removing by relation
+        // equality could erase a monomorphic recursive sibling's identical
+        // contract, which belongs to a different value.
+        if !ledger_removals.is_empty() {
+            subst.take_collection_contracts(&ledger_removals);
+        }
+        // [04-LIN-10]: every variable a definition or `let` binding quantifies
+        // is a generic's type parameter and is never instantiated at a
+        // key-carrying type. Marking here, in the one generalization
+        // mechanism, rather than at each binding site means no binding route
+        // can publish a generic without the rule; the binding sites only add
+        // the generic's name for the diagnostic
+        // ([`Subst::name_generic_parameters`]). A variable that already
+        // carries a mark keeps it, so a generic stored in a tuple or a data
+        // value and then generalized still names the generic it came from.
+        for tv in &level_scheme.tvars {
+            subst.forbid_key_instantiation(*tv, GenericParameter::default());
+        }
         level_scheme
     }
 
-    fn generalize_by_levels(&self, ty: &Type, subst: &Subst) -> Scheme {
+    /// chelis#1654: split the pending collection constraints into the ones
+    /// this generalization quantifies and the variables the rest must keep
+    /// monomorphic.
+    ///
+    /// Only relations already owned by a checked function value reach this
+    /// split. Their complete variable footprint must be visible in the value's
+    /// type; there are no hidden intermediate variables and no body-inferred
+    /// relation graph. Consumed application instances are absent from
+    /// `pending_collection_contracts` and therefore cannot be republished.
+    fn collection_constraints_to_quantify(
+        body: &Type,
+        body_variables: &[TypeVar],
+        body_candidates: &[TypeVar],
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> CollectionQuantification {
+        let mut split = CollectionQuantification::default();
+        let pending = subst.pending_collection_contracts();
+        if pending.is_empty() {
+            return split;
+        }
+        let visible = body_variables.iter().copied().collect::<UnordSet<_>>();
+        let candidates = body_candidates.iter().copied().collect::<UnordSet<_>>();
+        let current_level = subst.current_level();
+        for (id, level, constraint) in pending {
+            let owned = match owned_contracts {
+                Some(owned) => owned.contains(&id),
+                None => level > current_level,
+            };
+            if !owned {
+                continue;
+            }
+            let mut footprint = UnordSet::default();
+            for carried in constraint.carried_types() {
+                footprint.extend(free_tvars(carried));
+            }
+            let footprint = footprint.into_sorted();
+            let owned = if footprint.is_empty() {
+                crate::unify::collection_contract_visible_in_type(&constraint, body)
+            } else {
+                footprint.iter().all(|var| candidates.contains(var))
+            };
+            if owned {
+                split.ledger_removals.push(id);
+                if !split.constraints.contains(&constraint) {
+                    split.constraints.push(constraint);
+                }
+            } else if footprint.is_empty() || footprint.iter().all(|var| !visible.contains(var)) {
+                // The expression discarded the function-bearing subvalue:
+                // `(len, 1).1` and `ignore(len)` must not leave the detached
+                // contract behind to reject an unrelated result.
+                split.ledger_removals.push(id);
+            } else {
+                split
+                    .pinned
+                    .extend(footprint.into_iter().filter(|var| candidates.contains(var)));
+            }
+        }
+        split
+    }
+
+    fn generalize_by_levels(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
         let level = subst.current_level();
-        let tvars = ty_tvars
-            .into_iter()
-            .filter(|v| {
-                subst.level_of_tvar(*v) > level
-                        // spec/04 §3.1.1: a variable minted for an in-group
-                        // recursive instantiation stays monomorphic while its
-                        // group is inferred, so a let-bound alias of a group
-                        // member cannot smuggle in polymorphic recursion.
-                        && !crate::infer::recursion::tvar_pinned(*v)
-            })
+        // chelis#1489: a variable still tied to a pending operand gate, as its
+        // operand or its result, stays monomorphic until the gate discharges;
+        // see `Subst::pending_gate_vars`. Levels cannot see that tie -- it
+        // lives in the gate ledger, not in any unification.
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
+        // spec/04 §3.1.1: a variable minted for an in-group recursive
+        // instantiation stays monomorphic while its group is inferred, so a
+        // let-bound alias of a group member cannot smuggle in polymorphic
+        // recursion.
+        let generalizable = |v: TypeVar| {
+            subst.level_of_tvar(v) > level
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+        };
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Move only already-checked transport contracts whose complete
+        // variable footprint belongs to this generalized function value.
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -778,33 +1386,98 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: ty_dvars
-                .into_iter()
-                .filter(|v| subst.level_of_dvar(*v) > level)
-                .collect(),
-            rvars: ty_rvars
-                .into_iter()
-                .filter(|v| subst.level_of_rvar(*v) > level)
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: ty_dvars
+                    .into_iter()
+                    .filter(|v| {
+                        subst.level_of_dvar(*v) > level
+                            && !pending_d.contains(v)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: ty_rvars
+                    .into_iter()
+                    .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
 
-    /// Exact pre-#1207 environment-sweep implementation. It is compiled only
-    /// into tests and the temporary parity-oracle feature.
+    /// The pre-#1207 environment-sweep implementation, kept as the reference
+    /// the parity assertion in `generalize` checks the level-based path
+    /// against. It is compiled only into tests and the temporary parity-oracle
+    /// feature.
+    ///
+    /// It is a reference for *which variables the environment leaves free*, not
+    /// for which of those may be quantified. Two exclusions are therefore
+    /// mirrored here deliberately rather than inherited: a recursive group's
+    /// instantiation variables (`tvar_pinned`), a pending operand gate's
+    /// result variables, and an authored dimension binder still owned by the
+    /// active declaration level. These are properties of inference state that
+    /// no environment sweep can observe, so omitting one here would make the
+    /// oracle disagree with a correct production path. Keep the exclusions in
+    /// step with their production owners.
     #[cfg(feature = "generalize-sweep-oracle")]
-    fn generalize_by_sweep(&self, ty: &Type, subst: &Subst) -> Scheme {
+    fn generalize_by_sweep(
+        &self,
+        ty: &Type,
+        subst: &Subst,
+        owned_contracts: Option<&[crate::unify::CollectionContractId]>,
+    ) -> (Scheme, Vec<crate::unify::CollectionContractId>) {
         let ty = subst.apply(ty);
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
         let env_rvars = self.free_rvars(subst);
-        let tvars = free_tvars(&ty)
+        let active_tvars = self
+            .type_resolution_binders()
             .into_iter()
-            .filter(|v| !env_tvars.contains(v) && !crate::infer::recursion::tvar_pinned(*v))
+            .flat_map(|binders| binders.type_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
+        let active_dvars = self
+            .type_resolution_binders()
+            .into_iter()
+            .flat_map(|binders| binders.dim_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
+        let active_rvars = self
+            .type_resolution_binders()
+            .into_iter()
+            .flat_map(|binders| binders.rank_vars.to_sorted())
+            .map(|(_, var)| *var)
+            .collect::<UnordSet<_>>();
+        // chelis#1489: the same exclusion as `generalize_by_levels`, so the
+        // parity assertion in `generalize` keeps comparing like with like.
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_vars();
+        let current_level = subst.current_level();
+        let generalizable = |v: TypeVar| {
+            !env_tvars.contains(&v)
+                && !crate::infer::recursion::tvar_pinned(v)
+                && !pending_t.contains(&v)
+                && !(active_tvars.contains(&v) && subst.level_of_tvar(v) <= current_level)
+        };
+        let ty_tvars = free_tvars(&ty);
+        let mut tvars = ty_tvars
+            .iter()
+            .copied()
+            .filter(|v| generalizable(*v))
             .collect::<Vec<_>>();
+        // Mirror the checked-contract split in the reference generalizer.
+        let split = Self::collection_constraints_to_quantify(
+            &ty,
+            &ty_tvars,
+            &tvars,
+            subst,
+            owned_contracts,
+        );
+        tvars.retain(|v| !split.pinned.contains(v));
+        let constraints = split.constraints;
         let tvar_restrictions = tvars
             .iter()
             .filter_map(|v| {
@@ -813,20 +1486,49 @@ impl Env {
                     .map(|restriction| (*v, restriction))
             })
             .collect();
-        Scheme {
-            tvars,
-            tvar_restrictions,
-            dvars: free_dvars(&ty)
-                .into_iter()
-                .filter(|v| !env_dvars.contains(v))
-                .collect(),
-            rvars: free_rvars(&ty)
-                .into_iter()
-                .filter(|v| !env_rvars.contains(v))
-                .collect(),
-            body: ty,
-        }
+        (
+            Scheme {
+                tvars,
+                tvar_restrictions,
+                dvars: free_dvars(&ty)
+                    .into_iter()
+                    .filter(|v| {
+                        !env_dvars.contains(v)
+                            && !pending_d.contains(v)
+                            && !(active_dvars.contains(v)
+                                && subst.level_of_dvar(*v) <= current_level)
+                            && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                    })
+                    .collect(),
+                rvars: free_rvars(&ty)
+                    .into_iter()
+                    .filter(|v| {
+                        !env_rvars.contains(v)
+                            && !pending_r.contains(v)
+                            && !(active_rvars.contains(v)
+                                && subst.level_of_rvar(*v) <= current_level)
+                    })
+                    .collect(),
+                constraints,
+                body: ty,
+            },
+            split.ledger_removals,
+        )
     }
+}
+
+/// chelis#1654: what one generalization decided about the pending collection
+/// obligations. See [`Env::collection_constraints_to_quantify`].
+#[derive(Default)]
+struct CollectionQuantification {
+    /// Obligations this scheme now owns, in ledger order.
+    constraints: Vec<CollectionConstraint>,
+    /// Exact ledger entries either moved into the scheme or discarded with a
+    /// function-bearing subvalue no longer visible in the generalized type.
+    ledger_removals: Vec<crate::unify::CollectionContractId>,
+    /// Body variables that must stay monomorphic because an obligation this
+    /// scheme does NOT own still carries them.
+    pinned: UnordSet<TypeVar>,
 }
 
 /// True when `ty` contains a tensor whose shape carries the named
@@ -928,6 +1630,122 @@ mod module_scope_tests {
 
         assert!(env.lookup("borrowed").is_none());
         assert!(env.lookup_terminal_unique("borrowed").is_some());
+    }
+
+    #[test]
+    fn same_level_monomorphic_contracts_keep_distinct_declaration_owners() {
+        let env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let list = Type::Adt(
+            "List".to_string(),
+            vec![Type::Tensor(
+                vec![Dim::Lit(2), Dim::Lit(3)],
+                TensorPrec::Concrete(Prim::F32),
+            )],
+        );
+        let result = Type::Tensor(
+            vec![Dim::Wildcard, Dim::Wildcard],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let constraint = CollectionConstraint::Concat {
+            lhs: list.clone(),
+            rhs: Type::Prim(Prim::Int32),
+            result: result.clone(),
+        };
+        let checked = Scheme {
+            tvars: Vec::new(),
+            tvar_restrictions: Vec::new(),
+            dvars: Vec::new(),
+            rvars: Vec::new(),
+            constraints: vec![constraint.clone()],
+            body: Type::Fn(vec![list, Type::Prim(Prim::Int32)], Box::new(result)),
+        };
+
+        let component = subst.enter_level(&var_gen);
+        let first_mark = subst.collection_contract_mark();
+        let first_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let first_ids = subst.collection_contract_ids_since(first_mark);
+        let second_mark = subst.collection_contract_mark();
+        let second_ty = env.instantiate(&checked, &mut var_gen, &subst);
+        let second_ids = subst.collection_contract_ids_since(second_mark);
+        subst.leave_level(component, &var_gen);
+
+        let first = env.generalize_with_collection_contracts(&first_ty, &subst, &first_ids);
+        assert_eq!(first.constraints, vec![constraint.clone()]);
+        assert_eq!(
+            subst.pending_collection_contracts().len(),
+            1,
+            "generalizing one recursive sibling must not absorb the other's contract"
+        );
+
+        let second = env.generalize_with_collection_contracts(&second_ty, &subst, &second_ids);
+        assert_eq!(second.constraints, vec![constraint]);
+        assert!(
+            subst.pending_collection_contracts().is_empty(),
+            "each sibling must consume exactly its own contract instance"
+        );
+    }
+
+    #[test]
+    fn authored_binders_stay_monomorphic_inside_their_declaration_then_generalize_at_boundary() {
+        let mut env = Env::new();
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+
+        let declaration = subst.enter_level(&var_gen);
+        let authored_type = var_gen.fresh_tvar();
+        let authored = var_gen.fresh_dvar();
+        let authored_rank = var_gen.fresh_rvar();
+        let mut identities = DeclarationBinderIdentities::default();
+        identities
+            .type_vars
+            .insert("element".to_string(), authored_type);
+        identities.dim_vars.insert("extent".to_string(), authored);
+        identities
+            .rank_vars
+            .insert("shape".to_string(), authored_rank);
+        env.set_type_resolution_scope(Some(&identities), None);
+        let ty = Type::Tuple(vec![
+            Type::Var(authored_type),
+            Type::Tensor(
+                vec![Dim::Var(authored), Dim::Rank(authored_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        ]);
+
+        let nested = subst.enter_level(&var_gen);
+        let nested_type = var_gen.fresh_tvar();
+        let nested_local = var_gen.fresh_dvar();
+        let nested_rank = var_gen.fresh_rvar();
+        subst.leave_level(nested, &var_gen);
+        let nested_ty = Type::Tuple(vec![
+            ty.clone(),
+            Type::Var(nested_type),
+            Type::Tensor(
+                vec![Dim::Var(nested_local), Dim::Rank(nested_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        ]);
+        let nested_scheme = env.generalize(&nested_ty, &subst);
+        assert_eq!(nested_scheme.tvars, vec![nested_type]);
+        assert_eq!(
+            nested_scheme.dvars,
+            vec![nested_local],
+            "a nested let may generalize its own dimension but not its declaration's authored binder"
+        );
+        assert_eq!(nested_scheme.rvars, vec![nested_rank]);
+
+        subst.leave_level(declaration, &var_gen);
+        env.set_type_resolution_scope(None, None);
+        let declaration_scheme = env.generalize(&ty, &subst);
+        assert_eq!(declaration_scheme.tvars, vec![authored_type]);
+        assert_eq!(
+            declaration_scheme.dvars,
+            vec![authored],
+            "the authored dimension becomes a quantifier only at its declaration boundary"
+        );
+        assert_eq!(declaration_scheme.rvars, vec![authored_rank]);
     }
 }
 
@@ -1076,6 +1894,7 @@ mod tests {
     /// distinguishable from the correct one.
     fn restricted_scheme() -> Scheme {
         Scheme {
+            constraints: vec![],
             tvars: vec![TypeVar(1), TypeVar(2)],
             tvar_restrictions: vec![(TypeVar(2), TypeVarRestriction::ActiveFloat)],
             dvars: vec![DimVar(3), DimVar(4)],
@@ -1115,11 +1934,10 @@ mod tests {
 
         let mapped_subst = Subst::new();
         let mut mapped_gen = VarGen::default();
-        let (mapped, _tvar_mapping, mapping) =
-            env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
+        let mapped = env.instantiate_scheme(&scheme, &mut mapped_gen, &mapped_subst);
 
         assert_eq!(
-            plain, mapped,
+            plain, mapped.ty,
             "the mapping variant must produce an identical instantiated type"
         );
         assert_eq!(
@@ -1128,14 +1946,54 @@ mod tests {
             "both variants must advance the generator identically"
         );
         assert_eq!(
-            mapping.iter().map(|(from, _)| *from).collect::<Vec<_>>(),
+            mapped
+                .dvars
+                .iter()
+                .map(|(from, _)| *from)
+                .collect::<Vec<_>>(),
             scheme.dvars,
             "the mapping must cover every quantified dim in quantifier order"
         );
-        let fresh: Vec<DimVar> = mapping.iter().map(|(_, to)| *to).collect();
+        let fresh: Vec<DimVar> = mapped.dvars.iter().map(|(_, to)| *to).collect();
         assert!(
             fresh.iter().all(|f| !scheme.dvars.contains(f)),
             "every mapped-to variable must be fresh, got {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn mapped_axis_metadata_follows_the_fresh_scheme_dimension() {
+        let quantified = DimVar(9);
+        let quantified_rank = RankVar(10);
+        let scheme = Scheme {
+            constraints: vec![],
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![quantified],
+            rvars: vec![quantified_rank],
+            body: Type::Tensor(
+                vec![Dim::Rank(quantified_rank), Dim::Var(quantified)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        };
+        let env = Env::new();
+        let inference_subst = Subst::new();
+        inference_subst.mark_mapped_axis(quantified, 1);
+        let mut var_gen = VarGen::default();
+        let instantiated = env.instantiate_scheme(&scheme, &mut var_gen, &inference_subst);
+        let fresh = instantiated.dvars[0].1;
+
+        assert_eq!(inference_subst.mapped_axis(fresh), Some(1));
+        let Type::Tensor(dims, _) = instantiated.ty else {
+            panic!("mapped scheme body must remain a tensor")
+        };
+        assert!(
+            dims.contains(&Dim::Var(fresh)),
+            "the instantiated body must carry the fresh mapped identity: {dims:?}"
+        );
+        assert!(
+            !dims.contains(&Dim::Var(quantified)),
+            "the quantified mapped identity must not escape instantiation: {dims:?}"
         );
     }
 
@@ -1198,36 +2056,46 @@ mod tests {
         );
     }
 
-    /// chelis#260: a name is only rendered when the mapping vouches for it.
-    /// An unrecorded definition, or one whose recorded variables do not
-    /// appear in this instantiation, must yield nothing rather than a name
-    /// borrowed from another signature.
+    /// Signature occurrences preserve their scheme-instantiated identity,
+    /// while body-only roles receive a declaration-owned completion.
     #[test]
-    fn declared_dim_names_resolve_only_through_the_mapping() {
+    fn declaration_binder_identities_remap_and_complete_all_roles() {
         let mut env = Env::new();
-        env.record_declared_dim_names(
+        env.record_declared_binder_identities(
             "go",
-            UnordMap::from([(DimVar(3), "n".to_string()), (DimVar(4), "m".to_string())]),
+            DeclarationBinderIdentities {
+                type_vars: UnordMap::new(),
+                dim_vars: UnordMap::from([
+                    ("n".to_string(), DimVar(3)),
+                    ("m".to_string(), DimVar(4)),
+                ]),
+                rank_vars: UnordMap::new(),
+            },
         );
-
-        let resolved = env.declared_dim_names_for("go", &[(DimVar(3), DimVar(90))]);
-        assert_eq!(resolved.get(&DimVar(90)).map(String::as_str), Some("n"));
-        assert_eq!(resolved.len(), 1, "only mapped variables are named");
-
-        assert!(
-            env.declared_dim_names_for("absent", &[(DimVar(3), DimVar(90))])
-                .is_empty(),
-            "an unrecorded definition names nothing"
+        let instantiation = InstantiatedScheme {
+            ty: Type::Unit,
+            tvars: vec![],
+            dvars: vec![(DimVar(3), DimVar(90))],
+            rvars: vec![],
+        };
+        let mut var_gen = VarGen::default();
+        let resolved = env.declared_binder_identities_for_body(
+            "go",
+            &UnordSet::from(["m".to_string(), "n".to_string()]),
+            Some(&instantiation),
+            &mut var_gen,
         );
-        assert!(
-            env.declared_dim_names_for("go", &[]).is_empty(),
-            "an empty instantiation mapping names nothing"
+        assert_eq!(resolved.dim_vars.get("n"), Some(&DimVar(90)));
+        assert_ne!(
+            resolved.dim_vars.get("m"),
+            Some(&DimVar(90)),
+            "an unmapped signature identity must not borrow another name's mapping"
         );
-        assert!(
-            env.declared_dim_names_for("go", &[(DimVar(77), DimVar(91))])
-                .is_empty(),
-            "a variable this signature never declared names nothing"
-        );
+        for name in ["m", "n"] {
+            assert!(resolved.type_vars.contains_key(name));
+            assert!(resolved.dim_vars.contains_key(name));
+            assert!(resolved.rank_vars.contains_key(name));
+        }
     }
 
     #[test]
@@ -1295,6 +2163,7 @@ mod tests {
         let quantified_dim = DimVar(20);
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1330,6 +2199,7 @@ mod tests {
         let outer_dim = DimVar(22);
         let outer_rank = RankVar(32);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![quantified_type],
             tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
@@ -1370,6 +2240,7 @@ mod tests {
         let target_dim = DimVar(51);
         let target_rank = RankVar(61);
         let scheme = Scheme {
+            constraints: vec![],
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![],

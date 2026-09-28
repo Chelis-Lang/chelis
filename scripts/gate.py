@@ -16,30 +16,32 @@ macOS-smoke, LOC-report, no-AI-authorship, and docs CI jobs are
 deliberately out of scope; `scripts/test_gate.py` excludes those jobs
 by name so the exclusion is visible and reviewable.
 
-Usage (an unmanaged launcher is automatically re-executed through uv):
+Usage (a launcher is re-executed through this checkout's own interpreter when
+it exists, else an unmanaged one through uv):
     python3 scripts/gate.py            # run every gate command
     python3 scripts/gate.py lint-and-unit   # run the Rust-policy subset
-    python3 scripts/gate.py integration     # run the integration subset
+    python3 scripts/gate.py ci-fast         # hosted units + reviewed integrations
+    python3 scripts/gate.py integration     # retain the legacy integration subset
     python3 scripts/gate.py integration --tests-only --partition hash:1/2
     python3 scripts/gate.py integration --support-only
     python3 scripts/gate.py runtime-representation  # run the #893 oracle stage
     python3 scripts/gate.py --list     # print the canonical full list,
-                                       # annotated fast/local/CI-owned
+                                       # annotated fast/validation/CI-owned
     python3 scripts/gate.py --fast     # the pre-push gate: fix in place, then
                                        # lint, per-crate clippy, tripwires
-    python3 scripts/gate.py --local    # the once-per-pull-request gate, on the
-                                       # committed candidate before ready-for-review
+    python3 scripts/gate.py --validation  # optional troubleshooting and extra
+                                       # validation; CI owns PR readiness
 
-Local/CI stage split (chelis#360): the full developer gate runs
-`cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
-integration stage uses the `ci` profile and delegates its two census binaries
-to the required dtype oracle. The workspace execution stays out of `--local` --
-macOS Smoke is the authoritative
-workspace oracle, and on the macOS workstation the mass first-exec
-burst it triggers can wedge assessment entirely (see
-docs/local_macos_environment.md). `--local` is the once-per-pull-request
-gate, run on the committed candidate immediately before ready-for-review, after
-the draft is pushed and CI has started: two workspace clippy configurations
+Local/CI stage split: the complete developer gate and legacy integration stage
+retain their existing selections. The separate `ci-fast` stage builds product
+prerequisites and runs units plus the reviewed Cargo integration targets through
+`scripts/ci_test_targets.py`; it is intentionally absent from STAGE_ORDER so the
+full/manual gate does not execute a redundant subset. Full Linux and broad
+phase-oracle validation runs in heavy-e2e.yml nightly or by manual dispatch;
+Mac coverage runs in macos-nightly.yml. PR success does not certify those oracles.
+The workspace execution stays out of `--validation` because the mass first-exec burst
+can wedge assessment on a Mac workstation (docs/local_macos_environment.md).
+The validation command runs two workspace clippy configurations
 (compile-only, no mass exec), fmt, `chelis lint`, the regeneration and
 compile-fail guards, both oracles, plus `cargo nextest run -p <crate>
 --no-fail-fast` for each crate changed vs `origin/main` (committed diff plus
@@ -59,22 +61,22 @@ and after, so a file that was already dirty and that fmt changed further is
 still reported). It never runs the workspace clippy rows, the chelis#908
 oracle, or the runtime-representation oracle, and it never takes the lease.
 
-Why `--local` runs two of the three Clippy configurations
----------------------------------------------------------
-`check_configuration_closure.py` (in `--local`) reconciles every repository
+Why `--validation` runs two of the three Clippy configurations
+--------------------------------------------------------------
+`check_configuration_closure.py` (in `--validation`) reconciles every repository
 `.rs` file against rustc dep-info found under this worktree's target.
 `crates/chelis-prove/src/clarabel_sos.rs` is a whole module behind the
 `clarabel` feature, and the solver-free row is the only per-pull-request row
 that compiles it, so on a fresh target one configuration followed by the closure
 check fails. The `--no-default-features` row compiles a strict subset of the
 default row (no whole file is gated on `cfg(not(feature = ...))`), so dropping
-it from `--local` loses only the developer-side linting of the
+it from `--validation` loses only the developer-side linting of the
 `#[cfg(not(feature = "chelis-prove"))]` regions, which `gate.py lint-and-unit`
 still lints on Linux for every pull request. `--list` marks that row `ci-owned`.
 
 Preflight, lease, and run summary
 ---------------------------------
-`--fast`, `--local`, and the bare full gate run a preflight before the first
+`--fast`, `--validation`, and the bare full gate run a preflight before the first
 command: the environment checks in `gate_environment` (exit 2 on failure), the
 git facts for the summary (never fatal), a warning when the worktree has no
 `.venv/bin/python` (the gate exports `PYO3_PYTHON`, so only direct cargo and
@@ -85,13 +87,18 @@ skipped and the summary records `{"verdict": "skipped", "reason": "not
 darwin"}`; every other preflight, lease, and summary behavior is the same on
 both platforms. CI stage runs skip all of it.
 
-`--local` and the bare full gate then take an advisory workstation-wide lease,
+`--validation` and the bare full gate then take an advisory workstation-wide lease,
 `fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else
 `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
 held for the whole run so two cold full gates in different worktrees cannot
 starve each other. The default is to wait indefinitely, polling every 10 s with
-a heartbeat naming the holder every 60 s; `--no-wait` and `--lease-timeout
-SECONDS` exit 4 instead, `--no-lease` bypasses. `--fast` only reports a holder.
+a heartbeat naming the holder and queue position every 60 s. Numbered tickets
+in `gate.lock.queue/` are registered under a short `gate.lock.queue.lock` mutex;
+only the oldest live ticket may acquire. Ticket liveness is kernel-backed, so
+cancelled or killed waiters cannot leave a permanently blocking ticket. Queue
+errors stop with exit 2. `--no-wait` exits 4 when the lease or queue is busy;
+`--lease-timeout SECONDS` bounds the entire wait; `--no-lease` bypasses.
+`--fast` only reports a holder. FIFO requires updated runners in each worktree.
 The kernel releases the lock on holder death, SIGKILL included, so the JSON
 sidecar beside the lock is descriptive, never authoritative; nothing is killed.
 
@@ -107,7 +114,7 @@ Detached runs (chelis#1568)
 `--detach` starts the run in its own session and returns at once, printing a
 handle; `--status [HANDLE]` reports that run's verdict and exits with it. This
 exists because the run outlives a caller's foreground command limit: the three
-`--local` runs of the 2026-09-02 fleet took 7m51s, 9m56s and 10m02s against a
+validation runs of the 2026-09-02 fleet took 7m51s, 9m56s and 10m02s against a
 ten-minute limit.
 
 The launcher is not a gate run. It creates no `GateReport`, writes no summary
@@ -179,7 +186,7 @@ that is not an executable file is a loud failure, never a silent fall back
 to a build, and an explicit setting from the caller is never replaced. That
 is the same discipline applied to an explicit `PYO3_PYTHON`, timing
 included -- `gate_environment` validates an explicit handoff, so a bad one
-aborts before the first command rather than after the whole `--local` subset
+aborts before the first command rather than after the whole `--validation` subset
 has run.
 
 Present-but-empty is a failure on both sides, not an off switch. Reading
@@ -305,7 +312,11 @@ CLIPPY_NO_DEFAULT_FEATURES: list[str] = [
 CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
+    "chelis-cli/ownership-ledger,"
+    "chelis-compiler-api/compilation-trace,"
+    "chelis-compiler-api/ownership-ledger,"
     "chelis-e2e/hip-local-gpu,"
+    "chelis-ir/lowering-trace,"
     "chelis-prove/clarabel,"
     "chelis-python/extension-module,"
     "chelis-runtime/ownership-ledger,"
@@ -313,6 +324,12 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "chelis-types/generalize-sweep-oracle",
     "--", "-D", "warnings",
 ]
+# The Nix CI provider adds one native-library selection without changing the
+# developer gate's bundled OpenBLAS default or dropping any solver-free feature.
+CLIPPY_SOLVER_FREE_NIX_FEATURES = CLIPPY_SOLVER_FREE_FEATURES.copy()
+CLIPPY_SOLVER_FREE_NIX_FEATURES[
+    CLIPPY_SOLVER_FREE_NIX_FEATURES.index("--features") + 1
+] += ",chelis-prove/ci-openblas-system"
 FMT_CHECK: list[str] = ["cargo", "fmt", "--all", "--", "--check"]
 CHELIS_LINT_CHECK: list[str] = [
     "cargo",
@@ -348,6 +365,20 @@ NEXTEST_WORKSPACE_CI: list[str] = [
     "ci",
     "--no-fail-fast",
 ]
+NEXTEST_TARGETED_UNITS: list[str] = [
+    "cargo",
+    "nextest",
+    "run",
+    "--workspace",
+    "--lib",
+    "--bins",
+    "--locked",
+    "--profile",
+    "ci-fast",
+    "--ignore-default-filter",
+    "--no-fail-fast",
+]
+TARGETED_PACKAGES_ENV = "CHELIS_TARGETED_PACKAGES"
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
 # a compile-fail contract needs an explicit rustdoc command. The current
 # gate covers the type-system and compiler-pipeline contracts. The
@@ -373,6 +404,12 @@ DOCTEST_PIPELINE_CORE: list[str] = [
     "chelis-pipeline-core",
     "--doc",
 ]
+TARGETED_DOCTESTS: dict[str, list[str]] = {
+    "chelis-types": DOCTEST_TYPES,
+    "chelis-ir": DOCTEST_IR,
+    "chelis-compiler-api": DOCTEST_COMPILER_API,
+    "chelis-pipeline-core": DOCTEST_PIPELINE_CORE,
+}
 # This script verifies the exact compiler diagnostic from the standalone
 # raw-offset fixture. The marker is replaced with the same validated managed
 # interpreter exported to child commands as PYO3_PYTHON.
@@ -401,7 +438,7 @@ CONFIGURATION_CLOSURE: list[str] = [
 # `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
 # claim, or a broken facade compile-fail boundary passed hosted CI green. The
 # dependency guard (one `cargo metadata`) and the documentation guard (pure
-# Python) are cheap enough for the `--local` subset; the pipeline-artifact
+# Python) are cheap enough for the `--validation` subset; the pipeline-artifact
 # compile-fail fixture builds an out-of-workspace crate, so it stays in the
 # per-PR gate stage (CI + full gate) alongside the checkpoint fixture.
 PIPELINE_CORE_DEPENDENCY_GUARD: list[str] = [
@@ -431,28 +468,26 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
 # has already built the workspace, so the oracle's two
 # `nextest run` calls and its `cargo build -p chelis-cli` are warm. The
 # separate `Verify nextest profile coverage` step also needs nextest, but runs
-# on shard 1 to balance the hosted work. `--local` keeps both obligations: a
+# on shard 1 to balance the hosted work. `--validation` keeps both obligations: a
 # developer machine running the gate already has nextest.
 UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
-# chelis#893 Phase 0. Its acceptance surface deliberately runs release-profile
-# Rust reproducers and re-scans the seam inventory once per controlled
-# mutation, so on a hosted runner the oracle costs about eleven minutes: the
-# release builds of chelis-ir, chelis-backend-c, chelis-backend-hip, and
-# chelis-runtime never come from the shared cache (the workspace-cache writer
-# builds only the test profile), and the mutation re-scans run serially. It is
-# therefore its own gate stage, run by its own CI job, so the workspace test
-# shards keep their partition wall and the oracle keeps its own failure
-# boundary, like the other phase oracles. The stage still needs
-# `cargo nextest`, and `--local` keeps the obligation on developer machines.
+# chelis#893 Phase 2, retaining the complete Phase 1 host/C receipt and Phase 0
+# inventory/mutations before the generated ABI, device-owner, Python/DLPack,
+# and backend-header census legs. The inherited release builds and serial
+# mutation scans dominate the hosted cost, so the oracle remains its own gate
+# stage and CI job. This preserves the workspace shards' partition wall and
+# gives the cross-language receipt one failure boundary. The stage needs
+# `cargo nextest`, clang, and the managed Python; `--validation` keeps the same
+# obligation on developer machines.
 RUNTIME_REPRESENTATION_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/runtime_representation_oracle.py",
     "--phase",
-    "0",
+    "2",
 ]
 
 # chelis#1205's authoritative front-end complexity and parity oracle. It
@@ -485,7 +520,60 @@ CHELIS_BINARY_PRODUCERS: tuple[tuple[str, ...], ...] = (
     tuple(CHELIS_LINT_CHECK),
 )
 
+LOWERING_TRACE_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-ir", "--features", "lowering-trace",
+    "--lib", "--test", "lowering_trace", "--test", "helper_lowering_trace",
+]
+
+EMISSION_OBSERVER_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
+    "compilation-trace", "--lib", "--test", "emission_observer",
+    "--test", "execution_artifact_metadata", "--test", "compilation_trace",
+]
+
+# The ownership-ledger harnesses link the runtime their own build carries, so
+# each target requires its package's `ownership-ledger` feature and the
+# featureless workspace runs skip it. The CLI command rebuilds
+# <target>/debug/chelis against the instrumented runtime, so it runs after
+# every command that trusts the binary the producers above built.
+OWNERSHIP_LEDGER_API_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
+    "ownership-ledger",
+    "--test", "builtin_named_kernel_inputs",
+    "--test", "dropout_fixed_stream_api",
+    "--test", "fixed_control_host_c",
+    "--test", "generated_header_native_probe",
+    "--test", "invocation_local_random",
+    "--test", "issue_1684_entry_cleanup",
+    "--test", "issue_1685_multi_root_cleanup",
+    "--test", "issue_2445_match_arm_ownership",
+    "--test", "issue_2485_region_entry_terminals",
+    "--test", "issue_2508_list_step_ownership",
+    "--test", "issue_2522_data_type_c_lane",
+    "--test", "issue_2576_option_items_render",
+    "--test", "issue_2577_filter_named_predicate",
+    "--test", "key_admission_lanes",
+    "--test", "key_affinity_lanes",
+    "--test", "key_extent_lanes",
+    "--test", "key_operand_random_c",
+    "--test", "key_operations_c",
+    "--test", "key_root_lanes",
+    "--test", "key_split_count_lanes",
+    "--test", "key_surface_lanes",
+    "--test", "key_tensor_forms",
+    "--test", "local_ascription_activation",
+    "--test", "rule_d_entered_lanes",
+    "--test", "untaken_arm_gradients",
+]
+
+OWNERSHIP_LEDGER_CLI_TESTS: list[str] = [
+    "cargo", "nextest", "run", "-p", "chelis-cli", "--features",
+    "ownership-ledger", "--test", "issue_1314_json_bigint_ledger",
+]
+
 STAGES: dict[str, list[list[str]]] = {
+    "ci-fast": [[MANAGED_PYTHON, "scripts/ci_test_targets.py"]],
+    "targeted-units": [NEXTEST_TARGETED_UNITS],
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,
@@ -506,13 +594,23 @@ STAGES: dict[str, list[list[str]]] = {
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
+        LOWERING_TRACE_TESTS,
+        EMISSION_OBSERVER_TESTS,
+        OWNERSHIP_LEDGER_API_TESTS,
         COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
+        [MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+        OWNERSHIP_LEDGER_CLI_TESTS,
     ],
     "runtime-representation": [
         RUNTIME_REPRESENTATION_ORACLE,
     ],
 }
+STAGES["lint-and-unit-nix"] = [
+    CLIPPY_SOLVER_FREE_NIX_FEATURES
+    if command == CLIPPY_SOLVER_FREE_FEATURES else command
+    for command in STAGES["lint-and-unit"]
+]
 
 STAGE_ORDER: list[str] = [
     "lint-and-unit",
@@ -524,10 +622,10 @@ HASH_PARTITION_RE = re.compile(
     r"^hash:(?P<shard>[1-9][0-9]*)/(?P<count>[1-9][0-9]*)$"
 )
 
-# The static `--local` once-per-pull-request subset (chelis#360). Deliberately
+# The static subset for optional `--validation` runs (chelis#360). Deliberately
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
 # first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
-# authoritative workspace oracle). `--local` appends a dynamic
+# authoritative workspace oracle). `--validation` appends a dynamic
 # `cargo nextest run -p <crate> --no-fail-fast` stage per changed crate; see
 # `local_command_list`.
 #
@@ -535,13 +633,13 @@ HASH_PARTITION_RE = re.compile(
 # CONFIGURATION_CLOSURE's leg 3 reconciles every repository `.rs` file against
 # the dep-info in this worktree's target, and
 # `crates/chelis-prove/src/clarabel_sos.rs` is compiled per pull request only
-# by CLIPPY_SOLVER_FREE_FEATURES, so that row must stay or `--local` fails on
+# by CLIPPY_SOLVER_FREE_FEATURES, so that row must stay or `--validation` fails on
 # every fresh worktree. CLIPPY_NO_DEFAULT_FEATURES compiles a strict subset of
 # CLIPPY_WORKSPACE (no whole file is gated on `cfg(not(feature = ...))`), so
 # dropping it here loses only the developer-side lint of the 25
 # `#[cfg(not(feature = "chelis-prove"))]` regions, which `lint-and-unit` still
 # lints on Linux in CI for every pull request, whichever platform the
-# developer runs `--local` on. It stays in STAGES so `--list` keeps publishing
+# developer runs `--validation` on. It stays in STAGES so `--list` keeps publishing
 # it (`ci-owned`) and `check_configuration_closure.py` still finds its owner.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
@@ -560,12 +658,16 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     PIPELINE_CORE_DOCUMENTATION_GUARD,
     UNREPRESENTABLE_DOMAIN_ORACLE,
     RUNTIME_REPRESENTATION_ORACLE,
+    LOWERING_TRACE_TESTS,
+    EMISSION_OBSERVER_TESTS,
+    OWNERSHIP_LEDGER_API_TESTS,
+    OWNERSHIP_LEDGER_CLI_TESTS,
 ]
 
 # The `--fast` inner-loop pass. Fix-in-place commands first, so the tree the
 # read-only checks see is already normalized: regenerate the tier-0 artifacts
 # (Python only, sub-second), then `cargo fmt --all` in write mode. The lint row
-# is shared with `--local` and is also the `chelis` builder the tripwire
+# is shared with `--validation` and is also the `chelis` builder the tripwire
 # nextest reuses. Per-crate clippy and the tripwire run are appended by
 # `fast_command_list`.
 FMT_WRITE: list[str] = ["cargo", "fmt", "--all"]
@@ -575,6 +677,22 @@ REGEN_TIER0_WRITE: list[str] = [
 REGEN_TIER1_WRITE: list[str] = [
     MANAGED_PYTHON, "scripts/regen_all.py", "--tier", "1",
 ]
+
+
+def classify_paths_command(changed_paths: list[str]) -> list[str]:
+    """Reject a changed path the change-owned planner would refuse.
+
+    The planner itself cannot run here: in `pull_request` mode it requires a
+    two-parent synthetic merge, so against a working tree it exits before
+    classifying anything. This calls the same
+    `static_path_classification` the planner uses, and prints the same
+    `unclassified changed path: <path>` sentence CI prints, so the local and
+    hosted failures read alike (chelis#2250).
+    """
+    return [
+        MANAGED_PYTHON, "scripts/ci_change_owned.py", "classify-paths",
+        "--from-git",
+    ]
 # The bundle crate's in-crate `archive_self_consistency` test: the compile-time
 # counterpart of the std-bundle regeneration check. It cannot join
 # FAST_TRIPWIRE_NEXTEST because `--lib` would apply to every `-p` there and
@@ -603,7 +721,9 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "asset_drift_tripwire",
     "--test", "skill_set_uniformity",
     "-p", "chelis-compiler-api", "--test", "phase3_gate_inventory",
-    "-p", "chelis-types", "--test", "stack_guard_coverage",
+    "-p", "chelis-types",
+    "--test", "stack_guard_coverage",
+    "--test", "runtime_extent_target_manifest",
 ]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,
@@ -616,8 +736,8 @@ STD_PATH_PREFIXES: tuple[str, ...] = (
     "crates/chelis-std-bundle/",
 )
 
-LOCAL_ANNOTATION = "local + ci"
-FAST_ANNOTATION = "fast + local + ci"
+LOCAL_ANNOTATION = "validation + ci"
+FAST_ANNOTATION = "fast + validation + ci"
 CI_OWNED_ANNOTATION = "ci-owned"
 FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 FAST_DYNAMIC_NOTE = (
@@ -628,7 +748,7 @@ FAST_DYNAMIC_NOTE = (
     "a std path changed, cargo nextest run -p chelis-std-bundle --lib"
 )
 LOCAL_DYNAMIC_NOTE = (
-    "# --local also runs: cargo nextest run -p <crate> --no-fail-fast "
+    "# --validation also runs: cargo nextest run -p <crate> --no-fail-fast "
     "for each crate changed vs origin/main"
 )
 
@@ -638,6 +758,10 @@ LOCAL_DYNAMIC_NOTE = (
 # and would defeat cross-worktree serialization.
 REPORT_DIR_ENV = "CHELIS_GATE_REPORT_DIR"
 LEASE_DIR_ENV = "CHELIS_GATE_LEASE_DIR"
+# Set only on the re-exec into this checkout's own interpreter, and consumed at
+# once: a second arrival still not owned means that interpreter does not start
+# as this checkout's environment, and the gate stops rather than loop.
+OWNED_REEXEC_ENV = "CHELIS_GATE_OWNED_REEXEC"
 LEASE_FILE_NAME = "gate.lock"
 LEASE_POLL_SECONDS = 10.0
 LEASE_HEARTBEAT_SECONDS = 60.0
@@ -689,6 +813,39 @@ def is_managed_runtime(
     return False
 
 
+def owns_interpreter(environ: dict[str, str], prefix: Path, repo_root: Path) -> bool:
+    """Whether ``prefix`` is this checkout's own environment: its activated
+    Devenv state venv, or its ``.venv``.
+
+    This is the rule the capacity census's native execution enforces
+    (`capacity_census_native_execution._owned_interpreter`), and
+    `scripts/test_gate_diagnostics.py` checks that the two agree. Any other
+    managed venv, another checkout's included (chelis#2511), is not owned.
+    """
+    root = repo_root.resolve()
+    prefix = prefix.resolve()
+    devenv_state = environ.get("DEVENV_STATE")
+    if devenv_state:
+        state = Path(devenv_state).resolve()
+        if state.is_relative_to(root / ".devenv") and prefix == state / "venv":
+            return True
+    return prefix == (root / ".venv").resolve()
+
+
+def owned_interpreter(environ: dict[str, str], repo_root: Path) -> Path | None:
+    """This checkout's own interpreter, if one exists: the activated Devenv
+    state venv under this checkout, else its ``.venv``."""
+    root = repo_root.resolve()
+    devenv_state = environ.get("DEVENV_STATE")
+    if devenv_state:
+        state = Path(devenv_state).resolve()
+        candidate = state / "venv" / "bin" / "python"
+        if state.is_relative_to(root / ".devenv") and candidate.is_file():
+            return candidate
+    candidate = root / ".venv" / "bin" / "python"
+    return candidate if candidate.is_file() else None
+
+
 def ensure_managed_runtime(
     argv: list[str],
     *,
@@ -696,21 +853,53 @@ def ensure_managed_runtime(
     executable: Path | None = None,
     prefix: Path | None = None,
     base_prefix: Path | None = None,
+    repo_root: Path = REPO_ROOT,
     find_uv=shutil.which,
     execvpe=os.execvpe,
     error_stream=None,
 ) -> int | None:
-    """Re-exec an unmanaged gate launch through uv.
+    """Re-exec a gate launch through this checkout's own interpreter, or an
+    unmanaged launch through uv.
 
-    Returns ``None`` when the current runtime is already managed. A successful
-    re-exec never returns. Missing uv returns 127 after actionable setup
-    guidance.
+    Without an explicit ``PYO3_PYTHON``, the running interpreter becomes the
+    one every child command receives, so this checkout's own interpreter is
+    used whenever it exists. A venv another checkout put first on ``PATH`` is
+    managed but not owned, and the census refuses it only at the end of the
+    runtime-representation stage (chelis#2511). Returns ``None`` when the
+    current runtime is owned, or, with no owned interpreter to switch to or an
+    explicit ``PYO3_PYTHON``, when it is managed. A successful re-exec never
+    returns. Missing uv returns 127 after actionable setup guidance.
     """
     environment = dict(os.environ if environ is None else environ)
     current_executable = Path(sys.executable) if executable is None else executable
     current_prefix = Path(sys.prefix) if prefix is None else prefix
     current_base = Path(sys.base_prefix) if base_prefix is None else base_prefix
     error = sys.stderr if error_stream is None else error_stream
+    reexecuted = environment.pop(OWNED_REEXEC_ENV, None) is not None
+    if environ is None:
+        os.environ.pop(OWNED_REEXEC_ENV, None)
+
+    if not environment.get("PYO3_PYTHON"):
+        if owns_interpreter(environment, current_prefix, repo_root):
+            return None
+        owned = owned_interpreter(environment, repo_root)
+        if owned is not None:
+            if reexecuted:
+                print(
+                    f"gate: {owned} does not start as this checkout's own "
+                    f"environment: it reports sys.prefix {current_prefix}. "
+                    "Recreate it with `uv venv --python 3.11`, or set "
+                    "PYO3_PYTHON to the interpreter the gate should use.",
+                    file=error,
+                )
+                return EXIT_ENVIRONMENT
+            environment[OWNED_REEXEC_ENV] = "1"
+            execvpe(
+                str(owned),
+                [str(owned), str(Path(__file__).resolve()), *argv],
+                environment,
+            )
+            raise RuntimeError("owned-interpreter re-exec unexpectedly returned")
 
     if is_managed_runtime(
         environment,
@@ -832,7 +1021,7 @@ def gate_environment(
     # An explicit handoff is diagnosed here, before the first command runs,
     # not when the oracle finally reaches it (chelis#1322). The oracle
     # rejects a bad value on its own, but that is command 10 of 10 in
-    # `--local`: a typo would cost the whole workspace clippy, fmt, the
+    # `--validation`: a typo would cost the whole workspace clippy, fmt, the
     # lint pass, three rustdoc stages and two Python guards before saying
     # so. PYO3_PYTHON above is diagnosed at command 0 of 10, and the docs
     # claim the two get the same discipline, so they now do. Only a value
@@ -973,8 +1162,8 @@ def render(command: list[str]) -> str:
 
 def list_annotation(command: list[str]) -> str:
     """The `--list` annotation for a canonical command: whether the
-    `--fast` pre-push gate and the `--local` once-per-pull-request subset
-    include it, only `--local` does, or CI owns it."""
+    `--fast` pre-push gate and the optional `--validation` subset
+    include it, only `--validation` does, or CI owns it."""
     if command in FAST_STATIC_COMMANDS and command in LOCAL_STATIC_COMMANDS:
         return FAST_ANNOTATION
     if command in LOCAL_STATIC_COMMANDS:
@@ -997,8 +1186,8 @@ def workspace_member_packages(repo_root: Path = REPO_ROOT) -> dict[str, str]:
         # macOS system `python3` is 3.9. Surface that as guidance, not a
         # raw traceback (chelis#366).
         print(
-            "gate.py --local needs Python 3.11+ (tomllib); invoke "
-            "`python3 scripts/gate.py --local` so gate.py can route "
+            "gate.py needs Python 3.11+ (tomllib); invoke "
+            "`python3 scripts/gate.py` so gate.py can route "
             "through uv per AGENTS.md",
             file=sys.stderr,
         )
@@ -1029,7 +1218,7 @@ def changed_paths_from_git(diff_output: str, status_output: str) -> list[str]:
         # (core.quotePath); strip the quotes so the member-dir prefix
         # match still sees the path. Mirrors the porcelain branch below;
         # without this a committed-only change to such a file silently
-        # excludes its crate from the --local nextest stage (PR #362
+        # excludes its crate from the --validation nextest stage (PR #362
         # review finding 1).
         line = line.strip().strip('"')
         if line:
@@ -1062,7 +1251,7 @@ def changed_crates(
 
 
 def local_command_list(crates: list[str]) -> list[list[str]]:
-    """The `--local` once-per-pull-request command list: the static subset
+    """The optional `--validation` command list: the static subset
     plus one `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
     commands = list(LOCAL_STATIC_COMMANDS)
     for crate in crates:
@@ -1081,21 +1270,35 @@ def std_paths_changed(paths: list[str]) -> bool:
 
 
 def fast_command_list(
-    crates: list[str], *, std_changed: bool
+    crates: list[str], *, std_changed: bool, changed_paths: list[str]
 ) -> list[list[str]]:
     """The `--fast` command list: fix-in-place regeneration and fmt, the
-    lint row (which also builds `chelis`), `cargo clippy -p <crate> --tests`
-    per changed crate, one nextest run over the drift tripwires, and, when a
-    std path changed, the tier-1 regeneration before the checks and the
-    bundle self-consistency test after them. Every writer precedes every
-    check: a changed `.ch` source makes the embedded bundle stale, and the
-    `bundled_chelis_std_loader` tripwire would fail on it before a later
-    regeneration could fix it. Never the chelis#908 oracle: minutes of work
-    whose `chelis check` timeouts under load are a known false-red source."""
+    changed-path classification, the lint row (which also builds `chelis`),
+    `cargo clippy -p <crate> --tests` per changed crate, one nextest run over
+    the drift tripwires, and, when a std path changed, the tier-1
+    regeneration before the checks and the bundle self-consistency test after
+    them. Every writer precedes every check: a changed `.ch` source makes the
+    embedded bundle stale, and the `bundled_chelis_std_loader` tripwire would
+    fail on it before a later regeneration could fix it.
+
+    The classification is first among the checks because it is the cheapest
+    thing here that can reject a push, and because until chelis#2250 an
+    unrouted new file passed every local check and then failed `Plan Changed
+    Integration Tests` in CI. It derives its own set when it runs rather than
+    taking one built here; `AGENTS.md`'s `--fast` paragraph states once what
+    that set covers and what it does not, and this docstring deliberately
+    does not restate it.
+    `docs/ci_validation.md` under Measured figures carries its cost with the
+    conditions that produced it.
+
+    Never the chelis#908 oracle: minutes of work whose `chelis check`
+    timeouts under load are a known false-red source."""
     commands = [REGEN_TIER0_WRITE]
     if std_changed:
         commands.append(REGEN_TIER1_WRITE)
-    commands.extend([FMT_WRITE, CHELIS_LINT_CHECK])
+    commands.append(FMT_WRITE)
+    commands.append(classify_paths_command(changed_paths))
+    commands.append(CHELIS_LINT_CHECK)
     for crate in crates:
         commands.append(
             ["cargo", "clippy", "-p", crate, "--tests", "--", "-D", "warnings"]
@@ -1122,7 +1325,7 @@ def _git_output(args: list[str]) -> str:
 
 def _git_facts() -> dict[str, str | None]:
     """The commit facts the run summary records. Never fatal: a shallow CI
-    clone has no `origin/main`, and the `--local` and `--fast` paths keep
+    clone has no `origin/main`, and the `--validation` and `--fast` paths keep
     their own loud failure for the diff they actually depend on."""
     facts: dict[str, str | None] = {}
     for key, args in (
@@ -1306,7 +1509,7 @@ def write_summary(
 
 
 def _mode_label(mode: str) -> str:
-    if mode in ("fast", "local"):
+    if mode in ("fast", "validation"):
         return f"gate --{mode}"
     if mode == "full":
         return "gate"
@@ -1451,7 +1654,7 @@ def find_summary(
     to get this pid is the only match for the whole window before this run
     finishes; a later run that reused the pid outranks this run's own summary
     once it exists. Either way polling reports someone else's verdict, which is
-    a false PASS on the once-per-pull-request gate.
+    a false PASS on the optional validation gate.
 
     `not_before` is the handle's `started_at`, and the rule is: take the
     EARLIEST summary that ended at or after this run started. That one is
@@ -1604,7 +1807,7 @@ def detached_state(
     summary_path = find(
         report_dir,
         pid,
-        handle.get("mode", "local"),
+        handle.get("mode", "validation"),
         not_before=handle.get("started_at"),
     )
     if summary_path is not None:
@@ -1776,7 +1979,7 @@ def run_status(
     if termination == "lease-timeout":
         print(
             "gate: exit 4 is the lease timeout, not a gate failure; another "
-            "gate held the lease",
+            "gate held the lease or was ahead in its queue",
             file=output,
         )
     print(f"gate: log: {handle.get('log', '?')}", file=output, flush=True)
@@ -1845,7 +2048,7 @@ def run_preflight(
     output_stream=None,
     error_stream=None,
 ) -> tuple[int | None, dict[str, str] | None]:
-    """The checks before the first command of `--fast`, `--local`, or the
+    """The checks before the first command of `--fast`, `--validation`, or the
     bare full gate. Returns `(None, environment)` to proceed, or
     `(exit_code, None)` to stop. CI stage runs never call this. Everything
     the preflight says is a diagnostic, so it all goes to `error_stream`;
@@ -1870,9 +2073,10 @@ def run_preflight(
     if not venv_present:
         print(
             f"gate: warning: {venv_python} is missing. The gate exports "
-            "PYO3_PYTHON so its own commands do not need it; direct cargo and "
-            "nextest runs in this worktree do. Create it with: uv venv "
-            "--python 3.11",
+            "PYO3_PYTHON so most of its commands do not need it, but the "
+            "runtime-representation oracle's census legs refuse an interpreter "
+            "this checkout does not own, and direct cargo and nextest runs in "
+            "this worktree need it too. Create it with: uv venv --python 3.11",
             file=error,
         )
 
@@ -1958,20 +2162,29 @@ def describe_holder(holder: dict | None) -> str:
 
 
 class LeaseHeld(Exception):
-    """Raised when the lease is held and the caller declined to keep
+    """Raised when the lease or queue is busy and the caller declined to keep
     waiting (`--no-wait`, or `--lease-timeout` elapsed)."""
 
-    def __init__(self, holder: dict | None, waited: float) -> None:
+    def __init__(
+        self, holder: dict | None, waited: float, queue_position: int | None = None
+    ) -> None:
         super().__init__(describe_holder(holder))
         self.holder = holder
         self.waited = waited
+        self.queue_position = queue_position
+
+
+class LeaseQueueError(OSError):
+    """Queue bookkeeping failed; proceeding could overtake live waiters."""
 
 
 class GateLease:
-    """An advisory `fcntl.flock` on one file, plus a JSON sidecar naming the
-    holder. The kernel owns liveness: the lock vanishes with the holder's
-    last file descriptor, SIGKILL included, so no pid check is needed and a
-    stale sidecar without a lock is simply overwritten by the next acquirer.
+    """A FIFO admission queue ahead of the advisory flock and holder sidecar.
+
+    A short queue lock serializes ticket registration and admission. Order is
+    registration order, not process start time. Each waiter holds its ticket's
+    flock; an unlocked ticket is abandoned, even after SIGKILL or PID reuse.
+    The main lock still owns holder liveness and remains visible to old probes.
     """
 
     def __init__(
@@ -2002,6 +2215,11 @@ class GateLease:
         self.poll_seconds = poll_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self._fd: int | None = None
+        self.queue_path = path.with_name(path.name + ".queue")
+        self._queue_guard_fd: int | None = None
+        self._ticket_path: Path | None = None
+        self._ticket_fd: int | None = None
+        self.queue_position: int | None = None
         self.held = False
         self.wait_seconds = 0.0
         self.holder_seen: dict | None = None
@@ -2044,36 +2262,136 @@ class GateLease:
             os.close(fd)
 
     def acquire(self) -> None:
+        # Acquisition can be interrupted before run_local/run_full stores this
+        # object in main's cleanup state. Own every descriptor here until then.
+        try:
+            self._acquire()
+        except OSError as exc:
+            opened_main = self._fd is not None
+            self.release()
+            if opened_main:
+                raise LeaseQueueError(str(exc)) from exc
+            raise
+        except BaseException:
+            self.release()
+            raise
+        finally:
+            if self._queue_guard_fd is not None:
+                os.close(self._queue_guard_fd)
+                self._queue_guard_fd = None
+
+    def _try_turn(self) -> bool:
+        # Never block on bookkeeping: --no-wait and the overall deadline apply
+        # even if a process is stopped while holding this short-lived mutex.
+        if not self._try_flock(self._queue_guard_fd):
+            return False
+        try:
+            live: list[Path] = []
+            # iterdir surfaces I/O errors; glob can suppress an unreadable
+            # directory and would incorrectly describe the queue as empty.
+            tickets = (p for p in self.queue_path.iterdir() if p.suffix == ".ticket")
+            for ticket in sorted(tickets, key=lambda p: int(p.stem)):
+                if ticket == self._ticket_path:
+                    live.append(ticket)
+                    continue
+                try:
+                    fd = os.open(ticket, os.O_RDONLY)
+                except FileNotFoundError:
+                    continue  # A cancelled waiter removed its ticket.
+                try:
+                    if self._try_flock(fd):
+                        ticket.unlink(missing_ok=True)
+                    else:
+                        live.append(ticket)
+                finally:
+                    os.close(fd)
+            if self._ticket_path is None:
+                number = int(live[-1].stem) + 1 if live else 1
+                ticket = self.queue_path / f"{number:020d}.ticket"
+                self._ticket_fd = os.open(ticket, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+                self._ticket_path = ticket
+                # Nobody can inspect this ticket until the queue lock drops.
+                if not self._try_flock(self._ticket_fd):
+                    raise RuntimeError("new gate queue ticket is already locked")
+                live.append(ticket)
+            self.queue_position = live.index(self._ticket_path) + 1
+            if self.queue_position != 1 or not self._try_flock(self._fd):
+                return False
+            self._leave_queue()
+            return True
+        except (OSError, ValueError) as exc:
+            raise LeaseQueueError(str(exc)) from exc
+        finally:
+            fcntl.flock(self._queue_guard_fd, fcntl.LOCK_UN)
+
+    def _leave_queue(self) -> None:
+        try:
+            if self._ticket_path is not None:
+                self._ticket_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise LeaseQueueError(str(exc)) from exc
+        finally:
+            self._ticket_path = None
+            if self._ticket_fd is not None:
+                os.close(self._ticket_fd)
+                self._ticket_fd = None
+
+    def _acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            self.queue_path.mkdir(exist_ok=True)
+            self._queue_guard_fd = os.open(
+                self.path.with_name(self.path.name + ".queue.lock"),
+                os.O_RDWR | os.O_CREAT, 0o644,
+            )
+        except OSError as exc:
+            raise LeaseQueueError(str(exc)) from exc
         started = self._clock()
         last_heartbeat = started
         announced = False
         transient_retry = True
-        while not self._try_flock(self._fd):
-            holder = self.current_holder(self.path)
+        attempted = False
+        while True:
+            waited = self._clock() - started
+            if attempted and self.timeout is not None and waited >= self.timeout:
+                self.wait_seconds = waited
+                raise LeaseHeld(self.peek(self.path) or None, waited, self.queue_position)
+            attempted = True
+            if self._try_turn():
+                break
+            holder = self.peek(self.path)
             if holder:
                 self.holder_seen = holder
-            elif transient_retry:
+            elif transient_retry and self.queue_position == 1:
                 # No sidecar yet: either a holder is between its flock and
                 # its sidecar write, or a `--fast` peek holds a shared lock
                 # for a few microseconds. One short retry settles both
                 # before this run announces an unknown holder.
                 transient_retry = False
-                self._sleep(TRANSIENT_RETRY_SECONDS)
+                pause = TRANSIENT_RETRY_SECONDS
+                if self.timeout is not None:
+                    pause = max(0.0, min(pause, self.timeout - waited))
+                self._sleep(pause)
                 continue
             now = self._clock()
             waited = now - started
             expired = self.timeout is not None and waited >= self.timeout
             if not self.wait or expired:
-                os.close(self._fd)
-                self._fd = None
                 self.wait_seconds = waited
-                raise LeaseHeld(holder, waited)
+                raise LeaseHeld(holder or None, waited, self.queue_position)
+            position = (
+                f"queue position {self.queue_position}"
+                if self.queue_position is not None else "waiting to register a queue ticket"
+            )
+            holder_text = (
+                f"held by {describe_holder(holder)}"
+                if holder is not None else "no current holder"
+            )
             if not announced:
                 print(
-                    f"gate: waiting for the gate lease {self.path} held by "
-                    f"{describe_holder(holder)}; polling every "
+                    f"gate: waiting for the gate lease {self.path}; {position}; "
+                    f"{holder_text}; polling every "
                     f"{self.poll_seconds:.0f} s (pass --no-wait, "
                     "--lease-timeout SECONDS, or --no-lease to change this)",
                     file=self.output,
@@ -2084,27 +2402,22 @@ class GateLease:
             elif now - last_heartbeat >= self.heartbeat_seconds:
                 print(
                     f"gate: still waiting ({waited:.0f} s) for the gate lease "
-                    f"held by {describe_holder(holder)}",
+                    f"{position}; {holder_text}",
                     file=self.output,
                     flush=True,
                 )
                 last_heartbeat = now
             # Never sleep past the deadline: a bounded wait is honoured to
             # the second, not to the next poll boundary.
-            pause = self.poll_seconds
+            pause = (
+                self.poll_seconds if self._ticket_path is not None
+                else TRANSIENT_RETRY_SECONDS
+            )
             if self.timeout is not None:
                 pause = max(0.0, min(pause, self.timeout - waited))
             self._sleep(pause)
         self.wait_seconds = self._clock() - started
-        try:
-            self._write_sidecar()
-        except OSError:
-            # Holding the flock without a sidecar would let other gates wait
-            # on an anonymous holder while this run reports no lease at all.
-            # Release the lock and let the caller report the bypass truthfully.
-            os.close(self._fd)
-            self._fd = None
-            raise
+        self._write_sidecar()
         self.held = True
 
     def _write_sidecar(self) -> None:
@@ -2132,13 +2445,18 @@ class GateLease:
             os.fsync(stream.fileno())
 
     def release(self) -> None:
-        if self._fd is None:
-            return
-        if self.held:
-            self.sidecar_path.unlink(missing_ok=True)
-        os.close(self._fd)
-        self._fd = None
-        self.held = False
+        try:
+            if self.held:
+                self.sidecar_path.unlink(missing_ok=True)
+        finally:
+            try:
+                self._leave_queue()
+            finally:
+                if self._fd is not None:
+                    os.close(self._fd)
+                    self._fd = None
+                self.held = False
+                self.queue_position = None
 
     def __enter__(self) -> "GateLease":
         self.acquire()
@@ -2159,7 +2477,7 @@ def take_lease(
     error_stream=None,
     lease_factory=None,
 ) -> tuple[int | None, GateLease | None]:
-    """Take the lease for `--local` and the bare full gate; only report a
+    """Take the lease for `--validation` and the bare full gate; only report a
     holder for `--fast`. Returns `(exit_code, None)` when the lease is held
     and the caller declined to wait, else `(None, lease_or_None)`."""
     output = sys.stdout if output_stream is None else output_stream
@@ -2202,6 +2520,15 @@ def take_lease(
     )
     try:
         lease.acquire()
+    except LeaseQueueError as exc:
+        print(
+            f"gate: cannot use the gate lease queue at {path}: {exc}. "
+            "Repair the queue directory or explicitly pass --no-lease to bypass it.",
+            file=error,
+        )
+        record["mode"] = "error"
+        report.termination = "environment"
+        return EXIT_ENVIRONMENT, None
     except OSError as exc:
         # An unusable lease directory must not turn into a false red.
         print(
@@ -2220,8 +2547,16 @@ def take_lease(
             if getattr(args, "no_wait", False)
             else f"--lease-timeout {args.lease_timeout:g} elapsed"
         )
+        position = (
+            f"; queue position {held.queue_position}"
+            if held.queue_position is not None else ""
+        )
+        holder_text = (
+            f"held by {describe_holder(held.holder)}"
+            if held.holder is not None else "no readable holder"
+        )
         print(
-            f"gate: the gate lease {path} is held by {describe_holder(held.holder)} "
+            f"gate: the gate lease {path} is unavailable ({holder_text}{position}) "
             f"and {reason}. Rerun without the flag to wait, or pass --no-lease "
             "to bypass the lease. Exit 4 means lease-timeout, not a gate failure.",
             file=error,
@@ -2266,7 +2601,7 @@ def _derive_changed(label: str, report: GateReport) -> tuple[list[str], list[str
             flush=True,
         )
     else:
-        stage = "nextest" if label == "--local" else "clippy"
+        stage = "nextest" if label == "--validation" else "clippy"
         print(
             f"gate {label}: no crate changes detected vs origin/main; "
             f"skipping the per-crate {stage} stage. The workspace suite "
@@ -2284,25 +2619,25 @@ def run_local(
     executable: Path,
     state: dict,
 ) -> int:
-    """Run the `--local` once-per-pull-request gate: preflight, lease, derive
-    the changed crates vs origin/main, then run the local command list."""
+    """Run the optional `--validation` gate: preflight, lease, derive
+    the changed crates vs origin/main, then run the validation command list."""
     code, environment = run_preflight(
-        mode="local", report=report, environ=environ, executable=executable
+        mode="validation", report=report, environ=environ, executable=executable
     )
     if code is not None:
         return code
     assert environment is not None
-    derived = _derive_changed("--local", report)
+    derived = _derive_changed("--validation", report)
     if isinstance(derived, int):
         return derived
     _paths, crates = derived
-    code, lease = take_lease(mode="local", args=args, report=report, environ=environment)
+    code, lease = take_lease(mode="validation", args=args, report=report, environ=environment)
     state["lease"] = lease
     if code is not None:
         return code
     return run_commands(
         local_command_list(crates),
-        stage_label="local",
+        stage_label="validation",
         environ=environment,
         executable=executable,
         report=report,
@@ -2342,7 +2677,9 @@ def run_fast(
     state["lease"] = None
     before = _porcelain_hashes()
     code = run_commands(
-        fast_command_list(crates, std_changed=std_changed),
+        fast_command_list(
+            crates, std_changed=std_changed, changed_paths=paths
+        ),
         stage_label="fast",
         environ=environment,
         executable=executable,
@@ -2413,7 +2750,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "stage",
         nargs="?",
-        choices=STAGE_ORDER,
+        choices=list(STAGES),
         help=(
             "Run only this CI stage's gate subset. Omit to run the complete "
             "developer gate."
@@ -2430,6 +2767,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Run only the integration stage's non-nextest support oracles.",
     )
     p.add_argument(
+        "--support-slice", choices=("frontend", "domain"),
+        help="Run one integration support subset on its existing workspace worker.",
+    )
+    p.add_argument(
         "--partition",
         metavar="HASH:N/M",
         help=(
@@ -2442,15 +2783,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help=(
             "Print the canonical full gate command list, annotated with "
-            "which commands the --local subset includes, and exit."
+            "which commands the --validation subset includes, and exit."
         ),
     )
     p.add_argument(
-        "--local",
+        "--validation",
         action="store_true",
         help=(
-            "Run the once-per-pull-request gate on the committed candidate, "
-            "immediately before ready-for-review (chelis#360): two workspace "
+            "Run optional extra validation (chelis#360); --fast, not this, "
+            "is the pre-push gate. Runs two workspace "
             "clippy configurations, fmt --check, chelis lint --check ., the "
             "regeneration and compile-fail guards, both oracles, and cargo "
             "nextest run -p <crate> for each crate changed vs origin/main. "
@@ -2475,7 +2816,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Start the run in its own session and return at once, printing a "
             "handle. For a caller with a foreground command timeout shorter "
-            "than the run: the three completed --local runs of the 2026-09-02 "
+            "than the run: the three completed validation runs of the 2026-09-02 "
             "fleet took 7m51s, 9m56s and 10m02s against a ten-minute limit. "
             "The exit code is a launch verdict; use --status for the gate's."
         ),
@@ -2496,7 +2837,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--no-wait",
         action="store_true",
-        help="Exit 4 immediately when another gate holds the lease.",
+        help="Exit 4 when the lease or its admission queue is busy.",
     )
     p.add_argument(
         "--no-lease",
@@ -2511,16 +2852,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Wait at most this long for the lease, then exit 4.",
     )
     args = p.parse_args(argv)
-    if args.local and args.stage is not None:
-        p.error("--local cannot be combined with a CI stage name")
-    if args.local and args.list:
-        p.error("--local cannot be combined with --list")
+    if args.validation and args.stage is not None:
+        p.error("--validation cannot be combined with a CI stage name")
+    if args.validation and args.list:
+        p.error("--validation cannot be combined with --list")
     if args.fast and args.stage is not None:
         p.error("--fast cannot be combined with a CI stage name")
     if args.fast and args.list:
         p.error("--fast cannot be combined with --list")
-    if args.fast and args.local:
-        p.error("--fast and --local are mutually exclusive")
+    if args.fast and args.validation:
+        p.error("--fast and --validation are mutually exclusive")
     if args.detach and args.status is not None:
         p.error("--detach and --status are mutually exclusive")
     if args.detach and args.list:
@@ -2539,8 +2880,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "--detach cannot be combined with --fast; --fast writes to the "
             "worktree and must not run unattended"
         )
-    if args.status is not None and (args.fast or args.local or args.list):
-        p.error("--status cannot be combined with --fast/--local/--list")
+    if args.status is not None and (args.fast or args.validation or args.list):
+        p.error("--status cannot be combined with --fast/--validation/--list")
     if args.status is not None and args.stage is not None:
         p.error("--status cannot be combined with a CI stage name")
     lease_flags = [
@@ -2567,6 +2908,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--no-lease cannot be combined with --no-wait/--lease-timeout")
     if args.lease_timeout is not None and args.lease_timeout <= 0:
         p.error("--lease-timeout must be a positive number of seconds")
+    if args.support_slice is not None and not args.support_only:
+        p.error("--support-slice requires integration --support-only")
     if args.tests_only and args.support_only:
         p.error("--tests-only and --support-only are mutually exclusive")
     if (args.tests_only or args.support_only) and args.stage != "integration":
@@ -2580,10 +2923,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         if int(match.group("shard")) > int(match.group("count")):
             p.error("--partition shard N must not exceed partition count M")
     if (args.tests_only or args.support_only or args.partition) and (
-        args.local or args.list or args.fast
+        args.validation or args.list or args.fast
     ):
         p.error(
-            "integration selectors cannot be combined with --local/--fast/--list"
+            "integration selectors cannot be combined with --validation/--fast/--list"
         )
     return args
 
@@ -2594,15 +2937,65 @@ def selected_stage_commands(
     tests_only: bool,
     support_only: bool,
     partition: str | None,
+    support_slice: str | None = None,
+    environ: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Return one CI stage slice without duplicating canonical commands."""
     commands = STAGES[stage]
+    if stage == "targeted-units":
+        raw = (environ or {}).get(TARGETED_PACKAGES_ENV, "")
+        if not raw:
+            raise ValueError(
+                f"{TARGETED_PACKAGES_ENV} must name the exact package frontier"
+            )
+        packages = raw.split(",")
+        if any(
+            not package
+            or re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", package) is None
+            for package in packages
+        ):
+            raise ValueError(
+                f"{TARGETED_PACKAGES_ENV} must be comma-separated Cargo package names"
+            )
+        if len(packages) != len(set(packages)):
+            raise ValueError(f"{TARGETED_PACKAGES_ENV} contains duplicates")
+        if packages:
+            package_args = [
+                argument
+                for package in packages
+                for argument in ("-p", package)
+            ]
+            targeted_clippy = [
+                "cargo",
+                "clippy",
+                *package_args,
+                "--lib",
+                "--bins",
+                "--tests",
+                "--",
+                "-D",
+                "warnings",
+            ]
+            targeted_units = [
+                part
+                for part in NEXTEST_TARGETED_UNITS
+                if part != "--workspace"
+            ]
+            targeted_units[3:3] = package_args
+            commands = [FMT_CHECK, targeted_clippy, targeted_units]
+            commands.extend(
+                TARGETED_DOCTESTS[package]
+                for package in packages
+                if package in TARGETED_DOCTESTS
+            )
     if tests_only:
         selected = [list(commands[0])]
     elif support_only:
         selected = [list(command) for command in commands[1:]]
     else:
         selected = [list(command) for command in commands]
+    if support_slice is not None:
+        selected = selected[:4] if support_slice == "frontend" else selected[4:]
     if partition is not None:
         selected[0].extend(["--partition", partition])
     return selected
@@ -2916,7 +3309,13 @@ def main(
     `CARGO_TARGET_DIR` or writing under the real repository."""
     args = parse_args(argv)
     if args.list:
-        for command in full_command_list():
+        commands = full_command_list()
+        # Include executable CI variants, not constants detached from a stage.
+        for stage_commands in STAGES.values():
+            for command in stage_commands:
+                if command not in commands:
+                    commands.append(command)
+        for command in commands:
             print(f"{render(command)}  # {list_annotation(command)}")
         print(FAST_DYNAMIC_NOTE)
         print(LOCAL_DYNAMIC_NOTE)
@@ -2936,12 +3335,12 @@ def main(
             argv=list(argv),
             environ=environment_in,
             executable=current_executable,
-            mode="local" if args.local else "full",
+            mode="validation" if args.validation else "full",
         )
     if args.fast:
         mode = "fast"
-    elif args.local:
-        mode = "local"
+    elif args.validation:
+        mode = "validation"
     elif args.stage is not None:
         mode = args.stage
     else:
@@ -2959,6 +3358,8 @@ def main(
                 tests_only=args.tests_only,
                 support_only=args.support_only,
                 partition=args.partition,
+                support_slice=args.support_slice,
+                environ=environment_in,
             )
             exit_code = run_commands(
                 commands,
@@ -2968,7 +3369,7 @@ def main(
                 report=report,
             )
         else:
-            runner = {"fast": run_fast, "local": run_local}.get(mode, run_full)
+            runner = {"fast": run_fast, "validation": run_local}.get(mode, run_full)
             exit_code = runner(
                 args,
                 report=report,

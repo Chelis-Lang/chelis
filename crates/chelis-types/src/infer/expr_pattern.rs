@@ -7,7 +7,7 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_match(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -15,10 +15,10 @@ pub(super) fn infer_match(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
         return malformed_form(
-            list,
+            node,
             "match",
             "a scrutinee expression and at least one arm",
             errors,
@@ -34,7 +34,7 @@ pub(super) fn infer_match(
     // as a silent `Type::Error` (census-verified silent-through).
     if kids.len() < 2 {
         return malformed_form(
-            list,
+            node,
             "match",
             "at least one arm after the scrutinee",
             errors,
@@ -44,6 +44,10 @@ pub(super) fn infer_match(
     let mut result_ty: Option<Type> = None;
     let mut covered_variants: Vec<String> = Vec::new();
     let mut has_wildcard = false;
+    // chelis#2442: an arm's whole pattern sits against the scrutinee itself,
+    // so a repair may name the scrutinee when it is a variable.
+    let site = super::declarations::var_name_expr(&kids[0])
+        .map_or(PatternSite::Other, PatternSite::ArmOfVariable);
 
     for arm_expr in &kids[1..] {
         if let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm_expr) {
@@ -51,6 +55,20 @@ pub(super) fn infer_match(
             if arm_kids.len() >= 3 {
                 let mut arm_env = env.clone();
                 let pat = &arm_kids[0];
+                let guard = &arm_kids[1];
+                let empty_guard = match guard.carrier() {
+                    deep::ExprCarrier::StructuralList(elements) => elements.is_empty(),
+                    deep::ExprCarrier::DecodedNode(_, _, _)
+                    | deep::ExprCarrier::UndecodableHead(_, _, _)
+                    | deep::ExprCarrier::Atom(_)
+                    | deep::ExprCarrier::MetadataMap(_)
+                    | deep::ExprCarrier::MetadataExpression(_) => false,
+                };
+                // [04-PAT-2]: a guard can be `false`, so a guarded arm covers
+                // nothing. Its pattern is still checked and binds for the
+                // guard and body; only its coverage is discarded.
+                let mut arm_covered = Vec::new();
+                let mut arm_wildcard = false;
                 // RFC D-CHECK exhaustiveness fix (RT-0 verified false
                 // positives): a TOP-LEVEL irrefutable arm covers the
                 // match -- a bare `pat-var`, or a `pat-as` whose
@@ -58,10 +76,11 @@ pub(super) fn infer_match(
                 // keeps not-covering so exhaustiveness is not
                 // weakened on ordinary ADTs.
                 if top_level_arm_is_irrefutable(pat) {
-                    has_wildcard = true;
+                    arm_wildcard = true;
                 }
                 pattern_bindings(
                     pat,
+                    site,
                     &scrutinee_ty,
                     &mut arm_env,
                     vg,
@@ -69,24 +88,21 @@ pub(super) fn infer_match(
                     adt_reg,
                     errors,
                     product,
-                    &mut covered_variants,
-                    &mut has_wildcard,
+                    &mut arm_covered,
+                    &mut arm_wildcard,
                 );
-
-                let guard = &arm_kids[1];
-                let empty_guard = matches!(guard, deep::Expr::List(guard_list, _) if guard_list.elements.is_empty())
-                    || matches!(guard, deep::Expr::BareList(elements, _) if elements.is_empty());
-                if !empty_guard {
+                if empty_guard {
+                    covered_variants.extend(arm_covered);
+                    has_wildcard |= arm_wildcard;
+                } else {
                     let guard_ty =
                         infer_expr(guard, &mut arm_env, vg, subst, adt_reg, errors, product);
-                    let resolved_guard = subst.apply(&guard_ty);
-                    if !matches!(resolved_guard, Type::Prim(Prim::Bool) | Type::Error(_)) {
-                        errors.push(CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            format!("match arm guard must be bool, got {resolved_guard}"),
-                            vec![],
-                        ));
-                    }
+                    super::expr_function::require_bool_condition(
+                        &guard_ty,
+                        "match arm guard",
+                        subst,
+                        errors,
+                    );
                 }
 
                 let body_ty = infer_expr(
@@ -126,8 +142,8 @@ pub(super) fn infer_match(
                 let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
                 errors.push(CheckError::new(
                     CheckErrorKind::NonExhaustiveMatch,
-                    with_macro_provenance(
-                        &deep::Expr::List(list.clone(), zero_span()),
+                    with_node_provenance(
+                        node,
                         format!("non-exhaustive match: missing variants {:?}", names),
                     ),
                     vec![],
@@ -171,6 +187,7 @@ fn visit_sub_patterns_untyped(
         let fresh = vg.fresh_type();
         pattern_bindings(
             sub_pat,
+            PatternSite::Other,
             &fresh,
             env,
             vg,
@@ -201,6 +218,7 @@ pub(super) fn top_level_arm_is_irrefutable(pat: &deep::Expr) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn pattern_bindings(
     pat: &deep::Expr,
+    site: PatternSite<'_>,
     scrutinee_ty: &Type,
     env: &mut Env,
     vg: &mut VarGen,
@@ -251,7 +269,7 @@ pub(super) fn pattern_bindings(
                 // do not contain expression nodes" -- so `(pat-lit {} (lit {} 1))`
                 // is malformed Deep rather than a typing question, and the read
                 // belongs here rather than inside `check_literal_pattern`, which
-                // returns early on an unresolved or already-failed scrutinee.
+                // returns early on a flexible or already-failed scrutinee.
                 // Structural well-formedness must not depend on the scrutinee's
                 // type. Before this, `literal_pattern_atom` returned `None` for
                 // any non-atom child and the [04-PAT-1] check silently declined,
@@ -263,8 +281,17 @@ pub(super) fn pattern_bindings(
                     SlotShape::LiteralValue,
                     literal_pattern_atom,
                     errors,
+                ) && !check_literal_pattern(
+                    pat,
+                    atom,
+                    site,
+                    scrutinee_ty,
+                    env,
+                    subst,
+                    adt_reg,
+                    errors,
                 ) {
-                    check_literal_pattern(pat, atom, scrutinee_ty, subst, adt_reg, errors);
+                    product.defer_literal_pattern(pat, scrutinee_ty, site);
                 }
             }
             DeepTag::PatCtor => {
@@ -350,6 +377,7 @@ pub(super) fn pattern_bindings(
                             let resolved = subst.apply(&arg_types[i]);
                             pattern_bindings(
                                 sub_pat,
+                                PatternSite::Other,
                                 &resolved,
                                 env,
                                 vg,
@@ -385,6 +413,7 @@ pub(super) fn pattern_bindings(
                 if kids.len() >= 2 {
                     pattern_bindings(
                         &kids[1],
+                        PatternSite::Other,
                         scrutinee_ty,
                         env,
                         vg,
@@ -586,6 +615,7 @@ pub(super) fn pattern_bindings(
                             };
                             pattern_bindings(
                                 &kv_kids[1],
+                                PatternSite::Other,
                                 &field_ty,
                                 env,
                                 vg,
@@ -618,8 +648,37 @@ pub(super) fn pattern_bindings(
                 // `pat-record` / `pat-ctor` arms keys off the pattern's
                 // constructor name, not the scrutinee type, so the gate
                 // still fires under a fresh-var element type.
-                let elem_tys: Option<&[Type]> = match &resolved {
-                    Type::Tuple(ts) if ts.len() == kids.len() => Some(ts.as_slice()),
+                // chelis#1836: an UNRESOLVED scrutinee is tied to the
+                // pattern's own shape here. The pattern fixes the arity, so
+                // the scrutinee unifies with a tuple of one fresh element per
+                // sub-pattern and each binding IS the corresponding element.
+                // Handing every child a disconnected `vg.fresh_type()`
+                // instead left `a` in `match q with { | (a, k) => ... }`
+                // descending from `q` by name alone: it never bound when `q`
+                // did, so a shape-computed route over it published a result
+                // the later binding could not contradict, and a false
+                // declared shape checked at score 1.
+                //
+                // A failure to unify is reported rather than dropped: the
+                // scrutinee is a variable here, so the only way this can fail
+                // is an occurs-check violation, which is a real defect in the
+                // program rather than a shape this arm may ignore.
+                let tied: Option<Vec<Type>> = match &resolved {
+                    Type::Var(_) => {
+                        let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
+                        match unify(&resolved, &Type::Tuple(elems.clone()), subst) {
+                            Ok(()) => Some(elems),
+                            Err(error) => {
+                                errors.push(error.into());
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let elem_tys: Option<&[Type]> = match (&resolved, &tied) {
+                    (_, Some(elems)) => Some(elems.as_slice()),
+                    (Type::Tuple(ts), None) if ts.len() == kids.len() => Some(ts.as_slice()),
                     _ => None,
                 };
                 for (i, sub_pat) in kids.iter().enumerate() {
@@ -629,6 +688,7 @@ pub(super) fn pattern_bindings(
                     };
                     pattern_bindings(
                         sub_pat,
+                        PatternSite::Other,
                         &elem_ty,
                         env,
                         vg,
@@ -672,12 +732,7 @@ impl LiteralPatternAtom<'_> {
         match self {
             LiteralPatternAtom::Integer(value) => value.to_string(),
             LiteralPatternAtom::Float(value) => {
-                let printed = value.to_string();
-                if printed.contains(['.', 'e', 'E', 'n', 'i']) {
-                    printed
-                } else {
-                    format!("{printed}.0")
-                }
+                super::literal_width::render_numeric_atom(&deep::Atom::Float(*value))
             }
             LiteralPatternAtom::Bool(value) => value.to_string(),
             LiteralPatternAtom::Str(value) => format!("{value:?}"),
@@ -734,36 +789,55 @@ fn literal_pattern_atom(value: &deep::Expr) -> Option<LiteralPatternAtom<'_>> {
 ///    or function scrutinee admits no literal pattern);
 /// 2. the atom's family disagrees with the scrutinee primitive's family under
 ///    [04-LIT-1]'s closed pairing;
-/// 3. an integer pattern lies outside the scrutinee integer width's range,
-///    under the same range rule spec/04 §5.3 and §5.6 apply to a literal bound
-///    at that type. A float primitive has no such range: finalization at a
-///    float width is total under [04-NUM-1].
+/// 3. the pattern's value at the scrutinee's primitive is out of range (an
+///    integer width) or non-finite (a float width), under [04-LIT-2]'s rule for
+///    a literal bound at that type.
 ///
 /// A literal pattern selects no width, because a `pat-lit` has no precision
 /// slot and admits no suffix (spec/02 §P10a), so an unsuffixed integer pattern
 /// is admissible against every integer primitive. Unifying it with §5.3's
-/// `int32` default instead would reject `match x_int64 with { | 1 => ... }` and
-/// leave no spelling for an `int64` literal pattern.
+/// `i32` default instead would reject `match x_int64 with { | 1 => ... }` and
+/// leave no spelling for an `i64` literal pattern.
+///
+/// chelis#2442: a scrutinee whose type is a rigid authored binder is decided
+/// too, at every instantiation the binder admits
+/// ([`check_literal_pattern_at_binder`]).
+#[allow(clippy::too_many_arguments)]
 fn check_literal_pattern(
     pat: &deep::Expr,
     atom: LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
     scrutinee_ty: &Type,
+    env: &Env,
     subst: &Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-) {
+) -> bool {
     let resolved = adt_reg.expand_aliases(&subst.apply(scrutinee_ty));
-    // An unresolved scrutinee decides nothing yet, and an already-failed one
+    // A flexible scrutinee decides nothing yet, and an already-failed one
     // owns its own diagnostic: reporting here would either invent a rejection
     // or cascade off a root cause reported upstream (chelis#731 section C3).
+    //
+    // chelis#2442: a variable that an authored binder of the enclosing
+    // declaration resolves to is NOT unresolved. [04-INF-6] quantifies it over
+    // every instantiation its declaration admits, so it is decided here. Only
+    // a variable no authored binder denotes keeps the early return.
     //
     // chelis#1525: this early return is why the structural read of the value
     // child does NOT live here. Well-formedness of the `pat-lit` form cannot
     // depend on whether the scrutinee's type happens to be resolved, so the
     // caller reads the slot first and this function receives an atom it can
     // always decide about.
-    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
-        return;
+    match &resolved {
+        Type::Var(var) => {
+            if let Some((binder, bound)) = env.authored_type_binder(*var, subst) {
+                check_literal_pattern_at_binder(pat, &atom, site, binder, bound, errors);
+                return true;
+            }
+            return false;
+        }
+        Type::Error(_) => return true,
+        _ => {}
     }
 
     let Type::Prim(prim) = &resolved else {
@@ -783,17 +857,12 @@ fn check_literal_pattern(
                     .to_string(),
             ],
         );
-        return;
+        return true;
     };
 
-    let admissible = match &atom {
-        LiteralPatternAtom::Integer(_) => prim.is_integer(),
-        LiteralPatternAtom::Float(_) => prim.is_float(),
-        LiteralPatternAtom::Bool(_) => *prim == Prim::Bool,
-        LiteralPatternAtom::Str(_) => *prim == Prim::String,
-    };
-    if !admissible {
-        report_literal_pattern_error(
+    match literal_pattern_failure_at(*prim, &atom) {
+        None => {}
+        Some(PatternFailure::Family) => report_literal_pattern_error(
             pat,
             errors,
             format!(
@@ -817,28 +886,458 @@ fn check_literal_pattern(
                  available here (spec/02-surf-syntax.md section P10a)",
                 atom.admissible_scrutinee(),
             )],
-        );
-        return;
-    }
-
-    if let LiteralPatternAtom::Integer(literal) = &atom
-        && let Some((low, high)) = prim.integer_range()
-        && (*literal < low || *literal > high)
-    {
-        report_literal_pattern_error(
+        ),
+        Some(PatternFailure::OutOfRange { low, high }) => report_literal_pattern_error(
             pat,
             errors,
             format!(
-                "integer literal pattern `{literal}` is outside the `{}` range \
+                "integer literal pattern `{}` is outside the `{}` range \
                  [{low}, {high}], so this arm could never match \
                  (spec/04-type-system.md [04-PAT-1], section 5.3)",
+                atom.rendered(),
                 prim.name(),
             ),
             vec![format!(
                 "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
                 prim.name(),
             )],
+        ),
+        // [04-LIT-2]: a float pattern binds at the scrutinee's float width, and
+        // an infinity there is not a literal.
+        Some(PatternFailure::NonFinite) => report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "float literal pattern `{}` rounds to infinity at `{}`, the scrutinee's \
+                 dtype, and no literal denotes an infinity \
+                 (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
+                atom.rendered(),
+                prim.name(),
+            ),
+            vec![format!(
+                "Use a value the scrutinee's `{}` width can hold, or widen the scrutinee",
+                prim.name(),
+            )],
+        ),
+    }
+    true
+}
+
+/// Revisit one pattern captured while its scrutinee was flexible. The same
+/// checker decides concrete and authored-binder outcomes; a still-flexible
+/// scrutinee is an unmet [04-INF-1] semantic obligation at this declaration's
+/// own boundary, so it cannot silently become a polymorphic function.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_deferred_literal_pattern(
+    pat: &deep::Expr,
+    scrutinee_ty: &Type,
+    scrutinee_name: Option<&str>,
+    declaration: Option<&str>,
+    env: &Env,
+    subst: &Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let Some((DeepTag::PatLit, _, kids)) = stamped_parts(pat) else {
+        return;
+    };
+    let Some(atom) = kids.first().and_then(literal_pattern_atom) else {
+        return; // the original structural read owns this malformed node
+    };
+    let site = scrutinee_name.map_or(PatternSite::Other, PatternSite::ArmOfVariable);
+    if !check_literal_pattern(pat, atom, site, scrutinee_ty, env, subst, adt_reg, errors) {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "unresolved literal pattern obligation in `{}` at declaration boundary: \
+                 the scrutinee's primitive type is still unknown \
+                 (spec/04-type-system.md [04-PAT-1], [04-INF-1])",
+                declaration.unwrap_or("<anonymous>")
+            ),
+            vec![
+                "Annotate the lambda parameter with a primitive type or apply the lambda \
+                  before this declaration boundary"
+                    .to_string(),
+            ],
         );
+    }
+}
+
+/// Why a literal pattern cannot bind at one primitive under [04-PAT-1].
+#[derive(Clone, Copy)]
+enum PatternFailure {
+    /// The atom's family disagrees with the primitive's ([04-LIT-1]).
+    Family,
+    /// An integer atom outside the primitive's `[low, high]` range.
+    OutOfRange { low: i64, high: i64 },
+    /// A float atom that rounds to infinity at the primitive ([04-LIT-2]).
+    NonFinite,
+}
+
+/// [04-PAT-1]'s decision at one primitive. A concrete scrutinee asks it once
+/// and a rigid binder asks it at every member of its family, so the two can
+/// never disagree about what one member admits.
+fn literal_pattern_failure_at(prim: Prim, atom: &LiteralPatternAtom<'_>) -> Option<PatternFailure> {
+    let admissible = match atom {
+        LiteralPatternAtom::Integer(_) => prim.is_integer(),
+        LiteralPatternAtom::Float(_) => prim.is_float(),
+        LiteralPatternAtom::Bool(_) => prim == Prim::Bool,
+        LiteralPatternAtom::Str(_) => prim == Prim::String,
+    };
+    if !admissible {
+        return Some(PatternFailure::Family);
+    }
+    match atom {
+        LiteralPatternAtom::Integer(literal) => prim
+            .integer_range()
+            .filter(|(low, high)| literal < low || literal > high)
+            .map(|(low, high)| PatternFailure::OutOfRange { low, high }),
+        LiteralPatternAtom::Float(value) => {
+            super::literal_width::literal_is_non_finite_at(prim, &deep::Atom::Float(*value))
+                .then_some(PatternFailure::NonFinite)
+        }
+        LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => None,
+    }
+}
+
+/// The members of a dtype family, integers narrowest first and then the
+/// floats in [`Prim::ACTIVE_FLOATS`] order, so a rejection names the same
+/// member on every run.
+pub(super) fn family_members(family: TypeVarRestriction) -> impl Iterator<Item = Prim> {
+    Prim::ACTIVE_INTEGERS
+        .into_iter()
+        .chain(Prim::ACTIVE_FLOATS)
+        .filter(move |prim| family.admits(*prim))
+}
+
+/// Where a literal pattern sits, which decides how its repair can be spelled
+/// (chelis#2442).
+#[derive(Clone, Copy)]
+pub(super) enum PatternSite<'a> {
+    /// The arm's whole pattern, against a scrutinee that is the variable named
+    /// here: a comparison can run in an `if` ahead of the match.
+    ArmOfVariable(&'a str),
+    /// Any other position: nested in a tuple, record, constructor, or
+    /// as-pattern, or the whole pattern of an arm whose scrutinee is not a
+    /// variable. No expression names the matched value there.
+    Other,
+}
+
+/// chelis#2442: [04-PAT-1] against a rigid authored binder.
+///
+/// [04-INF-6] makes the binder denote every instantiation its declaration
+/// admits and requires the body to check at each, and [04-LIT-2] binds a
+/// literal pattern at the scrutinee's primitive, so the pattern binds at every
+/// member of the binder's family. It is rejected at the first member that
+/// refuses it. An unbounded binder ([04-DTYPE-2]) admits non-primitive types,
+/// against which no literal pattern is admissible, so it refuses every
+/// literal pattern.
+///
+/// The repair never adds a conversion to the pattern: a literal pattern
+/// carries no suffix and no cast. It names a spelling that checks and matches
+/// exactly the values equal to the literal at every member, without a cast
+/// that can trap ([`binder_pattern_repair`]).
+fn check_literal_pattern_at_binder(
+    pat: &deep::Expr,
+    atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
+    binder: &str,
+    bound: Option<TypeVarRestriction>,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    let Some(family) = bound.map(TypeVarRestriction::precision_family) else {
+        report_literal_pattern_error(
+            pat,
+            errors,
+            format!(
+                "{} literal pattern `{}` cannot match a scrutinee of type `{binder}`: \
+                 `{binder}` declares no dtype-family bound, so [04-INF-6] makes it denote \
+                 every type, including non-primitive instantiations such as a tensor or a \
+                 record, and a literal pattern is admissible only against a primitive \
+                 scrutinee (spec/04-type-system.md [04-PAT-1], [04-DTYPE-2])",
+                atom.family(),
+                atom.rendered(),
+            ),
+            vec![unbounded_binder_pattern_repair(atom, site, binder)],
+        );
+        return;
+    };
+    let Some((member, failure)) = family_members(family).find_map(|member| {
+        literal_pattern_failure_at(member, atom).map(|failure| (member, failure))
+    }) else {
+        return;
+    };
+    let reason = match failure {
+        PatternFailure::Family => format!(
+            "the pattern denotes no value, because {} literal patterns denote only {} \
+             ([04-LIT-1])",
+            atom.family(),
+            atom.admissible_primitives(),
+        ),
+        PatternFailure::OutOfRange { low, high } => {
+            format!("the value is outside its range [{low}, {high}]")
+        }
+        PatternFailure::NonFinite => {
+            "the value rounds to infinity, which no literal denotes".to_string()
+        }
+    };
+    report_literal_pattern_error(
+        pat,
+        errors,
+        format!(
+            "{} literal pattern `{}` cannot match a scrutinee of type `{binder}`: \
+             [04-INF-6] makes `{binder}: {}` denote every admissible instantiation, and at \
+             `{}` {reason}, so this arm could never match there \
+             (spec/04-type-system.md [04-PAT-1], [04-LIT-2])",
+            atom.family(),
+            atom.rendered(),
+            family.family_name(),
+            member.name(),
+        ),
+        vec![binder_pattern_repair(atom, site, binder, family)],
+    );
+}
+
+/// The repair for a literal pattern under an unbounded binder: declare the
+/// family the pattern's own kind denotes, and, when the pattern is still
+/// refused there, that family's repair too.
+fn unbounded_binder_pattern_repair(
+    atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
+    binder: &str,
+) -> String {
+    let family = match atom {
+        LiteralPatternAtom::Integer(_) => TypeVarRestriction::ActiveInt,
+        LiteralPatternAtom::Float(_) => TypeVarRestriction::ActiveFloat,
+        LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => {
+            return format!(
+                "No dtype family contains {}; write that type in place of `{binder}`",
+                atom.admissible_primitives(),
+            );
+        }
+    };
+    let declare = format!(
+        "Declare `{binder}: {}`, the family {} literal patterns denote",
+        family.family_name(),
+        atom.family(),
+    );
+    if family_members(family).any(|member| literal_pattern_failure_at(member, atom).is_some()) {
+        format!(
+            "{declare}. The pattern is refused there too: {}",
+            binder_pattern_repair(atom, site, binder, family)
+        )
+    } else {
+        declare
+    }
+}
+
+/// The exact value a numeric literal pattern is written with, before any
+/// member of a family binds it.
+#[derive(Clone, Copy)]
+enum PatternValue {
+    Integer(i64),
+    Float(f64),
+}
+
+/// `2^53`: every integer of smaller magnitude converts to `f64` exactly.
+const F64_EXACT_INTEGER_LIMIT: f64 = 9_007_199_254_740_992.0;
+/// `2^63`: no `i64` converts to an `f64` of larger magnitude.
+const I64_MAGNITUDE_LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+impl PatternValue {
+    fn of(atom: &LiteralPatternAtom<'_>) -> Option<Self> {
+        match atom {
+            LiteralPatternAtom::Integer(value) => Some(PatternValue::Integer(*value)),
+            LiteralPatternAtom::Float(value) => Some(PatternValue::Float(*value)),
+            LiteralPatternAtom::Bool(_) | LiteralPatternAtom::Str(_) => None,
+        }
+    }
+
+    /// The value as an `i64`, when it is an integer an `i64` can hold.
+    fn as_integer(self) -> Option<i64> {
+        match self {
+            PatternValue::Integer(value) => Some(value),
+            PatternValue::Float(value) => (value.is_finite()
+                && value.fract() == 0.0
+                && (-I64_MAGNITUDE_LIMIT..I64_MAGNITUDE_LIMIT).contains(&value))
+            .then_some(value as i64),
+        }
+    }
+
+    /// The value as an `f64`. Exact whenever [`Self::held_exactly_at`] holds
+    /// for `f64`, which is the only case a repair spells it.
+    fn as_f64(self) -> f64 {
+        match self {
+            PatternValue::Integer(value) => value as f64,
+            PatternValue::Float(value) => value,
+        }
+    }
+
+    /// The value as a float literal body, spelled the way [04-LIT-2]'s
+    /// diagnostics spell one (`70000.0`, `3.4e38`).
+    fn float_body(self) -> String {
+        super::literal_width::render_numeric_atom(&deep::Atom::Float(self.as_f64()))
+    }
+
+    /// Whether `prim` holds this value exactly: an integer width holds it when
+    /// it is an integer in range, and a float width when binding the literal
+    /// there ([04-LIT-2]'s one finalization) leaves it unchanged.
+    fn held_exactly_at(self, prim: Prim) -> bool {
+        if let Some((low, high)) = prim.integer_range() {
+            return self
+                .as_integer()
+                .is_some_and(|value| (low..=high).contains(&value));
+        }
+        let atom = match self {
+            PatternValue::Integer(value) => deep::Atom::Int(value),
+            PatternValue::Float(value) => deep::Atom::Float(value),
+        };
+        super::literal_width::literal_value_at_float(prim, &atom).is_some_and(|bound| {
+            bound.is_finite()
+                && match self {
+                    PatternValue::Integer(value) => {
+                        bound.fract() == 0.0 && bound as i128 == i128::from(value)
+                    }
+                    PatternValue::Float(value) => bound == value,
+                }
+        })
+    }
+}
+
+/// chelis#2442: what to write instead of a literal pattern a bounded binder
+/// refuses.
+///
+/// Every repair checks under the binder and matches exactly the values equal
+/// to the literal, at every member of the family, with no cast that can
+/// trap. The value `V` decides which:
+///
+/// - no member holds `V` exactly (a fractional value under `Int`, a boolean
+///   under any family): the arm matches nothing at any instantiation, so the
+///   repair deletes it;
+/// - every member holds `V` exactly under `Int` or `Float`: the literal in the
+///   family's own kind (`0.0` for `0` under `Float`);
+/// - every member holds `V` exactly under `Numeric`, so `V` is an integer in
+///   `i8`'s range: the comparison `eq(v, cast(V, p))`, which binds `V`
+///   exactly at every member;
+/// - otherwise, a comparison that widens the value to the family's widest
+///   member, where it converts without trapping and `V` is exact:
+///   `eq(cast(v, i64), Vi64)` under `Int`, `eq(cast(v, f64), Vf64)` under
+///   `Float` and `Numeric`. Under `Numeric` an `i64` wider than `2^53` rounds
+///   at `f64`; it can only land on a `V` whose magnitude is between `2^53`
+///   and `2^63`, and for that value no trap-free comparison is exact, so the
+///   repair narrows the binder instead.
+///
+/// Where the comparison goes depends on the pattern's site
+/// ([`comparison_repair`]).
+fn binder_pattern_repair(
+    atom: &LiteralPatternAtom<'_>,
+    site: PatternSite<'_>,
+    binder: &str,
+    family: TypeVarRestriction,
+) -> String {
+    let family_name = family.family_name();
+    let Some(value) = PatternValue::of(atom) else {
+        return format!(
+            "No member of `{family_name}` is {}, so this arm matches no value at any \
+             instantiation: delete it",
+            atom.admissible_primitives(),
+        );
+    };
+    let members: Vec<Prim> = family_members(family).collect();
+    if !members.iter().any(|member| value.held_exactly_at(*member)) {
+        return format!(
+            "No member of `{family_name}` holds the value `{}` exactly, so this arm matches \
+             no value at any instantiation: delete it",
+            atom.rendered(),
+        );
+    }
+    let held_everywhere = members.iter().all(|member| value.held_exactly_at(*member));
+    let no_suffix = "a literal pattern itself carries no suffix and no cast \
+                     (spec/02-surf-syntax.md section P10a)";
+    match (family, value.as_integer()) {
+        (TypeVarRestriction::ActiveInt, Some(integer)) if held_everywhere => {
+            return format!(
+                "Write the literal as an integer, `{integer}`, which denotes the same value \
+                 exactly at every member of `Int`; {no_suffix}"
+            );
+        }
+        (TypeVarRestriction::ActiveFloat, _) if held_everywhere => {
+            return format!(
+                "Write the literal as a float, `{}`, which denotes the same value exactly at \
+                 every member of `Float`; {no_suffix}",
+                value.float_body(),
+            );
+        }
+        (TypeVarRestriction::ActiveNumeric, Some(integer)) if held_everywhere => {
+            return format!(
+                "Compare instead of matching: {}. `cast({integer}, {binder})` binds {integer} \
+                 exactly at every member of `Numeric`; {no_suffix}",
+                comparison_repair(site, |subject| {
+                    format!("eq({subject}, cast({integer}, {binder}))")
+                }),
+            );
+        }
+        _ => {}
+    }
+    let (widest, spelled) = match family {
+        TypeVarRestriction::ActiveInt => (
+            Prim::Int64,
+            value
+                .as_integer()
+                .map(|integer| format!("{integer}i64"))
+                .expect("a value some Int member holds is an i64"),
+        ),
+        _ => {
+            let magnitude = value.as_f64().abs();
+            if !value.held_exactly_at(Prim::F64)
+                || (family == TypeVarRestriction::ActiveNumeric
+                    && (F64_EXACT_INTEGER_LIMIT..=I64_MAGNITUDE_LIMIT).contains(&magnitude))
+            {
+                return format!(
+                    "No comparison that cannot trap is exact at every member of \
+                     `{family_name}` for `{}`, because at `f64` an `i64` near it rounds \
+                     onto the same value. Declare `{binder}` with the family this arm is \
+                     meant for, `Int` or `Float`, and compare at that family's widest member",
+                    atom.rendered(),
+                );
+            }
+            (Prim::F64, format!("{}f64", value.float_body()))
+        }
+    };
+    let widest = widest.name();
+    format!(
+        "Compare at `{widest}` instead of matching: {}. Every member of `{family_name}` \
+         converts to `{widest}` without trapping, and the comparison holds exactly when the \
+         value is `{}`; {no_suffix}",
+        comparison_repair(site, |subject| {
+            format!("eq(cast({subject}, {widest}), {spelled})")
+        }),
+        atom.rendered(),
+    )
+}
+
+/// Where a repair's comparison goes, written by `comparison` for the
+/// expression that names the matched value.
+///
+/// When the literal is the arm's whole pattern against a variable, that
+/// variable names the value, so the comparison runs in an `if` ahead of the
+/// match and the literal arm's body becomes its `then` branch. Anywhere else
+/// nothing names the value, so the literal's position is bound to a fresh
+/// variable and the comparison moves into the arm's body. A guard would say
+/// the same thing, but the eval and C lanes ignore a guard at run time
+/// (chelis#2445), so a guard repair would check clean and then answer wrongly.
+fn comparison_repair(site: PatternSite<'_>, comparison: impl Fn(&str) -> String) -> String {
+    match site {
+        PatternSite::ArmOfVariable(scrutinee) => format!(
+            "`if {} then <this arm's body> else match {scrutinee} with {{ <the other arms> }}`",
+            comparison(scrutinee),
+        ),
+        PatternSite::Other => format!(
+            "put a fresh variable `v` where the literal is, and in the arm's body write \
+             `if {} then <this arm's body> else <what the remaining arms give>`",
+            comparison("v"),
+        ),
     }
 }
 
@@ -864,208 +1363,35 @@ fn report_literal_pattern_error(
     errors.push(error);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn infer_pipe(
-    list: &deep::List,
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &AdtRegistry,
-    errors: &mut DiagnosticSink<'_>,
-    product: &mut InferenceProduct,
-) -> Type {
-    let kids = children(list);
-    if kids.is_empty() {
-        return malformed_form(list, "pipe", "at least one stage", errors);
-    }
-
-    let mut current_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-
-    for stage in &kids[1..] {
-        // If the stage is the canonical bare-keyword / `cast(type)` pipe-stage
-        // shape `(fn (params <single unannotated param>) body)` produced by
-        // `crates/chelis-surf/src/parser.rs::parse_pipe_stage` and
-        // `desugar_pipe_stage`, infer the lambda with its parameter bound to
-        // the upstream pipe value's type. Without this pre-binding, per-builtin
-        // inference gates inside the body (e.g. `infer_copy`, `infer_cast`)
-        // see a fresh type variable for the parameter and reject before the
-        // pipe loop's unification can bind it to `current_ty`. See
-        // `docs/investigations/pipe_copy_typecheck_diagnosis.md` for the trace.
-        let stage_ty = if let Some(param_name) = synthesized_unary_lambda_param(stage, adt_reg, vg)
-        {
-            infer_pipe_stage_lambda(
-                stage,
-                &param_name,
-                current_ty.clone(),
-                env,
-                vg,
-                subst,
-                adt_reg,
-                errors,
-                product,
-            )
-        } else {
-            infer_expr(stage, env, vg, subst, adt_reg, errors, product)
-        };
-        // A bare pipe stage (`x |> recip`) has no `app` node, so the normal
-        // post-application policy check cannot see it. Consult the identical
-        // chelis#860 operand policy at this application boundary.
-        if let Some(fname) = bare_var_stage_name(stage) {
-            let resolved = type_for_readonly_check(&current_ty, subst);
-            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
-                let mut error = CheckError::new(kind, message, hints);
-                if let Some(id) = stage.span_id() {
-                    error.span_offset = parse_span_offset(id);
-                    error.span_id = Some(id.to_string());
-                } else if stage.span().offset > 0 {
-                    error.span_offset = Some(stage.span().offset);
-                }
-                return report(errors, error);
-            }
-        }
-        let ret_tv = vg.fresh_type();
-        let stage_arg_tys = auto_borrow_call_arg_types(&stage_ty, vec![current_ty.clone()], subst);
-        let expected = Type::Fn(stage_arg_tys, Box::new(ret_tv.clone()));
-
-        match unify(&stage_ty, &expected, subst) {
-            Ok(()) => {
-                current_ty = subst.apply(&ret_tv);
-            }
-            Err(te) => {
-                let mut e: CheckError = te.into();
-                if let Some(id) = stage.span_id() {
-                    e.span_offset = parse_span_offset(id);
-                    e.span_id = Some(id.to_string());
-                } else {
-                    let off = stage.span().offset;
-                    if off > 0 {
-                        e.span_offset = Some(off);
-                    }
-                }
-                return report(errors, e);
-            }
-        }
-    }
-
-    current_ty
-}
-
-/// Return the builtin name of a bare-reference pipe stage. Lambda-shaped
-/// stages contain ordinary application nodes and are handled by the normal
-/// post-application chokepoint.
-pub(super) fn bare_var_stage_name(stage: &deep::Expr) -> Option<&str> {
-    // chelis#1107 amendment: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(stage)?;
-    if tag != DeepTag::Var {
-        return None;
-    }
-    kids.first().and_then(symbol_name)
-}
-
-/// If `stage` is a `(fn (params x) body)` Deep node with exactly one
-/// unannotated parameter -- the canonical shape produced by the Surf
-/// parser's `parse_pipe_stage` and `desugar_pipe_stage` for bare
-/// unary-builtin keyword stages (`x |> copy`, `x |> realize`) and the
-/// one-arg `cast(type)` form (`x |> cast(f32)`) -- return the
-/// parameter's name. Otherwise return `None`.
+/// A `pipe` node reached inference.
 ///
-/// Multi-arg lambdas, lambdas with annotated parameters, and any other
-/// pipe-stage form (named reference, partial application, etc.) fall
-/// through unchanged.
-pub(super) fn synthesized_unary_lambda_param(
-    stage: &deep::Expr,
-    _adt_reg: &AdtRegistry,
-    _vg: &mut VarGen,
-) -> Option<String> {
-    // chelis#1107 amendment: carrier-preserving read (both levels).
-    let (tag, _, kids) = stamped_parts(stage)?;
-    if tag != DeepTag::Fn {
-        return None;
-    }
-    let params_expr = kids.first()?;
-    let (params_tag, _, param_kids) = stamped_parts(params_expr)?;
-    if params_tag != DeepTag::Params {
-        return None;
-    }
-    if param_kids.len() != 1 {
-        return None;
-    }
-    // Single param must be a bare symbol; an annotated form would
-    // surface as `MetaExpr` or a nested `List`, and the user-written
-    // annotation takes precedence over the upstream pipe value's type.
-    match &param_kids[0] {
-        deep::Expr::Atom(deep::Atom::Name(name), _) => Some(name.to_string()),
-        _ => None,
-    }
-}
-
-/// Infer a synthesized unary pipe-stage lambda with its parameter
-/// pre-bound to `param_ty`. Mirrors `infer_fn` but seeds the
-/// parameter's scheme from `param_ty` instead of allocating a fresh
-/// type variable, so per-builtin inference gates inside the body see
-/// the upstream pipe value's type.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn infer_pipe_stage_lambda(
-    stage: &deep::Expr,
-    param_name: &str,
-    param_ty: Type,
-    env: &mut Env,
-    vg: &mut VarGen,
-    subst: &mut Subst,
-    adt_reg: &AdtRegistry,
+/// It cannot, from any checker entry: `chelis_deep::pipe::fold_pipe` states
+/// `spec/02-surf-syntax.md` section 0.1's sentence -- `x |> f(y)` MEANS
+/// `f(x, y)` -- once, over every entry's input, so inference only ever sees
+/// the application. The rule that used to live here typed a stage from the
+/// callee's FUNCTION type instead of as that application, which lost every
+/// rule keyed on an application's arguments: `to_tensor`'s literal shape,
+/// `sum`'s axis, `expand`'s size (chelis#1923, chelis#1791).
+///
+/// So this arm exists to make the class impossible to reintroduce quietly
+/// rather than to handle a case. A pipe arriving here means an entry was
+/// added that does not fold, and saying so is worth more than typing it a
+/// second way.
+pub(super) fn pipe_reached_inference_unfolded(
+    node: &DeepNode,
     errors: &mut DiagnosticSink<'_>,
-    product: &mut InferenceProduct,
 ) -> Type {
-    // chelis#1107 amendment: carrier-preserving read -- a stamped pipe-stage
-    // `fn` node used to fall straight into the malformed-form rejection.
-    let Some((_, _, kids)) = stamped_parts(stage) else {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                "malformed pipe stage: expected a list-form stage node \
-                 (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
-                    .to_string(),
-                vec![],
+    let stages = node.children_slice().len().saturating_sub(1);
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::MalformedForm,
+            format!(
+                "a pipe reached inference unfolded ({stages} stage(s)): every checker entry \
+                 folds a pipe into the application it denotes before inference \
+                 (spec/02-surf-syntax.md section 0.1; chelis#1923)"
             ),
-        );
-    };
-    let body = match kids.get(1) {
-        Some(body) => body,
-        None => {
-            // A stamped `fn` node satisfies its `Fixed(2)` arity contract at
-            // construction, so only a legacy `List` carrier can be short here.
-            // chelis#1107 amendment (justified-safe, not routed): see the
-            // arity-contract argument in the comment directly above.
-            let deep::Expr::List(list, _) = stage else {
-                return report(
-                    errors,
-                    CheckError::new(
-                        CheckErrorKind::MalformedForm,
-                        "malformed pipe stage: expected a body \
-                         (spec/03-deep-syntax.md; chelis#731 [04-TOT-3])"
-                            .to_string(),
-                        vec![],
-                    ),
-                );
-            };
-            return malformed_form(list, "pipe stage", "a body", errors);
-        }
-    };
-
-    let mut fn_env = env.clone();
-    fn_env.bind_lexical(param_name.to_string(), Scheme::mono(param_ty.clone()));
-    // chelis#397/#469: a fresh parameter has no size provenance; clear any
-    // entry inherited from an outer name it shadows (BLOCKER C).
-    fn_env.clear_size_provenance(param_name);
-    // chelis#631: same for a shadowed list-literal length.
-    fn_env.clear_list_literal_len(param_name);
-
-    let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
-
-    let resolved_param = subst.apply(&param_ty);
-    let resolved_body = subst.apply(&body_ty);
-    let stage_ty = Type::Fn(vec![resolved_param], Box::new(resolved_body));
-    product.record_bypass(stage, stage_ty.clone(), "synthesized pipe-stage inference");
-    stage_ty
+            vec![],
+        ),
+    )
 }

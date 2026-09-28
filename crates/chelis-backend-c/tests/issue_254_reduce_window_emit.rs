@@ -3,7 +3,7 @@
 //!
 //! Pin the structural invariants of the emitted C code so we catch
 //! silent regressions where (for example) `Mean` forgets to divide by
-//! the window volume or `Min` uses `fmaxf`. Numerical
+//! the window volume or extrema stop selecting the first stored value. Numerical
 //! evaluator-vs-C-backend parity is exercised through the host-runtime
 //! reduce_window tests in `chelis-compiler-api`, which evaluate the
 //! same Surf programs through the IR evaluator path. The IR evaluator
@@ -23,13 +23,16 @@ fn tensor_4d(shape: [usize; 4]) -> TensorType {
 
 fn build_dag(reducer: ReduceWindowKind) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_4d([1, 1, 4, 4]),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer,
             window_shape: vec![2, 2],
@@ -43,60 +46,57 @@ fn build_dag(reducer: ReduceWindowKind) -> Dag {
 }
 
 #[test]
-fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
+fn issue254_emit_reduce_window_max_selects_first_nan_without_fmaxf() {
     let dag = build_dag(ReduceWindowKind::Max);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc = fmaxf("),
-        "Max emit must combine with fmaxf, got:\n{src}"
+        !src.contains("fmaxf("),
+        "Max emit must not use NaN-dropping fmaxf, got:\n{src}"
     );
     assert!(
-        src.contains("-INFINITY"),
-        "Max emit must initialize acc to -INFINITY, got:\n{src}"
-    );
-    // Two windowed axes → two nested `__w` loops with the literal
-    // window size 2.
-    assert!(
-        src.contains("for (int __w0 = 0; __w0 < 2;"),
-        "Max emit must have an inner window loop along axis 0, got:\n{src}"
+        src.contains("isnan(candidate) || candidate > best_value"),
+        "Max emit must select the first NaN or strict greater value, got:\n{src}"
     );
     assert!(
-        src.contains("for (int __w1 = 0; __w1 < 2;"),
-        "Max emit must have an inner window loop along axis 1, got:\n{src}"
+        src.contains(")[outer] = ((const float*)t0_data)[best_src]"),
+        "Max emit must copy the selected stored representation, got:\n{src}"
     );
+    assert!(src.contains("chelis_window_count("));
+    assert!(src.contains("for (int64_t leaf = 0; leaf < t1_window_count;"));
+    assert!(src.contains("chelis_window_index("));
+    assert!(!src.contains("full_indices[") && !src.contains("out_indices["));
 }
 
 #[test]
-fn issue254_emit_reduce_window_min_uses_fminf_and_positive_infinity() {
+fn issue254_emit_reduce_window_min_selects_first_nan_without_fminf() {
     let dag = build_dag(ReduceWindowKind::Min);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc = fminf("),
-        "Min emit must combine with fminf, got:\n{src}"
+        !src.contains("fminf("),
+        "Min emit must not use NaN-dropping fminf, got:\n{src}"
     );
-    // We init to INFINITY (no leading `-`).
     assert!(
-        src.contains("float acc = INFINITY;"),
-        "Min emit must initialize acc to INFINITY, got:\n{src}"
+        src.contains("isnan(candidate) || candidate < best_value"),
+        "Min emit must select the first NaN or strict lesser value, got:\n{src}"
     );
 }
 
 #[test]
-fn issue254_emit_reduce_window_sum_uses_plus_equals() {
+fn issue254_emit_reduce_window_sum_uses_adjacent_pair_tree() {
     let dag = build_dag(ReduceWindowKind::Sum);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += ((const float*)t"),
-        "Sum emit must use `acc += ...`, got:\n{src}"
+        src.contains("while (level_n > 1)"),
+        "Sum emit must use the canonical balanced tree, got:\n{src}"
     );
     assert!(
-        src.contains("float acc = 0.0f;"),
-        "Sum emit must initialize acc to 0.0f, got:\n{src}"
+        src.contains("level[left] + level[right]"),
+        "Sum emit must combine adjacent pairs, got:\n{src}"
     );
     // Sum must NOT emit a division by the window volume; that's the
     // distinguishing tell vs. Mean.
     assert!(
-        !src.contains("acc /= "),
+        !src.contains("result = result / "),
         "Sum emit must NOT divide by window volume, got:\n{src}"
     );
 }
@@ -106,28 +106,30 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += ((const float*)t"),
-        "Mean emit must combine with sum, got:\n{src}"
+        src.contains("while (level_n > 1)") && src.contains("level[left] + level[right]"),
+        "Mean emit must first use the canonical balanced sum, got:\n{src}"
     );
     // Window volume = 2 * 2 = 4.
     assert!(
-        src.contains("acc /= 4.0f;"),
+        src.contains("result = result / (float)t1_window_count;"),
         "Mean emit must divide by the window volume (4 for 2x2), got:\n{src}"
     );
 }
 
-/// Stride > 1 must show up in the source-index arithmetic (the IR
-/// node carries strides verbatim, and the emit multiplies by them).
+/// Stride > 1 is transported exactly to the checked projection plan.
 #[test]
 fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_4d([1, 1, 4, 4]),
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2, 2],
@@ -138,25 +140,31 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
         None,
     );
     let src = codegen(&dag, "kernel").unwrap().c_source;
-    assert!(
-        src.contains("* 2 + __w0"),
-        "stride>1 emit must multiply the output index by the stride along axis 0, got:\n{src}"
-    );
-    assert!(
-        src.contains("* 2 + __w1"),
-        "stride>1 emit must multiply the output index by the stride along axis 1, got:\n{src}"
-    );
+    let plan = src
+        .lines()
+        .find(|line| line.contains("= chelis_tensor_window_plan("))
+        .unwrap();
+    assert!(plan.contains("(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2))}"));
+    assert!(src.contains("chelis_window_index("));
 }
 
 #[test]
-fn non_f32_windowed_reduction_names_its_real_implementation_owner() {
+fn reduced_float_windowed_reduction_uses_f32_arithmetic_and_f16_storage() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let input_ty = TensorType {
         dims: vec![DimInfo::Lit(4)],
         precision: Prim::F16,
     };
-    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
+    let load = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input_ty,
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Sum,
             window_shape: vec![2],
@@ -170,23 +178,22 @@ fn non_f32_windowed_reduction_names_its_real_implementation_owner() {
         None,
     );
 
-    let error = match codegen(&dag, "kernel") {
-        Ok(_) => panic!("non-f32 windowed reduction must reject"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.to_string(),
-        "unsupported: op `reduce_window_*` on `f16` tensors in the C DAG emitter \
-         (node 1) (codegen:c); unimplemented chelis#729: the C windowed-reduction \
-         emitter is f32-only today; cast to f32 before the windowed reduction \
-         (spec/05-risc-primitives.md section 2.3.1)"
+    let src = codegen(&dag, "kernel").unwrap().c_source;
+    assert!(src.contains("chelis_f16_to_f32"));
+    assert!(src.contains("chelis_f32_to_f16"));
+    assert!(src.contains("CHELIS_DTYPE_F32"));
+    assert!(
+        src.contains("chelis_alloc(1, (int64_t[]){ 3 }, CHELIS_DTYPE_F16)"),
+        "the result must retain f16 storage:\n{src}"
     );
 }
 
 #[test]
 fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -201,6 +208,7 @@ fn runtime_symbolic_window_extent_names_dynamic_shape_owner() {
         None,
     );
     dag.add_node(
+        decl,
         RiscOp::ReduceWindow {
             reducer: ReduceWindowKind::Max,
             window_shape: vec![2, 2],

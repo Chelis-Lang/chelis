@@ -58,31 +58,31 @@ reason the NaN guard could be bypassed).
 Contract: there is exactly ONE function that lowers an in-module constant
 reference to an `SmtExpr`, used by BOTH the reduce/producer-body path AND
 the invariant-application path. It preserves the declared numeric type
-for ALL integer widths (int8/int16/int32/int64 -> `SmtSort::Int` /
+for ALL integer widths (i8/i16/i32/i64 -> `SmtSort::Int` /
 `IntLit`; f32/f64 -> `Real`), resolves a constant whose body references
 ANOTHER constant transitively, and never produces a sort mismatch.
 
 Parallel paths merged:
 
 - The producer-body path (`reduce` -> `const_lit_node` ->
-  `const_declared_int_type`) was made type-aware for int32/int64 only.
+  `const_declared_int_type`) was made type-aware for i32/i64 only.
 - The invariant-application path (`lower_pred_arith`) hardcoded
   `consts.get(name).copied().map(SmtExpr::RealLit)` -- so within ONE
   property the SAME constant lowered as `IntLit` on the producer body and
   `RealLit` in the invariant; compared against an Int-sorted var, cvc5
   ABORTED THE PROCESS ("Subexpressions must have the same type:
   Int/Real").
-- `const_declared_int_type` handled only int32/int64 (not int8/int16) and
+- `const_declared_int_type` handled only i32/i64 (not i8/i16) and
   read the declared type only from a DIRECT `lit` body, so a constant
   whose body referenced another constant lost its type.
 
 Single chokepoint: `chelis_prove::opaque::lower_const_ref(exprs, name,
 value)` returns the typed `SmtExpr` for a constant. It reads the declared
 numeric type via `const_declared_int_type` / `const_declared_numeric_type`,
-which (a) recognizes every integer width int8/int16/int32/int64 as
+which (a) recognizes every integer width i8/i16/i32/i64 as
 `SmtSort::Int`, f32/f64 as `Real`, reading the AUTHORITATIVE declared
-return type from a sibling `defsig` (a typed `def a() -> int8 = 1` carries
-int8 there, not on the default-int32 body literal), and (b) follows a
+return type from a sibling `defsig` (a typed `def a() -> i8 = 1` carries
+i8 there, not on the default-i32 body literal), and (b) follows a
 `(var other_const)` body transitively to the literal that carries the type
 tag. The resolver lives in `opaque` (the shared module both surfaces use)
 so the producer-body path (`tier_b_lower::reduce` ->
@@ -228,8 +228,8 @@ workspace: `chelis_types::Prim::is_integer` / `integer_range` /
 `integer_fuzz_bounds` own the int-width set, range, and fuzz-sampling
 window; the prove layer's `is_int_width` / `int_sample_bounds` are thin
 wrappers, and every recognition / sort / sampling / literal site routes
-through them, so an `int8`/`int16` field, param, or constant is handled
-identically to `int32`/`int64` everywhere.
+through them, so an `i8`/`i16` field, param, or constant is handled
+identically to `i32`/`i64` everywhere.
 
 ## RT6 -- total lowering + process isolation (supersedes the W5 whitelist)
 
@@ -298,12 +298,28 @@ stdin, returning a result over stdout). ANY way the child can fail -- a
 cvc5 C++ abort, a cvc5-internal assertion on a well-formed formula, a stack
 overflow, an OOM kill, a panic, a hang past the deadline -- becomes a clean
 `TierBResult::Error`/`Unknown` in the parent (routed to Tier C); the
-`chelis` process is never taken down by a solve. Isolation is opt-in: only
-a host that calls `enable_isolation` spawns workers, so tests solve
-in-process (no spawn) and exercise the Layer-1 lowering directly, while the
-end-to-end isolated path -- including recovery from a worker that
-aborts/panics/overflows on every solve -- is locked by the
+`chelis` process is never taken down by a solve. Production hosts opt in with
+`enable_isolation`. The crate's unit tests default to a dedicated libtest
+worker, and every `chelis-prove` integration test installs its binary's shared
+`support::solver_worker` entry before test work. This explicit registration
+also applies when `chelis-prove` is an ordinary dependency without
+`cfg(test)`. Engine-mediated calls use the same registered route. Each child
+re-execs only that exact worker test, returns its binary frame on stderr to
+avoid libtest's stdout, and must exit successfully before its result is
+accepted. No feature changes production startup. Direct lowering tests still
+exercise the Layer-1 guards. The end-to-end production path, including recovery
+from a worker that aborts/panics/overflows on every solve, is locked by the
 `prove_isolation` integration test running the real `chelis` binary.
+
+The integration containment oracle is `cargo test -p chelis-prove --features
+smt --test integration_solver_isolation`: real proof/disproof, observed worker
+spawns, parallel engine calls, abnormal exits (including death after a result
+frame), and a killed hung worker followed by a healthy solve. Its structural
+control rejects integration tests missing their worker setup. Without `smt`,
+the same target checks that no worker is spawned and no proof is fabricated.
+The required SMT smoke runs this target; the nightly's complete SMT suite runs
+all integration binaries, including `issue_1475_sqrt_domain`, with normal
+parallel test scheduling.
 
 ## Acceptance oracle
 
@@ -348,7 +364,7 @@ Non-finiteness (U1), every axis that previously hid a bug:
 
 Constants (U2):
 
-- a constant of EACH numeric type int8 / int16 / int32 / int64 / f32 /
+- a constant of EACH numeric type i8 / i16 / i32 / i64 / f32 /
   f64, used in a producer guard AND in an invariant predicate (same
   property);
 - a constant whose body references another constant.

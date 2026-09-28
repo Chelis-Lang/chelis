@@ -65,7 +65,7 @@ fn tag_head_with_meta_decodes_at_binder_syntax_selector() {
     let Some(Expr::Map(map, _)) = param.get(1) else {
         panic!("annotated parameter carries its type map: {param:?}");
     };
-    let Some((_, type_value)) = map.entries.iter().find(|(key, _)| key == "type") else {
+    let Some(type_value) = map.ty().map(|ty| ty.expression()) else {
         panic!("type entry present: {map:?}");
     };
     assert!(

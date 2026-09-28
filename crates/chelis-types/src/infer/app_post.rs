@@ -5,16 +5,152 @@
 
 use super::*;
 
+/// [05-OP-56]'s key domain: string, bool, or an active signed-integer scalar.
+/// Float, aggregate, tensor and random-key types are not dictionary keys.
+fn is_dict_key_type(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(prim) => matches!(prim, Prim::String | Prim::Bool) || prim.is_integer(),
+        _ => false,
+    }
+}
+
+/// The declared extent at one axis of an application's result, read from the
+/// two ingresses a declaration can reach a builtin call through.
+///
+/// The `def`/`sig` route hands the declared return type down as
+/// `expected_result`. A block-scoped ascription (`y: tensor[9, f32] = ...`)
+/// does not: `infer_let` infers the right-hand side with no expectation and
+/// unifies afterwards, so the ascription arrives as `"type"` metadata on this
+/// very application node (`crates/chelis-surf/src/desugar.rs`'s
+/// `inject_type_metadata`). Resolving it here costs one speculative
+/// `resolve_deep_type`, whose diagnostics are rolled back because `infer_let`
+/// owns reporting for that same annotation and would otherwise report twice.
+/// Going through the resolver rather than reading the metadata shape directly
+/// is what makes a declared type alias (`type Row = tensor[9, f32]`) carry the
+/// same verdict as its expansion.
+#[allow(clippy::too_many_arguments)]
+fn declared_result_literal(
+    result_axis: usize,
+    result_rank: usize,
+    expected_result: Option<&Type>,
+    node: &DeepNode,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<i64> {
+    // The rank-equality precondition matters as much as the literal does. A
+    // declaration whose RANK disagrees is already a signature mismatch, and the
+    // checker reports it with the two full tensor types. Reading an axis out of
+    // it anyway turns `tensor[n, 4, 5] -> tensor[7]` into "the result extent is
+    // at most 4", which names a repair that would not fix the program, and the
+    // `Type::Error` this path returns then suppresses the accurate diagnostic
+    // (round 1 P2). Rank belongs to unification; the bound stands down.
+    let literal_at = |ty: &Type| -> Option<i64> {
+        let Type::Tensor(dims, _) = ty else {
+            return None;
+        };
+        if dims.len() != result_rank {
+            return None;
+        }
+        subst.observe_dim(dims.get(result_axis)?).literal_extent()
+    };
+
+    if let Some(found) = expected_result
+        .map(|expected| subst.apply(expected))
+        .as_ref()
+        .and_then(&literal_at)
+    {
+        return Some(found);
+    }
+
+    let declared = node.meta().ty().map(|value| value.expression())?;
+    let checkpoint = errors.checkpoint();
+    let resolved = resolve_deep_type(
+        declared,
+        vg,
+        adt_reg,
+        TypeUseSite::Annotation,
+        annotation_binder_mode(env),
+        errors,
+    );
+    errors.retain_since(checkpoint, |_| false);
+    literal_at(&resolved.ok()?)
+}
+
+/// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
+/// selected extent, so a literal selected axis bounds the result from above for
+/// every runtime value of the other axis. A declared extent strictly greater
+/// than that bound is unreachable and is a `DimensionMismatch`; at or below it
+/// is satisfiable and the runtime guard owns the verdict.
+///
+/// Returns the error type when it rejects, so the caller propagates it instead
+/// of the inferred result. `Type::Error` unifies with anything, which is what
+/// keeps the enclosing signature or ascription from reporting a second time.
+#[allow(clippy::too_many_arguments)]
+fn reject_unreachable_diagonal_extent(
+    operand: &Type,
+    inferred: &Type,
+    axis1: usize,
+    axis2: usize,
+    node: &DeepNode,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    expected_result: Option<&Type>,
+) -> Option<Type> {
+    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2, subst)?;
+    let Type::Tensor(inferred_dims, _) = inferred else {
+        return None;
+    };
+    let declared = declared_result_literal(
+        result_axis,
+        inferred_dims.len(),
+        expected_result,
+        node,
+        env,
+        vg,
+        adt_reg,
+        subst,
+        errors,
+    )?;
+    if declared <= bound {
+        return None;
+    }
+    Some(report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_node_provenance(
+                node,
+                format!(
+                    "diagonal declares the smaller selected extent ([05-OP-33]): \
+                     axis {source_axis} is literal {bound}, so the result extent is \
+                     at most {bound}, but the declared result extent is {declared}"
+                ),
+            ),
+            vec![format!(
+                "Declare an extent at or below {bound}, or select an axis pair \
+                 whose literal extent is at least {declared}"
+            )],
+        ),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
-    list: &deep::List,
+    node: &DeepNode,
     kids: &[deep::Expr],
     func_name: Option<String>,
     arg_tys: Vec<Type>,
     ret_tv: Type,
-    env: &mut Env,
+    env: &Env,
     vg: &mut VarGen,
     subst: &mut Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
@@ -47,34 +183,58 @@ pub(super) fn finish_unified_app(
         return rejected;
     }
 
+    // chelis#1512: the three dtype-admissibility validators below run ahead of
+    // the route dispatch that owns the deferral site at the bottom of this
+    // function, so they get the same site built early. Each admitted a
+    // `Type::Var` operand and walked away; now each suspends the call instead,
+    // and `replay_dtype_admissibility` re-runs these same three functions once
+    // the operand settles.
+    let dtype_site = func_name
+        .as_deref()
+        .map(|fname| DtypeAdmissibilitySite::new(node, kids, fname, env));
+
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
-        list,
+        node,
         kids,
         &func_name,
         &arg_tys,
+        env,
         subst,
         errors,
         &mut checked_route_observed,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
     ) {
         return rejected;
     }
 
     if let Some(rejected) = reject_inadmissible_operand_dtypes(
-        list,
-        kids,
+        node,
         func_name.as_deref(),
         &arg_tys,
         env,
         subst,
         errors,
         &mut checked_route_observed,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
     ) {
         return rejected;
     }
 
-    if let Some(result) =
-        integer_binop_result_type(list, func_name.as_deref(), &arg_tys, vg, subst, errors)
-    {
+    if let Some(result) = integer_binop_result_type(
+        node,
+        func_name.as_deref(),
+        &arg_tys,
+        vg,
+        subst,
+        errors,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
+    ) {
         return result;
     }
 
@@ -86,7 +246,7 @@ pub(super) fn finish_unified_app(
     // `Var` as the call's result type. That bare `Var` would be
     // degraded to a rank-0 default `TensorType` during writeback and
     // CLOBBER the node's concrete type annotation, ICEing the IR
-    // lowering (`conv2d output height axis requires a statically known
+    // lowering (`conv output height axis requires a statically known
     // axis`; #778's short-circuit removal exposed this). Returning
     // `Type::Error` instead restores the pre-#778 downstream shape
     // WITHOUT re-adding the arg-`Error` short-circuit: the per-slot
@@ -107,7 +267,7 @@ pub(super) fn finish_unified_app(
                 | "mean"
                 | "expand"
                 | "layer_norm"
-                | "conv2d"
+                | "conv"
                 | "scatter_elements"
         ) && arg_tys
             .iter()
@@ -127,9 +287,21 @@ pub(super) fn finish_unified_app(
             })
             .unwrap_or(result_ty);
     } else if let Some(ref fname) = func_name {
+        // chelis#1836: ANY unresolved outer constructor suspends the route,
+        // not only one an annotation-free lambda parameter owns. The
+        // provenance predicate this replaced recognized a variable descending
+        // from such a parameter and nothing else, so three provenances took
+        // the route's eager `Type::Var` arm instead: a `pat-tuple` element on
+        // an unresolved scrutinee, a field of an unresolved record target, and
+        // a chelis#1577 gate's result. Each published the call's own result
+        // variable, which the declaration was then free to bind to any shape.
+        // This is the readiness predicate every other suspension already uses
+        // (`defer_or_check_shape_route`, the chelis#1577 dtype gates, and the
+        // replay pass itself), so a route now suspends on exactly the
+        // condition it resumes on, and provenance stops deciding anything.
         let owes_shape_replay = arg_tys
             .iter()
-            .any(|ty| product.shape_operand_awaits_lambda_binding(ty, subst));
+            .any(|ty| shape_operand_awaits_binding(ty, subst));
         let mut retained_shape_obligation = false;
         match fname.as_str() {
             "matmul" => {
@@ -174,7 +346,7 @@ pub(super) fn finish_unified_app(
                 checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
-                // the value environment — a bound `int32` var is the
+                // the value environment — a bound `i32` var is the
                 // issue #259 runtime-value class instead.
                 let axis_is_dim_name = kids.get(2).is_some_and(|arg| {
                     symbolic_dim_ref_name(arg).is_some_and(|name| env.lookup(name).is_none())
@@ -187,7 +359,7 @@ pub(super) fn finish_unified_app(
                 // rejection (a check-clean program must build).
                 let size_class = kids
                     .get(3)
-                    .map(|arg| classify_expand_size(arg, env))
+                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
                     .unwrap_or(SizeClass::Unknown);
                 if owes_shape_replay {
                     product.defer_shape_check(
@@ -228,11 +400,11 @@ pub(super) fn finish_unified_app(
                 }
                 result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
             }
-            "conv2d" => {
+            "conv" => {
                 checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
-                        DeferredShapeRule::Conv2d,
+                        DeferredShapeRule::Conv,
                         kids[1..].to_vec(),
                         arg_tys.clone(),
                         result_ty.clone(),
@@ -240,12 +412,16 @@ pub(super) fn finish_unified_app(
                     retained_shape_obligation = true;
                 }
                 result_ty =
-                    check_conv2d_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
+                    check_conv_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
+            }
+            "split_keys" => {
+                checked_route_observed = true;
+                result_ty = check_split_keys_signature(&kids[1..], &result_ty, env, subst, errors);
             }
             "scatter_elements" if owes_shape_replay => {
                 checked_route_observed = true;
                 product.defer_shape_check(
-                    DeferredShapeRule::ScatterElements { list: list.clone() },
+                    DeferredShapeRule::ScatterElements { node: node.clone() },
                     kids[1..].to_vec(),
                     arg_tys.clone(),
                     result_ty.clone(),
@@ -296,8 +472,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!(
                                     "{} requires tensor[D, bool] arguments, got tensor[D, {}]",
                                     fname,
@@ -313,8 +489,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 format!("{} requires bool arguments, got {}", fname, other),
                             ),
                             vec!["Logical ops only work on bool values".to_string()],
@@ -325,18 +501,19 @@ pub(super) fn finish_unified_app(
         }
     }
 
-    // Special case: comparison ops return tensor[D, bool] when any
-    // argument is tensor-shaped. Comparison ops broadcast a scalar
-    // arg against a tensor arg (see the rewrite block above), so the
-    // result shape comes from whichever argument is the tensor —
-    // not necessarily the first one (issue #5: `gt(1.5, xs)` was
-    // returning `Prim(Bool)` instead of `tensor[D, bool]` because
-    // this override only looked at `arg_tys[0]`).
+    // Special case: comparison ops return tensor[D, bool] when their
+    // arguments resolve to tensors. chelis#1506 removed the scalar/tensor
+    // rewrite and rejects a concrete primitive beside a tensor before
+    // unification under `[05-OP-36]`. A bounded-binder cast can still enter
+    // unification as a type variable and acquire the tensor type (chelis#1621),
+    // so resolved types alone do not prove that both source operands were
+    // tensors. Keep searching for a tensor shape: one operand can remain a
+    // variable while the other is ground, and issue #5 guards the result shape
+    // when the first operand is not the one that supplies it.
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
         checked_route_observed = true;
-        // Prefer any tensor-shaped arg as the dim source.
         let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
             Type::Tensor(dims, _) => Some(dims),
             _ => None,
@@ -366,6 +543,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
+        let site = UnresolvedOperandSite::new(node, kids, fname.as_str(), env);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -373,16 +551,24 @@ pub(super) fn finish_unified_app(
             "fail" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Var(vg.fresh_tvar());
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Var(vg.fresh_tvar()),
+                            );
                         }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("fail expects string input, got {other}"),
                                     ),
                                     vec![],
@@ -397,197 +583,41 @@ pub(super) fn finish_unified_app(
                     return subst.apply(first_arg);
                 }
             }
-            "string_len" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Prim(Prim::Int64);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_len expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "string_concat" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_concat expects string arguments, got {other}"
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_slice" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_slice expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(precision) if precision.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_slice expects integer index arguments; arg {} was {other}",
-                                            index + 1
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_contains" | "string_starts_with" | "string_ends_with" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("{} expects string arguments, got {other}", fname),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::Bool);
-            }
-            "string_trim" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Prim(Prim::String);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_trim expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
+            name if string_route_owns(name) => {
+                // chelis#1512: the string-operand group lives in `app_string.rs`.
+                // `None` means it decided nothing, which for a name it owns
+                // happens only on an empty argument list, so the generic path
+                // below runs exactly as it did before the move.
+                if let Some(result) = string_route_result(
+                    name, node, &arg_tys, &result_ty, &site, product, subst, errors,
+                ) {
+                    return result;
                 }
             }
             "to_string" => {
                 return Type::Prim(Prim::String);
             }
-            "to_int" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_int expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "to_float" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_float expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
             "rank" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int32);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int32),
+                            );
                         }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("rank expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -605,14 +635,17 @@ pub(super) fn finish_unified_app(
                     // validation.
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, _) => Some(dims),
-                        Type::Var(_) | Type::Error(_) => None,
+                        Type::Error(_) => None,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("shape expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -623,7 +656,7 @@ pub(super) fn finish_unified_app(
                 } else {
                     None
                 };
-                // Issue #216: cast-aware so `shape(x, cast(N, int32))`
+                // Issue #216: cast-aware so `shape(x, cast(N, i32))`
                 // (the idiomatic form from issue #206 for runtime-dim
                 // reshape) surfaces the same diagnostic as the bare-
                 // literal form.
@@ -635,8 +668,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::DimensionMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("shape requires non-negative axis, got {axis}"),
                                 ),
                                 vec![],
@@ -650,8 +683,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::DimensionMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "shape axis {axis} is out of bounds for rank {} tensor",
                                             dims.len()
@@ -665,19 +698,27 @@ pub(super) fn finish_unified_app(
                 }
                 if let Some(axis_arg) = arg_tys.get(1) {
                     match subst.apply(axis_arg) {
-                        // [05-DIM-2]: extent-domain out (int64), axis-domain
-                        // in (int32).
-                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
+                        // [05-DIM-2]: extent-domain out (i64), axis-domain
+                        // in (i32).
+                        Type::Prim(Prim::Int32) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("shape expects int32 axis, got {other}"),
+                                    with_node_provenance(
+                                        node,
+                                        format!("shape expects i32 axis, got {other}"),
                                     ),
                                     vec![],
                                 ),
@@ -689,16 +730,24 @@ pub(super) fn finish_unified_app(
             "numel" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("numel expects tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -717,31 +766,32 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             "tensor_to_scalar expects a rank-0 tensor".to_string(),
                                         ),
                                         vec![],
                                     ),
                                 );
                             }
-                            // tensor_to_scalar requires a fully
-                            // resolved precision. Polymorphic precision
-                            // must be resolved by unification before
-                            // this op can name a host scalar type.
+                            // Conversion changes the surface, not the dtype's
+                            // identity or its declared family restriction.
                             return match precision {
                                 TensorPrec::Concrete(p) => Type::Prim(p),
-                                TensorPrec::Var(_) => result_ty,
+                                TensorPrec::Var(p) => Type::Var(p),
                             };
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "tensor_to_scalar expects tensor input, got {other}"
                                         ),
@@ -759,14 +809,20 @@ pub(super) fn finish_unified_app(
                         Type::Prim(precision) if !matches!(precision, Prim::String) => {
                             return Type::Tensor(vec![], TensorPrec::Concrete(precision));
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Var(p) if subst.tvar_restriction(p).is_some() => {
+                            return Type::Tensor(vec![], TensorPrec::Var(p));
+                        }
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "scalar_to_tensor expects scalar numeric/bool input, got {other}"
                                         ),
@@ -780,15 +836,15 @@ pub(super) fn finish_unified_app(
             }
             "einsum" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let Some(equation) = kids.get(1).and_then(extract_string_literal) else {
                     return report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 "einsum expects a string equation as its first argument"
                                     .to_string(),
                             ),
@@ -801,8 +857,8 @@ pub(super) fn finish_unified_app(
                         errors,
                         CheckError::new(
                             CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
+                            with_node_provenance(
+                                node,
                                 "einsum ellipsis support is deferred in 3h".to_string(),
                             ),
                             vec![],
@@ -813,41 +869,31 @@ pub(super) fn finish_unified_app(
             }
             "gather" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
-                let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
-                let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
-                let axis = match resolve_builtin_axis(
-                    "gather",
-                    kids.get(3),
-                    &subst.apply(&arg_tys[2]),
-                    &tensor_ty,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
+                if let Err(err) = reject_non_int32_axis("gather", &arg_tys[2], node, subst, errors)
+                {
+                    return err;
+                }
+                let route = ShapeRoute::Gather {
+                    op: "gather".to_string(),
+                    indices: Box::new(type_for_readonly_check(&arg_tys[1], subst)),
+                    raw_axis: kids.get(3).and_then(extract_int_for_dim),
+                    updates: None,
+                    mode: None,
                 };
-                match infer_gather_result_type("gather", &tensor_ty, &indices_ty, axis) {
-                    Ok(ty) => return ty,
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
+                return decide_shape_route(
+                    route,
+                    &type_for_readonly_check(&arg_tys[0], subst),
+                    node,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "where" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let cond_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let then_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -859,15 +905,15 @@ pub(super) fn finish_unified_app(
                         Type::Tensor(else_dims, else_prec),
                     ) => {
                         if then_prec != else_prec
-                            || cond_dims != then_dims
-                            || then_dims != else_dims
+                            || !elementwise_shapes_match(cond_dims, then_dims, subst)
+                            || !elementwise_shapes_match(then_dims, else_dims, subst)
                         {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "where expects cond/both branches to have matching tensor shapes and branch precision, got {cond_ty}, {then_ty}, and {else_ty}"
                                         ),
@@ -878,19 +924,22 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Tensor(then_dims.clone(), then_prec.clone());
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "where expects a bool tensor condition and matching tensor branches, got {cond_ty}, {then_ty}, and {else_ty}"
                                     ),
@@ -903,7 +952,7 @@ pub(super) fn finish_unified_app(
             }
             "cumsum" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let cumsum_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -911,7 +960,8 @@ pub(super) fn finish_unified_app(
                     kids.get(2),
                     &subst.apply(&arg_tys[1]),
                     &cumsum_operand,
-                    list,
+                    node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -921,14 +971,17 @@ pub(super) fn finish_unified_app(
                     Type::Tensor(dims, precision) => {
                         return Type::Tensor(dims, precision);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("cumsum expects tensor input, got {other}"),
                                 ),
                                 vec![],
@@ -939,7 +992,7 @@ pub(super) fn finish_unified_app(
             }
             "diagonal" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let diagonal_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let axis1 = match resolve_axis_pair_member(
@@ -948,7 +1001,8 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[1]),
                     &diagonal_operand,
                     0,
-                    list,
+                    node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -960,23 +1014,45 @@ pub(super) fn finish_unified_app(
                     &subst.apply(&arg_tys[2]),
                     &diagonal_operand,
                     1,
-                    list,
+                    node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
-                    Ok(ty) => return ty,
+                match infer_diagonal_result_type(&diagonal_operand, axis1, axis2, subst) {
+                    Ok(ty) => {
+                        // chelis#1739: the result dim stays a wildcard for a
+                        // mixed (symbolic, literal) pair, and a wildcard
+                        // unifies with every declared extent. The literal is
+                        // still an upper bound on the minimum, so compare the
+                        // declared extent against it here, at the one place
+                        // that knows both the operand's axes and the
+                        // declaration.
+                        if let Some(rejection) = reject_unreachable_diagonal_extent(
+                            &diagonal_operand,
+                            &ty,
+                            axis1,
+                            axis2,
+                            node,
+                            env,
+                            vg,
+                            adt_reg,
+                            subst,
+                            errors,
+                            expected_result,
+                        ) {
+                            return rejection;
+                        }
+                        return ty;
+                    }
                     Err(message) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
+                                with_node_provenance(node, message),
                                 vec![],
                             ),
                         );
@@ -985,53 +1061,31 @@ pub(super) fn finish_unified_app(
             }
             "trace" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
-                let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
-                let axis1 = match resolve_axis_pair_member(
-                    "trace",
-                    kids.get(2),
-                    &subst.apply(&arg_tys[1]),
-                    &trace_operand,
-                    0,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                let axis2 = match resolve_axis_pair_member(
-                    "trace",
-                    kids.get(3),
-                    &subst.apply(&arg_tys[2]),
-                    &trace_operand,
-                    1,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                match infer_trace_result_type(&trace_operand, axis1, axis2) {
-                    Ok(ty) => return ty,
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
+                for idx in [1usize, 2] {
+                    if let Err(err) =
+                        reject_non_int32_axis("trace", &arg_tys[idx], node, subst, errors)
+                    {
+                        return err;
                     }
                 }
+                let route = ShapeRoute::Trace {
+                    raw_axis1: kids.get(2).and_then(extract_int_for_dim),
+                    raw_axis2: kids.get(3).and_then(extract_int_for_dim),
+                };
+                return decide_shape_route(
+                    route,
+                    &type_for_readonly_check(&arg_tys[0], subst),
+                    node,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "clamp" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let input_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let low_ty = type_for_readonly_check(&arg_tys[1], subst);
@@ -1042,8 +1096,10 @@ pub(super) fn finish_unified_app(
                         Type::Tensor(low_dims, low_prec),
                         Type::Tensor(high_dims, high_prec),
                     ) => {
-                        let low_ok = low_dims.is_empty() || low_dims == input_dims;
-                        let high_ok = high_dims.is_empty() || high_dims == input_dims;
+                        let low_ok = low_dims.is_empty()
+                            || elementwise_shapes_match(low_dims, input_dims, subst);
+                        let high_ok = high_dims.is_empty()
+                            || elementwise_shapes_match(high_dims, input_dims, subst);
                         if low_ok && high_ok && low_prec == input_prec && high_prec == input_prec {
                             return input_ty;
                         }
@@ -1051,8 +1107,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision, got {input_ty}, {low_ty}, and {high_ty}"
                                     ),
@@ -1061,19 +1117,22 @@ pub(super) fn finish_unified_app(
                             ),
                         );
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "clamp expects tensor input and tensor bounds, got {input_ty}, {low_ty}, and {high_ty}"
                                     ),
@@ -1086,7 +1145,7 @@ pub(super) fn finish_unified_app(
             }
             "sort" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
                 let _axis = match resolve_builtin_axis(
@@ -1094,7 +1153,8 @@ pub(super) fn finish_unified_app(
                     kids.get(2),
                     &subst.apply(&arg_tys[1]),
                     &sort_operand,
-                    list,
+                    node,
+                    subst,
                     errors,
                 ) {
                     Ok(axis) => axis,
@@ -1107,14 +1167,17 @@ pub(super) fn finish_unified_app(
                             Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                         ]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("sort expects tensor input, got {other}"),
                                 ),
                                 vec![],
@@ -1125,108 +1188,59 @@ pub(super) fn finish_unified_app(
             }
             "scatter" => {
                 if arg_tys.len() != 5 {
-                    return report_builtin_arity(errors, list, fname, 5, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 5, arg_tys.len());
                 }
-                let base_ty = subst.apply(&arg_tys[0]);
-                let indices_ty = subst.apply(&arg_tys[1]);
-                let updates_ty = subst.apply(&arg_tys[2]);
-                let axis = match resolve_builtin_axis(
-                    "scatter",
-                    kids.get(4),
-                    &subst.apply(&arg_tys[3]),
-                    &base_ty,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
+                if let Err(err) = reject_non_int32_axis("scatter", &arg_tys[3], node, subst, errors)
+                {
+                    return err;
+                }
+                let route = ShapeRoute::Gather {
+                    op: "scatter".to_string(),
+                    indices: Box::new(subst.apply(&arg_tys[1])),
+                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    updates: Some(Box::new(subst.apply(&arg_tys[2]))),
+                    mode: Some(
+                        kids.get(5)
+                            .and_then(extract_string_literal)
+                            .unwrap_or_default(),
+                    ),
                 };
-                let mode = kids.get(5).and_then(extract_string_literal);
-                match mode.as_deref() {
-                    Some("replace") | Some("add") => {}
-                    _ => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "scatter mode must be \"replace\" or \"add\"".to_string(),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-                match infer_gather_result_type("scatter", &base_ty, &indices_ty, axis) {
-                    Ok(expected_updates) => {
-                        if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return base_ty;
-                    }
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
+                return decide_shape_route(
+                    route,
+                    &subst.apply(&arg_tys[0]),
+                    node,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "scatter_replace" => {
-                // Tensor-lane replace-scatter (last-write-wins) — lowers
-                // to RiscOp::Scatter. Distinct from the host-lane
-                // `scatter(..., mode)` pentaop. AD policy: no_grad
-                // (rejected via AdError::NotSupported); see
-                // spec/05-risc-primitives.md §3.5.
                 if arg_tys.len() != 4 {
-                    return report_builtin_arity(errors, list, fname, 4, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 4, arg_tys.len());
                 }
-                let base_ty = subst.apply(&arg_tys[0]);
-                let indices_ty = subst.apply(&arg_tys[1]);
-                let updates_ty = subst.apply(&arg_tys[2]);
-                let axis = match resolve_builtin_axis(
-                    "scatter_replace",
-                    kids.get(4),
-                    &subst.apply(&arg_tys[3]),
-                    &base_ty,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
+                if let Err(err) =
+                    reject_non_int32_axis("scatter_replace", &arg_tys[3], node, subst, errors)
+                {
+                    return err;
+                }
+                let route = ShapeRoute::Gather {
+                    op: "scatter_replace".to_string(),
+                    indices: Box::new(subst.apply(&arg_tys[1])),
+                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    updates: Some(Box::new(subst.apply(&arg_tys[2]))),
+                    mode: None,
                 };
-                match infer_gather_result_type("scatter_replace", &base_ty, &indices_ty, axis) {
-                    Ok(expected_updates) => {
-                        if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return base_ty;
-                    }
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
+                return decide_shape_route(
+                    route,
+                    &subst.apply(&arg_tys[0]),
+                    node,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "scatter_elements" => {
-                return check_scatter_elements(list, kids, &arg_tys, result_ty, subst, errors);
+                return check_scatter_elements(node, kids, &arg_tys, result_ty, subst, errors);
             }
             "len" => {
                 if let Some(first_arg) = arg_tys.first() {
@@ -1234,15 +1248,23 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, _) if name == "List" || name == "Dict" => {
                             return Type::Prim(Prim::Int64);
                         }
-                        Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
+                        }
                         Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                         {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "len auto-borrows its List/Dict argument, so an explicit `&` is not a \
                                          supported surface form: write `len(xs)`, not `len(&xs)` (got &{inner})"
@@ -1257,8 +1279,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("len expects List or Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -1270,37 +1292,46 @@ pub(super) fn finish_unified_app(
             }
             "index" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
-                if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(index_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("index expects integer index, got {index_arg}"),
+                match &index_arg {
+                    Type::Prim(Prim::Int64) => {}
+                    // chelis#1512: not an i64 YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("index expects i64 index, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
                         return args.remove(0);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "index auto-borrows its List argument, so an explicit `&` is not a \
                                      supported surface form: write `index(xs, i)`, not `index(&xs, i)` (got &{inner})"
@@ -1315,8 +1346,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("index expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1327,7 +1358,7 @@ pub(super) fn finish_unified_app(
             }
             "append" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let value_arg = subst.apply(&arg_tys[1]);
@@ -1338,14 +1369,17 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("append expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1356,7 +1390,7 @@ pub(super) fn finish_unified_app(
             }
             "concat" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -1364,9 +1398,14 @@ pub(super) fn finish_unified_app(
                     matches!(&lhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
                 let rhs_is_list =
                     matches!(&rhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
+                // A right operand that is still a variable may be a list as
+                // well as an axis, so it is not constrained to `i32` here; the
+                // match below suspends the call on it.
+                let rhs_is_unresolved = matches!(rhs, Type::Var(_));
                 if lhs_is_list
                     && !rhs_is_list
-                    && let Err(err) = reject_non_int32_axis("concat", &rhs, list, errors)
+                    && !rhs_is_unresolved
+                    && let Err(err) = reject_non_int32_axis("concat", &rhs, node, subst, errors)
                 {
                     return err;
                 }
@@ -1383,32 +1422,21 @@ pub(super) fn finish_unified_app(
                         // types already produced while inferring the
                         // list argument, so ragged extents can SUM
                         // without a second semantic traversal.
-                        let raw_axis = kids.get(2).and_then(extract_int_for_dim);
-                        let list_info = match kids.get(1).and_then(collect_cons_chain_for_shape) {
-                            Some(elements) => ConcatListInfo::Direct(
-                                elements
-                                    .iter()
-                                    .map(|elem| {
-                                        match product.current_owner_type(elem, subst, errors) {
-                                            Some(Type::Tensor(dims, _)) => dims,
-                                            _ => Vec::new(),
-                                        }
-                                    })
-                                    .collect(),
-                            ),
-                            None => ConcatListInfo::BindingLen(static_list_len(kids.get(1), env)),
-                        };
-                        match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
+                        let evidence =
+                            tensor_concat_call_evidence(kids, env, subst, errors, product);
+                        match tensor_concat_result_type(
+                            &lhs_args[0],
+                            evidence.raw_axis,
+                            evidence.list_info,
+                            subst,
+                        ) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 return report(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
-                                            message,
-                                        ),
+                                        with_node_provenance(node, message),
                                         vec![],
                                     ),
                                 );
@@ -1426,19 +1454,22 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&lhs_args[0])]);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "concat expects matching List inputs, got {lhs} and {rhs}"
                                     ),
@@ -1451,39 +1482,45 @@ pub(super) fn finish_unified_app(
             }
             "split" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let axis_ty = subst.apply(&arg_tys[1]);
                 let sizes_ty = subst.apply(&arg_tys[2]);
                 // The pre-guard predicate here was `precision.is_integer()`,
                 // the same acceptance hole `concat` carried: it admitted an
-                // int64 axis while `sum` rejected one.
-                if let Err(err) = reject_non_int32_axis("split", &axis_ty, list, errors) {
+                // i64 axis while `sum` rejected one.
+                if let Err(err) = reject_non_int32_axis("split", &axis_ty, node, subst, errors) {
                     return err;
                 }
                 match (tensor_ty, sizes_ty) {
                     (Type::Tensor(dims, precision), Type::Adt(name, args))
                         if name == "List" && args.len() == 1 =>
                     {
-                        if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
-                            && !matches!(&args[0], Type::Var(_) | Type::Error(_))
-                        {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "split expects List[int] sizes".to_string(),
+                        match &args[0] {
+                            Type::Prim(prec) if prec.is_integer() => {}
+                            // chelis#1512: not an integer YET. Suspending the
+                            // call re-enters this route once the element type
+                            // binds, so this same guard decides against it.
+                            Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                            Type::Error(_) => {}
+                            _ => {
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_node_provenance(
+                                            node,
+                                            "split expects List[int] sizes".to_string(),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ),
-                            );
+                                );
+                            }
                         }
                         // Negative axes index from the end.
                         // Issue #216: cast-aware so a
-                        // `cast(N, int32)`-wrapped split axis still
+                        // `cast(N, i32)`-wrapped split axis still
                         // surfaces the bounds diagnostic at infer.
                         let raw_axis = kids.get(2).and_then(extract_int_for_dim);
                         let axis = match raw_axis {
@@ -1494,8 +1531,8 @@ pub(super) fn finish_unified_app(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "split axis {raw} out of bounds for rank {}",
                                                     dims.len()
@@ -1515,19 +1552,22 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tensor(piece_dims, precision)],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (tensor_ty, sizes_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "split expects tensor input and List[int] sizes, got {tensor_ty} and {sizes_ty}"
                                     ),
@@ -1538,40 +1578,49 @@ pub(super) fn finish_unified_app(
                     }
                 }
             }
-            "take" | "drop" => {
+            "take" | "skip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("{op_name} expects integer count, got {count_arg}"),
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
-                match list_arg {
-                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                        return Type::Adt("List".to_string(), vec![args[0].clone()]);
-                    }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
+                                    format!("{op_name} expects integer count, got {other}"),
+                                ),
+                                vec![],
+                            ),
+                        );
+                    }
+                }
+                match list_arg {
+                    Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+                        return Type::Adt("List".to_string(), vec![args[0].clone()]);
+                    }
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
                                     format!("{op_name} expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1582,24 +1631,30 @@ pub(super) fn finish_unified_app(
             }
             "chunk" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("chunk expects integer size, got {count_arg}"),
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_node_provenance(
+                                    node,
+                                    format!("chunk expects integer size, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -1608,14 +1663,17 @@ pub(super) fn finish_unified_app(
                             vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
                         );
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("chunk expects List input, got {other}"),
                                 ),
                                 vec![],
@@ -1626,19 +1684,20 @@ pub(super) fn finish_unified_app(
             }
             "range" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
                         Type::Prim(prec) if prec.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
+                        Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("range expects integer arguments, got {other}"),
                                     ),
                                     vec![],
@@ -1651,7 +1710,7 @@ pub(super) fn finish_unified_app(
             }
             "map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
                 let out_ty = vg.fresh_type();
@@ -1673,10 +1732,9 @@ pub(super) fn finish_unified_app(
             }
             "filter" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
@@ -1685,7 +1743,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "filter",
                             "expects a callback that returns bool",
                             te,
@@ -1703,11 +1761,10 @@ pub(super) fn finish_unified_app(
             }
             "fold" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let acc_ty = vg.fresh_type();
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(
@@ -1719,7 +1776,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "fold",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1730,7 +1787,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "fold",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1748,11 +1805,10 @@ pub(super) fn finish_unified_app(
             }
             "scan" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let acc_ty = vg.fresh_type();
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(
@@ -1764,7 +1820,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "scan",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1775,7 +1831,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "scan",
                             "expects a callback whose accumulator/result type matches the initial accumulator",
                             te,
@@ -1792,7 +1848,7 @@ pub(super) fn finish_unified_app(
                 return Type::Adt("List".to_string(), vec![subst.apply(&acc_ty)]);
             }
             "tensor_scan" => {
-                // `tensor_scan(initial: T, fn: (T, int64) -> T, n: int64) -> tensor[n, T]`.
+                // `tensor_scan(initial: T, fn: (T, i64) -> T, n: i64) -> tensor[n, T]`.
                 //
                 // Issue #257: host-runtime scan that produces a tensor
                 // directly, sidestepping the right-recursive list build
@@ -1802,28 +1858,27 @@ pub(super) fn finish_unified_app(
                 // that at execution time. At type-check time we accept
                 // any Type::Prim and let unification do the rest.
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let int64 = Type::Prim(Prim::Int64);
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
+                let i64 = Type::Prim(Prim::Int64);
                 // arg 0: initial accumulator of type T.
                 if let Err(te) = unify(&subst.apply(&arg_tys[0]), &elem_ty.clone(), subst) {
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
                             "expects an initial value whose type matches the callback element type",
                             te,
                         ),
                     );
                 }
-                // arg 1: callback `(T, int64) -> T`.
+                // arg 1: callback `(T, i64) -> T`.
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[1]),
                     &Type::Fn(
-                        vec![elem_ty.clone(), int64.clone()],
+                        vec![elem_ty.clone(), i64.clone()],
                         Box::new(elem_ty.clone()),
                     ),
                     subst,
@@ -1831,21 +1886,21 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
-                            "expects a callback (T, int64) -> T",
+                            "expects a callback (T, i64) -> T",
                             te,
                         ),
                     );
                 }
-                // arg 2: length `n: int64`.
-                if let Err(te) = unify(&subst.apply(&arg_tys[2]), &int64, subst) {
+                // arg 2: length `n: i64`.
+                if let Err(te) = unify(&subst.apply(&arg_tys[2]), &i64, subst) {
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "tensor_scan",
-                            "expects a length `n: int64`",
+                            "expects a length `n: i64`",
                             te,
                         ),
                     );
@@ -1864,7 +1919,7 @@ pub(super) fn finish_unified_app(
                         // resolve it once outer inference pins T.
                         // Using F32 as a placeholder (the previous
                         // behavior) silently lies about the dtype
-                        // when T is later pinned to int64 or bool.
+                        // when T is later pinned to i64 or bool.
                         TensorPrec::Var(*tv)
                     }
                     other => {
@@ -1872,8 +1927,8 @@ pub(super) fn finish_unified_app(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &list_expr,
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "tensor_scan element type must be a scalar primitive, got {other}"
                                     ),
@@ -1887,10 +1942,9 @@ pub(super) fn finish_unified_app(
             }
             "partition" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
-                let list_expr = deep::Expr::List(list.clone(), zero_span());
                 if let Err(te) = unify(
                     &subst.apply(&arg_tys[0]),
                     &Type::Fn(vec![elem_ty.clone()], Box::new(Type::Prim(Prim::Bool))),
@@ -1899,7 +1953,7 @@ pub(super) fn finish_unified_app(
                     return report(
                         errors,
                         collection_helper_type_error(
-                            &list_expr,
+                            node,
                             "partition",
                             "expects a callback that returns bool",
                             te,
@@ -1918,7 +1972,7 @@ pub(super) fn finish_unified_app(
             }
             "flat_map" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let elem_ty = vg.fresh_type();
                 let out_elem_ty = vg.fresh_type();
@@ -1956,14 +2010,22 @@ pub(super) fn finish_unified_app(
                                         vec![inner_args[0].clone()],
                                     );
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
+                                Type::Var(_) => {
+                                    return site.defer(
+                                        &arg_tys,
+                                        &result_ty,
+                                        product,
+                                        result_ty.clone(),
+                                    );
+                                }
                                 other => {
                                     return report(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "flatten expects List[List[T]] input, got List[{other}]"
                                                 ),
@@ -1974,14 +2036,17 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("flatten expects List[List[T]] input, got {other}"),
                                     ),
                                     vec![],
@@ -1993,7 +2058,7 @@ pub(super) fn finish_unified_app(
             }
             "zip" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
@@ -2009,19 +2074,22 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!("zip expects List inputs, got {lhs} and {rhs}"),
                                 ),
                                 vec![],
@@ -2039,14 +2107,17 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("enumerate expects List input, got {other}"),
                                     ),
                                     vec![],
@@ -2060,23 +2131,40 @@ pub(super) fn finish_unified_app(
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
                         Type::Adt(name, args) if name == "List" && args.len() == 1 => {
-                            match &args[0] {
+                            // chelis#2523: `dict_of`'s input is a list of
+                            // `(key, value)` pairs, so an element whose type is
+                            // still a variable is constrained to a pair rather
+                            // than admitted. That ties the result's key and
+                            // value types to the list's element, so a declared
+                            // result determines them (`dict_of([])`), and the
+                            // key rule below decides once the key is known.
+                            if let Type::Var(_) = subst.apply(&args[0]) {
+                                let pair = Type::Tuple(vec![vg.fresh_type(), vg.fresh_type()]);
+                                if let Err(te) = unify(&args[0], &pair, subst) {
+                                    return report(errors, te.into());
+                                }
+                            }
+                            match subst.apply(&args[0]) {
                                 Type::Tuple(items) if items.len() == 2 => {
+                                    let dict = Type::Adt(
+                                        "Dict".to_string(),
+                                        vec![items[0].clone(), items[1].clone()],
+                                    );
                                     match &items[0] {
-                                        Type::Prim(Prim::Int64) | Type::Prim(Prim::String) => {}
-                                        Type::Var(_) | Type::Error(_) => return result_ty,
+                                        key if is_dict_key_type(key) => {}
+                                        Type::Error(_) => return result_ty,
+                                        Type::Var(_) => {
+                                            return site.defer(&arg_tys, &result_ty, product, dict);
+                                        }
                                         other => {
                                             return report(
                                                 errors,
                                                 CheckError::new(
                                                     CheckErrorKind::TypeMismatch,
-                                                    with_macro_provenance(
-                                                        &deep::Expr::List(
-                                                            list.clone(),
-                                                            zero_span(),
-                                                        ),
+                                                    with_node_provenance(
+                                                        node,
                                                         format!(
-                                                            "dict_of keys must be int64 or string, got {other}"
+                                                            "dict_of keys must be string, bool, or a signed integer scalar ([05-OP-56]), got {other}"
                                                         ),
                                                     ),
                                                     vec![],
@@ -2084,19 +2172,16 @@ pub(super) fn finish_unified_app(
                                             );
                                         }
                                     }
-                                    return Type::Adt(
-                                        "Dict".to_string(),
-                                        vec![items[0].clone(), items[1].clone()],
-                                    );
+                                    return dict;
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
                                 other => {
                                     return report(
                                         errors,
                                         CheckError::new(
                                             CheckErrorKind::TypeMismatch,
-                                            with_macro_provenance(
-                                                &deep::Expr::List(list.clone(), zero_span()),
+                                            with_node_provenance(
+                                                node,
                                                 format!(
                                                     "dict_of expects List[(K, V)] input, got List[{other}]"
                                                 ),
@@ -2107,14 +2192,17 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_of expects List input, got {other}"),
                                     ),
                                     vec![],
@@ -2126,7 +2214,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_get" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2135,19 +2223,20 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("Option".to_string(), vec![subst.apply(&args[1])]);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_get expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2160,7 +2249,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_contains" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2169,19 +2258,20 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Prim(Prim::Bool);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_contains expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2194,7 +2284,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_remove" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(name, args), key_ty) if name == "Dict" && args.len() == 2 => {
@@ -2206,19 +2296,20 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&args[0]), subst.apply(&args[1])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
-                        return result_ty;
+                    (Type::Error(_), _) | (_, Type::Error(_)) => return result_ty,
+                    // chelis#2523: not a `Dict` YET. Suspending re-enters this
+                    // route once the operand binds, and decides it at its
+                    // instantiations if it never does.
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_remove expects Dict[K, V] and K, got {dict_ty} and {key_ty}"
                                     ),
@@ -2231,7 +2322,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_insert" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 match (
                     subst.apply(&arg_tys[0]),
@@ -2252,21 +2343,20 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&args[0]), subst.apply(&args[1])],
                         );
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => {
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    // chelis#2523: see `dict_get`.
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (dict_ty, key_ty, value_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_insert expects Dict[K, V], K, and V, got {dict_ty}, {key_ty}, and {value_ty}"
                                     ),
@@ -2279,7 +2369,7 @@ pub(super) fn finish_unified_app(
             }
             "dict_merge" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 match (subst.apply(&arg_tys[0]), subst.apply(&arg_tys[1])) {
                     (Type::Adt(lhs_name, lhs_args), Type::Adt(rhs_name, rhs_args))
@@ -2299,19 +2389,22 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs_ty, rhs_ty) => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "dict_merge expects matching Dict inputs, got {lhs_ty} and {rhs_ty}"
                                     ),
@@ -2328,14 +2421,17 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[0].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_keys expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2351,14 +2447,17 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[1].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_values expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2377,14 +2476,17 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("dict_entries expects Dict input, got {other}"),
                                     ),
                                     vec![],
@@ -2415,8 +2517,11 @@ pub(super) fn finish_unified_app(
                     // the to_tensor app's `type:` metadata) sees a
                     // sound shape instead of `Dim::Wildcard`.
                     let resolved = subst.apply(first_arg);
-                    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
+                    if matches!(resolved, Type::Error(_)) {
                         return result_ty;
+                    }
+                    if matches!(resolved, Type::Var(_)) {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     match peel_to_tensor_argument(&resolved) {
                         ToTensorPeel::Ok { rank, precision } => {
@@ -2428,8 +2533,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!("to_tensor expects List input, got {resolved}"),
                                         ),
                                         vec![],
@@ -2451,14 +2556,73 @@ pub(super) fn finish_unified_app(
                                 .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
                             return Type::Tensor(dims, TensorPrec::Concrete(precision));
                         }
-                        ToTensorPeel::Pending => return result_ty,
+                        // [05-OP-57]: the leaf of `to_tensor`'s List is one
+                        // scalar tensor-element dtype. A leaf variable restricted
+                        // to the `Float`, `Int` or `Numeric` family can only be
+                        // such a scalar, so the nesting depth already fixes the
+                        // rank and the variable is the result precision, exactly
+                        // as `to_list` maps `tensor[n, p]` to `List[p]`. Returning
+                        // the scheme's opaque result here left every consumer of
+                        // a generic `to_tensor` (a `reshape`, say) suspended past
+                        // its declaration boundary.
+                        ToTensorPeel::Pending { rank, element }
+                            if rank > 0
+                                && matches!(
+                                    subst.tvar_restriction(element),
+                                    Some(
+                                        TypeVarRestriction::ActiveFloat
+                                            | TypeVarRestriction::ActiveInt
+                                            | TypeVarRestriction::ActiveNumeric
+                                    )
+                                ) =>
+                        {
+                            let dims = kids
+                                .get(1)
+                                .and_then(|arg| static_to_tensor_shape(arg, rank))
+                                .unwrap_or_else(|| vec![Dim::Wildcard; rank]);
+                            return Type::Tensor(dims, TensorPrec::Var(element));
+                        }
+                        // chelis#2523: `to_tensor` maps `List` nested `r`
+                        // deep around a numeric or bool dtype `p` to a rank-`r`
+                        // tensor of `p`, so an element type that is still a
+                        // variable is determined by a result whose rank and
+                        // precision are known, as a declared field does for
+                        // `IntCol(to_tensor([]))`. Otherwise the call waits for
+                        // either one to bind, and the declaration boundary
+                        // decides it if neither does.
+                        ToTensorPeel::Pending { rank, element } => {
+                            if let Type::Tensor(result_dims, precision) = &result_ty
+                                && result_dims.len() >= rank
+                            {
+                                let scalar = match precision {
+                                    TensorPrec::Concrete(prim) => Type::Prim(*prim),
+                                    TensorPrec::Var(var) => Type::Var(*var),
+                                };
+                                let inner = (rank..result_dims.len()).fold(scalar, |inner, _| {
+                                    Type::Adt("List".to_string(), vec![inner])
+                                });
+                                if let Err(te) = unify(&Type::Var(element), &inner, subst) {
+                                    return report(errors, te.into());
+                                }
+                                // A concrete precision settles the call; a
+                                // precision variable is decided when it binds,
+                                // or at its instantiations.
+                                if let TensorPrec::Concrete(prim) = precision
+                                    && (prim.is_numeric() || *prim == Prim::Bool)
+                                {
+                                    return result_ty;
+                                }
+                            }
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
+                        ToTensorPeel::Poisoned => return result_ty,
                         ToTensorPeel::BadInner(inner) => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!(
                                             "to_tensor expects numeric or bool elements at the innermost level, got {inner}"
                                         ),
@@ -2472,8 +2636,8 @@ pub(super) fn finish_unified_app(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("to_tensor expects List input, got {resolved}"),
                                     ),
                                     vec![],
@@ -2492,8 +2656,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "to_list expects a rank-1 tensor, got rank {} tensor",
                                                 dims.len()
@@ -2503,22 +2667,30 @@ pub(super) fn finish_unified_app(
                                     ),
                                 );
                             }
-                            // to_list requires a fully resolved
-                            // precision: a polymorphic precision must
-                            // be resolved before to_list can name a
-                            // concrete element type. Defer if the
-                            // precision is still a var.
                             let precision = match precision {
                                 TensorPrec::Concrete(p) => p,
-                                TensorPrec::Var(_) => return result_ty,
+                                // [05-OP-57] fixes the result constructor and
+                                // leaf relation independently of whether the
+                                // authored precision has been instantiated:
+                                // tensor[n, p] becomes List[p]. Returning the
+                                // builtin scheme's opaque result variable here
+                                // erased the known List constructor and made a
+                                // following index look unresolved at [04-INF-9]'s
+                                // declaration boundary (chelis#2126).
+                                TensorPrec::Var(variable) => {
+                                    return Type::Adt(
+                                        "List".to_string(),
+                                        vec![Type::Var(variable)],
+                                    );
+                                }
                             };
                             if !precision.is_numeric() && !matches!(precision, Prim::Bool) {
                                 return report(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "to_list expects numeric or bool tensor input, got {precision:?}"
                                             ),
@@ -2529,14 +2701,17 @@ pub(super) fn finish_unified_app(
                             }
                             return Type::Adt("List".to_string(), vec![Type::Prim(precision)]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
                                 CheckError::new(
                                     CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
+                                    with_node_provenance(
+                                        node,
                                         format!("to_list expects Tensor input, got {other}"),
                                     ),
                                     vec![],
@@ -2548,7 +2723,7 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences" => {
                 if arg_tys.len() != 2 {
-                    return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 2, arg_tys.len());
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let pad_ty = subst.apply(&arg_tys[1]);
@@ -2570,14 +2745,22 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
                                             CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                with_node_provenance(
+                                                    node,
                                                     format!(
                                                         "pad_sequences expects numeric nested lists, got {other}"
                                                     ),
@@ -2593,8 +2776,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "pad_sequences expects List[List[T]], got List[{other}]"
                                             ),
@@ -2605,14 +2788,17 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "pad_sequences expects List[List[T]] input, got {other}"
                                     ),
@@ -2625,7 +2811,7 @@ pub(super) fn finish_unified_app(
             }
             "pad_sequences_to" => {
                 if arg_tys.len() != 3 {
-                    return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
+                    return report_builtin_arity(errors, node, fname, 3, arg_tys.len());
                 }
                 let seqs_ty = subst.apply(&arg_tys[0]);
                 let width_ty = subst.apply(&arg_tys[1]);
@@ -2635,14 +2821,15 @@ pub(super) fn finish_unified_app(
                 }
                 // The padded (axis-1) dimension equals the `width`
                 // argument. When `width` is a literal — including
-                // `cast(N, int64)`, the form every caller uses —
+                // `cast(N, i64)`, the form every caller uses —
                 // propagate `Dim::Lit(N)` so the padded width is a
                 // concrete dim that participates in shape checking.
                 // A non-literal or non-positive width stays
                 // `Dim::Wildcard` (the runtime validates the value).
                 // `extract_int_for_dim` (not `extract_int_literal`)
                 // is the cast-aware extractor used for dim contexts.
-                let width_dim = children(list)
+                let width_dim = node
+                    .children_slice()
                     .get(2)
                     .and_then(extract_int_for_dim)
                     .filter(|width| *width > 0)
@@ -2665,14 +2852,22 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
                                             CheckError::new(
                                                 CheckErrorKind::TypeMismatch,
-                                                with_macro_provenance(
-                                                    &deep::Expr::List(list.clone(), zero_span()),
+                                                with_node_provenance(
+                                                    node,
                                                     format!(
                                                         "pad_sequences_to expects numeric nested lists, got {other}"
                                                     ),
@@ -2688,8 +2883,8 @@ pub(super) fn finish_unified_app(
                                     errors,
                                     CheckError::new(
                                         CheckErrorKind::TypeMismatch,
-                                        with_macro_provenance(
-                                            &deep::Expr::List(list.clone(), zero_span()),
+                                        with_node_provenance(
+                                            node,
                                             format!(
                                                 "pad_sequences_to expects List[List[T]], got List[{other}]"
                                             ),
@@ -2700,14 +2895,17 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
+                                with_node_provenance(
+                                    node,
                                     format!(
                                         "pad_sequences_to expects List[List[T]] input, got {other}"
                                     ),
@@ -2746,13 +2944,13 @@ pub(super) fn finish_unified_app(
                 ]);
             }
             "round_to" => {
-                return check_round_to_builtin_signature(list, &arg_tys, subst, errors);
+                return check_round_to_builtin_signature(node, &arg_tys, subst, errors);
             }
             // Host-lane CSV I/O (chelis#903): parse/serialize plus column
             // accessors over the canonical List[Dict[string,string]] table.
             "parse_csv" | "to_csv" | "csv_f64s" | "csv_ints" | "csv_strs" | "csv_nrows"
             | "csv_cols" | "csv_f64" | "csv_int" | "csv_str" => {
-                return check_csv_builtin_signature(fname, list, &arg_tys, subst, errors);
+                return check_csv_builtin_signature(fname, node, &arg_tys, subst, errors);
             }
             _ => {}
         }
@@ -2767,6 +2965,6 @@ pub(super) fn finish_unified_app(
         );
     }
 
-    product.replay_ready_shape_checks(vg, subst, errors);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     subst.apply(&result_ty)
 }

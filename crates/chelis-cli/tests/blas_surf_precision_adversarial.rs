@@ -35,7 +35,7 @@ use chelis_types::{check_ir_program, check_linearity};
 /// lower on the source and return the resulting summary rejections.
 fn rejections_for_source(source: &str) -> Vec<SummaryRejection> {
     let decls = parse_str(source).expect("parse_str");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_ir_program(&deep).expect("check_ir_program");
     let checked = chelis_effects::check_program(&checked).expect("effect check");
     let checked = check_linearity(&checked).expect("linearity check");
@@ -105,10 +105,10 @@ fn w7_surf_f64_matmul_helper_emits_blas_output_precision_mismatch() {
 #[test]
 #[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises. The IR-level cross-product in blas_rejection_cross_product_adversarial.rs still covers integer matmul rejection at the recognizer level."]
 fn w7_surf_int32_matmul_helper_emits_blas_output_precision_mismatch() {
-    let source = "def my_mm(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
-                  -> tensor[8, 4, int32] = matmul(a, b)\n\
-                  def f(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
-                  -> tensor[8, 4, int32] = my_mm(a, b)\n";
+    let source = "def my_mm(a: tensor[8, 16, i32], b: tensor[16, 4, i32]) \
+                  -> tensor[8, 4, i32] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, i32], b: tensor[16, 4, i32]) \
+                  -> tensor[8, 4, i32] = my_mm(a, b)\n";
     let rejections = rejections_for_source(source);
     assert_blas_output_precision_mismatch(&rejections, Prim::Int32);
 }
@@ -120,10 +120,10 @@ fn w7_surf_int32_matmul_helper_emits_blas_output_precision_mismatch() {
 #[test]
 #[ignore = "WS-A0 spec lock: integer matmul is now a type error per spec §5.7.2 (PrecisionMismatch at the type checker), so the helper never reaches the BLAS summary-rejection path this test exercises."]
 fn w7_surf_int64_matmul_helper_emits_blas_output_precision_mismatch() {
-    let source = "def my_mm(a: tensor[8, 16, int64], b: tensor[16, 4, int64]) \
-                  -> tensor[8, 4, int64] = matmul(a, b)\n\
-                  def f(a: tensor[8, 16, int64], b: tensor[16, 4, int64]) \
-                  -> tensor[8, 4, int64] = my_mm(a, b)\n";
+    let source = "def my_mm(a: tensor[8, 16, i64], b: tensor[16, 4, i64]) \
+                  -> tensor[8, 4, i64] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, i64], b: tensor[16, 4, i64]) \
+                  -> tensor[8, 4, i64] = my_mm(a, b)\n";
     let rejections = rejections_for_source(source);
     assert_blas_output_precision_mismatch(&rejections, Prim::Int64);
 }
@@ -172,10 +172,10 @@ fn nonempty_summary_rejections_for_surf_f64_matmul_helper() {
 #[test]
 #[ignore = "WS-A0 spec lock: integer matmul is a type error per spec §5.7.2; the helper never reaches host lowering, so summary rejections never accrue."]
 fn nonempty_summary_rejections_for_surf_int32_matmul_helper() {
-    let source = "def my_mm(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
-                  -> tensor[8, 4, int32] = matmul(a, b)\n\
-                  def f(a: tensor[8, 16, int32], b: tensor[16, 4, int32]) \
-                  -> tensor[8, 4, int32] = my_mm(a, b)\n";
+    let source = "def my_mm(a: tensor[8, 16, i32], b: tensor[16, 4, i32]) \
+                  -> tensor[8, 4, i32] = matmul(a, b)\n\
+                  def f(a: tensor[8, 16, i32], b: tensor[16, 4, i32]) \
+                  -> tensor[8, 4, i32] = my_mm(a, b)\n";
     let rejections = rejections_for_source(source);
     assert!(
         !rejections.is_empty(),

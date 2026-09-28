@@ -20,10 +20,10 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic are now 15. The current format
+//! - The cache format version and magic are now 16. The current format
 //!   canonicalizes unordered collections, carries checker-owned nominal
 //!   parameter kinds and kinded arguments, and tags each deferred shape
-//!   obligation. A stale V14 file is rejected, never decoded.
+//!   obligation. A stale V15 file is rejected, never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.
@@ -38,8 +38,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-15 magic rejection of a forged
-//! V14 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-16 magic rejection of a forged
+//! V15 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /
@@ -94,7 +94,7 @@ fn make_pkg(name: &str, version: &str, main_ch: &str) -> (TempDir, PathBuf) {
     (dir, root)
 }
 
-const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value() -> int32 = cast(0, int32)\n";
+const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value() -> i32 = cast(0, i32)\n";
 
 /// Build a context, save it to a scratch path, and return the path plus
 /// the saved bytes. The scratch dir guard is kept alive by the caller.
@@ -225,7 +225,7 @@ fn rt1_distinct_source_packages_still_do_not_collide() {
     let (_dir_b, root_b) = make_pkg(
         "rt-distinct",
         "0.1.0",
-        "module Rt.Main\n\ndef rt_value() -> int32 = cast(1, int32)\n",
+        "module Rt.Main\n\ndef rt_value() -> i32 = cast(1, i32)\n",
     );
 
     let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
@@ -409,6 +409,16 @@ fn load_if_fresh_rejects_a_torn_write_in_the_identity_region() {
             | CacheError::Reef(_),
         ) => { /* acceptable: any "do not use these bytes" signal */ }
         Err(CacheError::Encode(e)) => panic!("encode error is impossible on the load path: {e}"),
+        // No cancel token is installed, so nothing can have been abandoned.
+        Err(CacheError::Cancelled) => panic!("a load with no cancel token cannot be cancelled"),
+        // The disk-cache load path has no out-of-band digest to compare
+        // against -- that absence is the whole reason it re-derives
+        // (chelis#2211) -- so this variant arriving here would mean the two
+        // routes had been merged without anyone deciding to.
+        Err(CacheError::HandoffDigestMismatch { expected, actual }) => panic!(
+            "the disk-cache load path must not report a handoff digest mismatch: \
+             expected={expected} actual={actual}"
+        ),
     }
 }
 
@@ -425,7 +435,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V16\n".to_vec(),                         // current magic only, no envelope
+        b"CHELIS_CTX_V23\n".to_vec(),                         // current magic only, no envelope
         b"CHELIS_CTX_V9\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
@@ -433,7 +443,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
             // valid (current) magic followed by garbage
-            let mut v = b"CHELIS_CTX_V16\n".to_vec();
+            let mut v = b"CHELIS_CTX_V23\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -479,26 +489,24 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Format-version-15 bump. Compiler contexts now tag every deferred shape
-// obligation, on top of the V14 canonical unordered collections and nominal
-// parameter kinds, so every V14 payload has a preceding shape and must be
-// rejected before decode.
+// Format-version-18 bump: exact source-number carriers change the payload.
+// The preceding V17 format must be rejected before payload decode.
 // ---------------------------------------------------------------------
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V16\n`. A leftover file carries a
-    // `CHELIS_CTX_V15\n` (or older) magic. Forge one from a real V16 payload.
+    // The current magic is `CHELIS_CTX_V23\n`. A leftover file carries a
+    // `CHELIS_CTX_V17\n` (or older) magic. Forge one from a real current payload.
     // load_if_fresh must reject it (the magic no longer matches), never
     // attempt to decode the stale-shaped envelope.
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V16\n"),
-        "fixture must be written with the current V16 magic"
+        bytes.starts_with(b"CHELIS_CTX_V23\n"),
+        "fixture must be written with the current magic"
     );
 
-    let mut forged = b"CHELIS_CTX_V15\n".to_vec();
-    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V16\n".len()..]);
+    let mut forged = b"CHELIS_CTX_V17\n".to_vec();
+    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V23\n".len()..]);
     fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
@@ -526,11 +534,11 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V16\n".len();
+    let magic_len = b"CHELIS_CTX_V23\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 15.
+    // bincode encodes a u32 little-endian; bump the low byte well past 24.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -540,8 +548,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 16, "the running binary expects format version 16");
-            assert_ne!(stored, 16, "the forged version must differ from 16");
+            assert_eq!(expected, 38, "the running binary expects format version 38");
+            assert_ne!(stored, 38, "the forged version must differ from 38");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -569,7 +577,7 @@ fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // share one entry. A non-deterministic key would silently disable the
     // cache (perpetual cold cost), not corrupt anything, but it is still
     // a regression worth pinning.
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> i32 = 1\n")
         .expect("sample decls parse");
     assert_eq!(
         stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST),
@@ -587,9 +595,9 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
     // package resolves the checkout's own source, not the bundle). A key
     // that ignored the decl bytes would let an edited runtime silently
     // reuse the unedited runtime's typecheck result.
-    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a() -> int32 = 1\n")
+    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a() -> i32 = 1\n")
         .expect("decls a parse");
-    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b() -> int32 = 2\n")
+    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b() -> i32 = 2\n")
         .expect("decls b parse");
     assert_ne!(
         decls_a, decls_b,
@@ -623,20 +631,20 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     // further than the per-package context cache.
     use sha2::{Digest, Sha256};
 
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> i32 = 1\n")
         .expect("sample decls parse");
     let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 13 (the
-    // deferred-ledger removal following the deferred-shape-obligation,
-    // exact-source determinant, hash-order and nominal-kind bumps); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 35 (authored
+    // signatures, checked operation restrictions, checked extent transport,
+    // named witness claims, and the single node spelling); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(13u32.to_le_bytes());
+        hasher.update(35u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());

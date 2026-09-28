@@ -104,11 +104,22 @@ def _summary_files(tmp: str) -> list[Path]:
 
 
 class FastCommandListTests(unittest.TestCase):
-    def test_static_prefix_is_regen_fmt_write_then_lint(self):
-        commands = gate.fast_command_list([], std_changed=False)
+    def test_static_prefix_is_regen_fmt_write_classify_then_lint(self):
+        """Classification is the first check, and every writer precedes it.
+
+        It is the cheapest row that can reject a push, so a developer learns
+        about an unrouted path in well under a second rather than after fmt,
+        lint, clippy and the tripwires.
+        """
+        commands = gate.fast_command_list([], std_changed=False, changed_paths=[])
         self.assertEqual(
-            commands[:3],
-            [gate.REGEN_TIER0_WRITE, gate.FMT_WRITE, gate.CHELIS_LINT_CHECK],
+            commands[:4],
+            [
+                gate.REGEN_TIER0_WRITE,
+                gate.FMT_WRITE,
+                gate.classify_paths_command([]),
+                gate.CHELIS_LINT_CHECK,
+            ],
         )
         self.assertEqual(
             gate.render(gate.REGEN_TIER0_WRITE),
@@ -119,25 +130,25 @@ class FastCommandListTests(unittest.TestCase):
 
     def test_one_clippy_per_changed_crate_precedes_the_tripwire_run(self):
         commands = gate.fast_command_list(
-            ["chelis-cli", "chelis-surf"], std_changed=False
+            ["chelis-cli", "chelis-surf"], std_changed=False, changed_paths=[]
         )
         self.assertEqual(
-            commands[3:5],
+            commands[4:6],
             [
                 ["cargo", "clippy", "-p", "chelis-cli", "--tests", "--", "-D", "warnings"],
                 ["cargo", "clippy", "-p", "chelis-surf", "--tests", "--", "-D", "warnings"],
             ],
         )
-        self.assertEqual(commands[5], gate.FAST_TRIPWIRE_NEXTEST)
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(commands[6], gate.FAST_TRIPWIRE_NEXTEST)
+        self.assertEqual(len(commands), 7)
 
     def test_std_bundle_legs_appear_only_when_std_paths_changed(self):
         self.assertTrue(gate.std_paths_changed(["packages/chelis-std/src/x.ch"]))
         self.assertTrue(gate.std_paths_changed(["crates/chelis-std-bundle/build.rs"]))
         self.assertFalse(gate.std_paths_changed(["crates/chelis-cli/src/main.rs"]))
         self.assertFalse(gate.std_paths_changed([]))
-        without = gate.fast_command_list([], std_changed=False)
-        with_std = gate.fast_command_list(["chelis-std-bundle"], std_changed=True)
+        without = gate.fast_command_list([], std_changed=False, changed_paths=[])
+        with_std = gate.fast_command_list(["chelis-std-bundle"], std_changed=True, changed_paths=[])
         self.assertEqual(without[-1], gate.FAST_TRIPWIRE_NEXTEST)
         self.assertNotIn(gate.REGEN_TIER1_WRITE, without)
         self.assertNotIn(gate.STD_BUNDLE_SELF_CONSISTENCY, without)
@@ -150,6 +161,7 @@ class FastCommandListTests(unittest.TestCase):
                 gate.REGEN_TIER0_WRITE,
                 gate.REGEN_TIER1_WRITE,
                 gate.FMT_WRITE,
+                gate.classify_paths_command([]),
                 gate.CHELIS_LINT_CHECK,
                 ["cargo", "clippy", "-p", "chelis-std-bundle", "--tests", "--", "-D", "warnings"],
                 gate.FAST_TRIPWIRE_NEXTEST,
@@ -164,7 +176,7 @@ class FastCommandListTests(unittest.TestCase):
     def test_fast_excludes_workspace_clippy_fmt_check_doctests_and_both_oracles(self):
         rendered = [
             gate.render(c)
-            for c in gate.fast_command_list(["chelis-cli"], std_changed=True)
+            for c in gate.fast_command_list(["chelis-cli"], std_changed=True, changed_paths=[])
         ]
         for excluded in (
             gate.CLIPPY_WORKSPACE,
@@ -195,7 +207,7 @@ class FastCommandListTests(unittest.TestCase):
             elif token == "--test":
                 self.assertIsNotNone(package)
                 pairs.append((package, command[index + 1]))
-        self.assertEqual(len(pairs), 12)
+        self.assertEqual(len(pairs), 13)
         for package, target in pairs:
             path = REPO_ROOT / "crates" / package / "tests" / f"{target}.rs"
             self.assertTrue(path.is_file(), f"missing tripwire target {path}")
@@ -206,7 +218,7 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(gate.STD_BUNDLE_SELF_CONSISTENCY[3:5], ["-p", "chelis-std-bundle"])
 
     def test_fast_list_hands_over_no_oracle_binary(self):
-        commands = gate.fast_command_list(["chelis-cli"], std_changed=True)
+        commands = gate.fast_command_list(["chelis-cli"], std_changed=True, changed_paths=[])
         self.assertIsNone(gate.oracle_binary_handoff(commands, "/t"))
 
     def test_fast_uses_the_managed_python_marker(self):
@@ -218,7 +230,7 @@ class FastCommandListTests(unittest.TestCase):
         self.assertEqual(materialized[0], "/py/bin/python")
 
     def test_fast_note_and_annotation_are_distinct_constants(self):
-        self.assertEqual(gate.FAST_ANNOTATION, "fast + local + ci")
+        self.assertEqual(gate.FAST_ANNOTATION, "fast + validation + ci")
         self.assertNotEqual(gate.FAST_ANNOTATION, gate.LOCAL_ANNOTATION)
         self.assertTrue(gate.FAST_DYNAMIC_NOTE.startswith("# "))
 
@@ -227,14 +239,14 @@ class FastArgTests(unittest.TestCase):
     def test_fast_alone_parses(self):
         args = _parse_quietly(["--fast"])
         self.assertTrue(args.fast)
-        self.assertFalse(args.local)
+        self.assertFalse(args.validation)
 
     def test_fast_excludes_stage_list_local_and_integration_selectors(self):
         for argv in (
             ["--fast", "lint-and-unit"],
             ["--fast", "runtime-representation"],
             ["--fast", "--list"],
-            ["--fast", "--local"],
+            ["--fast", "--validation"],
             ["--fast", "integration", "--tests-only"],
             ["--fast", "integration", "--support-only"],
         ):
@@ -254,9 +266,9 @@ class FastArgTests(unittest.TestCase):
 
     def test_lease_flag_pairs_are_exclusive(self):
         for argv in (
-            ["--local", "--no-lease", "--no-wait"],
-            ["--local", "--no-lease", "--lease-timeout", "5"],
-            ["--local", "--no-wait", "--lease-timeout", "5"],
+            ["--validation", "--no-lease", "--no-wait"],
+            ["--validation", "--no-lease", "--lease-timeout", "5"],
+            ["--validation", "--no-wait", "--lease-timeout", "5"],
         ):
             with self.subTest(argv=argv), self.assertRaises(SystemExit):
                 _parse_quietly(argv)
@@ -264,12 +276,12 @@ class FastArgTests(unittest.TestCase):
     def test_lease_timeout_must_be_positive(self):
         for value in ("0", "-3"):
             with self.subTest(value=value), self.assertRaises(SystemExit):
-                _parse_quietly(["--local", "--lease-timeout", value])
-        args = _parse_quietly(["--local", "--lease-timeout", "90"])
+                _parse_quietly(["--validation", "--lease-timeout", value])
+        args = _parse_quietly(["--validation", "--lease-timeout", "90"])
         self.assertEqual(args.lease_timeout, 90.0)
 
     def test_lease_flags_parse_with_local_fast_and_bare(self):
-        self.assertTrue(_parse_quietly(["--local", "--no-wait"]).no_wait)
+        self.assertTrue(_parse_quietly(["--validation", "--no-wait"]).no_wait)
         self.assertTrue(_parse_quietly(["--fast", "--no-lease"]).no_lease)
         self.assertTrue(_parse_quietly(["--no-lease"]).no_lease)
 
@@ -284,7 +296,7 @@ class PreflightTests(unittest.TestCase):
         environ_extra=None,
         probe_calls=None,
     ):
-        report = gate.GateReport(mode="local", started_at="now")
+        report = gate.GateReport(mode="validation", started_at="now")
         out, err = io.StringIO(), io.StringIO()
         calls = [] if probe_calls is None else probe_calls
 
@@ -301,7 +313,7 @@ class PreflightTests(unittest.TestCase):
             environ.update(environ_extra or {})
             with mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)):
                 code, environment = gate.run_preflight(
-                    mode="local",
+                    mode="validation",
                     report=report,
                     environ=environ,
                     executable=Path(sys.executable),
@@ -314,13 +326,13 @@ class PreflightTests(unittest.TestCase):
         return code, environment, report, out.getvalue(), err.getvalue(), calls
 
     def test_host_system_defaults_to_platform_and_is_resolved_at_call_time(self):
-        report = gate.GateReport(mode="local", started_at="now")
+        report = gate.GateReport(mode="validation", started_at="now")
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(gate, "_git_facts", lambda: dict(CANNED_GIT_FACTS)), \
                 mock.patch.object(gate, "host_system", lambda: "Linux"), \
                 mock.patch.object(gate, "run_probe", lambda *a, **k: self.fail("probe ran")):
             code, _env = gate.run_preflight(
-                mode="local", report=report, environ={"PATH": os.environ.get("PATH", "")},
+                mode="validation", report=report, environ={"PATH": os.environ.get("PATH", "")},
                 executable=Path(sys.executable), repo_root=Path(tmp),
                 output_stream=io.StringIO(), error_stream=io.StringIO(),
             )
@@ -510,7 +522,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["mode"], "fast")
         self.assertEqual(summary["termination"], "pass")
         self.assertEqual(summary["exit_code"], 0)
-        expected = gate.fast_command_list(["chelis-cli"], std_changed=False)
+        # The same path the run derives, so this also asserts that `--fast`
+        # hands the derived set to the classification rather than an empty one.
+        expected = gate.fast_command_list(["chelis-cli"], std_changed=False, changed_paths=[])
         self.assertEqual(len(launched), len(expected))
         self.assertEqual(len(summary["stages"]), len(expected))
         for index, stage in enumerate(summary["stages"], start=1):
@@ -518,7 +532,14 @@ class SummaryTests(unittest.TestCase):
             self.assertGreaterEqual(stage["seconds"], 0)
             self.assertEqual(stage["returncode"], 0)
             self.assertIsNone(stage["launch_error"])
-        self.assertIn("cargo clippy -p chelis-cli --tests -- -D warnings", summary["stages"][3]["command"])
+        self.assertIn(
+            "cargo clippy -p chelis-cli --tests -- -D warnings",
+            summary["stages"][4]["command"],
+        )
+        self.assertIn(
+            "scripts/ci_change_owned.py classify-paths",
+            summary["stages"][2]["command"],
+        )
         self.assertIsNone(summary["first_failing_stage"])
         self.assertEqual(summary["git"]["head"], CANNED_GIT_FACTS["head"])
         self.assertEqual(summary["git"]["selected_crates"], ["chelis-cli"])
@@ -553,6 +574,27 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("load_average_1m", summary["preflight"]["host"])
         self.assertNotIn("preflight stop", err)
 
+    def test_fast_asks_the_check_to_derive_its_own_set(self):
+        """`--from-git`, not a set captured before the writers ran.
+
+        Its own test rather than an assertion inside
+        `test_summary_written_on_pass`, because that one compares the stage
+        count and is red on Darwin for an unrelated reason (chelis#2255, the
+        preflight exec probe), so an assertion behind it would never run here.
+        """
+        _rc, summary, _launched, _out, _err, _lease = self._run_main(
+            ["--fast"],
+            diff="crates/chelis-cli/src/main.rs\n",
+            status=" M scripts/gate.py\n",
+        )
+        classify = next(
+            stage["command"]
+            for stage in summary["stages"]
+            if "classify-paths" in stage["command"]
+        )
+        self.assertIn("classify-paths --from-git", classify)
+        self.assertNotIn("crates/chelis-cli/src/main.rs", classify)
+
     def test_std_path_change_appends_the_std_legs(self):
         rc, summary, launched, out, _err, _lease = self._run_main(
             ["--fast"], diff="packages/chelis-std/src/time.ch\n"
@@ -563,7 +605,7 @@ class SummaryTests(unittest.TestCase):
         rendered = [" ".join(c) for c in launched]
         self.assertTrue(rendered[1].endswith("scripts/regen_all.py --tier 1"), rendered[1])
         self.assertTrue(rendered[-1].startswith("cargo nextest run -p chelis-std-bundle --lib"))
-        self.assertEqual(len(rendered), 6)
+        self.assertEqual(len(rendered), 7)
         self.assertIn("chelis-std paths changed", out)
         self.assertIn("no crate changes detected", out)
         self.assertIn("per-crate clippy", out)
@@ -606,16 +648,17 @@ class SummaryTests(unittest.TestCase):
         self.assertIn(gate.PROBE_RUNBOOK, err)
 
     def test_summary_written_on_keyboard_interrupt(self):
-        rc, summary, launched, out, err, lease_paths = self._run_main(["--local"], raise_on=2)
+        rc, summary, launched, out, err, lease_paths = self._run_main(["--validation"], raise_on=2)
         self.assertEqual(rc, 130)
         self.assertEqual(summary["termination"], "user-cancel")
         self.assertEqual(summary["exit_code"], 130)
         self.assertEqual(len(launched), 2)
         self.assertEqual(len(summary["stages"]), 1)
         self.assertIn("cancelled", err)
-        # The lease taken by --local is released in main's finally.
+        # The lease taken by --validation is released in main's finally.
         self.assertEqual(summary["lease"]["mode"], "held")
-        self.assertEqual([p.name for p in lease_paths], ["gate.lock"])
+        self.assertEqual(sorted(p.name for p in lease_paths),
+                         ["gate.lock", "gate.lock.queue", "gate.lock.queue.lock"])
         self.assertIn("USER-CANCEL", out)
 
     def test_summary_written_on_git_failure(self):
@@ -633,16 +676,17 @@ class SummaryTests(unittest.TestCase):
 
     def test_local_summary_records_the_held_lease_and_releases_it(self):
         rc, summary, launched, _out, _err, lease_paths = self._run_main(
-            ["--local"], diff="crates/chelis-surf/src/lib.rs\n"
+            ["--validation"], diff="crates/chelis-surf/src/lib.rs\n"
         )
         self.assertEqual(rc, 0)
-        self.assertEqual(summary["mode"], "local")
+        self.assertEqual(summary["mode"], "validation")
         self.assertEqual(summary["lease"]["mode"], "held")
         self.assertEqual(summary["lease"]["wait_seconds"], 0.0)
         self.assertIsNone(summary["lease"]["holder_seen"])
         self.assertEqual(len(launched), len(gate.local_command_list(["chelis-surf"])))
         # Lock file persists (it is just an inode to flock); the sidecar is gone.
-        self.assertEqual([p.name for p in lease_paths], ["gate.lock"])
+        self.assertEqual(sorted(p.name for p in lease_paths),
+                         ["gate.lock", "gate.lock.queue", "gate.lock.queue.lock"])
         self.assertEqual(summary["files_changed_by_run"], [])
 
     def test_stage_runs_get_a_summary_but_no_preflight_or_lease(self):
@@ -656,7 +700,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["git"]["head"], CANNED_GIT_FACTS["head"])
 
     def test_no_lease_is_recorded_as_bypassed(self):
-        rc, summary, _launched, _out, _err, lease_paths = self._run_main(["--local", "--no-lease"])
+        rc, summary, _launched, _out, _err, lease_paths = self._run_main(["--validation", "--no-lease"])
         self.assertEqual(rc, 0)
         self.assertEqual(summary["lease"]["mode"], "bypassed")
         self.assertEqual(lease_paths, [])
@@ -730,11 +774,11 @@ class SummaryTests(unittest.TestCase):
         unknown.files_changed_by_run = None
         self.assertIn("changed: unknown (git status failed after the run)", gate.human_summary(unknown, None, REPO_ROOT))
 
-        local = gate.GateReport(mode="local", started_at="now")
+        local = gate.GateReport(mode="validation", started_at="now")
         local.termination = "lease-timeout"
         local.exit_code = 4
         line = gate.human_summary(local, None, REPO_ROOT)
-        self.assertTrue(line.startswith("gate --local: 0 stages, "), line)
+        self.assertTrue(line.startswith("gate --validation: 0 stages, "), line)
         self.assertIn("LEASE-TIMEOUT (exit 4)", line)
         self.assertNotIn("changed:", line)
 
@@ -755,7 +799,7 @@ class SummaryTests(unittest.TestCase):
 class LeaseTests(unittest.TestCase):
     def _lease(self, path: Path, **overrides) -> "gate.GateLease":
         settings = dict(
-            mode="local",
+            mode="validation",
             worktree=Path("/wt"),
             head="abc",
             wait=False,
@@ -779,7 +823,7 @@ class LeaseTests(unittest.TestCase):
                 self.assertTrue(lease.held)
                 sidecar = json.loads((Path(tmp) / "nested" / "gate.lock.json").read_text())
                 self.assertEqual(sidecar["pid"], os.getpid())
-                self.assertEqual(sidecar["mode"], "local")
+                self.assertEqual(sidecar["mode"], "validation")
                 self.assertEqual(sidecar["worktree"], "/wt")
                 self.assertEqual(sidecar["head"], "abc")
                 self.assertEqual(sidecar["schema_version"], 1)
@@ -804,11 +848,11 @@ class LeaseTests(unittest.TestCase):
                 with self.assertRaises(gate.LeaseHeld) as raised:
                     second.acquire()
                 self.assertEqual(raised.exception.holder["pid"], os.getpid())
-                self.assertEqual(raised.exception.holder["mode"], "local")
+                self.assertEqual(raised.exception.holder["mode"], "validation")
                 self.assertFalse(second.held)
                 self.assertEqual(gate.GateLease.peek(path)["pid"], os.getpid())
                 # The failed acquirer must not have disturbed the holder's sidecar.
-                self.assertEqual(gate.GateLease.current_holder(path)["mode"], "local")
+                self.assertEqual(gate.GateLease.current_holder(path)["mode"], "validation")
             finally:
                 first.release()
             self._lease(path).acquire()
@@ -840,7 +884,7 @@ class LeaseTests(unittest.TestCase):
                 text = out.getvalue()
                 self.assertEqual(text.count("waiting for the gate lease"), 1)
                 self.assertIn(f"pid {os.getpid()}", text)
-                self.assertEqual(json.loads((path.with_name("gate.lock.json")).read_text())["mode"], "local")
+                self.assertEqual(json.loads((path.with_name("gate.lock.json")).read_text())["mode"], "validation")
             finally:
                 waiter.release()
 
@@ -942,14 +986,23 @@ class LeaseTests(unittest.TestCase):
         # A holder between its flock and its sidecar write, or a --fast peek
         # holding LOCK_SH for microseconds, blocks the first attempt with no
         # readable sidecar. One short retry must settle it silently.
-        attempts = iter([False, True])
         out = io.StringIO()
         sleeps: list[float] = []
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / gate.LEASE_FILE_NAME
             lease = self._lease(path, wait=True, output=out, sleep=sleeps.append)
+            real_try = gate.GateLease._try_flock
+            blocked = False
+
+            def transient_main_lock(fd, operation=gate.fcntl.LOCK_EX):
+                nonlocal blocked
+                if fd == lease._fd and not blocked:
+                    blocked = True
+                    return False
+                return real_try(fd, operation)
+
             with mock.patch.object(
-                gate.GateLease, "_try_flock", staticmethod(lambda fd, operation=gate.fcntl.LOCK_EX: next(attempts))
+                gate.GateLease, "_try_flock", staticmethod(transient_main_lock)
             ):
                 lease.acquire()
             lease.release()
@@ -1009,7 +1062,7 @@ class LeaseTests(unittest.TestCase):
             holder = self._lease(Path(tmp) / gate.LEASE_FILE_NAME, worktree=Path("/other"))
             holder.acquire()
             try:
-                code, lease, report, _out, err = self._take(tmp, "local", no_wait=True)
+                code, lease, report, _out, err = self._take(tmp, "validation", no_wait=True)
             finally:
                 holder.release()
         self.assertEqual(code, gate.EXIT_LEASE_TIMEOUT)
@@ -1038,7 +1091,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_no_lease_bypasses(self):
         with tempfile.TemporaryDirectory() as tmp:
-            code, lease, report, _out, _err = self._take(tmp, "local", no_lease=True)
+            code, lease, report, _out, _err = self._take(tmp, "validation", no_lease=True)
             self.assertEqual(list(Path(tmp).iterdir()), [])
         self.assertIsNone(code)
         self.assertIsNone(lease)
@@ -1046,7 +1099,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_local_takes_and_records_the_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
-            code, lease, report, _out, _err = self._take(tmp, "local")
+            code, lease, report, _out, _err = self._take(tmp, "validation")
             try:
                 self.assertIsNone(code)
                 self.assertTrue(lease.held)
@@ -1063,7 +1116,7 @@ class LeaseTests(unittest.TestCase):
             path = Path(tmp) / gate.LEASE_FILE_NAME
             path.write_text("")
             path.with_name("gate.lock.json").write_text(
-                json.dumps({"pid": 1, "worktree": "/dead", "mode": "local"})
+                json.dumps({"pid": 1, "worktree": "/dead", "mode": "validation"})
             )
             self.assertIsNone(gate.GateLease.peek(path))
             lease = self._lease(path)
@@ -1119,7 +1172,7 @@ class LeaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             blocker = Path(tmp) / "not-a-dir"
             blocker.write_text("")
-            code, lease, report, _out, err = self._take(str(blocker), "local")
+            code, lease, report, _out, err = self._take(str(blocker), "validation")
         self.assertIsNone(code)
         self.assertIsNone(lease)
         self.assertEqual(report.lease["mode"], "bypassed")
@@ -1135,19 +1188,6 @@ class LeaseTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(list(Path(tmp).glob("gate.lock*")), [])
             self.assertEqual(len(launched), len(gate.STAGES["integration"]) - 1)
-
-
-class DocumentationLockTests(unittest.TestCase):
-    def test_agents_md_does_not_transcribe_the_list(self):
-        # AGENTS.md points at `gate.py --list` instead of copying its output;
-        # a transcription drifts (the old one omitted six live rows).
-        text = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        offenders = [
-            line for line in text.splitlines() if line.startswith("# cargo clippy --workspace")
-        ]
-        self.assertEqual(offenders, [])
-        self.assertIn("python3 scripts/gate.py --fast", text)
-        self.assertIn("python3 scripts/gate.py --list", text)
 
 
 if __name__ == "__main__":

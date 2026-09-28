@@ -49,6 +49,11 @@ use crate::types::Prim;
 
 /// Frozen prefix shared by every [04-NUM-9] numeric-trap diagnostic.
 pub const NUMERIC_TRAP_PREFIX: &str = "numeric trap: ";
+
+/// Why a key buffer or key scalar refuses every numeric read: a key has no
+/// arithmetic, comparison, or cast (spec/04 §1.1), and the IR verifier keeps
+/// keys out of every numeric operation, so reaching one is a compiler defect.
+const KEY_HAS_NO_NUMERIC_READING: &str = "a random key has no numeric reading; the IR verifier keeps keys out of every numeric operation";
 /// Frozen spelling of the [04-NUM-9] overflow kind.
 pub const NUMERIC_TRAP_OVERFLOW_KIND: &str = "overflow";
 /// Frozen spelling of the [04-NUM-9] domain kind.
@@ -105,6 +110,63 @@ impl std::fmt::Display for NumericTrap {
 }
 
 impl std::error::Error for NumericTrap {}
+
+impl NumericTrap {
+    /// Recognize one complete [04-NUM-9] trap line at the boundary where an
+    /// evaluator's legacy text failure becomes a structured diagnostic.
+    /// Context belongs on other lines; a CLI prefix or appended hint is not
+    /// part of this grammar.
+    pub fn is_canonical_line(line: &str) -> bool {
+        let Some(body) = line.strip_prefix(NUMERIC_TRAP_PREFIX) else {
+            return false;
+        };
+        let operation_and_prim = [
+            NUMERIC_TRAP_OVERFLOW_KIND,
+            NUMERIC_TRAP_DOMAIN_KIND,
+            NUMERIC_TRAP_DIV_ZERO_KIND,
+        ]
+        .into_iter()
+        .find_map(|kind| {
+            body.strip_prefix(kind)?
+                .strip_prefix(NUMERIC_TRAP_OPERATION_SEPARATOR)
+        });
+        let Some((operation, prim)) =
+            operation_and_prim.and_then(|rest| rest.rsplit_once(NUMERIC_TRAP_DTYPE_SEPARATOR))
+        else {
+            return false;
+        };
+        !operation.is_empty()
+            && operation
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            && (Prim::parse_name(prim).is_some() || prim == "key")
+    }
+}
+
+#[cfg(test)]
+mod numeric_trap_line_tests {
+    use super::NumericTrap;
+
+    #[test]
+    fn canonical_line_excludes_cli_decoration_and_context() {
+        assert!(NumericTrap::is_canonical_line(
+            "numeric trap: domain in concat at i64"
+        ));
+        assert!(NumericTrap::is_canonical_line(
+            "numeric trap: division by zero in floor_div at i32"
+        ));
+        for line in [
+            "error: numeric trap: domain in concat at i64",
+            "numeric trap: domain in concat at i64; hint: retry",
+            "numeric trap: domain in concat at i64 trailing",
+            "numeric trap: other in concat at i64",
+            "numeric trap: domain in concat at imaginary",
+            "numeric trap: domain in bad op at i64",
+        ] {
+            assert!(!NumericTrap::is_canonical_line(line), "{line}");
+        }
+    }
+}
 
 /// One elementwise trap paired with the row-major flat index that produced
 /// it ([04-NUM-15]). Parallel lanes reduce this value by `flat_index`; a
@@ -206,7 +268,7 @@ impl CheckedCastPlan {
                 CheckedCastFamily::SignedInteger
             }
             Prim::Bool => CheckedCastFamily::Bool,
-            Prim::F8e4m3 | Prim::String => {
+            Prim::F8e4m3 | Prim::String | Prim::Key => {
                 return Err(CheckedCastPlanError::UnsupportedSource(source));
             }
         };
@@ -216,7 +278,7 @@ impl CheckedCastPlan {
                 CheckedCastFamily::SignedInteger
             }
             Prim::Bool => CheckedCastFamily::Bool,
-            Prim::F8e4m3 | Prim::String => {
+            Prim::F8e4m3 | Prim::String | Prim::Key => {
                 return Err(CheckedCastPlanError::UnsupportedTarget(target));
             }
         };
@@ -310,7 +372,7 @@ impl CheckedCastPlan {
                 | Prim::Bf16,
                 _,
             ) => false,
-            (Prim::F8e4m3 | Prim::String, _) => {
+            (Prim::F8e4m3 | Prim::String | Prim::Key, _) => {
                 unreachable!("unsupported source cannot construct a checked-cast plan")
             }
         };
@@ -334,6 +396,8 @@ enum Bits {
     F32(f32),
     F64(f64),
     Bool(bool),
+    /// A random key ([05-RNG-2]): an opaque word, never a number.
+    Key(RandomKey),
 }
 
 /// A finalized scalar at its dtype's own width. Construct via
@@ -356,11 +420,28 @@ impl ScalarValue {
             Bits::F32(_) => Prim::F32,
             Bits::F64(_) => Prim::F64,
             Bits::Bool(_) => Prim::Bool,
+            Bits::Key(_) => Prim::Key,
+        }
+    }
+
+    /// A key as a scalar value. A key has no literal, so this is the only
+    /// way a key scalar is formed: from a key some key operation produced.
+    pub fn from_key(key: RandomKey) -> Self {
+        Self {
+            bits: Bits::Key(key),
+        }
+    }
+
+    /// The key payload, or `None` for every numeric and bool dtype.
+    pub fn as_key(&self) -> Option<RandomKey> {
+        match self.bits {
+            Bits::Key(key) => Some(key),
+            _ => None,
         }
     }
 
     /// Widen to f64. Exact for every float width, bool, and integers up
-    /// to 2^53; EXPLICITLY LOSSY for int64 magnitudes above 2^53 (the
+    /// to 2^53; EXPLICITLY LOSSY for i64 magnitudes above 2^53 (the
     /// section C3 read-side contract names the loss instead of hiding it).
     pub fn as_f64_lossy(&self) -> f64 {
         match self.bits {
@@ -379,6 +460,10 @@ impl ScalarValue {
                     0.0
                 }
             }
+            Bits::Key(_) => panic!(
+                "as_f64_lossy: a random key has no numeric reading; the IR verifier \
+                 keeps keys out of every numeric operation"
+            ),
         }
     }
 
@@ -391,7 +476,7 @@ impl ScalarValue {
             Bits::I32(v) => Some(v as i64),
             Bits::I64(v) => Some(v),
             Bits::Bool(v) => Some(if v { 1 } else { 0 }),
-            Bits::F16(_) | Bits::Bf16(_) | Bits::F32(_) | Bits::F64(_) => None,
+            Bits::F16(_) | Bits::Bf16(_) | Bits::F32(_) | Bits::F64(_) | Bits::Key(_) => None,
         }
     }
 
@@ -406,7 +491,8 @@ impl ScalarValue {
             | Bits::F16(_)
             | Bits::Bf16(_)
             | Bits::F32(_)
-            | Bits::F64(_) => None,
+            | Bits::F64(_)
+            | Bits::Key(_) => None,
         }
     }
 
@@ -423,6 +509,9 @@ impl ScalarValue {
             Bits::F32(v) => ElementRef::F32(v),
             Bits::F64(v) => ElementRef::F64(v),
             Bits::Bool(v) => ElementRef::Bool(v),
+            Bits::Key(_) => {
+                panic!("element_ref: a random key has no observation form (chelis#2413)")
+            }
         }
     }
 }
@@ -634,7 +723,7 @@ impl TensorReduceOp {
     }
 }
 
-/// Closed exact-comparison reduction set. The result is an int64 index;
+/// Closed exact-comparison reduction set. The result is an i64 index;
 /// operands remain at their stored dtype throughout comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgReduceOp {
@@ -671,8 +760,8 @@ impl ReduceWindowGradOp {
 impl ArgReduceOp {
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Argmax => "argmax",
-            Self::Argmin => "argmin",
+            Self::Argmax => "argmax_reduce",
+            Self::Argmin => "argmin_reduce",
         }
     }
 
@@ -956,8 +1045,24 @@ fn extrema_selects_left<T: Copy + PartialOrd>(
     }
 }
 
+fn canonicalize_subtraction_f32(value: f32) -> f32 {
+    if value.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        value
+    }
+}
+
+fn canonicalize_subtraction_f64(value: f64) -> f64 {
+    if value.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else {
+        value
+    }
+}
+
 fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
-    match op {
+    let value = match op {
         FloatBinOp::Add => lhs + rhs,
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
@@ -965,11 +1070,15 @@ fn apply_float_binop_f32(op: FloatBinOp, lhs: f32, rhs: f32) -> f32 {
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f32::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f32::is_nan),
+    };
+    match op {
+        FloatBinOp::Sub => canonicalize_subtraction_f32(value),
+        _ => value,
     }
 }
 
 fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
-    match op {
+    let value = match op {
         FloatBinOp::Add => lhs + rhs,
         FloatBinOp::Sub => lhs - rhs,
         FloatBinOp::Mul => lhs * rhs,
@@ -977,6 +1086,10 @@ fn apply_float_binop_f64(op: FloatBinOp, lhs: f64, rhs: f64) -> f64 {
         FloatBinOp::FloorDiv => (lhs / rhs).floor(),
         FloatBinOp::Max => select_float_max_first(lhs, rhs, f64::is_nan),
         FloatBinOp::Min => select_float_min_first(lhs, rhs, f64::is_nan),
+    };
+    match op {
+        FloatBinOp::Sub => canonicalize_subtraction_f64(value),
+        _ => value,
     }
 }
 
@@ -1173,7 +1286,7 @@ macro_rules! compare_values {
 }
 
 /// Compare finalized operands at their exact matching dtype. In
-/// particular, int64 never crosses f64 and half values compare only after
+/// particular, i64 never crosses f64 and half values compare only after
 /// their ingress finalization.
 pub fn compare_scalars(
     op: CompareOp,
@@ -1202,7 +1315,7 @@ pub fn compare_scalars(
 
 /// Sealed per-dtype element buffer (section C3's storage decision:
 /// per-dtype buffers, not finalize-on-write over `Vec<f64>`; f64 storage
-/// cannot represent exact int64 above 2^53, chelis#684).
+/// cannot represent exact i64 above 2^53, chelis#684).
 #[derive(Debug, Clone, PartialEq)]
 enum Buf {
     F64(Vec<f64>),
@@ -1215,6 +1328,8 @@ enum Buf {
     I8(Vec<i8>),
     /// 0/1, one byte per element; ends PR #79's bool-storage deferral.
     Bool(Vec<u8>),
+    /// Random keys ([05-RNG-2]); constructed only by the key kernels.
+    Key(Vec<RandomKey>),
 }
 
 /// Read-only borrowed view of a [`TensorStorage`] buffer at its own
@@ -1231,6 +1346,8 @@ pub enum StorageView<'a> {
     I8(&'a [i8]),
     /// 0/1 bytes.
     Bool(&'a [u8]),
+    /// Opaque random keys.
+    Key(&'a [RandomKey]),
 }
 
 /// A finalized element buffer at its dtype's own width. Construct via
@@ -1253,6 +1370,7 @@ impl TensorStorage {
             Buf::I16(_) => Prim::Int16,
             Buf::I8(_) => Prim::Int8,
             Buf::Bool(_) => Prim::Bool,
+            Buf::Key(_) => Prim::Key,
         }
     }
 
@@ -1267,6 +1385,7 @@ impl TensorStorage {
             Buf::I16(v) => v.len(),
             Buf::I8(v) => v.len(),
             Buf::Bool(v) => v.len(),
+            Buf::Key(v) => v.len(),
         }
     }
 
@@ -1288,6 +1407,7 @@ impl TensorStorage {
             Buf::I16(v) => StorageView::I16(v),
             Buf::I8(v) => StorageView::I8(v),
             Buf::Bool(v) => StorageView::Bool(v),
+            Buf::Key(v) => StorageView::Key(v),
         }
     }
 
@@ -1306,10 +1426,11 @@ impl TensorStorage {
             Buf::I16(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
             Buf::I8(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
             Buf::Bool(v) => RawTensor::Int(v.iter().map(|&x| x as i64).collect()),
+            Buf::Key(_) => panic!("to_raw: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
-    /// Widen every element to f64. Exact except for int64 magnitudes
+    /// Widen every element to f64. Exact except for i64 magnitudes
     /// above 2^53, hence the lossy name (section C3 read-side contract).
     pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
         match &self.buf {
@@ -1322,6 +1443,7 @@ impl TensorStorage {
             Buf::I16(v) => v.iter().map(|&x| x as f64).collect(),
             Buf::I8(v) => v.iter().map(|&x| x as f64).collect(),
             Buf::Bool(v) => v.iter().map(|&x| x as f64).collect(),
+            Buf::Key(_) => panic!("to_f64_lossy_vec: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
@@ -1334,7 +1456,7 @@ impl TensorStorage {
             Buf::I16(v) => Some(v.iter().map(|&x| x as i64).collect()),
             Buf::I8(v) => Some(v.iter().map(|&x| x as i64).collect()),
             Buf::Bool(v) => Some(v.iter().map(|&x| x as i64).collect()),
-            Buf::F64(_) | Buf::F32(_) | Buf::F16(_) | Buf::Bf16(_) => None,
+            Buf::F64(_) | Buf::F32(_) | Buf::F16(_) | Buf::Bf16(_) | Buf::Key(_) => None,
         }
     }
 
@@ -1352,6 +1474,7 @@ impl TensorStorage {
             Buf::I16(v) => v[index] as f64,
             Buf::I8(v) => v[index] as f64,
             Buf::Bool(v) => v[index] as f64,
+            Buf::Key(_) => panic!("element_f64_lossy: {KEY_HAS_NO_NUMERIC_READING}"),
         }
     }
 
@@ -1368,6 +1491,7 @@ impl TensorStorage {
             Buf::I16(v) => Bits::I16(v[index]),
             Buf::I8(v) => Bits::I8(v[index]),
             Buf::Bool(v) => Bits::Bool(v[index] != 0),
+            Buf::Key(v) => Bits::Key(v[index]),
         };
         ScalarValue { bits }
     }
@@ -1396,6 +1520,7 @@ impl TensorStorage {
             Buf::I16(v) => Buf::I16(pick(v, indices)),
             Buf::I8(v) => Buf::I8(pick(v, indices)),
             Buf::Bool(v) => Buf::Bool(pick(v, indices)),
+            Buf::Key(v) => Buf::Key(pick(v, indices)),
         };
         TensorStorage { buf }
     }
@@ -1431,6 +1556,7 @@ impl TensorStorage {
             (Buf::I16(v), Bits::I16(f)) => Buf::I16(place(v, f, map)),
             (Buf::I8(v), Bits::I8(f)) => Buf::I8(place(v, f, map)),
             (Buf::Bool(v), Bits::Bool(f)) => Buf::Bool(place(v, u8::from(f), map)),
+            (Buf::Key(v), Bits::Key(f)) => Buf::Key(place(v, f, map)),
             (buf_other, bits_other) => unreachable!(
                 "reuse_fill_gather: prim equality was asserted above, yet buffer {:?} \
                  met fill {:?}",
@@ -1476,6 +1602,7 @@ impl TensorStorage {
             (Buf::I16(d), Buf::I16(s)) => write(d, s, writes),
             (Buf::I8(d), Buf::I8(s)) => write(d, s, writes),
             (Buf::Bool(d), Buf::Bool(s)) => write(d, s, writes),
+            (Buf::Key(d), Buf::Key(s)) => write(d, s, writes),
             (dst_other, src_other) => unreachable!(
                 "reuse_overwrite: prim equality was asserted above, yet target {:?} \
                  met source {:?}",
@@ -1801,12 +1928,12 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
     from_f32: impl Fn(f32) -> T,
 ) -> Vec<T> {
     match op {
-        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) + to_f32(rhs))),
-        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) - to_f32(rhs))),
-        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) * to_f32(rhs))),
-        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| from_f32(to_f32(lhs) / to_f32(rhs))),
-        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
-            from_f32((to_f32(lhs) / to_f32(rhs)).floor())
+        FloatBinOp::Add
+        | FloatBinOp::Sub
+        | FloatBinOp::Mul
+        | FloatBinOp::Div
+        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| {
+            from_f32(apply_float_binop_f32(op, to_f32(lhs), to_f32(rhs)))
         }),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, |value| to_f32(value).is_nan())
@@ -1819,11 +1946,11 @@ fn float_vec_binop_f32<T: Copy + PartialOrd>(
 
 fn float_vec_binop_f64(op: FloatBinOp, lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
     match op {
-        FloatBinOp::Add => zip_map(lhs, rhs, |lhs, rhs| lhs + rhs),
-        FloatBinOp::Sub => zip_map(lhs, rhs, |lhs, rhs| lhs - rhs),
-        FloatBinOp::Mul => zip_map(lhs, rhs, |lhs, rhs| lhs * rhs),
-        FloatBinOp::Div => zip_map(lhs, rhs, |lhs, rhs| lhs / rhs),
-        FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| (lhs / rhs).floor()),
+        FloatBinOp::Add
+        | FloatBinOp::Sub
+        | FloatBinOp::Mul
+        | FloatBinOp::Div
+        | FloatBinOp::FloorDiv => zip_map(lhs, rhs, |lhs, rhs| apply_float_binop_f64(op, lhs, rhs)),
         FloatBinOp::Max => zip_map(lhs, rhs, |lhs, rhs| {
             select_float_max_first(lhs, rhs, f64::is_nan)
         }),
@@ -2275,7 +2402,7 @@ fn reduction_arithmetic_prim(prim: Prim) -> Option<Prim> {
     match prim {
         Prim::F16 | Prim::Bf16 => Some(Prim::F32),
         Prim::F32 | Prim::F64 | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(prim),
-        Prim::Bool | Prim::String | Prim::F8e4m3 => None,
+        Prim::Bool | Prim::String | Prim::Key | Prim::F8e4m3 => None,
     }
 }
 
@@ -2509,17 +2636,8 @@ fn reduction_extreme(
     lhs: ScalarValue,
     rhs: ScalarValue,
     take_max: bool,
-    ignore_nan: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
     require_same_dtype(op.name(), lhs, rhs)?;
-    if ignore_nan {
-        if scalar_is_nan(lhs) {
-            return Ok(rhs);
-        }
-        if scalar_is_nan(rhs) {
-            return Ok(lhs);
-        }
-    }
     let compare = if take_max {
         CompareOp::Gt
     } else {
@@ -2541,32 +2659,15 @@ fn reduce_sum_group(
     input: &TensorStorage,
     group: &[usize],
     accumulator: Prim,
-    stride4: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
-    let zero = reduction_seed(op, accumulator, 0, 0.0)?;
-    if !stride4 {
-        let mut acc = zero;
-        for &index in group {
-            acc = reduction_add(
-                op,
-                acc,
-                scalar_at_reduction_width(op, input, index, accumulator)?,
-            )?;
-        }
-        return Ok(acc);
+    let leaves = group
+        .iter()
+        .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
+        .collect::<Result<Vec<_>, _>>()?;
+    match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))? {
+        Some(value) => Ok(value),
+        None => reduction_seed(op, accumulator, 0, 0.0),
     }
-
-    let mut lanes = [zero; 4];
-    for (position, &index) in group.iter().enumerate() {
-        lanes[position & 3] = reduction_add(
-            op,
-            lanes[position & 3],
-            scalar_at_reduction_width(op, input, index, accumulator)?,
-        )?;
-    }
-    let left = reduction_add(op, lanes[0], lanes[1])?;
-    let right = reduction_add(op, lanes[2], lanes[3])?;
-    reduction_add(op, left, right)
 }
 
 fn reduce_group(
@@ -2576,10 +2677,17 @@ fn reduce_group(
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
-        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator, true),
-        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator, false),
+        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator),
+        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
-            let sum = reduce_sum_group(op, input, group, accumulator, false)?;
+            if group.is_empty() {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            }
+            let sum = reduce_sum_group(op, input, group, accumulator)?;
             let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
             reduction_div_float(op, sum, divisor)
         }
@@ -2598,37 +2706,27 @@ fn reduce_group(
         | TensorReduceOp::MinReduce
         | TensorReduceOp::ReduceWindowMax
         | TensorReduceOp::ReduceWindowMin => {
+            let Some((&first_index, remaining)) = group.split_first() else {
+                return Err(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: input.prim(),
+                }
+                .into());
+            };
             let take_max = matches!(
                 op,
                 TensorReduceOp::MaxReduce | TensorReduceOp::ReduceWindowMax
             );
-            let integer_identity = if accumulator.is_integer() {
-                let (lo, hi) = accumulator
-                    .integer_range()
-                    .expect("integer reduction accumulators have fixed bounds");
-                if take_max { lo } else { hi }
-            } else if take_max {
-                i64::MIN
-            } else {
-                i64::MAX
-            };
-            let float_identity = if take_max {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            };
-            let mut acc = reduction_seed(op, accumulator, integer_identity, float_identity)?;
-            let propagate_nan = matches!(op, TensorReduceOp::MaxReduce | TensorReduceOp::MinReduce);
-            let ignore_nan = matches!(
-                op,
-                TensorReduceOp::ReduceWindowMax | TensorReduceOp::ReduceWindowMin
-            );
-            for &index in group {
-                let value = scalar_at_reduction_width(op, input, index, accumulator)?;
-                if propagate_nan && scalar_is_nan(value) {
+            let mut acc = input.scalar_at(first_index);
+            if scalar_is_nan(acc) {
+                return Ok(acc);
+            }
+            for &index in remaining {
+                let value = input.scalar_at(index);
+                if scalar_is_nan(value) {
                     return Ok(value);
                 }
-                acc = reduction_extreme(op, acc, value, take_max, ignore_nan)?;
+                acc = reduction_extreme(op, acc, value, take_max)?;
             }
             Ok(acc)
         }
@@ -2696,7 +2794,7 @@ fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
 
 /// Count true elements in explicitly ordered groups through the closed typed
 /// kernel boundary. The input must use exact Bool storage and the result is
-/// exact int64. Empty groups produce the specified zero identity.
+/// exact i64. Empty groups produce the specified zero identity.
 pub fn count_tensor_groups(
     input: &TensorStorage,
     groups: &[Vec<usize>],
@@ -2772,7 +2870,7 @@ pub fn reduce_tensor_groups(
     finalize_tensor(op.name(), result, raw).map_err(Into::into)
 }
 
-/// Reduce explicitly ordered groups to exact int64 winner indices. Values
+/// Reduce explicitly ordered groups to exact i64 winner indices. Values
 /// are compared at their stored dtype and never cross binary64 for integer
 /// inputs; first-seen wins ties.
 pub fn arg_reduce_tensor_groups(
@@ -2790,14 +2888,20 @@ pub fn arg_reduce_tensor_groups(
     let mut indices = Vec::with_capacity(groups.len());
     for group in groups {
         if group.is_empty() {
-            indices.push(-1);
-            continue;
+            return Err(NumericTrap::Domain {
+                op: op.name(),
+                prim: Prim::Int64,
+            }
+            .into());
         }
         let mut best_value = input.scalar_at(group[0]);
         let mut best_index = 0i64;
         for (axis_index, &input_index) in group.iter().enumerate().skip(1) {
             let candidate = input.scalar_at(input_index);
-            if compare_scalars(op.compare(), candidate, best_value)? {
+            if !scalar_is_nan(best_value)
+                && (scalar_is_nan(candidate)
+                    || compare_scalars(op.compare(), candidate, best_value)?)
+            {
                 best_value = candidate;
                 best_index = axis_index as i64;
             }
@@ -2848,10 +2952,16 @@ pub fn reduce_window_grad_tensor_groups(
             accumulator: prim,
             result: prim,
         })?;
-    let zero = reduction_seed(forward_op, accumulator, 0, 0.0)?;
-    let mut output = vec![zero; input.len()];
+    let mut output = vec![Vec::<ScalarValue>::new(); input.len()];
 
     for (group_index, group) in groups.iter().enumerate() {
+        if group.is_empty() {
+            return Err(NumericTrap::Domain {
+                op: forward_op.name(),
+                prim,
+            }
+            .into());
+        }
         let mut contribution =
             scalar_at_reduction_width(forward_op, cotangent, group_index, accumulator)?;
         if op == ReduceWindowGradOp::Mean {
@@ -2863,38 +2973,56 @@ pub fn reduce_window_grad_tensor_groups(
             )?;
             contribution = reduction_div_float(forward_op, contribution, divisor)?;
         }
-        let extreme = match op {
-            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
-                Some(reduce_group(forward_op, input, group, accumulator)?)
-            }
-            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => None,
-        };
 
-        for &input_index in group {
-            let selected = match extreme {
-                Some(extreme) => {
-                    let value =
-                        scalar_at_reduction_width(forward_op, input, input_index, accumulator)?;
-                    compare_scalars(CompareOp::Eq, value, extreme)?
+        match op {
+            ReduceWindowGradOp::Sum | ReduceWindowGradOp::Mean => {
+                for &input_index in group {
+                    output[input_index].push(contribution);
                 }
-                None => true,
-            };
-            if selected {
-                output[input_index] = reduction_add(forward_op, output[input_index], contribution)?;
+            }
+            ReduceWindowGradOp::Max | ReduceWindowGradOp::Min => {
+                if let Some(&first_nan) = group
+                    .iter()
+                    .find(|&&input_index| scalar_is_nan(input.scalar_at(input_index)))
+                {
+                    output[first_nan].push(contribution);
+                    continue;
+                }
+
+                let extreme = reduce_group(forward_op, input, group, accumulator)?;
+                let mut selected = Vec::new();
+                for &input_index in group {
+                    if compare_scalars(CompareOp::Eq, input.scalar_at(input_index), extreme)? {
+                        selected.push(input_index);
+                    }
+                }
+                let divisor = reduction_seed(
+                    forward_op,
+                    accumulator,
+                    i64::try_from(selected.len()).expect("window tie count fits i64"),
+                    selected.len() as f64,
+                )?;
+                let share = reduction_div_float(forward_op, contribution, divisor)?;
+                for input_index in selected {
+                    output[input_index].push(share);
+                }
             }
         }
     }
 
     let values = output
         .into_iter()
-        .map(|value| reduction_result_scalar(forward_op, value, prim))
+        .map(|contributions| {
+            let value = match checked_adjacent_pair_fold(contributions, |left, right| {
+                reduction_add(forward_op, left, right)
+            })? {
+                Some(value) => value,
+                None => reduction_seed(forward_op, accumulator, 0, 0.0)?,
+            };
+            reduction_result_scalar(forward_op, value, prim)
+        })
         .collect::<Result<Vec<_>, NumericKernelError>>()?;
-    finalize_tensor(
-        op.name(),
-        prim,
-        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect()),
-    )
-    .map_err(Into::into)
+    Ok(tensor_from_scalars(prim, &values))
 }
 
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
@@ -2908,6 +3036,7 @@ fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
         Bits::F32(value) => Buf::F32(vec![value; len]),
         Bits::F64(value) => Buf::F64(vec![value; len]),
         Bits::Bool(value) => Buf::Bool(vec![u8::from(value); len]),
+        Bits::Key(value) => Buf::Key(vec![value; len]),
     };
     TensorStorage { buf }
 }
@@ -2996,6 +3125,35 @@ pub fn compare_scalar_tensor(
     compare_tensors(op, &splat_storage(scalar, tensor.len()), tensor)
 }
 
+/// Round a compile-time float bound to `prim`'s exact value, the way the
+/// evaluator does when it stores one.
+///
+/// What a float-target `cast` does to a statically resolvable literal.
+///
+/// Random controls do NOT come through here: they are operands the IR lanes
+/// evaluate and `StagedBound` (C) folds, and both reach the same
+/// `finalize_scalar` chokepoint via `cast_raw`/`cast_scalar`.
+///
+/// chelis#2316: both of them used to recurse THROUGH a `cast` and keep the
+/// innermost literal, on the premise recorded in `extract_f64_value`'s own
+/// doc comment that "a float-target cast preserves the numeric value". That
+/// holds for f32 and f64 and is false for every narrowing float target, so
+/// `cast(cast(0.30000001, f16), f32)` baked `0.30000001` where the program
+/// declares `0.300048828125` — a silent bound substitution of ~1600 f32 ULPs
+/// that both compiled lanes made identically while `eval` rounded correctly.
+///
+/// Returns `None` for a non-float target, matching the fold sites' existing
+/// contract that an integer-target cast is left unresolved and goes loud
+/// rather than baking a guessed truncation (chelis#776).
+pub fn round_float_bound(prim: Prim, value: f64) -> Option<f64> {
+    if !prim.is_float() {
+        return None;
+    }
+    finalize_scalar("cast", prim, RawScalar::Float(value))
+        .ok()
+        .map(|scalar| scalar.as_f64_lossy())
+}
+
 /// Finalize one wide intermediate into `prim` per the section C1 table,
 /// or trap. THE construction chokepoint for op results.
 pub fn finalize_scalar(
@@ -3039,7 +3197,8 @@ pub fn finalize_scalar(
                 | Prim::Bf16
                 | Prim::F8e4m3
                 | Prim::Bool
-                | Prim::String => unreachable!("outer match binds an integer prim"),
+                | Prim::String
+                | Prim::Key => unreachable!("outer match binds an integer prim"),
             }
         }
         Prim::Bool => {
@@ -3060,6 +3219,10 @@ pub fn finalize_scalar(
         ),
         Prim::String => panic!(
             "finalize_scalar: string is not a numeric dtype and has no \
+             finalize semantics (op {op})"
+        ),
+        Prim::Key => panic!(
+            "finalize_scalar: a random key is not a numeric dtype and has no \
              finalize semantics (op {op})"
         ),
     };
@@ -3117,7 +3280,8 @@ pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
         | Prim::Int8
         | Prim::Bool
         | Prim::F8e4m3
-        | Prim::String => return false,
+        | Prim::String
+        | Prim::Key => return false,
     };
     let magnitude = value.unsigned_abs();
     if magnitude == 0 {
@@ -3128,18 +3292,506 @@ pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
         || magnitude.trailing_zeros() >= significant_bits.saturating_sub(precision)
 }
 
-/// Deterministic `[05-OP-8]` sample at the requested float width.
+/// Validated fixed parameters shared by the borrowed evaluator kernel and
+/// native emission. Construction checks the input dtype and stored rate;
+/// neither construction nor inspection draws, allocates a tensor or grants
+/// permission to replay a source site.
+#[derive(Debug, Clone, Copy)]
+pub struct DropoutParameters {
+    rate: ScalarValue,
+}
+
+impl DropoutParameters {
+    pub fn new(prim: Prim, rate: ScalarValue) -> Result<Self, NumericKernelError> {
+        if !prim.is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: "dropout",
+                expected: NumericFamily::Float,
+                actual: prim,
+            });
+        }
+        if rate.prim() != prim {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "dropout",
+                lhs: prim,
+                rhs: rate.prim(),
+            });
+        }
+        let wide_rate = rate.as_f64_lossy();
+        if !wide_rate.is_finite() || !(0.0..1.0).contains(&wide_rate) {
+            return Err(NumericTrap::Domain {
+                op: "dropout",
+                prim,
+            }
+            .into());
+        }
+        Ok(Self { rate })
+    }
+
+    pub fn rate(self) -> ScalarValue {
+        self.rate
+    }
+
+    /// The denominator is finalized at the storage dtype, before division.
+    /// Keeping this operation here prevents native preparation from silently
+    /// using a wide subtraction or reciprocal multiplication instead.
+    pub fn denominator(self) -> Result<ScalarValue, NumericKernelError> {
+        let one = cast_raw("dropout", RawScalar::Int(1), self.rate.prim())?;
+        float_binop(FloatBinOp::Sub, one, self.rate)
+    }
+}
+
+/// The key of one random draw: an opaque, structurally non-numeric carrier
+/// that a random kernel receives in place of any ambient stream.
 ///
-/// The bounds already carry their required f32 dtype. f64 computes the
-/// affine transform in f64 from the exact f32 images; f32 computes it at
-/// f32 width; f16/bf16 compute once in f32 and finalize once to storage.
-pub fn uniform_sample(
+/// A key has no arithmetic, comparison, or cast. It is formed only by
+/// [`RandomKey::from_seed`] ([05-OP-69]) and by the [05-RNG-2] derivations
+/// [`RandomKey::split`], [`RandomKey::fold_in`] and [`RandomKey::split_n`].
+/// [`RandomKey::bits`] exists so that native backends can port the kernels
+/// bit for bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RandomKey {
+    bits: u64,
+}
+
+impl RandomKey {
+    /// `[05-OP-69]` `key_from_seed`: the key whose bits are the i64 seed's
+    /// two's-complement bits, with no mixing.
+    pub fn from_seed(seed: ScalarValue) -> Result<Self, NumericKernelError> {
+        match seed.bits {
+            Bits::I64(seed) => Ok(Self { bits: seed as u64 }),
+            _ => Err(NumericKernelError::DtypeMismatch {
+                op: "key_from_seed",
+                lhs: Prim::Int64,
+                rhs: seed.prim(),
+            }),
+        }
+    }
+
+    /// `[05-RNG-2]`'s `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`.
+    pub fn derive(self, j: u64) -> Self {
+        Self {
+            bits: random_derive(self.bits, j),
+        }
+    }
+
+    /// `[05-OP-70]` `split_key`: `(derive(k, 0), derive(k, 1))`.
+    pub fn split(self) -> (Self, Self) {
+        (self.derive(0), self.derive(1))
+    }
+
+    /// `[05-OP-72]` `fold_in`: `derive(derive(k, 2), n)` with the i64 `n`
+    /// read as its two's-complement bits.
+    pub fn fold_in(self, n: ScalarValue) -> Result<Self, NumericKernelError> {
+        match n.bits {
+            Bits::I64(n) => Ok(self.fold_in_word(n as u64)),
+            _ => Err(NumericKernelError::DtypeMismatch {
+                op: "fold_in",
+                lhs: Prim::Int64,
+                rhs: n.prim(),
+            }),
+        }
+    }
+
+    /// `[05-OP-71]` `split_keys`: row `j` is `derive(derive(k, 2), j)`.
+    pub fn split_n(self, count: usize) -> Vec<Self> {
+        (0..count as u64).map(|j| self.fold_in_word(j)).collect()
+    }
+
+    fn fold_in_word(self, n: u64) -> Self {
+        self.derive(2).derive(n)
+    }
+
+    /// The key word, for native ports of the kernels below.
+    pub fn bits(self) -> u64 {
+        self.bits
+    }
+}
+
+/// Which half of `[05-OP-70]`'s pair a split produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyHalf {
+    /// `derive(k, 0)`.
+    Left,
+    /// `derive(k, 1)`.
+    Right,
+}
+
+impl TensorStorage {
+    /// Key storage from keys a key kernel produced. A key has no literal, so
+    /// this is the only construction path for a key buffer.
+    pub fn from_keys(keys: Vec<RandomKey>) -> Self {
+        TensorStorage {
+            buf: Buf::Key(keys),
+        }
+    }
+
+    /// The keys of a key buffer, or `None` for every numeric and bool buffer.
+    pub fn keys(&self) -> Option<&[RandomKey]> {
+        match &self.buf {
+            Buf::Key(keys) => Some(keys),
+            _ => None,
+        }
+    }
+}
+
+fn key_operand<'a>(
+    op: &'static str,
+    storage: &'a TensorStorage,
+) -> Result<&'a [RandomKey], NumericKernelError> {
+    storage.keys().ok_or(NumericKernelError::DtypeMismatch {
+        op,
+        lhs: Prim::Key,
+        rhs: storage.prim(),
+    })
+}
+
+/// `[05-OP-69]` element by element over a `tensor[D, i64]` of seeds.
+pub fn key_from_seed_storage(seeds: &TensorStorage) -> Result<TensorStorage, NumericKernelError> {
+    let keys = (0..seeds.len())
+        .map(|index| RandomKey::from_seed(seeds.scalar_at(index)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TensorStorage::from_keys(keys))
+}
+
+/// One half of `[05-OP-70]` element by element over a `tensor[D, key]`.
+pub fn split_key_storage(
+    keys: &TensorStorage,
+    half: KeyHalf,
+) -> Result<TensorStorage, NumericKernelError> {
+    let index = match half {
+        KeyHalf::Left => 0,
+        KeyHalf::Right => 1,
+    };
+    let keys = key_operand("split_key", keys)?;
+    Ok(TensorStorage::from_keys(
+        keys.iter().map(|key| key.derive(index)).collect(),
+    ))
+}
+
+/// `[05-OP-72]` element by element over a `tensor[D, key]` and a
+/// `tensor[D, i64]` of exactly equal length; there is no broadcasting.
+pub fn fold_in_storage(
+    keys: &TensorStorage,
+    ns: &TensorStorage,
+) -> Result<TensorStorage, NumericKernelError> {
+    let keys = key_operand("fold_in", keys)?;
+    if keys.len() != ns.len() {
+        return Err(NumericKernelError::LengthMismatch {
+            op: "fold_in",
+            lhs: keys.len(),
+            rhs: ns.len(),
+        });
+    }
+    let folded = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| key.fold_in(ns.scalar_at(index)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TensorStorage::from_keys(folded))
+}
+
+/// `[05-OP-71]` over a `tensor[D, key]`: the result is `tensor[D ++ [count],
+/// key]` in row-major order, so element `(i, j)` is row `j` of key `i`. The
+/// caller admits that result's extents under `[05-OP-33]` first, as the DAG
+/// evaluator does: this kernel allocates every one of its keys.
+pub fn split_keys_storage(
+    keys: &TensorStorage,
+    count: usize,
+) -> Result<TensorStorage, NumericKernelError> {
+    let keys = key_operand("split_keys", keys)?;
+    Ok(TensorStorage::from_keys(
+        keys.iter().flat_map(|key| key.split_n(count)).collect(),
+    ))
+}
+
+/// The row of flat element `index` when `len` elements split into
+/// `rows` equal rows, and the element's index within its row. A batched
+/// draw (`spec/10-serialization.md` §3.2) keys row `b` by `keys[b]` and
+/// numbers the row's elements from zero.
+fn batched_row(index: usize, len: usize, rows: usize) -> (usize, u64) {
+    let row_len = len / rows;
+    (index / row_len, (index % row_len) as u64)
+}
+
+fn require_row_split(op: &'static str, len: usize, rows: usize) -> Result<(), NumericKernelError> {
+    // Zero rows split only zero elements.
+    let divides = len.is_multiple_of(rows);
+    if divides {
+        Ok(())
+    } else {
+        Err(NumericKernelError::LengthMismatch {
+            op,
+            lhs: len,
+            rhs: rows,
+        })
+    }
+}
+
+/// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
+///
+/// Preparation performs every dtype/rate guard without drawing or allocating.
+/// The caller takes its draw's key only after `new` succeeds, then supplies
+/// that key to `apply`. This kernel owns no ambient random state and grants no
+/// replay provenance.
+///
+/// ```
+/// use chelis_types::dtype_semantics::{PreparedDropout, RandomKey};
+/// fn draw(prepared: &PreparedDropout<'_>, key: RandomKey) {
+///     let _ = prepared.apply(key);
+/// }
+/// ```
+///
+/// The kernel no longer takes a seed and an ordinal: its key is the only
+/// thing it knows about the stream it draws from.
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::PreparedDropout;
+/// fn draw(prepared: &PreparedDropout<'_>) {
+///     let _ = prepared.apply(42, 0);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout};
+/// fn bypass<'a>(input: &'a chelis_types::TensorStorage, rate: chelis_types::ScalarValue)
+///     -> PreparedDropout<'a> {
+///     let parameters = DropoutParameters::new(input.prim(), rate).unwrap();
+///     PreparedDropout { input, parameters }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::DropoutParameters;
+/// fn bypass(rate: chelis_types::ScalarValue) -> DropoutParameters {
+///     DropoutParameters { rate }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct PreparedDropout<'a> {
+    input: &'a TensorStorage,
+    parameters: DropoutParameters,
+}
+
+impl<'a> PreparedDropout<'a> {
+    pub fn new(input: &'a TensorStorage, rate: ScalarValue) -> Result<Self, NumericKernelError> {
+        Ok(Self {
+            input,
+            parameters: DropoutParameters::new(input.prim(), rate)?,
+        })
+    }
+
+    /// Evaluate the finalized sub/div graph with a pure keyed mask. A second
+    /// application with the same key is suitable for pathwise input replay;
+    /// the graph's key edge, not this numerical function, authorizes it.
+    pub fn apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError> {
+        let prim = self.input.prim();
+        let wide_rate = self.parameters.rate().as_f64_lossy();
+        let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
+        let denominator = self.parameters.denominator()?;
+        let mut output = Vec::with_capacity(self.input.len());
+        for index in 0..self.input.len() {
+            let exact_unit = random_unit(key.bits, index as u64);
+            let arithmetic_unit = if prim == Prim::F64 {
+                exact_unit
+            } else {
+                f64::from(exact_unit as f32)
+            };
+            output.push(if arithmetic_unit < wide_rate {
+                zero
+            } else {
+                float_binop(FloatBinOp::Div, self.input.scalar_at(index), denominator)?
+            });
+        }
+        Ok(tensor_from_scalars(prim, &output))
+    }
+}
+
+/// Validated `[05-OP-8]` controls: the output dtype `p` and its two bounds.
+///
+/// Construction performs the atom's checks before any draw: `p` is an active
+/// float dtype, both bounds share one dtype that widens exactly into `p`'s
+/// arithmetic width (f64 for `p = f64`, f32 otherwise), both are finite,
+/// `low <= high`, and `high - low` is finite at that width. The bounds'
+/// dtype is `p` or f32; f32 is the checker's current bound signature for
+/// every `p` (chelis#1295), which the atom's `p`-dtype bounds replace.
+#[derive(Debug, Clone, Copy)]
+pub struct UniformLikeParameters {
     prim: Prim,
-    low: f32,
-    high: f32,
-    seed: u64,
-    index: u64,
+    low: ScalarValue,
+    high: ScalarValue,
+}
+
+impl UniformLikeParameters {
+    pub fn new(
+        prim: Prim,
+        low: ScalarValue,
+        high: ScalarValue,
+    ) -> Result<Self, NumericKernelError> {
+        if !prim.is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: "uniform_like",
+                expected: NumericFamily::Float,
+                actual: prim,
+            });
+        }
+        if low.prim() != high.prim() {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "uniform_like",
+                lhs: low.prim(),
+                rhs: high.prim(),
+            });
+        }
+        if low.prim() != prim && low.prim() != Prim::F32 {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "uniform_like",
+                lhs: prim,
+                rhs: low.prim(),
+            });
+        }
+        let parameters = Self { prim, low, high };
+        let (low, high) = (low.as_f64_lossy(), high.as_f64_lossy());
+        let finite_difference = if prim == Prim::F64 {
+            (high - low).is_finite()
+        } else {
+            ((high as f32) - (low as f32)).is_finite()
+        };
+        if !low.is_finite() || !high.is_finite() || low > high || !finite_difference {
+            return Err(NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }
+            .into());
+        }
+        Ok(parameters)
+    }
+
+    pub fn prim(self) -> Prim {
+        self.prim
+    }
+
+    pub fn low(self) -> ScalarValue {
+        self.low
+    }
+
+    pub fn high(self) -> ScalarValue {
+        self.high
+    }
+
+    /// The `[05-OP-8]` sample of flat element `index` of the draw keyed by
+    /// `key`, stored at `p`. f64 computes the one f64 fused multiply-add from
+    /// the bounds' exact f64 images; every other `p` computes the one f32
+    /// fused multiply-add from their exact f32 images and `round_f32(u)`,
+    /// then finalizes once to `p`.
+    fn sample(self, key: RandomKey, index: u64) -> Result<ScalarValue, NumericKernelError> {
+        let unit = random_unit(key.bits, index);
+        let (low, high) = (self.low.as_f64_lossy(), self.high.as_f64_lossy());
+        let value = if self.prim == Prim::F64 {
+            (high - low).mul_add(unit, low)
+        } else {
+            let (low, high) = (low as f32, high as f32);
+            f64::from((high - low).mul_add(unit as f32, low))
+        };
+        scalar_from_f64("uniform_like", self.prim, value).map_err(Into::into)
+    }
+}
+
+/// Validated input to the pure `[05-OP-8]` sampler for a template of `len`
+/// elements. The template's element values are never observed.
+///
+/// ```
+/// use chelis_types::dtype_semantics::{PreparedUniformLike, RandomKey};
+/// fn draw(prepared: &PreparedUniformLike, key: RandomKey) {
+///     let _ = prepared.apply(key);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::uniform_sample;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedUniformLike {
+    len: usize,
+    parameters: UniformLikeParameters,
+}
+
+impl PreparedUniformLike {
+    pub fn new(
+        prim: Prim,
+        len: usize,
+        low: ScalarValue,
+        high: ScalarValue,
+    ) -> Result<Self, NumericKernelError> {
+        Ok(Self {
+            len,
+            parameters: UniformLikeParameters::new(prim, low, high)?,
+        })
+    }
+
+    pub fn parameters(&self) -> UniformLikeParameters {
+        self.parameters
+    }
+
+    /// Fill the template's element count with the draw keyed by `key`.
+    pub fn apply(&self, key: RandomKey) -> Result<TensorStorage, NumericKernelError> {
+        let values = (0..self.len)
+            .map(|index| self.parameters.sample(key, index as u64))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(tensor_from_scalars(self.parameters.prim, &values))
+    }
+}
+
+/// Which `[05-OP-8]` bound a pathwise adjoint belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniformBound {
+    Low,
+    High,
+}
+
+/// The `[05-OP-8]` pathwise adjoint of one bound under the forward draw keyed
+/// by `key`, for the output cotangent `cotangent` of dtype `p`.
+///
+/// In increasing row-major order element `i` contributes `g_i * (1 - u_i)` to
+/// `low` and `g_i * u_i` to `high`, where `u_i` is the forward draw's unit at
+/// the arithmetic width (the exact unit for `p = f64`, `round_f32(u)`
+/// otherwise). Every primitive executes at that arithmetic width (f64 for
+/// `p = f64`, f32 otherwise, the width `[05-OP-8]`'s forward affine uses), the
+/// contributions combine by the canonical adjacent-pair balanced tree, and
+/// the sum narrows once to `p`. An empty cotangent contributes positive zero.
+pub fn uniform_like_bound_adjoint(
+    cotangent: &TensorStorage,
+    key: RandomKey,
+    bound: UniformBound,
 ) -> Result<ScalarValue, NumericKernelError> {
+    uniform_like_bound_adjoint_by(cotangent, bound, |index| {
+        random_unit(key.bits, index as u64)
+    })
+}
+
+/// [`uniform_like_bound_adjoint`] of a row-batched draw whose rows share one
+/// bound: the cotangent's elements split into `keys.len()` equal rows, the
+/// unit of flat element `i` comes from its row's key at its index within the
+/// row, and every contribution joins one canonical balanced tree in
+/// increasing row-major order.
+pub fn uniform_like_bound_adjoint_rows(
+    cotangent: &TensorStorage,
+    keys: &[RandomKey],
+    bound: UniformBound,
+) -> Result<ScalarValue, NumericKernelError> {
+    let len = cotangent.len();
+    require_row_split("uniform_like", len, keys.len())?;
+    uniform_like_bound_adjoint_by(cotangent, bound, |index| {
+        let (row, element) = batched_row(index, len, keys.len());
+        random_unit(keys[row].bits, element)
+    })
+}
+
+fn uniform_like_bound_adjoint_by(
+    cotangent: &TensorStorage,
+    bound: UniformBound,
+    unit_at: impl Fn(usize) -> f64,
+) -> Result<ScalarValue, NumericKernelError> {
+    let prim = cotangent.prim();
     if !prim.is_float() {
         return Err(NumericKernelError::WrongFamily {
             op: "uniform_like",
@@ -3147,19 +3799,74 @@ pub fn uniform_sample(
             actual: prim,
         });
     }
-    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^= x >> 31;
-    let unit = ((x >> 11) as f64) / ((1u64 << 53) as f64);
     let value = if prim == Prim::F64 {
-        (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
+        let leaves = (0..cotangent.len())
+            .map(|index| {
+                let unit = unit_at(index);
+                let weight = match bound {
+                    UniformBound::Low => 1.0 - unit,
+                    UniformBound::High => unit,
+                };
+                cotangent.scalar_at(index).as_f64_lossy() * weight
+            })
+            .collect::<Vec<_>>();
+        checked_adjacent_pair_fold(leaves, |left, right| {
+            Ok::<_, NumericKernelError>(left + right)
+        })?
+        .unwrap_or(0.0)
     } else {
-        (high - low).mul_add(unit as f32, low) as f64
+        let leaves = (0..cotangent.len())
+            .map(|index| {
+                let unit = unit_at(index) as f32;
+                let weight = match bound {
+                    UniformBound::Low => 1.0f32 - unit,
+                    UniformBound::High => unit,
+                };
+                (cotangent.scalar_at(index).as_f64_lossy() as f32) * weight
+            })
+            .collect::<Vec<_>>();
+        f64::from(
+            checked_adjacent_pair_fold(leaves, |left, right| {
+                Ok::<_, NumericKernelError>(left + right)
+            })?
+            .unwrap_or(0.0),
+        )
     };
     scalar_from_f64("uniform_like", prim, value).map_err(Into::into)
+}
+
+// [05-RNG-1]'s `splitmix64`: add the golden gamma, xor-shift 30 and
+// multiply, xor-shift 27 and multiply, then xor-shift 31, all modulo 2^64.
+fn random_splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+/// `[05-RNG-2]`'s `derive(k, j) = splitmix64(k XOR rotl64(splitmix64(j), 29))`.
+/// A finalized mix, never a bare XOR of per-index terms, so a chained fold is
+/// not symmetric in its indices (the chelis#2408 class).
+fn random_derive(key: u64, j: u64) -> u64 {
+    random_splitmix64(key ^ random_splitmix64(j).rotate_left(29))
+}
+
+/// `[05-RNG-2]`'s source word for flat element `index` of the draw keyed by
+/// `key`: `word(key, index) = splitmix64(key XOR rotl64(splitmix64(index), 41))`,
+/// which [05-RNG-1] reads for element `index`.
+///
+/// This is the one kernel boundary of randomness (chelis#2408): every Rust
+/// lane derives a draw's element words from its key here, and the emitted C
+/// and HIP samplers are ports of this function. A key is all a sampler knows
+/// about the stream it draws from.
+fn random_word(key: u64, index: u64) -> u64 {
+    random_splitmix64(key ^ random_splitmix64(index).rotate_left(41))
+}
+
+/// `[05-RNG-1]`'s unit value: the word's high 53 bits over `2^53`, which f64
+/// represents exactly.
+fn random_unit(key: u64, index: u64) -> f64 {
+    ((random_word(key, index) >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
 /// THE authored cast ladder (the chelis#759 one-rule-per-direction
@@ -3281,8 +3988,8 @@ pub fn cast_trunc_tensor(
     //
     // The bulk `finalize_tensor` path cannot express this: `int_buf`
     // domain-checks the WHOLE buffer before it width-checks any of it,
-    // so `[300.9, NaN] -> int8` raises Domain there while C raises
-    // Overflow at element 0. Only int64 (where out-of-range and
+    // so `[300.9, NaN] -> i8` raises Domain there while C raises
+    // Overflow at element 0. Only i64 (where out-of-range and
     // non-finite are both caught in the same pass) is unaffected.
     // `cast_value`'s checked rung is per-element for the same reason;
     // agreeing with the other lane outranks the section C5 bulk-loop
@@ -3311,6 +4018,7 @@ fn assert_integer_trunc_target(op: &'static str, dst: Prim) {
             dst.name()
         ),
         Prim::String => panic!("cast_trunc: string is not a numeric dtype (op {op})"),
+        Prim::Key => panic!("cast_trunc: a random key is not a numeric dtype (op {op})"),
     }
 }
 
@@ -3324,7 +4032,8 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
         | Prim::Int64
         | Prim::Bool
         | Prim::F8e4m3
-        | Prim::String => panic!(
+        | Prim::String
+        | Prim::Key => panic!(
             "cast_trunc: `{}` is not a float source; [05-OP-6] is \
              float-to-integer only and the checker rejects every other \
              source (op {op})",
@@ -3333,178 +4042,10 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
     }
 }
 
-// ---------------------------------------------------------------------
-// Serialization (chelis#729 rework: the FIFTH storage layer). The IR
-// constant payloads (`RiscOp::Const`/`ConstTensor`) embed the sealed
-// types, and `RiscOp` derives serde for the on-disk context/stdlib
-// caches and the `WireDag` surface. The privacy contract survives the
-// wire: `Deserialize` routes every inbound value through finalize
-// (finalize-on-decode), and the reduced-width float images are
-// round-trip-validated, so a corrupt or hand-forged payload is a LOUD
-// decode error, never a silently renormalized value. Integer families
-// travel exact at width; f16/bf16 travel as their exact f64 images
-// (every half value is exactly representable in f64).
-// ---------------------------------------------------------------------
-
-/// Wire mirror of [`ScalarValue`]. Private: the only way in or out is
-/// the serde impls below.
-#[derive(serde::Serialize, serde::Deserialize)]
-enum ScalarWire {
-    F64(f64),
-    F32(f32),
-    /// Exact f64 image of the stored half value.
-    F16(f64),
-    /// Exact f64 image of the stored bfloat value.
-    Bf16(f64),
-    I64(i64),
-    I32(i32),
-    I16(i16),
-    I8(i8),
-    Bool(bool),
-}
-
-impl serde::Serialize for ScalarValue {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let wire = match self.bits {
-            Bits::F64(v) => ScalarWire::F64(v),
-            Bits::F32(v) => ScalarWire::F32(v),
-            Bits::F16(v) => ScalarWire::F16(f64::from(v)),
-            Bits::Bf16(v) => ScalarWire::Bf16(f64::from(v)),
-            Bits::I64(v) => ScalarWire::I64(v),
-            Bits::I32(v) => ScalarWire::I32(v),
-            Bits::I16(v) => ScalarWire::I16(v),
-            Bits::I8(v) => ScalarWire::I8(v),
-            Bits::Bool(v) => ScalarWire::Bool(v),
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ScalarValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let wire = ScalarWire::deserialize(deserializer)?;
-        let value = match wire {
-            ScalarWire::F64(v) => ScalarValue { bits: Bits::F64(v) },
-            ScalarWire::F32(v) => ScalarValue { bits: Bits::F32(v) },
-            ScalarWire::F16(image) => {
-                let half = f16_from_f64_rne(image);
-                if f64::from(half) != image && !image.is_nan() {
-                    return Err(D::Error::custom(format!(
-                        "f16 wire image {image} is not an exact f16 value; \
-                         refusing to renormalize a corrupt payload \
-                         (chelis#729 section C3 finalize-on-decode)"
-                    )));
-                }
-                ScalarValue {
-                    bits: Bits::F16(half),
-                }
-            }
-            ScalarWire::Bf16(image) => {
-                let half = bf16_from_f64_rne(image);
-                if f64::from(half) != image && !image.is_nan() {
-                    return Err(D::Error::custom(format!(
-                        "bf16 wire image {image} is not an exact bf16 value; \
-                         refusing to renormalize a corrupt payload \
-                         (chelis#729 section C3 finalize-on-decode)"
-                    )));
-                }
-                ScalarValue {
-                    bits: Bits::Bf16(half),
-                }
-            }
-            ScalarWire::I64(v) => ScalarValue { bits: Bits::I64(v) },
-            ScalarWire::I32(v) => ScalarValue { bits: Bits::I32(v) },
-            ScalarWire::I16(v) => ScalarValue { bits: Bits::I16(v) },
-            ScalarWire::I8(v) => ScalarValue { bits: Bits::I8(v) },
-            ScalarWire::Bool(v) => ScalarValue {
-                bits: Bits::Bool(v),
-            },
-        };
-        Ok(value)
-    }
-}
-
-/// Wire mirror of [`TensorStorage`]. Private, same discipline as
-/// [`ScalarWire`].
-#[derive(serde::Serialize, serde::Deserialize)]
-enum StorageWire {
-    F64(Vec<f64>),
-    F32(Vec<f32>),
-    /// Exact f64 images of the stored half values.
-    F16(Vec<f64>),
-    /// Exact f64 images of the stored bfloat values.
-    Bf16(Vec<f64>),
-    I64(Vec<i64>),
-    I32(Vec<i32>),
-    I16(Vec<i16>),
-    I8(Vec<i8>),
-    Bool(Vec<bool>),
-}
-
-impl serde::Serialize for TensorStorage {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let wire = match &self.buf {
-            Buf::F64(v) => StorageWire::F64(v.clone()),
-            Buf::F32(v) => StorageWire::F32(v.clone()),
-            Buf::F16(v) => StorageWire::F16(v.iter().map(|&h| f64::from(h)).collect()),
-            Buf::Bf16(v) => StorageWire::Bf16(v.iter().map(|&h| f64::from(h)).collect()),
-            Buf::I64(v) => StorageWire::I64(v.clone()),
-            Buf::I32(v) => StorageWire::I32(v.clone()),
-            Buf::I16(v) => StorageWire::I16(v.clone()),
-            Buf::I8(v) => StorageWire::I8(v.clone()),
-            Buf::Bool(v) => StorageWire::Bool(v.iter().map(|&b| b != 0).collect()),
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for TensorStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let wire = StorageWire::deserialize(deserializer)?;
-        let buf = match wire {
-            StorageWire::F64(v) => Buf::F64(v),
-            StorageWire::F32(v) => Buf::F32(v),
-            StorageWire::F16(images) => {
-                let mut out = Vec::with_capacity(images.len());
-                for image in images {
-                    let half = f16_from_f64_rne(image);
-                    if f64::from(half) != image && !image.is_nan() {
-                        return Err(D::Error::custom(format!(
-                            "f16 wire image {image} is not an exact f16 value; \
-                             refusing to renormalize a corrupt payload \
-                             (chelis#729 section C3 finalize-on-decode)"
-                        )));
-                    }
-                    out.push(half);
-                }
-                Buf::F16(out)
-            }
-            StorageWire::Bf16(images) => {
-                let mut out = Vec::with_capacity(images.len());
-                for image in images {
-                    let half = bf16_from_f64_rne(image);
-                    if f64::from(half) != image && !image.is_nan() {
-                        return Err(D::Error::custom(format!(
-                            "bf16 wire image {image} is not an exact bf16 value; \
-                             refusing to renormalize a corrupt payload \
-                             (chelis#729 section C3 finalize-on-decode)"
-                        )));
-                    }
-                    out.push(half);
-                }
-                Buf::Bf16(out)
-            }
-            StorageWire::I64(v) => Buf::I64(v),
-            StorageWire::I32(v) => Buf::I32(v),
-            StorageWire::I16(v) => Buf::I16(v),
-            StorageWire::I8(v) => Buf::I8(v),
-            StorageWire::Bool(v) => Buf::Bool(v.into_iter().map(u8::from).collect()),
-        };
-        Ok(TensorStorage { buf })
-    }
-}
+// Stored-value serialization is a checked bit transport, separate from arithmetic
+// finalization. The private child module retains access to the sealed carriers.
+mod wire_codec;
+pub use wire_codec::{KeyBits, execution_storage};
 
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
@@ -3561,6 +4102,10 @@ pub fn finalize_tensor(
         Prim::String => panic!(
             "finalize_tensor: string is not a numeric dtype and has no \
              finalize semantics (op {op})"
+        ),
+        Prim::Key => panic!(
+            "finalize_tensor: a random key has no literal or raw ingress; only the \
+             key kernels construct key storage (op {op})"
         ),
     };
     Ok(TensorStorage { buf })
@@ -3762,6 +4307,21 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
             "tensor_from_scalars: string is not a numeric dtype and has no \
              tensor storage"
         ),
+        Prim::Key => Buf::Key(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::Key(key) => Some(key),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
     };
     TensorStorage { buf }
 }
@@ -3769,6 +4329,7 @@ pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn fin(prim: Prim, x: f64) -> Result<ScalarValue, NumericTrap> {
         finalize_scalar("test_op", prim, RawScalar::Float(x))
@@ -3807,29 +4368,502 @@ mod tests {
     }
 
     #[test]
+    fn dropout_parameters_preserve_the_finalized_subtraction() {
+        for (prim, expected) in [
+            (Prim::F16, 0.89990234375),
+            (Prim::Bf16, 0.8984375),
+            (Prim::F32, f64::from(f32::from_bits(0x3f66_6666))),
+            (Prim::F64, f64::from_bits(0x3fec_cccc_cccc_cccd)),
+        ] {
+            let rate = scalar_from_f64("test", prim, 0.1).unwrap();
+            let parameters = DropoutParameters::new(prim, rate).unwrap();
+            assert_eq!(parameters.rate(), rate);
+            let denominator = parameters.denominator().unwrap();
+            assert_eq!(denominator.prim(), prim);
+            assert_eq!(denominator.as_f64_lossy(), expected, "{}", prim.name());
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                assert_ne!(denominator.as_f64_lossy(), 1.0 - rate.as_f64_lossy());
+            }
+        }
+    }
+
+    #[test]
+    fn dropout_parameters_do_not_need_a_dummy_tensor_to_check_ingress() {
+        let rate = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        assert!(matches!(
+            DropoutParameters::new(Prim::Int32, rate),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
+        assert!(matches!(
+            DropoutParameters::new(Prim::F64, rate),
+            Err(NumericKernelError::DtypeMismatch { .. })
+        ));
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for value in [-0.5, 1.0, f64::NAN, f64::INFINITY] {
+                let rate = scalar_from_f64("test", prim, value).unwrap();
+                assert!(matches!(
+                    DropoutParameters::new(prim, rate),
+                    Err(NumericKernelError::Trap(NumericTrap::Domain { .. }))
+                ));
+            }
+            let zero = scalar_from_f64("test", prim, -0.0).unwrap();
+            let parameters = DropoutParameters::new(prim, zero).unwrap();
+            assert!(parameters.rate().as_f64_lossy().is_sign_negative());
+            assert_eq!(parameters.denominator().unwrap().as_f64_lossy(), 1.0);
+        }
+    }
+
+    #[test]
+    fn prepared_dropout_rejects_invalid_ingress_even_when_empty() {
+        let integer = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![])).unwrap();
+        let half = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        assert!(matches!(
+            PreparedDropout::new(&integer, half),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for count in [0, 2] {
+                let input =
+                    finalize_tensor("test", prim, RawTensor::Float(vec![1.0; count])).unwrap();
+                let other = if prim == Prim::F64 {
+                    Prim::F32
+                } else {
+                    Prim::F64
+                };
+                let wrong = scalar_from_f64("test", other, 0.5).unwrap();
+                assert!(matches!(
+                    PreparedDropout::new(&input, wrong),
+                    Err(NumericKernelError::DtypeMismatch { .. })
+                ));
+                for value in [-0.5, 1.0, 2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let rate = scalar_from_f64("test", prim, value).unwrap();
+                    let error = PreparedDropout::new(&input, rate).unwrap_err();
+                    assert_eq!(
+                        error,
+                        NumericKernelError::Trap(NumericTrap::Domain {
+                            op: "dropout",
+                            prim
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    /// `[05-OP-69]`'s key of an i64 seed.
+    fn seed_key(seed: i64) -> RandomKey {
+        RandomKey::from_seed(scalar_from_i64("test", Prim::Int64, seed).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn prepared_dropout_rounds_the_unit_before_comparing_and_finalizes_division() {
+        // key_ref.py: word(key(45), 0) = 3cf6dc70d6515d83, whose unit rounds
+        // up to the f32 0x3e73db72.
+        let key = seed_key(45);
+        let rate = f32::from_bits(0x3e73_db72);
+        assert_eq!(random_word(key.bits(), 0), 0x3cf6_dc70_d651_5d83);
+        let unit = random_unit(key.bits(), 0);
+        assert_eq!((unit as f32).to_bits(), rate.to_bits());
+        assert!(
+            unit < f64::from(rate),
+            "ideal-rational comparison would drop"
+        );
+        let input = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.0])).unwrap();
+        let prepared = PreparedDropout::new(
+            &input,
+            scalar_from_f64("test", Prim::F32, f64::from(rate)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.apply(key).unwrap().scalar_at(0).as_f64_lossy(),
+            f64::from(1.0f32 / (1.0f32 - rate))
+        );
+        let input = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![f64::from(f32::from_bits(0x3f80_0005))]),
+        )
+        .unwrap();
+        let prepared =
+            PreparedDropout::new(&input, scalar_from_f64("test", Prim::F32, 0.1).unwrap()).unwrap();
+        let result = prepared.apply(key).unwrap().scalar_at(0).as_f64_lossy() as f32;
+        assert_eq!(result.to_bits(), 0x3f8e_38e9);
+        assert_ne!(result.to_bits(), 0x3f8e_38ea, "reciprocal-multiply mutant");
+    }
+
+    #[test]
+    fn prepared_dropout_is_pure_keyed_and_preserves_stored_zero_signs() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let rate = scalar_from_f64("test", prim, 0.5).unwrap();
+            let input = finalize_tensor("test", prim, RawTensor::Float(vec![-0.0; 2])).unwrap();
+            let prepared = PreparedDropout::new(&input, rate).unwrap();
+            // key_ref.py: unit(key(44), 0) = 0.4215 < 0.5 <= unit(key(44), 1) = 0.7762,
+            // so element 0 is dropped and element 1 is kept.
+            let first = prepared.apply(seed_key(44)).unwrap();
+            assert_eq!(first, prepared.apply(seed_key(44)).unwrap());
+            assert_eq!(first.scalar_at(0).as_f64_lossy().to_bits(), 0);
+            assert_eq!(
+                first.scalar_at(1).as_f64_lossy().to_bits(),
+                (-0.0f64).to_bits()
+            );
+            assert_eq!(
+                input.scalar_at(0).as_f64_lossy().to_bits(),
+                (-0.0f64).to_bits()
+            );
+            let empty = finalize_tensor("test", prim, RawTensor::Float(vec![])).unwrap();
+            assert!(
+                PreparedDropout::new(&empty, rate)
+                    .unwrap()
+                    .apply(seed_key(-1))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    // [05-RNG-2]'s `word` and [05-RNG-1]'s unit, transcribed from the spec
+    // text for the kernel tests below.
+    fn spec_unit(key_bits: u64, index: u64) -> f64 {
+        fn splitmix64(x: u64) -> u64 {
+            let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let word = splitmix64(key_bits ^ splitmix64(index).rotate_left(41));
+        (word >> 11) as f64 / (1_u64 << 53) as f64
+    }
+
+    #[test]
+    fn the_draw_word_is_the_05_rng_2_word() {
+        // key_ref.py's worked values: word(key(7), 0) and its unit.
+        assert_eq!(random_word(seed_key(7).bits(), 0), 0x2065_4588_fcd2_5740);
+        assert_eq!(
+            random_unit(seed_key(7).bits(), 0).to_bits(),
+            0.126_545_282_310_709_38_f64.to_bits()
+        );
+        for seed in [0, 42, -1, i64::MIN, i64::MAX] {
+            let root = seed_key(seed);
+            let (left, right) = root.split();
+            for key in [root, left, right] {
+                for index in [0, 1, 5, 1 << 40, u64::MAX] {
+                    assert_eq!(
+                        random_unit(key.bits(), index).to_bits(),
+                        spec_unit(key.bits(), index).to_bits(),
+                        "key {:#x} index {index}",
+                        key.bits()
+                    );
+                }
+            }
+        }
+    }
+
+    // chelis#2408: the retired mixing computed `seed ^ c*G ^ i*G`, so element i
+    // of draw c equalled element c of draw i, and every diagonal element was
+    // the same seed-only value. Draw c here is the draw keyed by row c of
+    // `split_keys` ([05-OP-71]).
+    #[test]
+    fn draw_c_element_i_is_not_draw_i_element_c() {
+        const N: usize = 32;
+        for seed in [42, -1] {
+            let rows = seed_key(seed).split_n(N);
+            let unit = |c: usize, i: usize| random_unit(rows[c].bits(), i as u64).to_bits();
+            for c in 0..N {
+                for i in (c + 1)..N {
+                    assert_ne!(unit(c, i), unit(i, c), "seed {seed} ({c}, {i})");
+                }
+            }
+            let diagonal = (0..N).map(|c| unit(c, c)).collect::<BTreeSet<_>>();
+            assert_eq!(diagonal.len(), N, "seed {seed}");
+        }
+    }
+
+    fn f32_scalar(value: f32) -> ScalarValue {
+        scalar_from_f64("test", Prim::F32, f64::from(value)).unwrap()
+    }
+
+    fn uniform_element(prim: Prim, low: f32, high: f32, key: RandomKey, index: usize) -> f64 {
+        PreparedUniformLike::new(prim, index + 1, f32_scalar(low), f32_scalar(high))
+            .unwrap()
+            .apply(key)
+            .unwrap()
+            .scalar_at(index)
+            .as_f64_lossy()
+    }
+
+    #[test]
+    fn uniform_sampler_is_the_05_op_8_affine_of_the_spec_unit() {
+        for key in [seed_key(42), seed_key(-1).split().1] {
+            for (low, high) in [(2.0f32, 5.0f32), (-1.0, 3.0), (0.0, 1.0)] {
+                for index in 0..16 {
+                    let unit = spec_unit(key.bits(), index);
+                    let narrow = (high - low).mul_add(unit as f32, low);
+                    let wide = (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low));
+                    for (prim, expected) in [
+                        (Prim::F64, wide),
+                        (Prim::F32, f64::from(narrow)),
+                        (Prim::F16, f64::from(half::f16::from_f32(narrow))),
+                        (Prim::Bf16, f64::from(half::bf16::from_f32(narrow))),
+                    ] {
+                        let value = uniform_element(prim, low, high, key, index as usize);
+                        assert_eq!(
+                            value.to_bits(),
+                            expected.to_bits(),
+                            "{prim:?} [{low}, {high}) key {:#x} index {index}",
+                            key.bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn uniform_sampler_dispatches_at_the_output_dtype_width() {
         let low = 2.0f32;
         let high = 7.0f32;
-        let seed = 42;
+        let key = seed_key(42);
         let index = 4;
-        let f32_value = uniform_sample(Prim::F32, low, high, seed, index).unwrap();
-        let f64_value = uniform_sample(Prim::F64, low, high, seed, index).unwrap();
-        assert_eq!(f32_value.prim(), Prim::F32);
-        assert_eq!(f64_value.prim(), Prim::F64);
+        let f32_value = uniform_element(Prim::F32, low, high, key, index);
+        let f64_value = uniform_element(Prim::F64, low, high, key, index);
         assert_ne!(
-            f32_value.as_f64_lossy().to_bits(),
-            f64_value.as_f64_lossy().to_bits(),
+            f32_value.to_bits(),
+            f64_value.to_bits(),
             "the two widths must not share a post-hoc f32 sampler"
         );
         for prim in [Prim::F16, Prim::Bf16] {
-            let value = uniform_sample(prim, low, high, seed, index).unwrap();
-            assert_eq!(value.prim(), prim);
-            assert!((low as f64..high as f64).contains(&value.as_f64_lossy()));
+            let storage = PreparedUniformLike::new(prim, 5, f32_scalar(low), f32_scalar(high))
+                .unwrap()
+                .apply(key)
+                .unwrap();
+            assert_eq!(storage.prim(), prim);
+            assert!((low as f64..high as f64).contains(&storage.scalar_at(index).as_f64_lossy()));
         }
         assert!(matches!(
-            uniform_sample(Prim::Int32, low, high, seed, index),
+            PreparedUniformLike::new(Prim::Int32, 1, f32_scalar(low), f32_scalar(high)),
             Err(NumericKernelError::WrongFamily { .. })
         ));
+    }
+
+    // chelis#2413: the kernels take a key and nothing else about the stream.
+    // The dropout and uniform values under a key are the atoms' values at
+    // that key, recomputed here from the spec text (`spec_unit` above) rather
+    // than from any kernel helper.
+    #[test]
+    fn kernels_under_a_key_reproduce_the_spec_stream() {
+        for seed in [0, 42, -1, i64::MIN, 7] {
+            let root = seed_key(seed);
+            let (left, right) = root.split();
+            let mut keys = vec![root, left, right];
+            keys.extend(root.split_n(2));
+            for key in keys {
+                for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+                    let values = (0..24)
+                        .map(|i| 1.0 + f64::from(i) / 8.0)
+                        .collect::<Vec<_>>();
+                    let input = finalize_tensor("test", prim, RawTensor::Float(values)).unwrap();
+                    let rate = scalar_from_f64("test", prim, 0.375).unwrap();
+                    let output = PreparedDropout::new(&input, rate)
+                        .unwrap()
+                        .apply(key)
+                        .unwrap();
+                    let denominator = float_binop(
+                        FloatBinOp::Sub,
+                        scalar_from_f64("test", prim, 1.0).unwrap(),
+                        rate,
+                    )
+                    .unwrap();
+                    for index in 0..input.len() {
+                        let unit = spec_unit(key.bits(), index as u64);
+                        let unit = if prim == Prim::F64 {
+                            unit
+                        } else {
+                            f64::from(unit as f32)
+                        };
+                        let expected = if unit < 0.375 {
+                            0.0
+                        } else {
+                            float_binop(FloatBinOp::Div, input.scalar_at(index), denominator)
+                                .unwrap()
+                                .as_f64_lossy()
+                        };
+                        assert_eq!(
+                            output.scalar_at(index).as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "dropout {prim:?} key {:#x} index {index}",
+                            key.bits()
+                        );
+                    }
+                    let (low, high) = (-1.5f32, 2.25f32);
+                    let sampled =
+                        PreparedUniformLike::new(prim, 24, f32_scalar(low), f32_scalar(high))
+                            .unwrap()
+                            .apply(key)
+                            .unwrap();
+                    for index in 0..24 {
+                        let unit = spec_unit(key.bits(), index);
+                        let expected = if prim == Prim::F64 {
+                            (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
+                        } else {
+                            scalar_from_f64(
+                                "test",
+                                prim,
+                                f64::from((high - low).mul_add(unit as f32, low)),
+                            )
+                            .unwrap()
+                            .as_f64_lossy()
+                        };
+                        assert_eq!(
+                            sampled.scalar_at(index as usize).as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "uniform {prim:?} key {:#x} index {index}",
+                            key.bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // [05-OP-8]'s bound adjoint, transcribed from the atom: contributions in
+    // row-major order at the arithmetic width, combined level by level in
+    // adjacent pairs with an odd trailing element carried up unchanged, then
+    // narrowed once to `p`.
+    fn spec_bound_adjoint(prim: Prim, cotangent: &[f64], key_bits: u64, high: bool) -> f64 {
+        fn tree<T: Copy + std::ops::Add<Output = T>>(mut level: Vec<T>, zero: T) -> T {
+            if level.is_empty() {
+                return zero;
+            }
+            while level.len() > 1 {
+                level = (0..level.len().div_ceil(2))
+                    .map(|pair| match level.get(2 * pair + 1) {
+                        Some(right) => level[2 * pair] + *right,
+                        None => level[2 * pair],
+                    })
+                    .collect();
+            }
+            level[0]
+        }
+        if prim == Prim::F64 {
+            let leaves = cotangent
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let u = spec_unit(key_bits, i as u64);
+                    g * if high { u } else { 1.0 - u }
+                })
+                .collect();
+            tree(leaves, 0.0)
+        } else {
+            let leaves = cotangent
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let u = spec_unit(key_bits, i as u64) as f32;
+                    (*g as f32) * if high { u } else { 1.0 - u }
+                })
+                .collect();
+            let wide = f64::from(tree(leaves, 0.0f32));
+            scalar_from_f64("test", prim, wide).unwrap().as_f64_lossy()
+        }
+    }
+
+    #[test]
+    fn uniform_bound_adjoint_is_the_05_op_8_pathwise_transcription() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for len in [0_usize, 1, 2, 3, 7, 16, 33] {
+                let values = (0..len)
+                    .map(|i| (i as f64 - 3.0) * 0.625 + 0.1)
+                    .collect::<Vec<_>>();
+                let cotangent =
+                    finalize_tensor("test", prim, RawTensor::Float(values.clone())).unwrap();
+                let stored = (0..len)
+                    .map(|i| cotangent.scalar_at(i).as_f64_lossy())
+                    .collect::<Vec<_>>();
+                for key in [seed_key(42), seed_key(-1).split().0] {
+                    for (bound, high) in [(UniformBound::Low, false), (UniformBound::High, true)] {
+                        let actual = uniform_like_bound_adjoint(&cotangent, key, bound).unwrap();
+                        assert_eq!(actual.prim(), prim);
+                        let expected = spec_bound_adjoint(prim, &stored, key.bits(), high);
+                        assert_eq!(
+                            actual.as_f64_lossy().to_bits(),
+                            expected.to_bits(),
+                            "{prim:?} len {len} {bound:?} key {:#x}",
+                            key.bits()
+                        );
+                    }
+                }
+            }
+        }
+        let integer = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1])).unwrap();
+        assert!(matches!(
+            uniform_like_bound_adjoint(&integer, seed_key(0), UniformBound::Low),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
+    }
+
+    // [05-OP-8]: the bounds are validated before any draw, at the arithmetic
+    // width, with equal bounds admitted; the bounds carry `p` or the checker's
+    // current f32 signature (chelis#1295) and nothing else.
+    #[test]
+    fn uniform_parameters_validate_the_bounds_at_the_arithmetic_width() {
+        let domain = |prim| {
+            Err::<(), _>(NumericKernelError::Trap(NumericTrap::Domain {
+                op: "uniform_like",
+                prim,
+            }))
+        };
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for (low, high) in [
+                (1.0f32, 0.5f32),
+                (f32::NAN, 1.0),
+                (0.0, f32::INFINITY),
+                (f32::NEG_INFINITY, 0.0),
+            ] {
+                assert_eq!(
+                    UniformLikeParameters::new(prim, f32_scalar(low), f32_scalar(high)).map(|_| ()),
+                    domain(prim),
+                    "{prim:?} [{low}, {high})"
+                );
+            }
+            let equal = PreparedUniformLike::new(prim, 3, f32_scalar(0.5), f32_scalar(0.5))
+                .unwrap()
+                .apply(seed_key(42))
+                .unwrap();
+            for index in 0..3 {
+                assert_eq!(equal.scalar_at(index).as_f64_lossy(), 0.5);
+            }
+        }
+        // Finite f32 bounds whose difference overflows f32 but not f64: the
+        // f64 draw computes in f64 and is valid; every narrower `p` computes
+        // in f32 and traps.
+        let (low, high) = (f32_scalar(-3.0e38), f32_scalar(3.0e38));
+        assert!(UniformLikeParameters::new(Prim::F64, low, high).is_ok());
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32] {
+            assert_eq!(
+                UniformLikeParameters::new(prim, low, high).map(|_| ()),
+                domain(prim)
+            );
+        }
+        let f64_bound = scalar_from_f64("test", Prim::F64, 0.5).unwrap();
+        let f16_bound = scalar_from_f64("test", Prim::F16, 0.5).unwrap();
+        assert!(UniformLikeParameters::new(Prim::F64, f64_bound, f64_bound).is_ok());
+        assert!(UniformLikeParameters::new(Prim::F16, f16_bound, f16_bound).is_ok());
+        for (prim, low, high) in [
+            (Prim::F32, f64_bound, f64_bound),
+            (Prim::Bf16, f16_bound, f16_bound),
+            (Prim::F64, f32_scalar(0.5), f64_bound),
+        ] {
+            assert!(
+                matches!(
+                    UniformLikeParameters::new(prim, low, high),
+                    Err(NumericKernelError::DtypeMismatch { .. })
+                ),
+                "{prim:?} {:?} {:?}",
+                low.prim(),
+                high.prim()
+            );
+        }
     }
 
     // ---- chelis#1116: exact insertion from already-finalized scalars ----
@@ -4301,7 +5335,7 @@ mod tests {
             assert_eq!(fin_i(prim, max).unwrap().as_i64_exact(), Some(max));
             assert_eq!(fin_i(prim, min).unwrap().as_i64_exact(), Some(min));
         }
-        // int64 from an exact i64 wide value can never overflow.
+        // i64 from an exact i64 wide value can never overflow.
         assert_eq!(
             fin_i(Prim::Int64, i64::MAX).unwrap().as_i64_exact(),
             Some(i64::MAX)
@@ -4426,7 +5460,7 @@ mod tests {
                 .as_f64_lossy(),
             2048.0
         );
-        // int64 ingress from i64 is total (cannot trap by construction).
+        // i64 ingress from i64 is total (cannot trap by construction).
         assert_eq!(
             scalar_from_i64("ingress", Prim::Int64, 9007199254740993)
                 .unwrap()
@@ -4931,8 +5965,8 @@ mod tests {
     }
 
     #[test]
-    fn global_sum_uses_explicit_accumulator_and_stride4_order() {
-        let int8 = finalize_tensor(
+    fn global_sum_uses_explicit_accumulator_and_canonical_order() {
+        let i8 = finalize_tensor(
             "test",
             Prim::Int8,
             RawTensor::Int(vec![i64::from(i8::MAX), 1, -1]),
@@ -4943,14 +5977,14 @@ mod tests {
                 accumulator: Prim::Int32,
                 result: Prim::Int32,
             },
-            &int8,
+            &i8,
             &one_group(3),
         )
         .unwrap();
         assert_eq!(widened.prim(), Prim::Int32);
         assert_eq!(widened.to_i64_exact_vec(), Some(vec![i64::from(i8::MAX)]));
 
-        let int32 = finalize_tensor(
+        let i32 = finalize_tensor(
             "test",
             Prim::Int32,
             RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
@@ -4962,7 +5996,7 @@ mod tests {
                     accumulator: Prim::Int32,
                     result: Prim::Int32,
                 },
-                &int32,
+                &i32,
                 &one_group(3),
             ),
             Err(NumericKernelError::Trap(NumericTrap::Overflow {
@@ -4970,6 +6004,42 @@ mod tests {
                 prim: Prim::Int32,
             }))
         );
+    }
+
+    #[test]
+    fn global_sum_traps_only_at_canonical_adjacent_pairs() {
+        for prim in [Prim::Int32, Prim::Int64] {
+            let (_, max) = prim.integer_range().unwrap();
+            let op = TensorReduceOp::Sum {
+                accumulator: prim,
+                result: prim,
+            };
+            let trapping = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, 1, 0, 0, -max, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &trapping, &one_group(8)),
+                Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                    op: "sum",
+                    prim
+                }))
+            );
+            let valid = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, -max, 0, 0, 1, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &valid, &one_group(8))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![0])
+            );
+        }
     }
 
     #[test]
@@ -5014,20 +6084,115 @@ mod tests {
     }
 
     #[test]
-    fn value_and_window_extrema_keep_their_distinct_nan_rules() {
-        let input =
-            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![f64::NAN, 1.0])).unwrap();
-        assert!(
-            reduce_tensor_groups(TensorReduceOp::MaxReduce, &input, &one_group(2))
-                .unwrap()
-                .element_f64_lossy(0)
-                .is_nan()
-        );
+    fn value_and_window_extrema_preserve_first_nan_and_equal_value_bits() {
+        let first_nan = f32::from_bits(0xffc1_2345);
+        let later_nan = f32::from_bits(0x7fc5_4321);
+        let input = TensorStorage {
+            buf: Buf::F32(vec![first_nan, 1.0, later_nan]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &input, &one_group(3)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                first_nan.to_bits(),
+                "{} must preserve the first NaN payload and sign",
+                op.name()
+            );
+        }
+
+        let zeros = TensorStorage {
+            buf: Buf::F32(vec![-0.0, 0.0]),
+        };
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            let output = reduce_tensor_groups(op, &zeros, &one_group(2)).unwrap();
+            let StorageView::F32(values) = output.view() else {
+                panic!("f32 extrema must return f32 storage");
+            };
+            assert_eq!(
+                values[0].to_bits(),
+                (-0.0f32).to_bits(),
+                "{} must preserve the first representation among equal values",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn reductions_without_empty_identities_trap_domain() {
+        let float = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![])).unwrap();
+        for op in [
+            TensorReduceOp::MaxReduce,
+            TensorReduceOp::MinReduce,
+            TensorReduceOp::ReduceWindowMean,
+            TensorReduceOp::ReduceWindowMax,
+            TensorReduceOp::ReduceWindowMin,
+        ] {
+            assert_eq!(
+                reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::F32,
+                }))
+            );
+        }
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &float, &[vec![]]),
+                Err(NumericKernelError::Trap(NumericTrap::Domain {
+                    op: op.name(),
+                    prim: Prim::Int64,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn arg_reductions_select_the_lowest_nan_index() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![5.0, f32::from_bits(0xffc1_2345), 9.0, f32::NAN]),
+        };
+        for op in [ArgReduceOp::Argmax, ArgReduceOp::Argmin] {
+            assert_eq!(
+                arg_reduce_tensor_groups(op, &input, &one_group(4))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![1])
+            );
+        }
+    }
+
+    #[test]
+    fn window_sum_and_mean_use_the_canonical_adjacent_pair_tree() {
+        let input = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
         assert_eq!(
-            reduce_tensor_groups(TensorReduceOp::ReduceWindowMax, &input, &one_group(2))
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &input, &one_group(4))
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![1.0]
+            vec![-16_777_213.0]
+        );
+        assert_eq!(
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowMean, &input, &one_group(4))
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![-4_194_303.25]
         );
     }
 
@@ -5063,7 +6228,7 @@ mod tests {
     }
 
     #[test]
-    fn window_grad_kernel_preserves_selection_ties_and_rejects_dtype_mismatch() {
+    fn window_grad_kernel_splits_ties_and_rejects_dtype_mismatch() {
         let input =
             finalize_tensor("test", Prim::F32, RawTensor::Float(vec![2.0, 2.0, 2.0])).unwrap();
         let cotangent =
@@ -5073,7 +6238,7 @@ mod tests {
             reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
                 .unwrap()
                 .to_f64_lossy_vec(),
-            vec![4.0, 8.0, 4.0]
+            vec![2.0, 4.0, 2.0]
         );
 
         let wrong = finalize_tensor("test", Prim::F64, RawTensor::Float(vec![4.0, 4.0])).unwrap();
@@ -5087,6 +6252,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_grad_routes_first_nan_and_balances_overlap_add() {
+        let input = TensorStorage {
+            buf: Buf::F32(vec![
+                f32::from_bits(0xffc1_2345),
+                f32::from_bits(0x7fc5_4321),
+                2.0,
+            ]),
+        };
+        let cotangent =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![3.0, 5.0])).unwrap();
+        let groups = vec![vec![0, 1], vec![1, 2]];
+        assert_eq!(
+            reduce_window_grad_tensor_groups(ReduceWindowGradOp::Max, &input, &cotangent, &groups,)
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![3.0, 5.0, 0.0]
+        );
+
+        let single = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![0.0])).unwrap();
+        let overlap = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![-1.0e-7, 3.0, 16_777_216.0, -33_554_432.0]),
+        )
+        .unwrap();
+        assert_eq!(
+            reduce_window_grad_tensor_groups(
+                ReduceWindowGradOp::Sum,
+                &single,
+                &overlap,
+                &[vec![0], vec![0], vec![0], vec![0]],
+            )
+            .unwrap()
+            .to_f64_lossy_vec(),
+            vec![-16_777_213.0]
+        );
+    }
+
     // ---- trap message shape (section C2; strings freeze at Phase 2) ----
 
     #[test]
@@ -5097,7 +6301,7 @@ mod tests {
                 prim: Prim::Int8
             }
             .to_string(),
-            "numeric trap: overflow in add at int8"
+            "numeric trap: overflow in add at i8"
         );
         assert_eq!(
             NumericTrap::Domain {
@@ -5113,7 +6317,7 @@ mod tests {
                 prim: Prim::Int64
             }
             .to_string(),
-            "numeric trap: division by zero in trunc_div at int64"
+            "numeric trap: division by zero in trunc_div at i64"
         );
     }
 
@@ -5309,7 +6513,7 @@ mod tests {
         // Exact-int source finalizes from the exact integer, same rule.
         let v = cast_raw("cast", RawScalar::Int(2049), Prim::F16).unwrap();
         assert_eq!(v.as_f64_lossy(), 2048.0);
-        // int64 above 2^53 to f64 is the LOSSY-BY-DESIGN float direction
+        // i64 above 2^53 to f64 is the LOSSY-BY-DESIGN float direction
         // ([04-NUM-6]): RNE, never a trap.
         let v = cast_raw("cast", RawScalar::Int(9_007_199_254_740_993), Prim::F64).unwrap();
         assert_eq!(v.as_f64_lossy(), 9_007_199_254_740_992.0);
@@ -5336,9 +6540,9 @@ mod tests {
         // Pre-rework this wrapped two's-complement (300 -> 44). The checked
         // default TRAPS; wrapping is chelis#759's future NAMED form.
         let err = cast_raw("cast", RawScalar::Int(300), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
         let err = cast_raw("cast", RawScalar::Int(-129), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
     }
 
     #[test]
@@ -5348,7 +6552,7 @@ mod tests {
 
         for fractional in [3.5, -3.5] {
             let err = cast_raw("cast", RawScalar::Float(fractional), Prim::Int8).unwrap_err();
-            assert_eq!(err.to_string(), "numeric trap: domain in cast at int8");
+            assert_eq!(err.to_string(), "numeric trap: domain in cast at i8");
         }
     }
 
@@ -5357,17 +6561,17 @@ mod tests {
         // Pre-rework this saturated (300.0 -> 127). The checked default
         // TRAPS; saturation is chelis#759's future NAMED form.
         let err = cast_raw("cast", RawScalar::Float(300.0), Prim::Int8).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int8");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i8");
         let err = cast_raw("cast", RawScalar::Float(1.0e300), Prim::Int64).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: overflow in cast at int64");
+        assert_eq!(err.to_string(), "numeric trap: overflow in cast at i64");
     }
 
     #[test]
     fn cast_raw_non_finite_float_to_int_traps_domain() {
         let err = cast_raw("cast", RawScalar::Float(f64::NAN), Prim::Int32).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at i32");
         let err = cast_raw("cast", RawScalar::Float(f64::INFINITY), Prim::Int32).unwrap_err();
-        assert_eq!(err.to_string(), "numeric trap: domain in cast at int32");
+        assert_eq!(err.to_string(), "numeric trap: domain in cast at i32");
     }
 
     #[test]
@@ -5413,13 +6617,13 @@ mod tests {
         // Identity short-circuit.
         let same = cast_scalar("cast", v, Prim::Int64).unwrap();
         assert_eq!(same.as_i64_exact(), Some(9_007_199_254_740_993));
-        // Exact integer wide: above 2^53 an int64 -> int64-family cast must
+        // Exact integer wide: above 2^53 an i64 -> i64-family cast must
         // not launder through f64 (that laundering is the chelis#684 bug
         // shape this module exists to end).
         let narrowed = cast_scalar("cast", v, Prim::Int32).unwrap_err();
         assert_eq!(
             narrowed.to_string(),
-            "numeric trap: overflow in cast at int32"
+            "numeric trap: overflow in cast at i32"
         );
     }
 
@@ -5472,6 +6676,149 @@ mod tests {
         assert_width!(Prim::Int16, I16, i16::MIN, i16::MAX);
         assert_width!(Prim::Int32, I32, i32::MIN, i32::MAX);
         assert_width!(Prim::Int64, I64, i64::MIN, i64::MAX);
+    }
+
+    #[test]
+    fn direct_subtraction_canonicalizes_float_nan_at_every_storage_width() {
+        fn assert_scalar_bits(actual: ScalarValue, expected: ScalarValue) {
+            match (actual.bits, expected.bits) {
+                (Bits::F16(actual), Bits::F16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::Bf16(actual), Bits::Bf16(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F32(actual), Bits::F32(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                (Bits::F64(actual), Bits::F64(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits())
+                }
+                _ => panic!("test cases must compare one matching float dtype"),
+            }
+        }
+
+        let scalar_cases = [
+            (
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_bits(0xfe55)),
+                },
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_f32(1.0)),
+                },
+                ScalarValue {
+                    bits: Bits::F16(half::f16::from_bits(0x7e00)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_bits(0xffe5)),
+                },
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_f32(1.0)),
+                },
+                ScalarValue {
+                    bits: Bits::Bf16(half::bf16::from_bits(0x7fc0)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::F32(f32::from_bits(0xffc5_4321)),
+                },
+                ScalarValue {
+                    bits: Bits::F32(1.0),
+                },
+                ScalarValue {
+                    bits: Bits::F32(f32::from_bits(0x7fc0_0000)),
+                },
+            ),
+            (
+                ScalarValue {
+                    bits: Bits::F64(f64::from_bits(0xfff8_abcd_1234_5678)),
+                },
+                ScalarValue {
+                    bits: Bits::F64(1.0),
+                },
+                ScalarValue {
+                    bits: Bits::F64(f64::from_bits(0x7ff8_0000_0000_0000)),
+                },
+            ),
+        ];
+        for (lhs, rhs, expected) in scalar_cases {
+            assert_scalar_bits(float_binop(FloatBinOp::Sub, lhs, rhs).unwrap(), expected);
+        }
+
+        let tensor_cases = [
+            (
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_bits(0xfe55)]),
+                },
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_f32(1.0)]),
+                },
+                TensorStorage {
+                    buf: Buf::F16(vec![half::f16::from_bits(0x7e00)]),
+                },
+            ),
+            (
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_bits(0xffe5)]),
+                },
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_f32(1.0)]),
+                },
+                TensorStorage {
+                    buf: Buf::Bf16(vec![half::bf16::from_bits(0x7fc0)]),
+                },
+            ),
+        ];
+        for (lhs, rhs, expected) in tensor_cases {
+            match (
+                float_tensor_binop(FloatBinOp::Sub, &lhs, &rhs).unwrap().buf,
+                expected.buf,
+            ) {
+                (Buf::F16(actual), Buf::F16(expected)) => {
+                    assert_eq!(actual[0].to_bits(), expected[0].to_bits())
+                }
+                (Buf::Bf16(actual), Buf::Bf16(expected)) => {
+                    assert_eq!(actual[0].to_bits(), expected[0].to_bits())
+                }
+                _ => panic!("test cases must compare one matching reduced float dtype"),
+            }
+        }
+        match float_tensor_binop(
+            FloatBinOp::Sub,
+            &TensorStorage {
+                buf: Buf::F32(vec![f32::from_bits(0xffc5_4321)]),
+            },
+            &TensorStorage {
+                buf: Buf::F32(vec![1.0]),
+            },
+        )
+        .unwrap()
+        .buf
+        {
+            Buf::F32(actual) => assert_eq!(actual[0].to_bits(), 0x7fc0_0000),
+            _ => panic!("f32 subtraction must retain f32 storage"),
+        }
+        match float_tensor_binop(
+            FloatBinOp::Sub,
+            &TensorStorage {
+                buf: Buf::F64(vec![f64::from_bits(0xfff8_abcd_1234_5678)]),
+            },
+            &TensorStorage {
+                buf: Buf::F64(vec![1.0]),
+            },
+        )
+        .unwrap()
+        {
+            TensorStorage {
+                buf: Buf::F64(actual),
+            } => {
+                assert_eq!(actual[0].to_bits(), 0x7ff8_0000_0000_0000)
+            }
+            _ => panic!("f64 subtraction must retain f64 storage"),
+        }
     }
 
     #[test]
@@ -6014,5 +7361,103 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod round_float_bound_tests {
+    use super::{Prim, round_float_bound};
+
+    /// The chelis#2316 repro, at the value level. `cast(0.30000001, f16)` is
+    /// `0.300048828125`, and widening that to f32 keeps it — so the chain's
+    /// value is NOT the literal it started from. Both compiled fold sites used
+    /// to return the literal.
+    #[test]
+    fn f16_then_f32_keeps_the_f16_rounding() {
+        let inner = round_float_bound(Prim::F16, 0.30000001).expect("f16 is a float target");
+        assert_eq!(inner, 0.300048828125);
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!((widened as f32).to_bits(), 0x3e99a000);
+        // What the broken fold baked instead: the untouched literal, whose f32
+        // image is 0x3e99999a. That is the exact constant chelis#2316 found in
+        // the emitted `chelis_uniform_sample_f32` call.
+        assert_ne!((widened as f32).to_bits(), 0x3e99999a_u32);
+    }
+
+    /// The high bound from the same repro.
+    #[test]
+    fn f16_then_f32_high_bound_matches_the_declared_value() {
+        let inner = round_float_bound(Prim::F16, 0.90000001).expect("f16 is a float target");
+        let widened = round_float_bound(Prim::F32, inner).expect("f32 is a float target");
+        assert_eq!(widened, 0.89990234375);
+        assert_eq!((widened as f32).to_bits(), 0x3f666000);
+    }
+
+    /// bf16 has fewer mantissa bits than f16, so it rounds further. This is
+    /// why the bf16 program diverged more than the f16 one.
+    #[test]
+    fn bf16_rounds_further_than_f16() {
+        let f16 = round_float_bound(Prim::F16, 0.30000001).expect("float target");
+        let bf16 = round_float_bound(Prim::Bf16, 0.30000001).expect("float target");
+        assert_ne!(f16, bf16);
+        assert!(
+            (bf16 - 0.30000001f64).abs() > (f16 - 0.30000001f64).abs(),
+            "bf16 {bf16} should be further from the source than f16 {f16}",
+        );
+    }
+
+    /// DISPOSITION LOCK: a target that cannot narrow the value returns it
+    /// unchanged, which is why a lone `cast(lit, f32)` bound always agreed
+    /// across lanes even with the broken fold.
+    #[test]
+    fn a_non_narrowing_target_is_the_identity() {
+        let v = 0.30000001192092896_f64; // already exactly f32-representable
+        assert_eq!(round_float_bound(Prim::F32, v), Some(v));
+        assert_eq!(round_float_bound(Prim::F64, v), Some(v));
+    }
+
+    /// Ties-to-even at the target width, per [04-NUM-2] / [04-NUM-14].
+    #[test]
+    fn rounding_is_ties_to_even_not_truncation() {
+        // A value just above an f16 midpoint must round up, not truncate down.
+        let up = round_float_bound(Prim::F16, 0.30004884).expect("float target");
+        assert!(
+            up >= 0.300048828125,
+            "expected round-to-nearest, got truncation: {up}",
+        );
+    }
+
+    /// NEGATIVE PARITY (chelis#776): an integer target is left unresolved so
+    /// the caller goes loud rather than baking a guessed truncation. Both fold
+    /// sites depend on this `None`.
+    #[test]
+    fn integer_and_bool_targets_are_unresolved() {
+        for prim in [
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            assert_eq!(
+                round_float_bound(prim, 2.7),
+                None,
+                "{prim:?} must not resolve as a float bound",
+            );
+        }
+    }
+
+    /// Non-finite values are not bounds the emitter can bake; they must not
+    /// silently become a finite number.
+    #[test]
+    fn non_finite_values_do_not_become_finite() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            if let Some(rounded) = round_float_bound(Prim::F32, v) {
+                assert!(
+                    !rounded.is_finite(),
+                    "non-finite {v} must not round to the finite {rounded}",
+                );
+            }
+        }
     }
 }

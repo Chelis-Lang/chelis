@@ -49,10 +49,17 @@ fn mat_ty(rows: usize, cols: usize, precision: Prim) -> TensorType {
 /// fuses the two into one chain, and that chain panicked.
 fn exp_times_x_dag(precision: Prim) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_ty(4, precision);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let e = dag.add_node(RiscOp::Exp, vec![x], ty.clone(), None);
-    let m = dag.add_node(RiscOp::Mul, vec![e, x], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![x], ty.clone(), None);
+    let m = dag.add_node(decl, RiscOp::Mul, vec![e, x], ty, None);
     dag.add_root(m);
     fuse(&dag)
 }
@@ -139,6 +146,7 @@ fn f64_fused_chain_compiles() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -203,24 +211,37 @@ fn integer_fused_chain_is_a_diagnostic_not_a_panic() {
     // reaches Python as a `PanicException` rather than a diagnostic,
     // which is the failure mode chelis#919 reports.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = vec_ty(4, Prim::Int32);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty.clone(), None);
-    let a = dag.add_node(RiscOp::Add, vec![x, y], ty.clone(), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let a = dag.add_node(decl, RiscOp::Add, vec![x, y], ty.clone(), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], ty, None);
     dag.add_root(n);
     let fused = fuse(&dag);
 
     let err = codegen(&fused, "int32_fused_reject_probe")
         .map(|_| ())
-        .expect_err("an int32 fused chain must be rejected, not emitted");
+        .expect_err("an i32 fused chain must be rejected, not emitted");
     let rendered = err.to_string();
     assert!(
         rendered.starts_with("unsupported:"),
         "the rejection must come through the branded diagnostic channel; got: {rendered}"
     );
     assert!(
-        rendered.contains("int32"),
+        rendered.contains("i32"),
         "the rejection must name the offending dtype; got: {rendered}"
     );
 }
@@ -234,11 +255,19 @@ fn f64_fused_reduce_is_a_diagnostic_not_a_panic() {
     // `sum(exp(x), 0)` at f64 inlines the elementwise node into the
     // reduction, so it must reject rather than panic.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let ty = mat_ty(3, 4, Prim::F64);
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let e = dag.add_node(RiscOp::Exp, vec![x], ty.clone(), None);
-    let n = dag.add_node(RiscOp::Neg, vec![e], ty, None);
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let e = dag.add_node(decl, RiscOp::Exp, vec![x], ty.clone(), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![e], ty, None);
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F64,

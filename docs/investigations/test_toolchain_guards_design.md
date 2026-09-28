@@ -33,34 +33,12 @@ Three failure modes kept recurring in CI:
 
 ### Design
 
-- Two CI `workspace-tests-shard` workers run deterministic, disjoint hash
-  partitions of `cargo nextest run --workspace`; a stable `workspace-tests`
-  aggregate requires both workers to succeed. A `ci` nextest profile
-  (`.config/nextest.toml`) adds a `[profile.ci.junit]` section so each worker
-  writes machine-readable per-test JUnit XML to
-  `target/nextest/ci/junit.xml`.
-- `scripts/test_timing_check.py` parses that JUnit XML
-  (`<testcase classname=... name=... time=...>`, keyed as
-  `binary::test`) and flags tests over budget.
-- Thresholds are config, never hardcoded:
-  - `scripts/test_timing_config.json` holds `tolerance` (a multiplier),
-    `absolute_ceiling` (seconds), and `min_regression_delta` (seconds).
-  - `scripts/test_timing_baseline.json` maps `binary::test` -> seconds.
-- Every ordinary-PR test, whether baselined or new, is reported above the
-  `absolute_ceiling`. Baselined tests that exceed both `tolerance` times their
-  baseline and `min_regression_delta` are reported as relative regressions.
-- The baseline is hand-curated and explicitly regenerated, NOT
-  auto-regenerated on merge. Auto-regen would launder a real
-  regression into the baseline. Regeneration is one documented
-  command: `python3 scripts/test_timing_check.py --update-baseline`.
-- CI merges the two exact, disjoint workspace JUnit shards before one timing
-  check. All threshold findings use `--informational`: repeated unchanged-code
-  hosted samples vary too much to make a single observation a reliable
-  required check, but the report remains visible. Dtype,
-  explicit-generalization, and macOS workers apply the same validation and
-  report to their own JUnit before their required aggregates, so tests outside
-  the Linux workspace selection remain observable. Missing, malformed, empty,
-  or non-finite telemetry still fails the producing or aggregate job.
+- One `ci-fast` worker builds and executes units plus the reviewed integration
+  targets. Its `ci-fast` nextest profile publishes JUnit; `ci-fast-receipts`
+  records the Cargo selection, binary listing, and build/list/run timings.
+  The stable `integration` aggregate requires success. Full workspace
+  execution and phase oracles run nightly; `docs/ci_validation.md` records
+  their current owners.
 
 ### Why these defaults
 
@@ -139,16 +117,16 @@ charset checker was added: that would be a second source of truth for
   developer-runnable gate. It defines the command list once, split by
   CI stage (`lint-and-unit`, `integration`, `runtime-representation`), with
   the union as the full gate.
-  Two `workspace-tests-shard` workers invoke disjoint partitions of the
-  integration test command, and shard 2 invokes the support-only slice
-  exactly once. The `runtime-representation` stage is
+  The independent `ci-fast` stage owns the PR subset and is not added to
+  the full/manual stage union. Nightly `integration-support` workers invoke
+  the frontend and domain support slices; `runtime-representation` remains
   the chelis#893 Phase 0 oracle alone: its release-profile reproducers and
   serial mutation re-scans cost about eleven hosted minutes, so the
   `runtime-representation-phase0-oracle` job runs it on a runner of its own
   rather than doubling a workspace shard. The stable `Workspace Tests
   (Linux)` context aggregates the shards, and `Integration Tests (Linux)`
   aggregates it with the parallel phase oracles. A stage name runs one
-  subset; `--list` prints the canonical full list and `--local` derives
+  subset; `--list` prints the canonical full list and `--validation` derives
   per-crate tests from the diff against `origin/main`.
 - `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
   the system interpreter for gate logic. Unless it is already running in

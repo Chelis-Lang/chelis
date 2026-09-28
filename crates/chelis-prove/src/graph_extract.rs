@@ -6,7 +6,7 @@
 //! [`GoalShape::BoxRange`] form against the frozen seam contract
 //! (`docs/design/phase2_seam_contract.md`), populating the goal's
 //! [`IrHandle`] with the content hash + root index that addresses the
-//! serialized exact-version `WireDag` v6 artifact a consumer resolves.
+//! serialized exact-version `WireDag` v9 artifact a consumer resolves.
 //!
 //! ## Why content addressing, not a Dag handle
 //!
@@ -24,15 +24,12 @@
 //!
 //! ## Finite-float precondition
 //!
-//! The content-address path requires FINITE floats. `serde_json` serializes
-//! a non-finite f64 (NaN / +inf / -inf) as the JSON token `null`, which both
-//! fails a consumer's round-trip parse and collapses the three non-finite
-//! values to one byte sequence (one hash). [`check_finite_floats`] rejects a
-//! DAG carrying any non-finite node-op float at the producer boundary, before
-//! serialize + hash, with [`GraphExtractError::NonFiniteValue`] — never
-//! hashing an artifact a consumer cannot parse. A canonical non-finite
-//! representation (to support content-addressing such DAGs) is a tracked
-//! follow-up requiring a coordinated `WireDag`-JSON-format change with Beacon.
+//! BoxRange's proof boundary requires finite node-op values. The exact wire
+//! codec itself preserves every float bit pattern, including infinities and
+//! NaNs; this proof-support restriction does not constrain wire transport.
+//! [`check_finite_floats`] enforces the existing BoxRange precondition before
+//! hashing. Random parameter domains are validated by the owning WireDag
+//! contract first. See `docs/design/phase2_seam_contract.md`.
 //!
 //! ## What this is NOT
 //!
@@ -64,8 +61,52 @@ use sha2::{Digest, Sha256};
 
 use crate::discharge::{Goal, GoalError, IntervalBox, IrHandle, OutputRange};
 
+/// Retain the selected scalar output's exact dependency closure. Function
+/// definition roots and their placeholder Loads must not enter its input box.
+pub(crate) fn scalar_root_closure(wire: &WireDag, root: u64) -> Result<(WireDag, u64), String> {
+    wire.validate_wire_contract().map_err(|e| e.to_string())?;
+    let mut retained = std::collections::BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if retained.insert(id) {
+            let index = usize::try_from(id).map_err(|_| "node ID exceeds host size")?;
+            let node = wire
+                .nodes
+                .get(index)
+                .ok_or("root dependency outside graph")?;
+            if node.id != id || !node.shape_deps.is_empty() {
+                return Err("scalar closure requires dense IDs and no shape dependencies".into());
+            }
+            pending.extend(node.inputs.iter().copied());
+            // The activation decides whether the node checks; it is part
+            // of the closure like an input.
+            pending.extend(node.activation);
+        }
+    }
+    let mapping: std::collections::BTreeMap<_, _> = retained
+        .iter()
+        .enumerate()
+        .map(|(new, old)| (*old, new as u64))
+        .collect();
+    let mut dag = wire.clone();
+    dag.nodes = retained
+        .iter()
+        .map(|id| {
+            let mut node = wire.nodes[*id as usize].clone();
+            node.id = mapping[id];
+            node.inputs = node.inputs.iter().map(|input| mapping[input]).collect();
+            node.activation = node.activation.map(|activation| mapping[&activation]);
+            node
+        })
+        .collect();
+    let root = mapping[&root];
+    dag.roots = vec![root];
+    dag.validate_wire_contract().map_err(|e| e.to_string())?;
+    Ok((dag, root))
+}
+
 /// A box/range [`Goal`] produced from real source, plus the serialized
-/// exact-version `WireDag` v6 artifact its [`IrHandle`] addresses.
+/// exact-version `WireDag` v9 artifact its [`IrHandle`] addresses.
 ///
 /// The goal's [`IrHandle`] carries the content hash (lowercase-hex sha256)
 /// of [`wire_dag_bytes`](Self::wire_dag_bytes) and the root index its single
@@ -77,7 +118,7 @@ use crate::discharge::{Goal, GoalError, IntervalBox, IrHandle, OutputRange};
 pub struct ExtractedGoal {
     /// The box/range goal, with a populated [`IrHandle`].
     pub goal: Goal,
-    /// The serialized exact-version `WireDag` v6 JSON bytes the handle's hash addresses.
+    /// The serialized exact-version `WireDag` v9 JSON bytes the handle's hash addresses.
     /// A consumer recomputes sha256 over exactly these bytes and compares
     /// for byte-identity before trusting the DAG.
     pub wire_dag_bytes: Vec<u8>,
@@ -119,22 +160,20 @@ pub enum GraphExtractError {
         available: Vec<String>,
     },
 
+    /// A named output does not reference a node of its enclosed graph.
+    #[error("output `{output}` does not reference a node of the owning WireDag")]
+    InvalidOutputReference { output: String },
+
     /// The box/range bounds are ill-formed (an inverted or NaN interval).
     /// Carries the underlying [`GoalError`].
     #[error("ill-formed box/range bounds: {0}")]
     IllFormedGoal(#[from] GoalError),
 
-    /// A node op carries a NON-FINITE float (NaN / +inf / -inf), so the DAG
-    /// cannot be content-addressed: `serde_json` serializes a non-finite f64
-    /// as the JSON token `null`, which (a) does NOT parse back as an f64 (a
-    /// consumer's deserialize fails), and (b) collapses +inf / -inf / NaN to
-    /// ONE byte sequence, so three distinct DAGs would collide on one hash.
-    /// The producer fails CLOSED here (same posture as the schema-version
-    /// check) rather than hashing an artifact a consumer cannot parse. The
-    /// content-address path requires finite floats; see
-    /// `docs/design/phase2_seam_contract.md`.
+    /// A node op carries a nonfinite value outside BoxRange's supported
+    /// finite domain. Exact wire transport can represent that value, but
+    /// this proof producer does not admit it.
     #[error(
-        "node {node} op field `{field}` is a non-finite float (NaN/inf); the content-address path requires finite floats"
+        "node {node} op field `{field}` is a non-finite float (NaN/inf); the BoxRange proof boundary requires finite floats"
     )]
     NonFiniteValue { node: usize, field: &'static str },
 }
@@ -142,69 +181,47 @@ pub enum GraphExtractError {
 /// Reject a [`WireDag`] that carries any non-finite float in a node op,
 /// failing closed BEFORE serialize + hash.
 ///
-/// `serde_json` serializes a non-finite f64 (NaN / +inf / -inf) as the JSON
-/// token `null`. That breaks content addressing two ways: the bytes do not
-/// parse back as a `WireDag` (a consumer's deserialize fails on
-/// `null`-where-f64-expected, AFTER the self-consistent hash already matched,
-/// so it is silent at the producer), and +inf / -inf / NaN all collapse to
-/// the same `null`, so three distinct DAGs would share one hash. `to_vec`
-/// returns `Ok(null)` rather than `Err`, so the serialize `.expect` never
-/// fires — this guard is the only thing that catches it.
-///
-/// The match is EXHAUSTIVE with no wildcard, so a future `WireRiscOp` variant
-/// forces a compile error here rather than silently slipping the guard; the
-/// f64-bearing variants are checked and the f64-free ones are listed
-/// explicitly. The `every_f64_bearing_op_field_is_guarded` test pins the
-/// f64-bearing field set so the list cannot drift unnoticed.
+/// The match is exhaustive so a new operation must be classified here.
+/// Only floating values are inspected numerically; integers remain in their
+/// exact tagged carriers. Serialization later moves the original stored bits.
 fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
     fn reject_if_non_finite(
         node: usize,
         field: &'static str,
-        value: f64,
+        value: chelis_types::ScalarValue,
     ) -> Result<(), GraphExtractError> {
-        if value.is_finite() {
+        if !value.prim().is_float() || value.as_f64_lossy().is_finite() {
             Ok(())
         } else {
             Err(GraphExtractError::NonFiniteValue { node, field })
         }
     }
 
-    for n in &wire_dag.nodes {
-        let id = n.id;
+    for (id, n) in wire_dag.nodes.iter().enumerate() {
         match &n.op {
-            // --- f64-bearing ops: check EVERY f64 field ---
-            WireRiscOp::UniformLike { low, high, .. } => {
-                reject_if_non_finite(id, "low", *low)?;
-                reject_if_non_finite(id, "high", *high)?;
-            }
-            WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
-            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", fill.as_f64_lossy())?,
-            // Wire v4 (chelis#856): the constant payloads are sealed
-            // dtype-tagged values. Prove's real-envelope reading takes
-            // the f64 image (integer payloads are always finite; the
-            // exact-env swap is the chelis#688 Phase 2 work).
-            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", value.as_f64_lossy())?,
+            // Check every numeric payload against the proof support boundary.
+            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
+            WireRiscOp::Const { value } => reject_if_non_finite(id, "value", *value)?,
             WireRiscOp::ConstTensor { data } => {
-                for v in data.to_f64_lossy_vec() {
-                    if !v.is_finite() {
-                        return Err(GraphExtractError::NonFiniteValue {
-                            node: id,
-                            field: "data",
-                        });
-                    }
+                for index in 0..data.len() {
+                    reject_if_non_finite(id, "data", data.scalar_at(index))?;
                 }
             }
 
-            // --- f64-free ops: no float to check. Listed explicitly (no
-            // wildcard) so a new variant breaks the build until someone
-            // decides whether it carries an f64. ---
+            // Operations without embedded numeric values. Keep this match
+            // exhaustive so a new payload cannot bypass the proof boundary.
             WireRiscOp::Add
             | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
-            | WireRiscOp::CmpLt
+            | WireRiscOp::Mod
+            | WireRiscOp::Bitwise { .. }
+            | WireRiscOp::Compare { .. }
+            | WireRiscOp::Logical { .. }
+            | WireRiscOp::Where {}
+            | WireRiscOp::GuardedFail { .. }
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem
             | WireRiscOp::ExtremaAdjoint { .. }
@@ -223,6 +240,15 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Floor
             | WireRiscOp::Ceil
             | WireRiscOp::Round
+            | WireRiscOp::UniformLike {}
+            | WireRiscOp::Dropout {}
+            | WireRiscOp::DropoutReplay {}
+            | WireRiscOp::UniformBoundAdjoint { .. }
+            | WireRiscOp::KeyFromSeed {}
+            | WireRiscOp::Split { .. }
+            | WireRiscOp::FoldIn {}
+            | WireRiscOp::KeySelect {}
+            | WireRiscOp::SplitN { .. }
             | WireRiscOp::Sum { .. }
             | WireRiscOp::Count { .. }
             | WireRiscOp::MaxReduce { .. }
@@ -239,6 +265,9 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Shrink { .. }
             | WireRiscOp::Stride { .. }
             | WireRiscOp::Shape { .. }
+            | WireRiscOp::ExtentWitness { .. }
+            | WireRiscOp::CheckedReshapeExtent { .. }
+            | WireRiscOp::CheckedUnitAxis { .. }
             | WireRiscOp::Load { .. }
             | WireRiscOp::Store { .. }
             | WireRiscOp::Copy
@@ -311,7 +340,7 @@ pub fn name_sorted_input_box(mut dims: Vec<(String, f64, f64)>) -> IntervalBox {
 /// each addressed by its own root index.
 pub fn box_range_goal_from_wire_dag(
     wire_dag: &WireDag,
-    named_roots: &std::collections::BTreeMap<String, usize>,
+    named_roots: &std::collections::BTreeMap<String, u64>,
     input_box: IntervalBox,
     output_range: OutputRange,
 ) -> Result<ExtractedGoal, GraphExtractError> {
@@ -325,17 +354,26 @@ pub fn box_range_goal_from_wire_dag(
         .validate_wire_contract()
         .map_err(GraphExtractError::WireContractRejected)?;
 
-    // Fail closed on a non-finite float before hashing: serde_json emits a
-    // non-finite f64 as `null`, which would produce a self-consistent hash
-    // over bytes a consumer cannot parse (and would collapse +inf/-inf/NaN to
-    // one hash). Same boundary posture as the schema-version check.
+    for (name, reference) in named_roots {
+        if usize::try_from(*reference)
+            .ok()
+            .and_then(|index| wire_dag.nodes.get(index))
+            .is_none()
+        {
+            return Err(GraphExtractError::InvalidOutputReference {
+                output: name.clone(),
+            });
+        }
+    }
+
+    // Preserve BoxRange's finite-only support policy after wire admission.
     check_finite_floats(wire_dag)?;
 
     // Resolve the goal's single output to a root index by NAME (Beacon's
     // Load seeding is name-addressed; a positional index would force a
     // binding-integrity remap downstream).
     let root_index = match named_roots.get(&output_range.output) {
-        Some(&idx) => idx as u64,
+        Some(&idx) => idx,
         None => {
             let mut available: Vec<String> = named_roots.keys().cloned().collect();
             available.sort();
@@ -362,7 +400,7 @@ pub fn box_range_goal_from_wire_dag(
     })
 }
 
-/// Lower `source` to an exact-version `WireDag` v6 via the public
+/// Lower `source` to an exact-version `WireDag` v9 via the public
 /// [`chelis_compiler_api::compiler::lower`] API, mapping a lowering failure to
 /// [`GraphExtractError::LowerFailed`]. When `entry` is `Some`, lowering is
 /// scoped to the defs reachable from that named entry (the WI-3
@@ -390,7 +428,7 @@ fn lower_source(
 /// Build a single box/range [`Goal`] from Chelis source, addressing the
 /// goal's ONE scalar output by name.
 ///
-/// Lowers the WHOLE `source` to an exact-version `WireDag` v6, then delegates to
+/// Lowers the WHOLE `source` to an exact-version `WireDag` v9, then delegates to
 /// [`box_range_goal_from_wire_dag`]. The `output_range.output` name must be a
 /// named root of the lowered program. Use
 /// [`box_range_goal_from_source_entry`] to extract one entry from a module
@@ -519,7 +557,41 @@ const _: () = {
     // Moved to `7` for chelis#1277 Slice A: Expand's display-string size
     // became the existing typed WireRtDim carrier, which gained InputAxis.
     // Both remain in the f64-free operation group above.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 7);
+    // v8 transports tagged literal witness requirements. They are discrete
+    // shape checks outside the float-envelope extraction above.
+    // Version 9 moves all numeric operation payloads through the exact
+    // stored-bit codec and admits fixed-width references and dimensions.
+    // Version 10 adds discrete checked-extent carriers, outside this
+    // float-envelope extraction and classified explicitly above.
+    // Version 11 (chelis#1374/#1376) gives `ExtentWitness` named claims: one
+    // binder string and one boolean role per requirement edge, plus the edges
+    // themselves. Every added field is discrete and the edges name other
+    // witnesses, so the box/range float-bound extraction contract is
+    // unchanged; the version moves because the witness payload shape did.
+    // Version 12 adds a discrete result-claim site to ExtentWitness. Witnesses
+    // remain outside float-envelope extraction, and its dependency edges are
+    // refused by the existing shape-dependency boundary above.
+    // Version 13 adds a literal-result witness role. Version 14 adds the
+    // discrete authored local-ascription identity and binding provenance.
+    // Version 15 adds direct comparison, logical, and where identities with
+    // no embedded numeric payload. All remain obligations outside this
+    // float-envelope extraction boundary.
+    // Version 16 (chelis#1464) adds the [05-OP-68] guarded abort. Its payload
+    // is a compile-time message and a boolean side, both discrete, so it adds
+    // nothing to the float-envelope extraction. It is classified with the
+    // no-numeric-payload group above rather than given a transformer: an
+    // abort is a control effect, and relaxing it to its fallback's envelope
+    // would drop the trap the identity exists to preserve.
+    // Version 17 (chelis#2413) moves random controls and keys into operands.
+    // The random operations carry no numeric payload, and their key inputs
+    // are the structural `key` precision; they stay outside float-envelope
+    // extraction in the no-numeric-payload group above.
+    // Version 18 (chelis#2413) adds the explicit key operations. They produce
+    // keys, not float values; `SplitN`'s count is the tagged `WireRtDim` an
+    // `Expand` size is, so they join the same group.
+    // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
+    // it adds no operation.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 20);
 };
 
 #[cfg(test)]

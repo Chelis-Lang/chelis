@@ -44,12 +44,12 @@ fn reef_toml() -> String {
 const DROPOUT: &str = "module Demo.Dropout\n\
      export (Mode, Train, Eval, use)\n\
      type Mode = | Train | Eval\n\
-     def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n";
+     def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n";
 
 const SD: &str = "module Demo.Sd\n\
      export (Mode, Train, Eval, use)\n\
      type Mode = | Train | Eval\n\
-     def use(m: Mode) -> int32 = match m with { | Train => 1 | Eval => 0 }\n";
+     def use(m: Mode) -> i32 = match m with { | Train => 1 | Eval => 0 }\n";
 
 /// Run `chelis check <dir>` with the style gate disabled (the fixtures
 /// synthesize ad-hoc Surf to exercise resolution, not formatting) and return
@@ -89,14 +89,14 @@ fn qualified_constructor_references_disambiguate_same_named_modes() {
         "module Demo.Combo\n\
          import Demo.Dropout\n\
          import Demo.Sd\n\
-         def go() -> int32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
+         def go() -> i32 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified references must let both Modes coexist: {combo}"
     );
     assert!(
@@ -124,7 +124,7 @@ fn unqualified_import_of_both_modes_is_still_ambiguous() {
         "module Demo.Combo\n\
          import Demo.Dropout (Mode, Train, Eval, use)\n\
          import Demo.Sd (Mode, Train, Eval, use)\n\
-         def go() -> int32 = add(use(Train), use(Eval))\n",
+         def go() -> i32 = add(use(Train), use(Eval))\n",
     );
 
     let json = check_package(root);
@@ -153,7 +153,7 @@ fn qualified_reference_to_unexported_name_is_rejected() {
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
          import Demo.Dropout\n\
-         def go() -> int32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
+         def go() -> i32 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
     );
 
     let json = check_package(root);
@@ -179,7 +179,7 @@ fn qualified_pattern_to_unexported_name_is_rejected() {
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
          import Demo.Dropout\n\
-         def go() -> int32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Missing => 0 }\n",
+         def go() -> i32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Missing => 0 }\n",
     );
 
     let json = check_package(root);
@@ -208,15 +208,15 @@ fn qualified_constructor_patterns_match_per_module() {
         "module Demo.Combo\n\
          import Demo.Dropout\n\
          import Demo.Sd\n\
-         def classify_dropout() -> int32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
-         def classify_sd() -> int32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
+         def classify_dropout() -> i32 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
+         def classify_sd() -> i32 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified constructor patterns must type-check per module: {combo}"
     );
     assert!(
@@ -244,14 +244,14 @@ fn qualified_type_annotation_resolves_per_module() {
         "module Demo.Combo\n\
          import Demo.Dropout\n\
          import Demo.Sd\n\
-         def relay(m: Demo.Dropout.Mode) -> int32 = Demo.Dropout.use(m)\n",
+         def relay(m: Demo.Dropout.Mode) -> i32 = Demo.Dropout.use(m)\n",
     );
 
     let json = check_package(root);
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified type annotation must resolve and type-check: {combo}"
     );
     assert!(
@@ -279,7 +279,7 @@ fn qualified_type_annotation_distinguishes_modules() {
         "module Demo.Combo\n\
          import Demo.Dropout\n\
          import Demo.Sd\n\
-         def bad(m: Demo.Dropout.Mode) -> int32 = Demo.Sd.use(m)\n",
+         def bad(m: Demo.Dropout.Mode) -> i32 = Demo.Sd.use(m)\n",
     );
 
     let json = check_package(root);
@@ -313,7 +313,7 @@ fn qualified_type_to_unexported_name_is_rejected() {
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
          import Demo.Dropout\n\
-         def relay(m: Demo.Dropout.Nope) -> int32 = 0\n",
+         def relay(m: Demo.Dropout.Nope) -> i32 = 0\n",
     );
 
     let json = check_package(root);

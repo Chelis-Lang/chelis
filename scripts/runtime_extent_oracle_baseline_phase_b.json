@@ -1,324 +1,2208 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "3bdd2484f1fa873377562c2d79699e1849b83310f04ab812103f5ce9e05931cd",
+  "corpus_sha256": "e3b2963f23bd954ad00c4a56e61654b26bb14d2d7635de26d0e1a03a703d3226",
   "rows": [
     {
+      "id": "claim.combinator_result.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
+    {
+      "id": "claim.combinator_result.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.a_combinator_result_is_produced_by_its_combinator"
+    },
+    {
+      "id": "claim.literal.identity_root.c",
       "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.identity_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.kernel_entry",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.nameless_activation.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.nameless_activation.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.nested_and_unused.eval_c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_claim_transport_survives_nested_and_unused_calls"
+    },
+    {
+      "id": "claim.literal.same_shape_producer.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.literal.same_shape_producer.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.literal.unwitnessed_pass_through.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.unwitnessed_pass_through.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.activation_identity",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.each_inlined_activation_gets_a_distinct_one_owner_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_local_ascription_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.agreeing_literal_result.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly"
+    },
+    {
+      "id": "claim.local_ascription.agreeing_literal_result.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_literal_result_and_local_claim_execute_exactly"
+    },
+    {
+      "id": "claim.local_ascription.alias_liveness",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.aliasing_and_dead_value_elimination_retain_the_initializer_obligation"
+    },
+    {
+      "id": "claim.local_ascription.axis_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order"
+    },
+    {
+      "id": "claim.local_ascription.axis_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.multiple_local_axis_claims_fail_in_authored_axis_order"
+    },
+    {
+      "id": "claim.local_ascription.cache_composition",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "api_issue_2110_local_ascription_cache.stdlib_and_dependency_cache_roundtrips_preserve_composed_local_obligations"
+    },
+    {
+      "id": "claim.local_ascription.checked_rewrites",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.checker_owned_ascription_survives_clone_serialization_and_checker_rewrites"
+    },
+    {
+      "id": "claim.local_ascription.checker_transport",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.runtime_dependent_local_ascription_retains_exact_authored_claim"
+    },
+    {
+      "id": "claim.local_ascription.composed_identity_collision",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "api_issue_2110_local_ascription_cache.composed_sources_with_equal_local_names_and_offsets_lower_their_own_identities"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_selected.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_selected.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_runtime_branch_enforces_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_untaken.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_helper_untaken.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_runtime_branch_skips_an_inlined_helpers_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_selected.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.a_selected_runtime_branch_emits_its_local_ascription_guard_on_c"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_selected.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.selected_runtime_branch_executes_its_local_ascription_guard"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_untaken.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.an_untaken_runtime_branch_does_not_emit_its_local_ascription_guard_on_c"
+    },
+    {
+      "id": "claim.local_ascription.control_if.runtime_untaken.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.untaken_runtime_branch_does_not_execute_its_local_ascription_guard"
+    },
+    {
+      "id": "claim.local_ascription.control_if.selected.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.selected.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_branch_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.untaken.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_if.untaken.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_branch_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_match.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_selected_match_arm_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.control_match.checker",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.authored_ascriptions_inside_match_arms_reach_the_checked_program"
+    },
+    {
+      "id": "claim.local_ascription.control_match.selected.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.selected.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_selected_static_match_arm_enforces_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.untaken.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.control_match.untaken.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_untaken_static_match_arm_creates_no_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.dead.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps"
+    },
+    {
+      "id": "claim.local_ascription.dead.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_value_dead_except_for_the_obligation_still_traps"
+    },
+    {
+      "id": "claim.local_ascription.deep.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_agreeing_ascription_checks_and_executes_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.origin",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "types_issue_2110_local_ascription.hand_authored_deep_type_metadata_is_an_explicit_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.deep.runtime.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.runtime.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_runtime_ascription_checks_then_traps_on_eval_and_c"
+    },
+    {
+      "id": "claim.local_ascription.deep.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_2110_local_ascription.hand_authored_deep_static_mismatch_rejects_check_eval_and_c_build"
+    },
+    {
+      "id": "claim.local_ascription.direct.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_runtime_disagreement_traps_at_the_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_grad_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_grad.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_grad_retains_the_forward_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_direct_top_level_vmap_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.direct_vmap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.direct_top_level_vmap_retains_the_shifted_local_ascription_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.fusion",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.fusion_preserves_the_exact_local_site_on_the_rebuilt_initializer"
+    },
+    {
+      "id": "claim.local_ascription.grad_pruning",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.grad_pruning_preserves_a_dead_except_for_trap_local_site"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.agreeing_host_effects_execute_in_source_order_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.trap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not"
+    },
+    {
+      "id": "claim.local_ascription.host_effect_order.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_effect_before_the_local_guard_runs_and_one_after_it_does_not"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_host_lane_initializer_alias_executes_once_in_source_order"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.shadowing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.shadowing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_cross_let_alias_preserves_nested_shadowing_on_the_c_lane"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.trap.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner"
+    },
+    {
+      "id": "claim.local_ascription.host_initializer_alias.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_host_lane_initializer_alias_keeps_pad_as_the_guard_owner"
+    },
+    {
+      "id": "claim.local_ascription.host_kernel",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.host_evaluation_kernel_carries_the_same_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.host_partition",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.staged_host_partition_retains_the_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_staged_host_partition_traps_at_its_reshape_initializer_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.host_partition.nondata",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_staged_partition.host::staged::tests::local_ascription_claims_remain_nondata_tokens_across_host_source_cuts"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_runtime_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_metadata.structure",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.inferred_metadata_does_not_create_a_local_ascription_site"
+    },
+    {
+      "id": "claim.local_ascription.inferred_result.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.inferred_result.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inferred_result_claim_does_not_replace_the_local_claim"
+    },
+    {
+      "id": "claim.local_ascription.initializer_alias.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation"
+    },
+    {
+      "id": "claim.local_ascription.initializer_alias.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_initializer_alias_keeps_the_local_claim_on_the_producing_operation"
+    },
+    {
+      "id": "claim.local_ascription.inlined.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.inlined.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_inlined_callee_retains_its_local_ascription_obligation"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_agreeing_invoked_local_closure_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_invoked_local_closure_prepares_its_own_local_ascription"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.uninvoked.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation"
+    },
+    {
+      "id": "claim.local_ascription.local_closure.uninvoked.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.an_uninvoked_disagreeing_local_closure_creates_no_outer_obligation"
+    },
+    {
+      "id": "claim.local_ascription.lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.lowering_matches_the_authored_binding_and_attaches_one_exact_site_to_its_initializer"
+    },
+    {
+      "id": "claim.local_ascription.named.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent"
+    },
+    {
+      "id": "claim.local_ascription.named.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_named_local_claim_uses_its_declaring_runtime_extent"
+    },
+    {
+      "id": "claim.local_ascription.native_malformed",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_issue_2110_local_ascription.malformed_local_claim_roles_are_rejected_by_the_native_verifier"
+    },
+    {
+      "id": "claim.local_ascription.ownership_lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.ownership_lowering_keeps_the_claim_live_through_its_initializer_owner"
+    },
+    {
+      "id": "claim.local_ascription.provenance",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "surf_issue_2110_local_ascription_provenance.explicit_local_tensor_ascription_is_distinct_from_inferred_type_metadata"
+    },
+    {
+      "id": "claim.local_ascription.rebuilds",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.rebuild_cse_dce_and_specialization_preserve_the_exact_site"
+    },
+    {
+      "id": "claim.local_ascription.return_alias.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer"
+    },
+    {
+      "id": "claim.local_ascription.return_alias.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_return_alias_keeps_the_local_claim_on_the_initializer"
+    },
+    {
+      "id": "claim.local_ascription.same_shape_consumer.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim"
+    },
+    {
+      "id": "claim.local_ascription.same_shape_consumer.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_later_same_shape_consumer_does_not_take_the_initializer_claim"
+    },
+    {
+      "id": "claim.local_ascription.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_static_local_disagreement_is_a_checker_error_on_every_entry_lane"
+    },
+    {
+      "id": "claim.local_ascription.vmap",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_2110_local_ascription.vmap_shifts_the_local_claim_and_initializer_axis_together"
+    },
+    {
+      "id": "claim.local_ascription.wildcard.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation"
+    },
+    {
+      "id": "claim.local_ascription.wildcard.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2110_local_ascription.a_wildcard_local_ascription_creates_no_extent_obligation"
+    },
+    {
+      "id": "claim.local_ascription.wire_live_lowering",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "wire_issue_2110_local_ascription_projection.compiler::tests::native_wire_projection_preserves_live_local_ascription_claims"
+    },
+    {
+      "id": "claim.local_ascription.wire_roundtrip",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "wire_issue_2110_local_ascription.local_ascription_site_roundtrips_exact_identity_and_rejects_missing_or_unknown_fields"
+    },
+    {
+      "id": "claim.named.host_result.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.named.host_result.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_2608_result_claims.declared_result_claims_are_checked_on_both_lanes"
+    },
+    {
+      "id": "claim.named.nested_fresh_result.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder"
+    },
+    {
+      "id": "claim.named.nested_fresh_result.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder"
+    },
+    {
+      "id": "claim.named.resolved.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.named.resolved.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.named.same_shape_producer.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_by_its_returned_same_shape_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer"
+    },
+    {
+      "id": "claim.named.same_shape_producer.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_same_shape_claim_is_guarded_by_its_returned_producer"
+    },
+    {
+      "id": "claim.restamped_axis.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation"
+    },
+    {
+      "id": "claim.restamped_axis.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_2512_a_restamped_axis_is_guarded_by_the_restamping_operation"
+    },
+    {
+      "id": "claim.same_shape.agreeing.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly"
+    },
+    {
+      "id": "claim.same_shape.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.an_agreeing_same_shape_result_claim_executes_exactly"
+    },
+    {
+      "id": "claim.same_shape.distinct_paths.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution"
+    },
+    {
+      "id": "claim.same_shape.distinct_paths.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.distinct_candidate_paths_do_not_create_source_order_attribution"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_fusion_and_dce"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.interior.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.an_interior_named_result_claim_splits_the_fusion_chain"
+    },
+    {
+      "id": "claim.same_shape.fusion.named.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.named_result_claim_traps_after_fusion_and_dce"
+    },
+    {
+      "id": "claim.same_shape.no_origin.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.no_origin.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.no_claim_capable_operand_origin_does_not_drop_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_disagreement.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_disagreement.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.runtime_operand_disagreement_precedes_the_result_claim"
+    },
+    {
+      "id": "claim.same_shape.operand_one.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add"
+    },
+    {
+      "id": "claim.same_shape.operand_one.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.the_operand_one_witness_is_guarded_by_add"
+    },
+    {
+      "id": "claim.same_shape.rank_zero.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.rank_zero_inputs_are_excluded_from_same_shape_result_claim_observation"
+    },
+    {
+      "id": "claim.same_shape.repeated_path.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim"
+    },
+    {
+      "id": "claim.same_shape.repeated_path.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.repeated_paths_to_one_candidate_produce_one_add_claim"
+    },
+    {
+      "id": "claim.same_shape.reversed.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.reversed.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_issue_1948_same_shape.reversing_operands_does_not_rename_adds_result_claim"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.literal.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.blas_interior_literal_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.named.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.blas_interior_named_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.blas.unclaimed.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.unclaimed_blas_region_still_specializes_and_executes"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.literal.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.dense_gather_interior_literal_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.named.trap.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.dense_gather_interior_named_claim_blocks_replacement_and_traps_after_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.dense_gather.unclaimed.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.unclaimed_dense_gather_region_still_specializes_and_executes"
+    },
+    {
+      "id": "claim.same_shape.specialization.named.agreeing.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.agreeing_named_result_claim_survives_specialization_and_dce"
+    },
+    {
+      "id": "claim.same_shape.specialization.named.trap.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.named_result_claim_traps_after_specialization_and_dce"
+    },
+    {
+      "id": "claim.same_shape.static_refutation",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_issue_1948_same_shape.a_statically_refuted_same_shape_result_is_a_dimension_mismatch"
+    },
+    {
+      "id": "claim.same_shape.structure.dedup",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_issue_1948_same_shape.identical_members_deduplicate_but_distinct_paths_remain"
+    },
+    {
+      "id": "claim.same_shape.structure.malformed",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_issue_1948_same_shape.malformed_same_shape_relations_are_verifier_errors"
+    },
+    {
       "id": "class.load_load.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.an_all_interface_class_traps_at_entry_when_its_witnesses_disagree"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.load_load.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.load_load_named_class_guards_every_non_canonical_member_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.load_op_output.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.a_local_class_guards_at_its_operation_and_renders_the_numeric_trap"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.load_op_output.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.local_members.all_guarded.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.every_local_member_of_one_class_is_guarded_at_its_operation_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.no_movement_consumer.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.no_movement_consumer.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_class_with_no_movement_bound_consumer_still_guards_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.op_output_op_output.c",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.op_output_op_output.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.shared_member_node.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.shared_member_node.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_classes_sharing_one_node_keep_separate_guards_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.splice_f_of_n_n.c",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "class.splice_f_of_n_n.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval"
     },
     {
+      "id": "concat.literal_claim.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "concat.literal_claim.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "dtype.late_precision.authored_contract",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_declared_operation_bounds.insufficient_authored_contracts_are_rejected_without_a_call_site"
+    },
+    {
+      "id": "dtype.late_precision.binds_one_application_later",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_precision_that_binds_one_application_later_is_decided_on_binding"
+    },
+    {
+      "id": "dtype.late_precision.declared_bound",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_bounded_precision_binder_is_decided_by_its_family_at_once"
+    },
+    {
+      "id": "dtype.late_precision.family_routes",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation"
+    },
+    {
+      "id": "dtype.late_precision.indirect_and_transitive",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_declared_operation_bounds.invalid_function_value_chain_lambda_and_field_calls_stop_before_execution"
+    },
+    {
+      "id": "dtype.late_precision.instantiation",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation"
+    },
+    {
+      "id": "entry.beta.actual.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry"
+    },
+    {
+      "id": "entry.beta.actual.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_run_failing_actual_before_entry"
+    },
+    {
+      "id": "entry.beta.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals"
+    },
+    {
+      "id": "entry.beta.literal.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_literal_entry_and_eager_actuals"
+    },
+    {
+      "id": "entry.beta.order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order"
+    },
+    {
+      "id": "entry.beta.order.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_preserve_signature_order"
+    },
+    {
+      "id": "entry.beta.scopes.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent"
+    },
+    {
+      "id": "entry.beta.scopes.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.beta_reduced_callbacks_keep_outer_and_inner_claims_independent"
+    },
+    {
+      "id": "entry.higher_order.invocation.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim"
+    },
+    {
+      "id": "entry.higher_order.invocation.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.higher_order_invocation_keeps_authored_entry_claim"
+    },
+    {
+      "id": "entry.host_helper.signature_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.mixed_helpers_fail_in_signature_order"
+    },
+    {
+      "id": "entry.host_helper.signature_order.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.mixed_helpers_fail_in_signature_order"
+    },
+    {
+      "id": "entry.host_helper.unused_witness.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses"
+    },
+    {
+      "id": "entry.host_helper.unused_witness.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.mixed_helpers_keep_unused_signature_witnesses"
+    },
+    {
+      "id": "entry.host_tuple.repeated_binder.c",
       "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_c"
+    },
+    {
+      "id": "entry.host_tuple.repeated_binder.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_split_kernel_tuple_root_guards_its_repeated_binder_on_eval"
+    },
+    {
+      "id": "entry.indirect.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_literal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.repeated_binder.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals"
+    },
+    {
+      "id": "entry.indirect.repeated_binder.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_keeps_formal_repeated_binder_and_eager_actuals"
+    },
+    {
+      "id": "entry.indirect.transform.direct.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.direct.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.local.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transform.local.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.local_indirect_grad_transform_keeps_formal_entry_boundary"
+    },
+    {
+      "id": "entry.indirect.transport.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization"
+    },
+    {
+      "id": "entry.indirect.transport.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.indirect_callable_contract_survives_alias_local_and_wrapper_specialization"
+    },
+    {
+      "id": "entry.inline_callback.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation"
+    },
+    {
+      "id": "entry.inline_callback.literal.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_signature_entry.inline_callback_entry_precedes_body_effects_on_every_invocation"
+    },
+    {
+      "id": "entry.kernel.repeated_binder.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes"
+    },
+    {
+      "id": "entry.kernel.repeated_binder.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_one_kernel_root_keeps_its_repeated_binder_guard_on_both_lanes"
+    },
+    {
+      "id": "entry.merged_scopes.declaration.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_1788_two_scopes_in_one_function_share_one_declaration"
+    },
+    {
       "id": "expand.arith_size.named_claim.c",
-      "phase_b": "lane_divergent",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c"
     },
     {
-      "baseline": "lane_divergent",
       "id": "expand.arith_size.named_claim.eval",
-      "phase_b": "lane_divergent",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.foreign_claim.same_tensor_set_axis.c",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_c"
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.foreign_claim.same_tensor_set_axis.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval"
     },
     {
-      "baseline": "ice",
       "id": "expand.kept_axis.op_declared_source.c",
-      "phase_b": "ice",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_665_expand_over_stride_builds_and_runs"
     },
     {
-      "baseline": "ice",
       "id": "expand.kept_axis.op_declared_source.eval",
-      "phase_b": "ice",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval"
     },
     {
-      "baseline": "lane_divergent",
       "id": "expand.literal_claim.cross_tensor_read.c",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.issue_1374_cross_tensor_read_traps_on_c"
-    },
-    {
       "baseline": "lane_divergent",
-      "id": "expand.literal_claim.cross_tensor_read.eval",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval"
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c"
     },
     {
-      "baseline": "nonconforming_rejection",
+      "id": "expand.literal_claim.cross_tensor_read.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval"
+    },
+    {
       "id": "expand.literal_claim.exported_kernel.c",
+      "baseline": "nonconforming_rejection",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.a_literal_claim_over_a_runtime_read_traps_at_entry_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.literal_claim.exported_kernel.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
-      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval"
+      "receipt": "cli_slice_b.a_literal_claim_over_a_runtime_read_traps_at_producer_on_eval"
     },
     {
-      "baseline": "lane_divergent",
       "id": "expand.literal_claim.inlined_root.c",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.issue_1377_literal_claim_traps_at_the_inlined_root_on_c"
-    },
-    {
       "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_result_claim_contract"
+    },
+    {
       "id": "expand.literal_claim.inlined_root.eval",
-      "phase_b": "lane_divergent",
-      "receipt": "cli_slice_b.a_literal_claim_survives_root_inlining_with_its_guard_on_eval"
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "literal_claim.literal_result_claim_contract"
     },
     {
-      "baseline": "silent_unguarded",
+      "id": "expand.named_bystander.axis_zero.c",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too"
+    },
+    {
+      "id": "expand.named_bystander.consumer.c",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_c"
+    },
+    {
+      "id": "expand.named_bystander.no_consumer.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes"
+    },
+    {
+      "id": "expand.named_bystander.no_consumer.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes"
+    },
+    {
       "id": "expand.named_claim.cross_tensor_read.c",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c"
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.named_claim.cross_tensor_read.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval"
     },
     {
-      "baseline": "ice",
       "id": "expand.op_declared_source.hip_prologue",
+      "baseline": "ice",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_op_declared_witness_reaches_the_hip_prologue_without_panicking"
     },
     {
-      "baseline": "nonconforming_rejection",
       "id": "expand.piped_shape_read.lint_fix",
-      "phase_b": "nonconforming_rejection",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_597_positional_same_rank_replacement_executes_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement.non_unit_source_static",
+      "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "cli_slice_b.a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement.non_unit_source_traps.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "exec_c.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement.non_unit_source_traps.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
+      "id": "expand.positional.replacement.shape_size.eval_c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_broadcast.singleton_broadcast_contract"
+    },
+    {
       "id": "expand.positional.replacement_zero.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.positional.replacement_zero.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_zero_positional_replacement_declares_an_empty_axis_on_eval"
     },
     {
-      "baseline": "nonconforming_rejection",
       "id": "expand.record_projection.size",
-      "phase_b": "nonconforming_rejection",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_record_projection_is_an_admissible_expand_size"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.shape_derived.declared_result_survives.c",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "expand.shape_derived.declared_result_survives.eval",
-      "phase_b": "silent_unguarded",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
     },
     {
+      "id": "expand.sourceless_size.pipe_position",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
+    },
+    {
+      "id": "grad.independent_calls.agree.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.agree.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_claims_agree_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.computed_claim.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_computed_claims_keep_producer_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.independent_calls.entry_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.independent_grad_entry_failures_are_ordered_on_eval_and_c"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_nonzero.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_nonzero.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_zero.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.agree_zero.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted_reordered.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.mapped.entry_witness.refuted_reordered.eval",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1932_mapped_grad_entry_witness_matrix_executes_exactly_on_both_lanes"
+    },
+    {
+      "id": "grad.wrt_aggregate.multi.dead_forward.c",
       "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.multi.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_aggregate.single.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_aggregate_typed_wrt_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.multi.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.multi.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_prim_scalar.single.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_prim_scalar_wrt_is_still_silent_on_eval_and_refused_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.multi.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_tensor.multi.dead_forward.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_multi_target_grad_over_the_same_claim_is_still_lane_divergent"
+    },
+    {
+      "id": "grad.wrt_tensor.single.dead_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.single.dead_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_over_a_disagreeing_named_claim_traps_on_eval"
+    },
+    {
+      "id": "grad.wrt_tensor.single.live_forward.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_c"
+    },
+    {
+      "id": "grad.wrt_tensor.single.live_forward.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.grad_keeps_the_entry_carrier_when_the_backward_reads_the_forward_on_eval"
+    },
+    {
+      "id": "guard.local.declaration_order.eval_c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.local_reshape_guards_follow_declaration_order"
+    },
+    {
+      "id": "guard.local.numeric_carriers.eval_c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.numeric_local_extent_claims_execute_exactly"
+    },
+    {
       "id": "guard_order.effect_after.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.effect_after.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.effect_before.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.effect_before.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_effect_before_the_guard_runs_when_the_guard_traps_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.trap_after.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_after_a_mismatch_loses"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.trap_after.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_later_trap_is_preempted_by_the_extent_guard_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.trap_before.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.c_independent_trap_before_a_mismatch_wins"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "guard_order.trap_before.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_earlier_trap_preempts_the_extent_guard_on_eval"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "ir.axis_source.cardinality",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission"
     },
     {
+      "id": "pad.identity_axis.literal_claim.inlined_root.c",
+      "baseline": "ice",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.identity_axis.literal_claim.inlined_root.eval",
       "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.inlined_root.c",
+      "baseline": "lane_divergent",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.inlined_root.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.runtime_bound_claim.after_and_named.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard"
+    },
+    {
+      "id": "pad.runtime_bound_claim.after_and_named.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard"
+    },
+    {
+      "id": "pad.runtime_bound_claim.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form"
+    },
+    {
+      "id": "pad.runtime_bound_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form"
+    },
+    {
+      "id": "pad.runtime_bound_claim.rank_two_axis.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens"
+    },
+    {
+      "id": "pad.runtime_bound_claim.rank_two_axis.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens"
+    },
+    {
+      "id": "pipe.bare_name_stage.expand_source.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source"
+    },
+    {
+      "id": "pipe.bare_name_stage.expand_source.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source"
+    },
+    {
+      "id": "pipe.bare_name_stage.lint_fix.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.expand.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.expand.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.sum.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
+    },
+    {
+      "id": "pipe.bare_name_stage.to_tensor.sum.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs"
+    },
+    {
+      "id": "producer.input_entry.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.input_axis_claim_still_precedes_body_on_both_lanes"
+    },
+    {
+      "id": "producer.insert.claim_effects.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.claim_effects.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_insert_result_guard_owns_attribution_and_effect_order"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.c_forwarded_insert_axis_keeps_result_ownership"
+    },
+    {
+      "id": "producer.insert.forwarded_axis.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_producer_guard_order.eval_forwarded_insert_axis_keeps_result_ownership"
+    },
+    {
+      "id": "producer.insert.site",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "ir_producer_guard_sites.interface_sized_insert_has_one_local_result_claim"
+    },
+    {
+      "id": "producer.missing_axis",
+      "baseline": "ice",
+      "phase_b": "rejects_exactly",
+      "receipt": "ir_producer_guard_sites.missing_result_axis_is_a_checked_error"
+    },
+    {
       "id": "rebuild.classes_after_each_pass",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "ir_classes.every_rebuild_pass_preserves_the_derived_classes"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "reshape.named_claim.node_target.c",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c"
     },
     {
-      "baseline": "silent_unguarded",
       "id": "reshape.named_claim.node_target.eval",
+      "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
     },
     {
-      "baseline": "ice",
+      "id": "return.block_bodied.effect_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_before_an_effect_that_follows_the_producing_operation"
+    },
+    {
+      "id": "return.block_bodied.effect_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_before_an_effect_that_follows_the_producing_operation"
+    },
+    {
+      "id": "return.block_bodied.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_on_a_block_bodied_return"
+    },
+    {
+      "id": "return.block_bodied.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_on_a_block_bodied_return"
+    },
+    {
+      "id": "return.call_bodied.effect_order.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed"
+    },
+    {
+      "id": "return.call_bodied.effect_order.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.an_effect_inside_the_callee_after_the_producing_operation_is_suppressed"
+    },
+    {
+      "id": "return.call_bodied.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_on_a_call_bodied_return"
+    },
+    {
+      "id": "return.call_bodied.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_on_a_call_bodied_return"
+    },
+    {
+      "id": "return.callback.aggregate_interface.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_aggregate_interface_ingress_stamps_each_tensor_field_as_load"
+    },
+    {
+      "id": "return.callback.composed_selection.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_inherited_callback_claim_waits_for_body_selection"
+    },
+    {
+      "id": "return.callback.composed_selection.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_inherited_callback_claim_waits_for_body_selection"
+    },
+    {
+      "id": "return.callback.identity.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_identity_callback_checks_claim_after_actual_preparation"
+    },
+    {
+      "id": "return.callback.identity.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_identity_callback_checks_claim_after_actual_preparation"
+    },
+    {
+      "id": "return.callback.inherited.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_inherited_claim_reaches_named_and_literal_callbacks"
+    },
+    {
+      "id": "return.callback.inherited.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_inherited_claim_reaches_named_and_literal_callbacks"
+    },
+    {
+      "id": "return.callback.polymorphic.combined.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_combined_precision_rank_callback_claims_actualize_each_callsite"
+    },
+    {
+      "id": "return.callback.polymorphic.combined.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_combined_precision_rank_callback_claims_actualize_each_callsite"
+    },
+    {
+      "id": "return.callback.rank_zero.host_effect.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_rank_zero_host_identity_without_a_claim_preserves_value_and_effects"
+    },
+    {
+      "id": "return.callback.rank_zero.no_claim.eval_c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.rank_zero_identity_without_a_result_claim_executes_both_lanes"
+    },
+    {
+      "id": "return.callback.shared.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_shared_callback_claims_are_invocation_local"
+    },
+    {
+      "id": "return.callback.shared.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_shared_callback_claims_are_invocation_local"
+    },
+    {
+      "id": "return.if.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_selected_if_result_claims"
+    },
+    {
+      "id": "return.if.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_selected_if_result_claims"
+    },
+    {
+      "id": "return.match.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_selected_match_result_claims"
+    },
+    {
+      "id": "return.match.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_selected_match_result_claims"
+    },
+    {
+      "id": "return.pure_helper.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_pure_helper.c_inherited_result_claim_enters_pure_helpers"
+    },
+    {
+      "id": "return.pure_helper.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_pure_helper.eval_inherited_result_claim_enters_pure_helpers"
+    },
+    {
+      "id": "return.selected.before_production.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_selection_before_production_forwards_only_to_the_selected_arm"
+    },
+    {
+      "id": "return.selected.before_production.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_selection_before_production_forwards_only_to_the_selected_arm"
+    },
+    {
+      "id": "return.selected.delayed.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_delayed_selection_guards_only_the_selected_value"
+    },
+    {
+      "id": "return.selected.delayed.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_delayed_selection_guards_only_the_selected_value"
+    },
+    {
+      "id": "return.selected.tuple_projection.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.c_tuple_projection_retains_only_the_selected_producer"
+    },
+    {
+      "id": "return.selected.tuple_projection.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_result_callable_selection.eval_tuple_projection_retains_only_the_selected_producer"
+    },
+    {
+      "id": "return.shared_callee.literal.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.c_shared_callee_result_claims_are_invocation_scoped"
+    },
+    {
+      "id": "return.shared_callee.literal.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_shared_callee_result_claims_are_invocation_scoped"
+    },
+    {
+      "id": "root.dim_variable.argument_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c"
+    },
+    {
+      "id": "root.dim_variable.argument_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "route.untied.gather.gate",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand"
+    },
+    {
+      "id": "route.untied.matmul.match",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee"
+    },
+    {
+      "id": "route.untied.scatter_replace.gate",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand"
+    },
+    {
+      "id": "route.untied.sum.copy",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand"
+    },
+    {
+      "id": "route.untied.sum.match",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee"
+    },
+    {
+      "id": "route.untied.sum.record",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_record_field_sum_operand_is_tied_to_the_bound_target"
+    },
+    {
+      "id": "route.untied.trace.gate",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand"
+    },
+    {
       "id": "shrink.elementwise_const.build",
+      "baseline": "ice",
       "phase_b": "typed_unsupported(#1482)",
       "receipt": "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt"
     },
     {
-      "baseline": "silent_unguarded",
+      "id": "shrink.runtime_bound.overshoot.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c"
+    },
+    {
+      "id": "shrink.runtime_bound.overshoot.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_eval"
+    },
+    {
       "id": "shrink.to_end.nonzero_start",
+      "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "ir_sources.to_end_shrink_end_requires_a_literal_zero_start"
+    },
+    {
+      "id": "staged.dynamic_to_tensor.vmap_column.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
+    },
+    {
+      "id": "staged.dynamic_to_tensor.vmap_column.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_nonpositive.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_non_positive_steps_preempt_earlier_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
+    },
+    {
+      "id": "stride.multi_axis_positive.eval",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_multi_axis_positive_stride_vectors_execute_on_both_lanes"
+    },
+    {
+      "id": "stride.nonunit_claim.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes"
+    },
+    {
+      "id": "stride.nonunit_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1931_positive_stride_extents_guard_declared_results_on_both_lanes"
+    },
+    {
+      "id": "stride.runtime_zero.c",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes"
+    },
+    {
+      "id": "stride.runtime_zero.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.issue_1907_runtime_non_positive_stride_steps_trap_before_claims_on_both_lanes"
     }
   ]
 }

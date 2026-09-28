@@ -41,17 +41,17 @@ additional_sources = ["properties"]
     // packaging contract, not an accident of creation order or WalkDir.
     fs::write(
         root.join("src/nested/zeta.ch"),
-        "module Repro.Nested.Zeta\n\ndef zeta() -> int32 = 2\n",
+        "module Repro.Nested.Zeta\n\ndef zeta() -> i32 = 2\n",
     )
     .expect("write zeta");
     fs::write(
         root.join("src/main.ch"),
         "module Repro.Main\n\
          export (main, identity, choose_left, tensor_identity, matrix_identity)\n\n\
-         def main() -> int32 = 1\n\
+         def main() -> i32 = 1\n\
          def identity[a](x: a) -> a = x\n\
          def choose_left[a, b](x: a, y: b) -> a = x\n\
-         def tensor_identity[p](x: &tensor[..r, p]) -> &tensor[..r, p] = x\n\
+         def tensor_identity[r, p](x: &tensor[..r, p]) -> &tensor[..r, p] = x\n\
          def matrix_identity[n, m, p](x: &tensor[n, m, p]) -> &tensor[n, m, p] = x\n",
     )
     .expect("write main");
@@ -69,7 +69,7 @@ additional_sources = ["properties"]
         root.join(LONG_SOURCE_FILE),
         format!(
             "module Repro.Properties.{long_module_component}\n\n\
-             def long_name() -> int32 = 3\n"
+             def long_name() -> i32 = 3\n"
         ),
     )
     .expect("write long-name source");

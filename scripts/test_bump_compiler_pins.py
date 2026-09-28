@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -387,7 +388,16 @@ class CompileFailFixtureLockTests(unittest.TestCase):
         "check_pipeline_core_compile_fail",
     )
 
-    def test_inventory_covers_both_gated_fixtures(self):
+    def test_inventory_covers_all_path_dependent_compile_fail_fixtures(self):
+        discovered = set()
+        for manifest in (bump_mod.REPO_ROOT / "crates").glob("*/tests/compile_fail/*/Cargo.toml"):
+            data = tomllib.loads(manifest.read_text())
+            if any(isinstance(dep, dict) and "path" in dep
+                   for dep in data.get("dependencies", {}).values()):
+                discovered.add(manifest)
+        self.assertEqual(set(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS), discovered)
+
+    def test_inventory_covers_known_gated_fixtures(self):
         relative = {
             path.relative_to(bump_mod.REPO_ROOT).as_posix()
             for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
@@ -397,6 +407,7 @@ class CompileFailFixtureLockTests(unittest.TestCase):
             {
                 "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
                 "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
+                "crates/chelis-unord/tests/compile_fail/order_escape/Cargo.toml",
             },
         )
 
@@ -405,6 +416,11 @@ class CompileFailFixtureLockTests(unittest.TestCase):
         # moves must move in both places, or the bump silently stops
         # regenerating the lock its gate step is about to reject.
         gated = {_load_sibling(name).MANIFEST for name in self.GATE_SCRIPTS}
+        for fixture in _load_sibling("check_hash_order_phase_b_compile_fail").FIXTURES:
+            manifest = Path(fixture.command[fixture.command.index("--manifest-path") + 1])
+            dependencies = tomllib.loads(manifest.read_text()).get("dependencies", {})
+            if any(isinstance(dep, dict) and "path" in dep for dep in dependencies.values()):
+                gated.add(manifest)
         self.assertEqual(set(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS), gated)
 
     def test_each_manifest_ships_a_committed_lock(self):

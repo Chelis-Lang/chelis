@@ -5,12 +5,12 @@
 //! The class under test: the float-only / capability acceptance checks
 //! used to run only inside `infer_app`'s post-unify block, so any
 //! application form that never builds an `app` node bypassed them -
-//! concretely the bare-callee pipe stage (`cast(2, int32) |> recip`),
+//! concretely the bare-callee pipe stage (`cast(2, i32) |> recip`),
 //! which reached the runtime while the direct spelling was rejected.
 //! The fix routes every application surface (direct application, pipe
-//! stages, reduction first-argument checks, and the polymorphic
-//! cross-row pass) through one policy function,
-//! `chelis_types::infer::operand_dtype_rejection`.
+//! stages and reduction first-argument checks) through one policy.
+//! Generic calls now enforce the checked dtype-family contract; they do
+//! not reopen the callee body to recover an operation-specific message.
 //!
 //! Every negative row asserts a CHECK-TIME rejection: stderr carries
 //! the capability citation and never the runtime `numeric trap` brand
@@ -75,7 +75,7 @@ fn assert_check_rejects(program: &str, citation: &str, label: &str) {
 }
 
 const INT64_TENSOR: &str =
-    "to_tensor([cast(100, int64), cast(400, int64), cast(200, int64), cast(50, int64)])";
+    "to_tensor([cast(100, i64), cast(400, i64), cast(200, i64), cast(50, i64)])";
 
 // ===========================================================================
 // chelis#724 - integer mean is a check-time rejection in every form.
@@ -95,7 +95,7 @@ fn integer_mean_def_body_form_rejected() {
     assert_check_rejects(
         &format!(
             "module M.Main\n\
-             def f(x: tensor[4, int64]) -> tensor[int64] = mean(x, 0)\n\
+             def f(x: tensor[4, i64]) -> tensor[i64] = mean(x, 0)\n\
              out = print(f({INT64_TENSOR}))\n"
         ),
         "chelis#724",
@@ -108,19 +108,19 @@ fn integer_mean_polymorphic_wrapper_rejected_at_instantiation() {
     assert_check_rejects(
         &format!(
             "module M.Main\n\
-             sig my_mean: tensor[4, p] -> tensor[p]\n\
+             sig my_mean[p: Float]: tensor[4, p] -> tensor[p]\n\
              def my_mean(x) = mean(x, 0)\n\
-             def call(y: tensor[4, int64]) -> tensor[int64] = my_mean(y)\n\
+             def call(y: tensor[4, i64]) -> tensor[i64] = my_mean(y)\n\
              out = print(call({INT64_TENSOR}))\n"
         ),
-        "chelis#724",
+        "dtype family `Float`",
         "mean_poly_wrapper",
     );
 }
 
 #[test]
 fn integer_mean_direct_and_polymorphic_paths_share_the_canonical_diagnostic() {
-    const BASE: &str = "mean on operand precision `int64` is not admitted per the chelis#724 \
+    const BASE: &str = "mean on operand precision `i64` is not admitted per the chelis#724 \
 capability decision: mean is float-only (f32, f64, bf16, f16). An integer mean has no \
 authored rounding, and a fractional result inside an integer tensor violates \
 spec/04-type-system.md section 9 [04-NUM-1]";
@@ -131,21 +131,21 @@ spec/04-type-system.md section 9 [04-NUM-1]";
     let polymorphic = rejection_stderr(
         &format!(
             "module M.Main\n\
-             sig my_mean: tensor[4, p] -> tensor[p]\n\
+             sig my_mean[p: Float]: tensor[4, p] -> tensor[p]\n\
              def my_mean(x) = mean(x, 0)\n\
-             def call(y: tensor[4, int64]) -> tensor[int64] = my_mean(y)\n\
+             def call(y: tensor[4, i64]) -> tensor[i64] = my_mean(y)\n\
              out = print(call({INT64_TENSOR}))\n"
         ),
         "mean_poly_canonical",
     );
     assert!(direct.contains(BASE), "direct diagnostic drifted: {direct}");
     assert!(
-        polymorphic.contains(BASE),
-        "polymorphic diagnostic must reuse the direct base: {polymorphic}"
+        polymorphic.contains("PrecisionMismatch") && polymorphic.contains("dtype family `Float`"),
+        "polymorphic diagnostic must name the checked family: {polymorphic}"
     );
     assert!(
-        polymorphic.contains("Reached through the polymorphic sig for `my_mean`"),
-        "polymorphic context must remain available as a hint: {polymorphic}"
+        polymorphic.contains("cannot be instantiated at `i64`"),
+        "polymorphic diagnostic must name the offending dtype: {polymorphic}"
     );
 }
 
@@ -224,9 +224,13 @@ fn bool_sum_is_not_reclassified_as_a_726_arithmetic_cell() {
         "module M.Main\nout = print(sum(to_tensor([true, false, true]), 0))\n",
         "bool_sum_existing_rejection",
     );
+    // The checked Numeric contract now rejects this before the IR's
+    // reduce_sum refusal. It still is not a #726 arithmetic diagnostic.
     assert!(
-        stderr.contains("reduce_sum is not defined on bool tensors"),
-        "the pre-existing reduction disposition should remain explicit: {stderr}"
+        stderr.contains("PrecisionMismatch")
+            && stderr.contains("dtype family `Numeric`")
+            && stderr.contains("`bool`"),
+        "sum's checked family rejection should name Numeric and bool: {stderr}"
     );
     assert!(
         !stderr.contains("chelis#726"),
@@ -249,11 +253,11 @@ fn bool_add_def_body_form_rejected() {
 fn bool_add_polymorphic_wrapper_rejected_at_instantiation() {
     assert_check_rejects(
         "module M.Main\n\
-         sig both: tensor[2, p] -> tensor[2, p] -> tensor[2, p]\n\
+         sig both[p: Numeric]: tensor[2, p] -> tensor[2, p] -> tensor[2, p]\n\
          def both(x, y) = add(x, y)\n\
          def call(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[2, bool] = both(a, b)\n\
          out = print(call(to_tensor([true, false]), to_tensor([true, true])))\n",
-        "chelis#726",
+        "dtype family `Numeric`",
         "bool_add_poly_wrapper",
     );
 }
@@ -270,7 +274,7 @@ a numeric dtype, so arithmetic on it has no authored meaning";
     );
     let polymorphic = rejection_stderr(
         "module M.Main\n\
-         sig both: tensor[2, p] -> tensor[2, p] -> tensor[2, p]\n\
+         sig both[p: Numeric]: tensor[2, p] -> tensor[2, p] -> tensor[2, p]\n\
          def both(x, y) = add(x, y)\n\
          def call(a: tensor[2, bool], b: tensor[2, bool]) -> tensor[2, bool] = both(a, b)\n\
          out = print(call(to_tensor([true, false]), to_tensor([true, true])))\n",
@@ -278,12 +282,12 @@ a numeric dtype, so arithmetic on it has no authored meaning";
     );
     assert!(direct.contains(BASE), "direct diagnostic drifted: {direct}");
     assert!(
-        polymorphic.contains(BASE),
-        "polymorphic diagnostic must reuse the direct base: {polymorphic}"
+        polymorphic.contains("PrecisionMismatch") && polymorphic.contains("dtype family `Numeric`"),
+        "polymorphic diagnostic must name the checked family: {polymorphic}"
     );
     assert!(
-        polymorphic.contains("Reached through the polymorphic sig for `both`"),
-        "polymorphic context must remain available as a hint: {polymorphic}"
+        polymorphic.contains("cannot be instantiated at `bool`"),
+        "polymorphic diagnostic must name the offending dtype: {polymorphic}"
     );
 }
 
@@ -321,7 +325,7 @@ fn bool_logic_and_counting_idiom_still_compute() {
 
     let got = eval_program(
         "module M.Main\n\
-         out = print(sum(cast(to_tensor([true, false, true]), int64), 0))\n",
+         out = print(sum(cast(to_tensor([true, false, true]), i64), 0))\n",
     )
     .expect("counting idiom");
     assert_eq!(got, "2");
@@ -331,14 +335,14 @@ fn bool_logic_and_counting_idiom_still_compute() {
 #[test]
 fn numeric_arithmetic_still_computes() {
     assert_eq!(
-        eval_program("module M.Main\nout = print(add(cast(2, int32), cast(3, int32)))\n")
+        eval_program("module M.Main\nout = print(add(cast(2, i32), cast(3, i32)))\n")
             .expect("int add"),
         "5"
     );
     assert_eq!(
         eval_program(
             "module M.Main\n\
-             out = print(sum(to_tensor([cast(1, int64), cast(2, int64)]), 0))\n"
+             out = print(sum(to_tensor([cast(1, i64), cast(2, i64)]), 0))\n"
         )
         .expect("int sum"),
         "3"
@@ -353,9 +357,9 @@ fn numeric_arithmetic_still_computes() {
 #[test]
 fn int_recip_through_bare_pipe_stage_rejected_at_check_time() {
     // Scalar transcendental rejections use the generic acceptance
-    // message (the same one the direct form `recip(cast(2, int8))`
+    // message (the same one the direct form `recip(cast(2, i8))`
     // produces); the section 5.4 citation is the concrete-tensor form's.
-    for (width, label) in [("int8", "i8"), ("int32", "i32"), ("int64", "i64")] {
+    for (width, label) in [("i8", "i8"), ("i32", "i32"), ("i64", "i64")] {
         assert_check_rejects(
             &format!("module M.Main\nout = print(cast(2, {width}) |> recip)\n"),
             "does not accept argument type",
@@ -367,7 +371,7 @@ fn int_recip_through_bare_pipe_stage_rejected_at_check_time() {
 #[test]
 fn int_exp_through_bare_pipe_stage_rejected_at_check_time() {
     assert_check_rejects(
-        "module M.Main\nout = print(to_tensor([cast(2, int32)]) |> exp)\n",
+        "module M.Main\nout = print(to_tensor([cast(2, i32)]) |> exp)\n",
         "5.4",
         "pipe_exp_int_tensor",
     );
@@ -376,12 +380,12 @@ fn int_exp_through_bare_pipe_stage_rejected_at_check_time() {
 #[test]
 fn multi_stage_pipe_rejects_at_the_offending_stage() {
     // First stage is fine (float recip); second stage pipes the float
-    // through a cast to int32 via a lambda, then the THIRD bare stage
+    // through a cast to i32 via a lambda, then the THIRD bare stage
     // must reject.
     assert_check_rejects(
         "module M.Main\n\
-         out = print(cast(2.0, f32) |> recip |> fn (v) -> cast(floor(v), int32) |> recip)\n",
-        "does not accept argument type",
+         out = print(cast(2.0, f32) |> recip |> fn (v) -> cast(floor(v), i32) |> recip)\n",
+        "dtype family `Float`",
         "pipe_multi_stage",
     );
 }

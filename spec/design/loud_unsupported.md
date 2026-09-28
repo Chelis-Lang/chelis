@@ -226,27 +226,30 @@ not satisfy the normative surface contract.
 pub struct Unsupported {
     /// What was encountered: an op, builtin name, dtype, tag, effect
     /// kind, or construct. Closed enum + payload, not a bare string.
-    pub what: UnsupportedKind,
+    pub what: Box<UnsupportedKind>,
     /// The context of the encounter (the op family, target lane, or
     /// call position) - the `on <context>` clause of the rendering.
     /// (Added at Phase 1 ratification: the branded message format always
     /// carried a context clause; the struct now carries it explicitly.)
-    pub context: String,
+    pub context: Box<str>,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
-    pub span: Option<SpanRef>,
-    /// Opaque typed authority plus the supported alternative. Construction
-    /// distinguishes a numbered-spec decision from tracked implementation
-    /// work and rejects empty or unregistered citations.
+    pub span: Option<Box<SpanRef>>,
+    /// Opaque typed authority. Construction distinguishes a numbered-spec
+    /// decision from tracked implementation work and rejects empty or
+    /// unregistered citations.
     pub authority: RejectionAuthority,
+    /// A supported route the caller can select, when one exists.
+    pub supported_alternative: Option<Box<str>>,
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported`. The span field is
-boxed so the `Err` variant stays small on Result-typed emission paths; this is
-a representation detail, not a contract change.
+Implemented as `chelis_types::unsupported::Unsupported`. The subject, context,
+span, and supported-alternative storage shown above are boxed so the `Err`
+variant stays small on Result-typed emission paths; these are representation
+details, not changes to their projected values.
 
 **Message format:**
 `unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
@@ -254,9 +257,10 @@ literal prefix `unsupported:` so tests and shells can match it. The three
 existing exemplary messages are the calibration set and must remain
 conformant when migrated:
 
-- HIP: `` `chelis build --target hip` admits `f16` only on tensor
-  load/store nodes ... See spec/04-type-system.md §5.7.1`` (names the
-  construct, the boundary, and the spec);
+- HIP: ``unsupported: narrow-float compute ...; unimplemented chelis#729:
+  this operation has no typed HIP narrow-float kernel; see
+  spec/04-type-system.md §1.1.3`` (names the construct, the boundary, and the
+  controlling matrix without repeating its capability list);
 - Metal: `` `chelis build --target metal` rejects f64 ... `` ;
 - runtime: `unsupported: destination dtype ... on to_tensor host-lane
   literal storage (runtime); ...` (migrated to the branded shape at
@@ -273,22 +277,45 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (updated 2026-08-01): the structured `chelis check` surface above is
-still the TARGET, not current behavior.** The `Unsupported` object now carries
-the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
-(`chelis check` never reaches lowering or codegen, so no `Unsupported` can
-arrive there), no type on the `Unsupported` path derives `Serialize`, and
-the build surface renders the branded string into a flat
-`kind: "unsupported_feature"` envelope
-(`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
-Consumers - including this plan's own rejected-cells corpus - match prose
-today. Three prerequisites, in order: [#729] Phase 4C populates capability
-Table A; Phase 4D derives `check` reporting from its target-independent
-rejections (`capability_table.md` §Derivations); then the structured payload
-must be plumbed onto `schema::Diagnostic`. Until both land, the
-`unsupported:` brand is the machine surface and tests may match it. The
-byte-for-byte per-lane corpus assertions likewise arrive with [#732]
-Phase 3; today's corpus is deliberately substring-level and says so.
+**STATUS (updated 2026-09-24): the complete structured `chelis check` and wire
+surface above is still the TARGET, not current behavior.** The `Unsupported`
+object now carries the §C2.1 opaque typed authority. Chelis#2503's `par` fence
+constructs `Stage::Checker` and reaches `chelis check`, `eval`, and `build`
+through the checker diagnostic channel; no type on the `Unsupported` path
+derives `Serialize`. Chelis#1870's bounded in-process trial remains the
+transport: `schema::Diagnostic` retains the actual typed value off-wire,
+`LowerDiagnostic` retains it for selected lowering producers, and
+`unsupported_identity()` projects the exact
+`unsupported:` brand/prefix, diagnostic
+kind, subject, context, stage, span association, disposition, atom or tracking
+issue, and supported alternative without parsing prose. The
+three compiler-API entry paths share one `LowerDiagnostic` adapter. A typed
+unsupported rejection uses `DiagnosticKind::UnsupportedFeature` as [05-UNS-6]
+requires; an ordinary lowering diagnostic retains `LowerError`, irrespective
+of its message text. The adapter preserves the lower envelope stage and
+producer rendering while retaining the typed payload and source association. The
+`c_nonliteral_window` witness proves identical production stderr through the
+C, HIP, and Metal CLI build entry paths; it is lowering and host-process
+evidence, not device execution.
+
+That trial is not replacement coverage yet. In particular, the current
+unimplemented authority stores an issue number but has no exact capability
+Table A/B key; the issue remains nonsemantic tracking metadata. The existing
+exact rejected-cell pins and their mutations therefore remain blocking.
+The Phase 3 body/result audit and required changed-test acknowledgements
+replace its definition digests under chelis#1868; that retirement does not
+relax the diagnostic-text comparison. The two chelis#1918 softmax consumers read one generated
+reviewed snapshot from a canonical reviewed row, owned by
+`scripts/regen_all.py --tier 0`, while their structured identity is checked
+separately. This tier-0 snapshot is not production-derived: tier 0 cannot
+execute the Rust renderer, and parsing or re-rendering Rust source would create
+a second prose implementation. A production-derived snapshot therefore waits
+for a built-tier Rust generator or a production-owned declarative source that
+does not duplicate rendering. Remaining prerequisites are [#729] Phase 4C's
+capability tables, Phase 4D's target-independent checker derivation, and a
+complete serialized diagnostic payload. Until they land, branded prose remains
+a sanctioned compatibility surface beside, not instead of, the structured
+trial.
 
 **This is a normative relaxation, recorded as a decision.** Naming it
 rather than leaving a later reader to discover it: the surfacing bullet
@@ -361,28 +388,86 @@ REGISTRIES of what actually exists:
   byte-agreement test (the §C4.3 generated-header pattern), so the
   registry cannot drift from `spec/` silently. Citing an atom that no
   numbered spec declares is a construction error.
-- `IssueRef` wraps `NonZeroU32` AND validates membership in a
-  checked-in issue manifest recording, per number: it is an ISSUE
-  (not a PR), and it is OPEN. **A checked-in manifest is
-  self-authorizing unless its edits are gated** - the same PR that
-  cites a bogus number can add the manifest row that blesses it (the
-  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
-  issue, a PR number, and a 404 all "validate"). So manifest
-  ADDITIONS receive blocking LIVE validation: every construction,
-  registry, validator, imported liveness-helper, detector, and workflow input
-  is in the `Rejection Authority Liveness` change set, and that job verifies
-  every added or modified row against the live tracker (exists, is an
-  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
-  will re-verify the STANDING manifest for drift, so a cited issue closing
-  later makes the stale citation red - the shell contract's "probe flips
-  green, remove the citation" rule, pointed inward. Until that Phase 4 job
-  lands, standing-state drift remains a named pending control rather than an
-  implied continuous guarantee. Membership answers the compile-time question;
-  the change-gated job answers the truth question when authority inputs change.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a checked-in,
+  source-derived issue manifest recording, per number: it is an ISSUE (not a
+  PR), and it is OPEN. `scripts/generate_rejection_registries.py` discovers
+  one Cargo-owned production workspace: every repository-local workspace
+  member, regardless of directory, contributes its non-test library and
+  binary-like target roots and its exact package identity. The existing
+  `chelis-repr-inventory` `syn` parser follows those roots through inline,
+  ordinary external, and literal `#[path]` module edges. Before validating
+  `include!`, macro, or module wiring, it forms one `test=false` source view by
+  excluding test-only items, statements, expressions, arms, fields, arguments,
+  and generic parameters. Thus `src/tests.rs`, inline `#[cfg(test)]`, and
+  test-only expression citations are not authority, while a production
+  `#[path]` source outside its target directory is. Ambiguous ordinary module
+  paths, conditional or malformed path wiring, production `include!`, and
+  production macro definitions that directly emit module wiring fail closed.
+  The defining
+  `crates/chelis-types/src/unsupported.rs` remains the sole citation
+  exclusion. The direct-construction boundary checker consumes this exact
+  source view rather than owning a second filesystem glob. The generator also
+  runs Cargo's non-test production targets and reuses
+  `check_configuration_closure.py`'s rustc dep-info parser; dep-info selection
+  uses the same Cargo package identity set while remaining an independent
+  compiler-read closure observation. Every compiler-read repository source
+  must appear in the structural graph. Thus the parser does not self-certify
+  module closure.
+  Every resulting production `unimplemented_rejection!` invocation is parsed.
+  The first argument accepts Rust's full unsuffixed decimal token grammar
+  (leading zeroes and arbitrary/trailing underscores), then must decode to a
+  positive `u32`; dynamic expressions, alternate delimiters, suffixes, zero,
+  overflow, and malformed invocations are errors.
+  The macro name is likewise exact: production imports and reexports may not
+  rename `unimplemented_rejection`, because an aliased invocation would evade
+  source derivation. Rust strings, raw strings, ordinary character literals,
+  byte character literals, comments, and lifetimes are lexed distinctly so
+  none can hide or fabricate a citation.
+  Repeated production sites for one issue collapse to one sorted row. The
+  generator writes both `spec/design/loud_unsupported_issue_manifest.json`
+  and the Rust membership artifact, while `--check` rejects a cited issue
+  missing from the manifest, an uncited stale row, or byte drift in either
+  generated artifact. Tests freeze Cargo target-kind and repository-local
+  package selection (including members outside `crates/`), dep-info package
+  selection, the structural module and test-exclusion contract, the shared
+  boundary source owner, the sole citation exclusion, exact parsing, both drift
+  directions, duplicate handling, and Rust byte agreement.
+- **A source-derived manifest is still self-authorizing with respect to live
+  tracker state** - one change can cite a closed issue, a PR number, or a
+  nonexistent number and regenerate a structurally valid row. Pull-request
+  validation therefore splits the complete offline construction boundary
+  across existing owners: `script-unit` checks privacy and source usage, while
+  the always-running Docs Phase 4B oracle freshly derives production/compiler
+  closure, generated-byte agreement, registry membership, and citation syntax.
+  Neither queries mutable GitHub state. Recent successful dedicated jobs spent
+  10-14 minutes re-deriving the complete source manifest even when the
+  changed-row selection was empty.
+  GitHub issue state is project metadata rather than [05-UNS-5] semantic
+  authority, so the daily/manual canary is the sole automated exists/kind/open
+  owner. It runs
+  `.github/workflows/loud-unsupported-nightly.yml`: daily and manual runs
+  check out `main`, freshly rederive the complete standing manifest, and fail
+  closed while resolving every row through the issue API. A constant
+  workflow-level concurrency group serializes the complete validation/report
+  pair across scheduled and manual dispatches without cancelling a running
+  run. GitHub retains at most one additional pending member of that group, so
+  dispatch bursts may coalesce by replacing an older pending run with the
+  newest; the group is not a FIFO queue, and report scripts do not overlap.
+  The `always()` report job opens or updates one `nightly-failure` issue for
+  every executed non-success result (including cancelled or skipped),
+  collapses any exact-title duplicates to one issue while failing, and closes
+  every exact-title match on the next success. This is the standing
+  issue-authority canary only; it does not
+  deliver the pending exclusion/census/oracle matrix or complete §C7.5.
+  Membership answers the compile-time question; the scheduled job answers the
+  mutable tracker-state question at its execution.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
-  privacy errors, locked by `compile_fail` doctests. The required CI job also
-  runs the boundary checker before the network-backed manifest validation.
+  privacy errors, locked by `compile_fail` doctests. The PR `script-unit` job
+  runs the boundary checker. The Docs Phase 4B oracle uses Cargo metadata for
+  each production target's package, name, kind, root, and required features;
+  its compiler closure requires matching non-test dep-info for every exact
+  target identity.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's
@@ -393,9 +478,9 @@ REGISTRIES of what actually exists:
 
 **Calibrated claim:** construction proves only citation IDENTITY and
 last-verified tracker STATE - an existing atom, or a manifest member
-that was live-verified as an open ISSUE when its row was added and at
-the last scheduled re-verification since. Between schedules the issue
-manifest means "open at last verification", never "open this instant".
+that was live-verified as an open ISSUE by the last successful liveness
+execution. The issue manifest means "open at last verification", never
+"open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -408,8 +493,8 @@ admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; a same-PR manifest addition of a closed issue, a PR number,
-or a nonexistent number fails the change-gated live validation. An
+validate; a closed issue, PR number, or nonexistent number fails the
+scheduled or manual live validation. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update
@@ -612,7 +697,21 @@ be represented.
    site identity nor an exhaustiveness proof: aliases, bindings, indirection,
    equivalent numeric-default spellings, count relocation, and in-crate raw
    emission can evade it. The corresponding typed mutation oracle is the
-   authority. For the hosted [#732] no-third-formatter classes the same
+   authority. `closed_vocabulary_architecture.rs` keeps positive evidence at
+   consumer-crate granularity: the ratified production roots for each crate
+   must contain the typed vocabulary or tagged-carrier markers in non-comment
+   source tokens, but no marker is assigned to an owner filename. Recognized
+   extensions select an explicit Rust or C-family lexical projection. Positive
+   evidence excludes comment and literal payloads except active C-family
+   include operands. Forbidden rules match active token structure, retaining
+   ordinary string-literal tokens where the rule requires them while excluding
+   raw-string and comment payloads; C-family block comments are non-nesting and
+   Rust block comments remain nested. The rules are scanned recursively across
+   the relevant crate source trees and published runtime/device headers,
+   including device-specific header suffixes, so an in-crate owner move cannot
+   hide one. The explicit crate/root set remains supporting inventory; the
+   added-variant mutation remains the exhaustiveness authority. For the hosted [#732]
+   no-third-formatter classes the same
    textual limits apply and the residue is DECLARED at the owning rule
    (`faithful_observation.md` §B2.4, each piece with its owner):
    derived-Debug containers embedding floats, bare `{}` Display /
@@ -650,7 +749,12 @@ C1.4 raise except five documented structural keeps in `lower.rs` (the
 defsig/deftype/typealias inert declaration node, the
 unknown-tag-with-children sequence seed, `zero_tensor_node`'s
 deliberate ADT zero adjoint, the empty-`drop` sequencing zero, and the
-`fail`-in-if mask placeholder - each annotated at the site). Row status
+`fail`-in-if mask placeholder - each annotated at the site). The
+`fail`-in-if keep was WITHDRAWN by chelis#1464: it was justified on the
+ground that the placeholder's value could never be observed, which was
+false on the taken path and untested. A direct `fail(...)` branch now
+lowers to the [05-OP-68] guarded abort and an indirect one is a section C2
+rejection, so four structural keeps remain. Row status
 notes below are left as the P0 record; the per-row conversion evidence
 is the un-ignored acceptance tests named in PR [#791] plus
 `loud_unsupported_phase1.rs`. Chelis#729 Phase 3 subsequently turns the
@@ -662,7 +766,7 @@ controls while leaving genuinely unsupported siblings branded. Appended rows:
 | 20 | `host.rs` handle-effect arm (host-lane sibling of row 9) | drops handler, lowers body for non-`random` kinds | [#709]-adjacent (P1 discovery, B2.5) | CONVERTED with row 9 in the same change set (test `unknown_effect_kind_is_rejected`) |
 | 21 | `lower.rs` `expand` positional-axis `unwrap_or(0)` | axis 0 | flagged by [#782] | CONVERTED: fatal raise (section C1.4; a computed axis previously expanded axis 0 silently) |
 | 22 | `lower.rs` `tuple-get` index `unwrap_or(0)` | field 0 | flagged by [#782] | CONVERTED: raise (section C1.4; compile-time index by construction) |
-| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); FILED as [#795] | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class. **MIGRATION DISPOSITION (recorded 2026-08-04):** this is a true Phase 1 migration miss, not a new mechanism. The shared optional-static-argument resolver distinguishes `Absent`, `Resolved(T)`, and `PresentButUnresolvable(Unsupported)`; callers apply their documented default only to `Absent`, propagate the branded §C2 diagnostic for `PresentButUnresolvable`, and consume `Resolved(T)`. The conversion audits every optional compile-time argument in `lower.rs`, not only conv2d, and routes each through that resolver or records a typed, tested reason it cannot. [#795]'s liveness probe and absent/present negative parity land with the migration. The tripwire's `unwrap-or-numeric-literal` count shrinks by the two conv2d sites and by every equivalent site the audit migrates, per B1; a replacement local `match` or `unwrap_or` is red. This work does not wait for Phase 3 or Phase 4 because it is completion of the already-frozen Phase 1 construction path |
+| 23 | `lower.rs` former `conv2d` stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | [#795], broader optional-static-argument class | CONVERTED in #1299: canonical `conv` requires explicit per-axis stride and padding lists and has no absent-argument default. PP9 applies [05-OP-51] at every checker entry: literal-provable invalid values reject, while runtime stride/padding and symbolic tensor metadata remain legal language inputs. Any lowering path that cannot implement those legal forms must reject through this plan's failure channel; it may not narrow the checker signature. Both scalar fallback sites were deleted, shrinking the numeric-unwrap baseline from 12 to 10. The remaining optional-static-argument audit and PP9 capability relocations stay open under #730. |
 | 24 | `emit.rs` `emit_fused_elem` and `emit_fused_reduce` non-f32 arms | `panic!` (row-two: panic, not substitution) | [#919] (P1 discovery, B2.5); [#951] owns the surviving `emit_fused_reduce` half | CONVERTED in [#932]: both arms now return a section C2 `Unsupported` instead of panicking (tests `f64_activations_compute_in_double_not_float`, `f64_exp_returns_full_double_precision`, and both `*_is_a_diagnostic_not_a_panic`). `emit_fused_elem` is additionally **widened** to f64, so its arm now fires only for the reduced-float and integer dtypes ([#691] - whose direct DAG integer path is repaired by [#729] Phase 3; PR #1164 rehomed the emitter citations off that issue as authority and it CLOSED 2026-08-04, so this arm's remaining scope is the reduced-float and integer dtypes on its own terms rather than under a live [#691] rejection); `emit_fused_reduce` stays a rejection ([#951]) - a shipped divergence from `spec/04-type-system.md` §1.1.3's admitted f64 cell, recorded here so [#729] Phase 4 inherits a known hole rather than discovering one |
 
 **2026-07-30 ratchet-review appends (rows 24-27).** Filed per B2.5 from
@@ -813,10 +917,10 @@ The effect consumer set is exhaustive for the current tree:
 | `chelis-effects::infer_handle_effects` | exhaustively remove the handled kind; decode failures enter `EffectError` |
 | `chelis-effects::validate_handler_expr` | exhaustive per-kind validation; decode failures are errors |
 | `chelis-effects::validate_build_target_expr` | exhaustive typed target policy |
-| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `Random`/`Resource`; preserve distinct diagnostic payloads |
+| `chelis-ir::lower::lower_handle_effect` | consume `Result`; exhaust `EffectKind`; preserve distinct diagnostic payloads |
 | `chelis-ir::host::lower_host_expr` | consume `Result`; no empty sentinel or raw comparison |
 | `chelis-compiler-api::runtime::eval::HostEvaluator::eval_expr` | exhaustive typed evaluation; every decode error is `Err` |
-| `chelis-surf::desugar` `WithSeed`/`WithDevice` | emit `EffectKind::symbol()` |
+| `chelis-surf::desugar` `WithDevice` | emit `EffectKind::symbol()` |
 | both `chelis-surf::decompile_handle_effect` implementations | decode once; exhaust known kinds; preserve malformed/unknown Deep only through an explicit observation path |
 
 The added-kind mutation oracle inserts a temporary variant in the single
@@ -983,8 +1087,17 @@ authored or monomorphized provenance through C-ABI projection. The published
 header and tensor-entry selectors use that provenance, not symbol text.
 Specializations use translation-unit-local C linkage in binary and object mode.
 Speculative summary probes use state snapshot and restore plus sorted order.
-Thus, repeated builds emit byte-identical C and a probe failure cannot fail the
-build. Specializations intern by exact package definition identity under a
+Thus, repeated builds emit byte-identical C and an ordinary returned probe
+error is deferred until real lowering, including an error already returned by a
+nested summary probe. A fatal tensor-helper rejection raised directly during a
+summary probe is different: the existing lowering catcher returns its diagnostic
+after specialization-state and inlining-marker cleanup, without caching a false
+summary at that boundary (#1922). This preserves the existing returned-error
+deferral; it does not admit the rejected operation or fall back to a value.
+`issue_1922_helper_summary_diagnostic_api` and
+`issue_1922_helper_summary_diagnostic_cli` lock the public error transport;
+the private host unit locks same-name retry and probe-state restoration.
+Specializations intern by exact package definition identity under a
 canonical signature key. Exact identity lookup precedes unique terminal-name
 fallback. A hash collision between distinct signatures produces a loud internal
 error. A specialization's parameter types are the call site's checked types.
@@ -1305,7 +1418,7 @@ named feature to a product crate and must go red. It is deliberately
 NOT presented as a derived guard over "any runtime switch": the
 repository legitimately carries a sanctioned test-selector
 convention (`CHELIS_TEST_*`, `CHELIS_STYLE_GATE_DISABLE` - the
-latter documented in the repo Style Gate section) at dozens of
+latter documented in `AGENTS.md` §Writing Chelis Source) at dozens of
 product-source sites, and product crates carry eight legitimate
 features; no derivation distinguishes those from a forbidden switch,
 so a guard claiming to derive the class would be either red on day
@@ -1452,72 +1565,24 @@ row has no token to parse. Discovery of the [#919] shape (sites that
 derived classes - which would have counted those panics - and to the
 probe corpus, not to this binder.
 
-### C7.5 Change-gated and scheduled authority
+### C7.5 Offline admission and scheduled authority
 
-A named structural authority must actually execute: pre-merge when its
-inputs change, and on a schedule as the drift canary for everything
-else. A point-in-time run is phase-completion evidence, never
-class-maintenance evidence. The Phase 2 oracle's two
-controlled-mutation legs - the plan's own named authority - currently
-run in no CI job; only their self-tests are continuous. A nightly
-alone would be honest as a canary but is NOT recurrence prevention: it
-detects a hole only after main has moved. Phase 4 therefore delivers
-both halves:
+A named authority executes where its evidence is stable. Privacy and source
+usage execute pre-merge in `script-unit`; fresh compiler closure and generated
+registry agreement execute in the always-running Docs Phase 4B oracle. Mutable
+GitHub issue state executes on the daily/manual standing canary and at
+release/red-team checkpoints; it is project metadata, not [05-UNS-5] semantic
+authority. Phase 4 therefore delivers both owners:
 
-1. **Change-gated, pre-merge, blocking - with the trigger loop
-   closed.** A filter derived only from the already-ratified §C6
-   inventory has a hole exactly where it matters: a NEW consumer is by
-   definition not in the inventory yet, so its path would never fire
-   the filter, and the nightly would find it only after merge. The
-   loop closes in two moves. First, per §C7.3, discovery and the
-   manifest-totality guard are unconditional per-PR workspace tests -
-   a PR adding a consumer, member, or root goes red pre-merge with no
-   filter involved, and can only go green by editing the ratified
-   inventory or the registry. Second, the mutation job's path filter
-   covers the files that edit therefore touches: the vocabulary owner
-   sources, `host_abi.rs`, the RATIFIED INVENTORY FILE itself, the
-   CANONICAL EXCLUSION REGISTRY (the third authorization route, per
-   §C7.3 - one artifact, so the filter names it exhaustively), the
-   §C2.1 issue manifest, the root `Cargo.toml`, the non-Cargo
-   product-root registry, the oracle scripts, and the workflows. A new
-   consumer thus cannot reach main without the discovery test forcing
-   an inventory, exclusion-registry, or root-registry edit, and none
-   of those edits
-   can merge without the mutation legs running. The same job carries
-   the §C2.1/§C7 exclusion live validation: added or modified issue-
-   manifest rows AND added or modified canonical-exclusion rows are
-   resolved through the same validator against the tracker (exists,
-   is an issue rather than a PR, is open) before merge. It also runs
-   the sibling [#729] §C6 census-liveness command
-   (`scripts/capacity_census_liveness.py`) when the capacity census or
-   its citations change - converged 2026-07-31 from that plan's
-   original manual-only gate; the script, pass line, and census
-   contract remain [#729]'s, the scheduling and gating are this
-   section's (the [#732] oracle split), and the census artifacts join
-   this filter. An exclusion
-   row cannot bypass the check by citing a standing manifest entry:
-   the changed exclusion's `IssueRef` is re-queried too. **The live
-   check's operational consequences, named rather than implied:** the
-   validation step requires `issues: read` on its job (`ci.yml`'s
-   restrictive permissions block grants nothing by default, and no
-   blocking job queries the issue API today - the open/close pattern
-   this doc cites lives in separate `report` jobs with
-   `issues: write`); tracker unavailability fails CLOSED as a
-   retryable job failure, never a merge-through; and the live half is
-   CI-owned - `scripts/gate.py --local` runs the membership and shape
-   half offline, exactly as the workspace nextest stage is CI-owned
-   in the existing gate split. The
-   crate-scoped `HostAbiType` leg runs on every
-   filter match; the workspace vocabulary leg runs when the vocab
-   owner, the inventory, the exclusion registry, the root manifest, or
-   the product-root registry changes. The job is classified in
-   `scripts/test_gate.py`'s job tables in the same change.
-   Trigger controls land with the workflow: a planted new workspace
-   member, a planted vocab dependency edge, a planted file in a
-   previously uninventoried consumer, and a planted non-Cargo root
-   must each (a) fail the per-PR discovery tests and (b) have their
-   forced inventory/registry edit matched by the filter - asserted
-   against the workflow's path list, not assumed.
+1. **Offline, pre-merge, blocking - with the trigger loop closed.**
+   Per §C7.3, discovery and manifest totality are unconditional PR tests:
+   adding a consumer, member, root, citation, or exclusion cannot pass by
+   avoiding a path filter. The `script-unit` worker executes
+   `check_rejection_authority_boundary.py` for privacy and source-usage checks.
+   The always-running Docs Phase 4B oracle freshly derives production/compiler
+   closure and generated registry agreement, including on docs-only numbered
+   spec changes. The crate-scoped and workspace vocabulary mutation legs retain
+   their existing PR owners. This half performs no GitHub issue lookup.
 2. **Scheduled full matrix, the drift canary.**
    `loud-unsupported-nightly.yml`: a cron workflow running
    `scripts/loud_unsupported_phase2_oracle.py` in full,
@@ -1539,9 +1604,37 @@ both halves:
    completes. The workflow file is added to `NON_GATE_WORKFLOWS` in
    `scripts/test_gate.py` in the same change.
 
-Neither half alone satisfies this section: the gated job without the
-nightly leaves unfiltered drift invisible; the nightly without the
-gated job is a canary mislabeled as prevention.
+   **Delivery status (2026-09-13; partial, not Phase 4 completion).** The
+   contract-named workflow and its `NON_GATE_WORKFLOWS` classification now
+   exist, but its one delivered validation job is deliberately narrower than
+   this full-matrix contract: it freshly runs
+   `scripts/validate_rejection_issue_manifest.py` over the complete derived
+   standing manifest on `main`, with issue-read permission and fail-closed
+   tracker access. A constant workflow-level concurrency group prevents
+   scheduled/manual validation and report scripts from overlapping and does
+   not cancel a running member. GitHub keeps at most one further pending
+   member, so a dispatch burst may replace an older pending run with the
+   newest rather than execute every queued dispatch; ordering is not FIFO. The
+   `always()` report job uses the repository's open/update-on-non-success and
+   close-on-success `nightly-failure` pattern; cancelled and skipped are
+   non-success, never green. It also consolidates every open exact-title
+   duplicate into one canonical issue on failure and closes every exact-title
+   match on success, so a legacy or race-created duplicate cannot survive
+   recovery. The loud-unsupported and faithful-observation Phase 2 runners, the
+   loud-unsupported Phase 4 oracle, standing `Deferred`-exclusion validation,
+   and the capacity-census liveness sweep remain pending. Regular PR validation
+   collectively runs the complete offline construction boundary under §C2.1.
+   The capacity-liveness reader's
+   final-binding format repair is separate: native tagged transports and the
+   [05-OP-45] shape operation need no issue lookup, and retired binding
+   citations are rejected. That persisted-shape check supplies no current
+   graph/codec/execution authority and does not enroll another workflow leg.
+   Therefore this scheduled slice
+   is only the standing rejection-authority drift canary; neither execution
+   half nor §C7.5 as a whole is complete.
+
+The offline boundary and standing canary prove different facts; neither
+substitutes for the other.
 
 ---
 
@@ -1559,8 +1652,8 @@ gated job is a canary mislabeled as prevention.
 | gate inventory (§C5 rows 17-18 resolution) | Phase 3 | this doc |
 | §C2.2 `DiagnosticKind` vocabulary + wire spellings | Phase 3 | the deciding atom [05-UNS-6] (spec/05 §7) + this doc + the wire-spelling lock test, same PR |
 | §C2.1 `RejectionAuthority` shape | Phase 3 | the deciding atom [05-UNS-5] (spec/05 §7) + this doc + [#687] corpus, same PR |
-| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions are typed rows - `Structural` with a reviewed reason, or `Deferred` carrying an `IssueRef` that passes changed-row live validation and relevance review |
-| §C7.5 execution jobs (the change-gated `ci.yml` job + the nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
+| §C7 universe derivations + the canonical exclusion registry | Phase 4 | exclusions shrink-only, in the one registry only; additions are typed rows - `Structural` with a reviewed reason, or `Deferred` carrying a structurally valid `IssueRef` and explicit relevance review |
+| §C7.5 execution jobs (offline PR boundary + nightly workflow + `NON_GATE_WORKFLOWS` entry) | Phase 4 | this doc + `scripts/test_gate.py`, same PR |
 
 ## B2. Invariants that hold across every boundary
 
@@ -1583,13 +1676,9 @@ gated job is a canary mislabeled as prevention.
 6. **Interlock edits are bidirectional.** Any change to §I1's boundary
    with [#729] updates both documents in the same change set. The same
    rule governs the §I2 interlocks.
-7. **A named structural authority executes pre-merge when its inputs
-   change, and on a schedule otherwise** (§C7.5). A point-in-time
-   oracle run is phase-completion evidence only; class maintenance
-   requires the change-gated blocking job plus the scheduled full
-   matrix with its open/close tracking-issue report. A scheduled-only
-   authority is a canary, not prevention; an authority with neither is
-   itself a hole of this class and gets censused.
+7. **Stable structural evidence executes pre-merge; mutable external
+   liveness executes on a schedule and at release/red-team checkpoints**
+   (§C7.5). An authority with neither owner is a hole and gets censused.
 8. **Ratchet universes are derived, never enumerated** (§C7). A
    recurrence mechanism whose scope is a hand-maintained list is
    mis-rung; scope narrowing is an annotated, issue-backed exclusion.
@@ -1604,8 +1693,8 @@ gated job is a canary mislabeled as prevention.
 3. Conversions are per-site PR-reviewable units; the plumbing refactor
    (Phase 1 item 1) is one PR that changes signatures with zero behavior
    change, so review is mechanical.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Gate with `scripts/gate.py --fast` before every push; macOS Smoke is the
+   workspace oracle.
 
 ---
 
@@ -1835,8 +1924,9 @@ root-realizability integration.
    `reduce_window` hints cite [#729] and [#600], not [#959]) -
    plus the two validation registries the constructors consume: the
    derived atom registry (generated from the numbered specs,
-   byte-agreement-tested) and the checked-in issue manifest (whose
-   liveness re-verification is §C7.5 scheduled-job work).
+   byte-agreement-tested) and the checked-in issue manifest (generated from
+   exact production `unimplemented_rejection!` citations, then live-validated;
+   scheduled standing-state re-verification remains §C7.5 work).
 5. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
@@ -1883,9 +1973,9 @@ planted-mutation controls (planted bypass in a non-chokepoint
 compiler-api module fails the workspace check, byte-restored after);
 and the authority admission set - empty atom, malformed atom,
 well-shaped nonexistent atom, issue zero, closed issue, PR-number
-citation, nonexistent nonzero issue, and the same-PR manifest
-addition of any such number - each rejected at construction,
-validation, or the change-gated live check. The supported-neighbor
+citation, nonexistent nonzero issue, and a manifest addition of any such
+number - each rejected at construction,
+offline validation, or the scheduled/manual live check. The supported-neighbor
 control is an open ISSUE manifest row (chelis#879), which passes those
 structural checks; deliberately attaching that unrelated issue to a
 rejection is the paired review-negative control and MUST be rejected
@@ -1937,13 +2027,9 @@ tripwire, §C7, and census rows 24-25 and 27.
    member list.
 5. **Census row 25's conversion** ([#958], the einsum default), the
    row shrinking with the fix per B1.
-6. **Both §C7.5 execution halves**: the change-gated blocking `ci.yml`
-   job for the mutation legs and the shared manifest/exclusion live
-   validation (path
-   filter per §C7.5: the vocab owners, `host_abi.rs`, the ratified
-   inventory, the canonical exclusion registry, the issue manifest,
-   the root `Cargo.toml`, the non-Cargo registry, the oracle scripts,
-   the workflows; classified in `scripts/test_gate.py`), and
+6. **Both §C7.5 execution owners**: the offline construction and
+   discovery boundary split across PR `script-unit` and the always-running
+   Docs Phase 4B oracle, and
    `loud-unsupported-nightly.yml` + the `NON_GATE_WORKFLOWS` entry +
    the open/close report job, running both plans' Phase 2 oracle
    runners and this phase's oracle as the full-matrix drift canary.
@@ -1974,14 +2060,11 @@ with the ignore-ledger equality and the live-row probe-record
 existence check; the §C7.3 dual-source discovery scan; the
 `compiler_invariant!` guard-referent tier (every guard resolves in the
 selected test set or the atom registry); the execution-wiring
-assertions (the change-gated `ci.yml` job exists, is classified in
-`scripts/test_gate.py`, and its path filter covers the ratified
-inventory file, the canonical exclusion registry, the §C2.1 issue
-manifest, the root `Cargo.toml`, and the non-Cargo registry -
-the §C7.5 trigger-loop closure, asserted against the workflow's
-actual path list; the nightly file exists, names both oracle runners,
+assertions (PR `script-unit` and the always-running Docs Phase 4B oracle
+jointly execute the offline rejection construction boundary; the nightly file
+exists, names both oracle runners,
 and appears in `NON_GATE_WORKFLOWS`; the mutation legs, changed-row
-manifest/exclusion live validation, and scheduled full standing
+manifest/exclusion structural validation, and scheduled full standing
 manifest/exclusion validation are executed by those jobs, not by this
 assertion); and negative controls
 in the Phase 2 oracle's planted style - a planted production
@@ -2001,8 +2084,8 @@ supported-neighbor control and does not become a candidate. A planted
 `Deferred` exclusion
 for a vocab-edge candidate fails until its `IssueRef` names a
 live open issue: chelis#944 (closed issue), chelis#1 (PR),
-chelis#999999999 (missing), and same-PR manifest/exclusion additions
-for each are negative controls, while chelis#879 is the structurally
+chelis#999999999 (missing), and manifest/exclusion additions for each are
+scheduled/manual liveness negatives, while chelis#879 is the structurally
 valid open-issue control; a planted `Structural` exclusion over a
 discovered candidate is red regardless of its reason. A same-PR
 exclusion citing chelis#879 but
@@ -2061,6 +2144,23 @@ through and beyond both former limits, a cyclic type, and a planted low
 resource budget; it asserts the complete obligation set or the explicit
 exhaustion error, never a smaller successful proof problem.
 
+The implementation uses a finite proof-type graph shared by raw Deep declarations
+and checker-inferred types. Alias and record references preserve node identity;
+the production collector reports a `TypeTraversal` error on resource exhaustion.
+The budget applies independently to each exported signature and invariant.
+
+LU2's completion oracle is:
+
+```sh
+cargo nextest run -p chelis-prove -p chelis-cli --lib --test issue_872_proof_type_traversal -E 'test(obligations::tests::) or binary(issue_872_proof_type_traversal)' --no-fail-fast
+```
+
+Success is every selected test passing with no ignored tests. The CLI matrix
+crosses alias lengths 32/33 and record depths 16/17 with non-opaque twins;
+the public collector tests add parser-free cycles, complete Option/tuple
+positions, direct producers, and an injected low budget. These tests are part
+of the normal workspace test surface and require no SMT solver.
+
 ### LU3 - canonical iterative compiler list spines ([#906])
 
 Compiler-authored traversal of canonical `Cons`/`Nil` data uses one iterative
@@ -2101,7 +2201,7 @@ definition instead derives its per-backend result transitively from every
 statically resolved numeric, sibling, and host-constructor disposition plus
 every exact effect row keyed by
 `(CanonicalEffectRequirement, BackendId)`. The effect requirement is exactly
-`Random | Accum | IO | Test | Resource(ResourceId)`; the four fixed variants
+`Accum | IO | Test | Resource(ResourceId)`; the three fixed variants
 and every resource literal discovered in the completed checked-body closure
 expand across all backends. Recursive host values additionally compose through
 the host-constructor table. The program reaches build/link/run when
@@ -2305,9 +2405,8 @@ closed/PR/missing issue identity cannot masquerade as live. Citation
 RELEVANCE remains explicitly review-owned; the registries do not claim to
 prove it. Sanction exactly one invariant terminal whose metadata is
 shape-checked at compile time and referent-checked by the oracle, and run
-discovery unconditionally on every PR with the mutation authority
-change-gated pre-merge and nightly otherwise, so the proof never goes stale
-and never depends on predicting a path.
+discovery unconditionally on every PR, with mutable issue state checked by the
+nightly/reporting owner, so source coverage never depends on predicting a path.
 
 [#257]: https://github.com/Chelis-Lang/chelis/issues/257
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387

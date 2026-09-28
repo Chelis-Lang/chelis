@@ -1,1 +1,1 @@
-(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} int32)} 4)))
+(def {} g (app {} (var {} sqrt) (lit {type: (t-prim {} i32)} 4)))

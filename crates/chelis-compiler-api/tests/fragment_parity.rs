@@ -23,9 +23,11 @@
 //! 2. **Tagged-error coverage.** Each rejection case pins which pass rejects
 //!    (Type / Effect / Linearity) so the tool's error tag stays faithful to the
 //!    pass that actually failed. The cases span the full pass surface: type /
-//!    precision, declared-pure-body-performs-Random/IO, effect propagation to a
-//!    held caller, linearity use-after-consume, and the two cross-def structural
-//!    detectors (base-case-free recursion group, top-level binding cycle).
+//!    precision, declared-pure-body-performs-IO (and a keyed draw, which
+//!    performs no effect), effect propagation to a held caller, linearity
+//!    use-after-consume, and the remaining cross-def structural detector
+//!    (top-level binding cycle). A separate acceptance row pins
+//!    [04-INF-2]/[04-INF-3] uniform recursion after PP9.
 //!
 //! ## Verdict definition
 //!
@@ -53,7 +55,7 @@ use chelis_deep::Expr;
 /// CLI does for a `.ch` file (`parse_str -> desugar_program -> expand_program`).
 fn render_deep(surf_source: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf_source).expect("surf parse");
-    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .expect("macro expand")
         .into_exprs()
@@ -78,18 +80,18 @@ fn render_body(surf_source: &str, function_name: &str) -> Expr {
 /// Return the `decl_index`-th declaration inside the single `(module ...)`
 /// node, borrowed from the program slice.
 fn module_decl(expr: &Expr, decl_index: usize) -> Option<&Expr> {
-    let Expr::List(list, _) = expr else {
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    if !is_tag(list, "module") {
+    if !is_tag(node, "module") {
         return None;
     }
-    // module.elements: [tag, meta, name, decls...]; decls start at index 3.
-    list.elements.get(3 + decl_index)
+    // module children: [name, decls...]; decls start at child 1.
+    node.children_slice().get(1 + decl_index)
 }
 
-fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
-    matches!(list.tag(), Some(t) if t.as_str() == tag)
+fn is_tag(node: &chelis_deep::node::Node, tag: &str) -> bool {
+    node.tag().as_str() == tag
 }
 
 /// Flatten `(module ...)` wrappers into a bare decl list, mirroring
@@ -97,10 +99,10 @@ fn is_tag(list: &chelis_deep::List, tag: &str) -> bool {
 fn flatten_modules(exprs: &[Expr]) -> Vec<Expr> {
     let mut out = Vec::new();
     for expr in exprs {
-        if let Expr::List(list, _) = expr
-            && is_tag(list, "module")
+        if let Expr::Node(node, _) = expr
+            && is_tag(node, "module")
         {
-            out.extend(flatten_modules(&list.elements[3..]));
+            out.extend(flatten_modules(&node.children_slice()[1..]));
             continue;
         }
         out.push(expr.clone());
@@ -133,8 +135,7 @@ impl Verdict {
 
 /// Run full whole-program `chelis check` on `module`, mirroring
 /// `cmd_check_one_deep` exactly: `check_ir_fitness` (the whole-module
-/// type/structural pass, including the cross-def `detect_trivial_non_terminating_fns`
-/// and `detect_top_level_binding_cycles` detectors) FIRST, THEN
+/// type/structural pass, including `detect_top_level_binding_cycles`) FIRST, THEN
 /// `check_typed_program` -> `check_program` (effects) -> `check_linearity`,
 /// short-circuiting on the first failing pass and naming it.
 ///
@@ -241,10 +242,10 @@ fn module_decls(module: &[Expr]) -> Vec<Expr> {
     module
         .iter()
         .find_map(|expr| {
-            let Expr::List(list, _) = expr else {
+            let Expr::Node(node, _) = expr else {
                 return None;
             };
-            is_tag(list, "module").then(|| list.elements[3..].to_vec())
+            is_tag(node, "module").then(|| node.children_slice()[1..].to_vec())
         })
         .expect("single module node")
 }
@@ -397,7 +398,7 @@ def bs_call_scalar(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = cast(bs_
 /// standalone.
 const RECURSIVE_MODULE: &str = r#"module Frag.Recursive
 export (count_down)
-def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1))
+def count_down(n: i32) -> i32 = if eq(n, 0) then 0 else count_down(sub(n, 1))
 "#;
 
 /// Constructed: a mutually-recursive `is_even` / `is_odd` pair. A new body for
@@ -405,46 +406,47 @@ def count_down(n: int32) -> int32 = if eq(n, 0) then 0 else count_down(sub(n, 1)
 /// against their sibling's `defsig`. Checks clean standalone.
 const MUTUAL_RECURSION_MODULE: &str = r#"module Frag.Mutual
 export (is_even, is_odd)
-def is_even(n: int32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
-def is_odd(n: int32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
+def is_even(n: i32) -> bool = if eq(n, 0) then true else is_odd(sub(n, 1))
+def is_odd(n: i32) -> bool = if eq(n, 0) then false else is_even(sub(n, 1))
 "#;
 
 /// Constructed: an effect-propagation module. `entry` is declared pure
-/// (`! { }`) and currently calls only the pure `pure_sibling`. `noisy`
-/// performs `Random` via the `dropout` builtin; `logger` performs `Io` via
-/// `debug`. Splicing a `noisy`- or `logger`-calling body into `entry` performs
-/// an effect under a pure signature; full check rejects it under both shapes
-/// (the declared-vs-inferred validator descends into the module wrapper).
-/// Checks clean standalone.
+/// (`! { }`) and currently calls only the pure `pure_sibling`. `logger`
+/// performs `Io` via `debug`; `noisy` draws with the explicit key it is given,
+/// which is no effect. Splicing a `logger`-calling body into `entry` performs
+/// an effect under a pure signature, so full check rejects it (the
+/// declared-vs-inferred validator descends into the module wrapper); a
+/// `noisy`-calling body stays pure. Checks clean standalone.
 const EFFECT_MODULE: &str = r#"module Frag.Effect
 export (entry)
-def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
+def noisy(k: key, x: tensor[8, f32]) -> tensor[8, f32] = dropout(k, x, 0.5)
 def logger(x: tensor[8, f32]) -> tensor[8, f32] = debug(x)
 def pure_sibling(x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
 def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = pure_sibling(add(x, x))
 "#;
 
-/// Constructed: cross-def effect propagation to a held caller (the red-team
-/// finding). `t` is declared `! { Random }` but its body is pure (`add(x, x)`),
-/// so its INFERRED effect is empty: over-declaration, which is allowed.
-/// `caller` is declared pure (`! { }`) and calls `t`; since `t`'s inferred
-/// effect is empty, `caller`'s inferred effect is empty too, so the base module
-/// checks clean. Splicing `t`'s body to perform `Random` (via `dropout`) raises
-/// `t`'s INFERRED effect to `{ Random }` (still matching its declared `Random`,
-/// so a `t`-local view accepts), but `caller` now INHERITS `Random` and
-/// violates its declared purity. Only the whole-module check sees that
-/// propagation, so it REJECTS on the effect pass. This is the divergence a
-/// single-def-scoped check would have missed.
-const CROSS_DEF_RANDOM_MODULE: &str = r#"module Frag.CrossRandom
+/// Constructed: a keyed draw spliced into a callee of a held caller. `t` takes
+/// a key it does not use (dropping a key is allowed); `caller` is declared
+/// pure (`! { }`) and passes `t` a fresh key. Splicing `t`'s body to draw with
+/// that key leaves both inferred effects empty, so the whole-module check
+/// accepts: a draw propagates no effect to its callers. Checks clean
+/// standalone.
+const CROSS_DEF_KEY_MODULE: &str = r#"module Frag.CrossKey
 export (caller)
-def t(x: tensor[8, f32]) -> tensor[8, f32] ! { Random } = add(x, x)
-def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
+def t(k: key, x: tensor[8, f32]) -> tensor[8, f32] = add(x, x)
+def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(key_from_seed(7i64), x)
 "#;
 
-/// The IO analog of [`CROSS_DEF_RANDOM_MODULE`]. `t` is declared `! { IO }` with
-/// a pure body; `caller` is declared pure and calls `t`. Splicing `t`'s body to
-/// perform `Io` (via `debug`) makes `caller` inherit `Io` and violate its
-/// declared purity. Checks clean standalone.
+/// Constructed: cross-def effect propagation to a held caller (the red-team
+/// finding). `t` is declared `! { IO }` but its body is pure (`add(x, x)`), so
+/// its INFERRED effect is empty: over-declaration, which is allowed. `caller`
+/// is declared pure (`! { }`) and calls `t`; since `t`'s inferred effect is
+/// empty, `caller`'s is too, so the base module checks clean. Splicing `t`'s
+/// body to perform `Io` (via `debug`) raises `t`'s INFERRED effect to
+/// `{ Io }` (still matching its declaration, so a `t`-local view accepts), but
+/// `caller` now INHERITS `Io` and violates its declared purity. Only the
+/// whole-module check sees that propagation, so it REJECTS on the effect pass.
+/// This is the divergence a single-def-scoped check would have missed.
 const CROSS_DEF_IO_MODULE: &str = r#"module Frag.CrossIo
 export (caller)
 def t(x: tensor[8, f32]) -> tensor[8, f32] ! { IO } = add(x, x)
@@ -453,29 +455,27 @@ def caller(x: tensor[8, f32]) -> tensor[8, f32] ! { } = t(x)
 
 /// Constructed: a `ping` / `pong` mutually-recursive pair where `ping` holds
 /// the sole base case (`if eq(n, 0) then 0 ...`) and `pong` is unconditional.
-/// Splicing `ping`'s body to drop the base case (new body `pong(sub(n, 1))`)
-/// closes the recursion group with no base case anywhere, which the whole-module
-/// `detect_trivial_non_terminating_fns` detector flags. The detector is a
-/// recursion-group property, so it fires only when the full rewritten module is
-/// analyzed. Checks clean standalone (the base case is present).
+/// Splicing `ping`'s body to drop that case leaves one uniform recursive
+/// instantiation, which [04-INF-2]/[04-INF-3] admit. Both the fragment tool and
+/// full check must accept the rewritten module after PP9.
 const PINGPONG_MODULE: &str = r#"module Frag.PingPong
 export (ping, pong)
-def ping(n: int32) -> int32 = if eq(n, 0) then 0 else pong(sub(n, 1))
-def pong(n: int32) -> int32 = ping(sub(n, 1))
+def ping(n: i32) -> i32 = if eq(n, 0) then 0 else pong(sub(n, 1))
+def pong(n: i32) -> i32 = ping(sub(n, 1))
 "#;
 
 /// Constructed: a module carrying a top-level value-binding cycle
 /// (`a` reads `b`, `b` reads `a`), which the whole-module
-/// `detect_top_level_binding_cycles` detector flags. This is the SECOND
-/// cross-def structural detector the fitness pass runs. The body-replacement
+/// `detect_top_level_binding_cycles` detector flags. This cross-def structural
+/// detector remains checker-owned. The body-replacement
 /// tool only targets functions with a declared signature, so a value-binding
 /// cycle cannot be introduced through a splice; this fixture verifies the
 /// oracle ([`full_check_verdict`]) mirrors `cmd_check_one_deep` by running
 /// `check_ir_fitness` first and so REJECTS the cycle.
 const BINDING_CYCLE_MODULE: &str = r#"module Frag.BindingCycle
 export (a, b)
-a: int32 = add(b, 1)
-b: int32 = add(a, 1)
+a: i32 = add(b, 1)
+b: i32 = add(a, 1)
 "#;
 
 /// Constructed: a linearity module. `target(x)` takes an owned tensor
@@ -579,7 +579,7 @@ fn recursive_body_resolves_against_signature_agrees_accept() {
     let module = render_deep(RECURSIVE_MODULE);
     // A new recursive body must resolve `count_down` against its signature.
     let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = if lt(n, 1) then 0 else add(1, count_down(sub(n, 1)))\n",
+        "module M\ndef f(n: i32) -> i32 = if lt(n, 1) then 0 else add(1, count_down(sub(n, 1)))\n",
         "f",
     );
     assert_parity_mw(
@@ -595,11 +595,11 @@ fn recursive_body_resolves_against_signature_agrees_accept() {
 #[test]
 fn recursive_body_wrong_return_type_agrees_reject() {
     let module = render_deep(RECURSIVE_MODULE);
-    // The recursive call resolves against the signature, but its int32 result
-    // is cast to f32 and returned under an int32 signature: precision mismatch
+    // The recursive call resolves against the signature, but its i32 result
+    // is cast to f32 and returned under an i32 signature: precision mismatch
     // against the declared return. TYPE reject.
     let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = cast(count_down(n), f32)\n",
+        "module M\ndef f(n: i32) -> i32 = cast(count_down(n), f32)\n",
         "f",
     );
     assert_parity_mw(
@@ -620,7 +620,7 @@ fn mutual_recursion_body_resolves_sibling_agrees_accept() {
     // New body for is_even referencing the sibling is_odd: resolves against
     // is_odd's signature.
     let body = render_body(
-        "module M\ndef f(n: int32) -> bool = if lt(n, 1) then true else is_odd(sub(n, 1))\n",
+        "module M\ndef f(n: i32) -> bool = if lt(n, 1) then true else is_odd(sub(n, 1))\n",
         "f",
     );
     assert_parity_mw(
@@ -636,11 +636,11 @@ fn mutual_recursion_body_resolves_sibling_agrees_accept() {
 #[test]
 fn mutual_recursion_body_wrong_type_agrees_reject() {
     let module = render_deep(MUTUAL_RECURSION_MODULE);
-    // is_even declared to return bool; the then-branch returns the int32
-    // argument while the else-branch returns int32: TYPE reject even though
+    // is_even declared to return bool; the then-branch returns the i32
+    // argument while the else-branch returns i32: TYPE reject even though
     // the sibling reference resolves.
     let body = render_body(
-        "module M\ndef f(n: int32) -> bool = if lt(n, 1) then n else 0\n",
+        "module M\ndef f(n: i32) -> bool = if lt(n, 1) then n else 0\n",
         "f",
     );
     assert_parity_mw(
@@ -674,30 +674,30 @@ fn effect_pure_body_agrees_accept() {
 }
 
 #[test]
-fn effect_declared_pure_body_introduces_random() {
-    // `entry` is declared pure (`! { }`); the new body calls `noisy`, which
-    // performs `Random`. The declared-vs-inferred validator descends into the
-    // `(module ...)` wrapper and rejects on the effect pass.
+fn effect_declared_pure_body_with_a_keyed_draw_accepts() {
+    // `entry` is declared pure (`! { }`); the new body calls `noisy` with a
+    // fresh key. A draw is a pure function of its key, so the body infers no
+    // effect and the validator accepts it (under the retired counter stream
+    // this body performed `Random` and was rejected).
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
-        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(x)\n",
+        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = noisy(key_from_seed(7i64), x)\n",
         "f",
     );
     assert_parity_mw(
-        "effect/declared_pure_introduces_random",
+        "effect/declared_pure_keyed_draw",
         &module,
         "entry",
         &body,
-        Verdict::Reject(FailingPass::Effect),
+        Verdict::Accept,
         true,
     );
 }
 
 #[test]
 fn effect_declared_pure_body_introduces_io() {
-    // The IO counterpart: `entry` is declared pure (`! { }`); the new body
-    // calls `logger`, which performs `Io` via `debug`. Rejected on the effect
-    // pass, the same as the Random case.
+    // `entry` is declared pure (`! { }`); the new body calls `logger`, which
+    // performs `Io` via `debug`. Rejected on the effect pass.
     let module = render_deep(EFFECT_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = logger(x)\n",
@@ -716,24 +716,21 @@ fn effect_declared_pure_body_introduces_io() {
 // ── Effect: cross-def propagation to a held caller (red-team finding) ───────
 
 #[test]
-fn effect_cross_def_random_propagates_to_held_caller_rejects() {
-    // `t` is declared `! { Random }` with a pure body; `caller` (declared pure)
-    // calls `t`. Splicing `t`'s body to perform `Random` keeps `t` itself
-    // self-consistent (its declared Random now matches its inferred Random) but
-    // makes `caller` INHERIT Random and violate its declared purity. Only the
-    // whole-module check sees that propagation, so it REJECTS on the effect
-    // pass. A single-def-scoped check of `t` alone would have ACCEPTED.
-    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+fn effect_cross_def_keyed_draw_keeps_caller_pure_accepts() {
+    // The key-form counterpart of the propagation below: splicing `t`'s body
+    // to draw with its key keeps `t`'s inferred effect empty, so the pure
+    // `caller` stays pure and the whole-module check ACCEPTS.
+    let module = render_deep(CROSS_DEF_KEY_MODULE);
     let body = render_body(
-        "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)\n",
+        "module M\ndef f(k: key, x: tensor[8, f32]) -> tensor[8, f32] = dropout(k, x, 0.5)\n",
         "f",
     );
     assert_parity_mw(
-        "effect/cross_def_random_to_held_caller",
+        "effect/cross_def_keyed_draw_keeps_caller_pure",
         &module,
         "t",
         &body,
-        Verdict::Reject(FailingPass::Effect),
+        Verdict::Accept,
         true,
     );
 }
@@ -764,8 +761,8 @@ fn effect_cross_def_pure_body_keeps_caller_pure_accepts() {
     // Control: splicing `t`'s body to another pure expression keeps `t`'s
     // inferred effect empty, so `caller` stays pure and the whole-module check
     // ACCEPTS. This pins that the reject above is the propagated effect, not the
-    // mere presence of the `! { Random }` declaration on `t`.
-    let module = render_deep(CROSS_DEF_RANDOM_MODULE);
+    // mere presence of the `! { IO }` declaration on `t`.
+    let module = render_deep(CROSS_DEF_IO_MODULE);
     let body = render_body(
         "module M\ndef f(x: tensor[8, f32]) -> tensor[8, f32] = mul(x, x)\n",
         "f",
@@ -826,30 +823,24 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
     );
 }
 
-// ── Cross-def structural fitness (whole-module detectors) ───────────────────
+// ── Cross-def fitness and uniform-recursion acceptance ──────────────────────
 
 #[test]
-fn pingpong_drop_base_case_agrees_reject() {
+fn pingpong_drop_base_case_agrees_accept() {
     // `ping` holds the sole base case of the `ping`/`pong` group. Splicing its
-    // body to call `pong` unconditionally removes the only base case, so the
-    // whole-module `detect_trivial_non_terminating_fns` detector flags both
-    // `ping` and `pong` as trivially non-terminating. That detector is a
-    // recursion-group property and only fires when the FULL rewritten module is
-    // analyzed. The tool runs `check_ir_fitness` on the rewritten module and so
-    // REJECTS, matching `cmd_check_one_deep`. Reject identity is a structural
-    // Type rejection on both paths.
+    // body to call `pong` unconditionally removes that case but does not change
+    // the recursive instantiation. [04-INF-2]/[04-INF-3] therefore admit it.
+    // PP9 requires both the tool and full `chelis check` to ACCEPT; any backend
+    // refusal is a separate chelis#730 capability decision.
     let module = render_deep(PINGPONG_MODULE);
-    let body = render_body(
-        "module M\ndef f(n: int32) -> int32 = pong(sub(n, 1))\n",
-        "f",
-    );
+    let body = render_body("module M\ndef f(n: i32) -> i32 = pong(sub(n, 1))\n", "f");
     assert_parity_mw(
         "pingpong/drop_base_case",
         &module,
         "ping",
         &body,
-        Verdict::Reject(FailingPass::Type),
-        true,
+        Verdict::Accept,
+        false,
     );
 }
 

@@ -11,7 +11,7 @@
 //!
 //! depending on which classifier reached the unresolved `Type::Var(_)`
 //! first. The school-style reproducer was a `pool → relu → &result →
-//! conv2d` chain in a forward body whose intermediate had no declared
+//! conv` chain in a forward body whose intermediate had no declared
 //! type and whose RHS sub-expressions (`reshape(...)`, `mean(...)`)
 //! left their output type as a free variable until the surrounding
 //! call's `&tensor[..]` parameter pinned it via unification.
@@ -56,7 +56,7 @@
 //!     fix remains untouched here.
 //!
 //! Negative test parity: a `&` borrow on a genuinely non-tensor binding
-//! (a stack `int32`) must still be rejected. The error surfaces from
+//! (a stack `i32`) must still be rejected. The error surfaces from
 //! the inference-layer `borrow` arm before linearity runs.
 
 use assert_cmd::Command;
@@ -125,12 +125,12 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
         &fixture,
         "module Issue256PolyReturnChain\n\
          def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
-           six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
-           perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
-           five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\
-           mean(five, cast(4, int32))\n\
+           six = reshape(x, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(2, i64), cast(2, i64)])\n\
+           perm = permute(six, cast(0, i32), cast(1, i32), cast(2, i32), cast(4, i32), cast(3, i32), cast(5, i32))\n\
+           five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
+           mean(five, cast(4, i32))\n\
          }\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward(x: tensor[2, 4, 4, 4, f32]) -> bool = {\n\
            p = pool_no_sig(x)\n\
            r = relu(p)\n\
@@ -141,7 +141,7 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "polymorphic-return borrow chain must produce no errors post-fix; got {kinds:?}"
@@ -162,12 +162,12 @@ fn id4_roundtrip_workaround_still_works() {
         &fixture,
         "module Issue256Id4Workaround\n\
          def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
-           six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
-           perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
-           five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\
-           mean(five, cast(4, int32))\n\
+           six = reshape(x, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(2, i64), cast(2, i64)])\n\
+           perm = permute(six, cast(0, i32), cast(1, i32), cast(2, i32), cast(4, i32), cast(3, i32), cast(5, i32))\n\
+           five = reshape(perm, [cast(2, i64), cast(4, i64), cast(2, i64), cast(2, i64), cast(4, i64)])\n\
+           mean(five, cast(4, i32))\n\
          }\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def id4[a, c, h, w](x: tensor[a, c, h, w, f32]) -> tensor[a, c, h, w, f32] = x\n\
          def forward(x: tensor[2, 4, 4, 4, f32]) -> bool = {\n\
            p = pool_no_sig(x)\n\
@@ -180,7 +180,7 @@ fn id4_roundtrip_workaround_still_works() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "id4 round-trip workaround must produce no errors; got {kinds:?}"
@@ -202,8 +202,8 @@ fn borrow_of_non_tensor_is_still_rejected() {
     write_file(
         &fixture,
         "module Issue256NonTensor\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
-         def forward(x: int32) -> bool = consume_t(&x)\n",
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def forward(x: i32) -> bool = consume_t(&x)\n",
     );
     fmt_inplace(&fixture);
 
@@ -211,13 +211,13 @@ fn borrow_of_non_tensor_is_still_rejected() {
     let kinds = error_kinds(&json);
     assert!(
         !kinds.is_empty(),
-        "borrow of int32 against a &tensor parameter must be rejected; got clean score {json}"
+        "borrow of i32 against a &tensor parameter must be rejected; got clean score {json}"
     );
     assert!(
         kinds
             .iter()
             .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
-        "borrow of int32 must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+        "borrow of i32 must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
     );
     let messages: Vec<String> = json["errors"]
         .as_array()
@@ -226,8 +226,8 @@ fn borrow_of_non_tensor_is_still_rejected() {
         .map(|e| e["message"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        messages.iter().any(|m| m.contains("int32")),
-        "rejection diagnostic should mention `int32`; got {messages:?}"
+        messages.iter().any(|m| m.contains("i32")),
+        "rejection diagnostic should mention `i32`; got {messages:?}"
     );
 }
 
@@ -243,7 +243,7 @@ fn direct_relu_borrow_chain_keeps_working() {
     write_file(
         &fixture,
         "module Issue256DirectRelu\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward[a, c, h, w](x: tensor[a, c, h, w, f32]) -> bool = {\n\
            r = relu(x)\n\
            consume_t(&r)\n\
@@ -253,7 +253,7 @@ fn direct_relu_borrow_chain_keeps_working() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "direct relu → borrow chain must keep working; got {kinds:?}"
@@ -273,7 +273,7 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
         "module Issue256Issue154Regression\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig borrow_params: &BatchNormParams[n] -> bool\n\
+         sig borrow_params[n]: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
          def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
@@ -281,7 +281,7 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "chelis#154 tensor-carrying record ADT borrow must keep working; got {kinds:?}"
@@ -305,10 +305,10 @@ fn borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected() {
     write_file(
         &fixture,
         "module Issue256NonTensorRecordPolyConsumer\n\
-         type Config = | Config { lr: f32, bs: int32 }\n\
+         type Config = | Config { lr: f32, bs: i32 }\n\
          def consume_any[a](t: a) -> bool = true\n\
          def forward() -> bool = {\n\
-           c = Config { lr: 0.1, bs: cast(32, int32) }\n\
+           c = Config { lr: 0.1, bs: cast(32, i32) }\n\
            consume_any(&c)\n\
          }\n",
     );
@@ -331,7 +331,7 @@ fn borrow_of_non_tensor_record_with_polymorphic_consumer_is_rejected() {
 /// Extended negative parity: a tuple of scalars borrowed against a
 /// `&tensor[..]` parameter must still be rejected. The inference
 /// borrow arm accepts `Type::Tuple(_)` unconditionally; the rejection
-/// surfaces from the call-site type mismatch (`(int32, int32)` vs
+/// surfaces from the call-site type mismatch (`(i32, i32)` vs
 /// `tensor[..]`). This locks the adjacent path the linearity loosening
 /// does not affect, so a future refactor that moves the tuple-of-scalars
 /// classification to linearity does not silently regress.
@@ -342,9 +342,9 @@ fn borrow_of_scalar_tuple_is_rejected() {
     write_file(
         &fixture,
         "module Issue256ScalarTupleBorrowRejected\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward() -> bool = {\n\
-           pair = (cast(1, int32), cast(2, int32))\n\
+           pair = (cast(1, i32), cast(2, i32))\n\
            consume_t(&pair)\n\
          }\n",
     );
@@ -354,7 +354,7 @@ fn borrow_of_scalar_tuple_is_rejected() {
     let kinds = error_kinds(&json);
     assert!(
         !kinds.is_empty(),
-        "borrow of (int32, int32) against a &tensor parameter must be rejected; got clean score {json}"
+        "borrow of (i32, i32) against a &tensor parameter must be rejected; got clean score {json}"
     );
     assert!(
         kinds
@@ -376,7 +376,7 @@ fn borrow_of_unit_is_rejected_at_inference() {
     write_file(
         &fixture,
         "module Issue256UnitBorrowRejected\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def forward() -> bool = {\n\
            u = ()\n\
            consume_t(&u)\n\
@@ -451,7 +451,7 @@ fn borrow_of_free_var_against_polymorphic_consumer_is_rejected() {
 
 /// Round-2 soundness lock, end-to-end variant: the same free-var borrow
 /// reached through a CONCRETE caller that instantiates the polymorphic
-/// parameter at a non-tensor type (`int32`). This is the fully-terminating
+/// parameter at a non-tensor type (`i32`). This is the fully-terminating
 /// program a user could actually write: no recursion, a concrete `main`,
 /// and a non-tensor value flowing into a `&` borrow. It must be rejected
 /// so a non-tensor never reaches the (borrow-type-erased) backend.
@@ -467,7 +467,7 @@ fn borrow_of_free_var_instantiated_at_int32_is_rejected() {
            v = seed\n\
            consume_any(&v)\n\
          }\n\
-         def main() -> bool = use_it(cast(42, int32))\n",
+         def main() -> bool = use_it(cast(42, i32))\n",
     );
     fmt_inplace(&fixture);
 
@@ -482,7 +482,7 @@ fn borrow_of_free_var_instantiated_at_int32_is_rejected() {
         kinds
             .iter()
             .any(|k| k == "TypeMismatch" || k == "InvalidBorrow"),
-        "free-var-at-int32 borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
+        "free-var-at-i32 borrow must surface a TypeMismatch or InvalidBorrow; got {kinds:?}"
     );
 }
 
@@ -499,7 +499,7 @@ fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
     write_file(
         &fixture,
         "module Issue256PolyParamPinned\n\
-         def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
+         def consume_t[a, c, h, w](t: &tensor[a, c, h, w, f32]) -> bool = true\n\
          def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
            v = relu(seed)\n\
            consume_t(&v)\n\
@@ -509,7 +509,7 @@ fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a tensor must be accepted; got {kinds:?}"
@@ -540,14 +540,14 @@ fn borrow_of_deferred_var_resolving_to_non_carrying_adt_is_rejected() {
     write_file(
         &fixture,
         "module Issue256DeferredNonCarryingAdt\n\
-         type Config = | Config { lr: f32, bs: int32 }\n\
+         type Config = | Config { lr: f32, bs: i32 }\n\
          sig consume_config: &Config -> bool\n\
          def consume_config(c) = true\n\
          def use_it[a](seed: a) -> bool = {\n\
            v = seed\n\
            consume_config(&v)\n\
          }\n\
-         def main() -> bool = use_it(Config { lr: 0.1, bs: cast(32, int32) })\n",
+         def main() -> bool = use_it(Config { lr: 0.1, bs: cast(32, i32) })\n",
     );
     fmt_inplace(&fixture);
 
@@ -616,7 +616,7 @@ fn borrow_of_concrete_carrier_adt_is_accepted() {
         "module Issue256DeferredCarrierAdt\n\
          type BatchNormParams[n] =\n\
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-         sig consume_bnp: &BatchNormParams[n] -> bool\n\
+         sig consume_bnp[n]: &BatchNormParams[n] -> bool\n\
          def consume_bnp(p) = true\n\
          def use_it[n](seed: BatchNormParams[n]) -> bool = {\n\
            v = seed\n\
@@ -628,7 +628,7 @@ fn borrow_of_concrete_carrier_adt_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a tensor-carrying ADT must be \
@@ -670,7 +670,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
         "module Issue256DeferredTransitiveCarrier\n\
          type Inner[n] = | Inner { w: tensor[n, f32] }\n\
          type Outer[n] = | Outer { inner: Inner[n] }\n\
-         sig consume_outer: &Outer[n] -> bool\n\
+         sig consume_outer[n]: &Outer[n] -> bool\n\
          def consume_outer(o) = true\n\
          def use_it[n](seed: Outer[n]) -> bool = {\n\
            v = seed\n\
@@ -682,7 +682,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a transitively-tensor-carrying \
@@ -714,7 +714,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
 /// and a consumer whose parameter is `&BatchNormParams[n]`.
 const BNP_PRELUDE: &str = "type BatchNormParams[n] =\n  \
      | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
-     sig consume_bnp: &BatchNormParams[n] -> bool\n\
+     sig consume_bnp[n]: &BatchNormParams[n] -> bool\n\
      def consume_bnp(p) = true\n";
 
 /// Write a `.ch` fixture with the `BNP_PRELUDE`, canonicalize it, and check it.
@@ -762,7 +762,7 @@ fn borrow_of_inferred_param_resolving_to_carrier_is_accepted() {
         "def use_it(seed) -> bool = consume_bnp(&seed)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of an inferred parameter that inference resolves to a \
@@ -802,7 +802,7 @@ fn borrow_of_inferred_param_agrees_across_both_ingresses() {
         error_messages(&deep),
         "Surf and Deep ingresses must agree on the error list"
     );
-    assert_eq!(surf["score"], 1, "perfect-score contract: {surf}");
+    assert_eq!(surf["score"], 1.0, "perfect-score contract: {surf}");
     assert!(
         error_kinds(&surf).is_empty(),
         "both ingresses must accept the inferred-parameter borrow; got {:?}",
@@ -825,7 +825,7 @@ fn borrow_of_unannotated_def_resolving_to_carrier_is_accepted() {
         "def use_it(seed) = consume_bnp(&seed)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow inside a def with no annotation at all must be accepted \
@@ -848,7 +848,7 @@ fn borrow_of_lambda_param_resolving_to_carrier_is_accepted() {
         "def use_it[n](p: BatchNormParams[n]) -> bool = (fn (v) -> consume_bnp(&v))(p)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a lambda parameter that resolves to a carrier must be \
@@ -871,7 +871,7 @@ fn borrow_of_let_alias_of_inferred_param_is_accepted() {
         "def use_it(seed) -> bool = {\n  v = seed\n  consume_bnp(&v)\n}\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a let alias of an inferred parameter must be accepted \
@@ -995,7 +995,7 @@ fn borrow_of_relu_result_with_unresolved_dims_is_accepted() {
     write_file(
         &fixture,
         "module Issue1589UnresolvedDims\n\
-         sig consume_t: &tensor[a, c, h, w, f32] -> bool\n\
+         sig consume_t[a, c, h, w]: &tensor[a, c, h, w, f32] -> bool\n\
          def consume_t(t) = true\n\
          def use_it[a, c, h, w](seed: tensor[a, c, h, w, f32]) -> bool = {\n\
            v = relu(seed)\n\
@@ -1006,7 +1006,7 @@ fn borrow_of_relu_result_with_unresolved_dims_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a tensor with unresolved dimension variables must be \

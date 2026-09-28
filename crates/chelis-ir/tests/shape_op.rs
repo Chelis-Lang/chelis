@@ -33,7 +33,9 @@ fn scalar_int_ty(precision: Prim) -> TensorType {
 #[test]
 fn shape_node_evaluates_to_runtime_extent() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(
@@ -43,12 +45,14 @@ fn shape_node_evaluates_to_runtime_extent() {
         None,
     );
     let s0 = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         scalar_int_ty(Prim::Int64),
         None,
     );
     let s1 = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 1 },
         vec![x],
         scalar_int_ty(Prim::Int64),
@@ -81,13 +85,15 @@ fn shape_node_evaluates_to_runtime_extent() {
 
 fn verify_shape(input_dims: Vec<DimInfo>, axis: usize, out_ty: TensorType) -> Vec<String> {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(input_dims, Prim::F32),
         None,
     );
-    dag.add_node(RiscOp::Shape { axis }, vec![x], out_ty, None);
+    dag.add_node(decl, RiscOp::Shape { axis }, vec![x], out_ty, None);
     verify::verify(&dag)
 }
 
@@ -118,7 +124,7 @@ fn shape_node_verify_rejects_non_scalar_output() {
 fn shape_node_verify_rejects_non_integer_output() {
     let errs = verify_shape(vec![DimInfo::Lit(4)], 0, scalar_int_ty(Prim::F32));
     assert!(
-        errs.iter().any(|e| e.contains("exact int64 scalar")),
+        errs.iter().any(|e| e.contains("exact i64 scalar")),
         "non-integer output must be rejected; errs = {errs:?}"
     );
 }
@@ -146,19 +152,23 @@ fn shape_node_verify_accepts_wellformed() {
 fn shape_node_is_ad_transparent_with_zero_adjoint() {
     // forward: loss = cast(shape(x, 0), f32)  (a scalar float).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         tensor_ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
         None,
     );
     let sh = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         scalar_int_ty(Prim::Int64),
         None,
     );
     let loss = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::F32,
         },

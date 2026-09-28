@@ -1,139 +1,741 @@
-name: Heavy E2E
+name: Linux Extended Validation
 
-# The heavyweight end-to-end suite: tests that run a real `chelis build`
-# + gcc + run, a real `reef build` / `reef install`, or a full-stdlib
-# `chelis check`. Each re-typechecks or rebuilds the whole chelis-std
-# transitive graph and costs 9-28s wall, and nextest cannot parallelize
-# within a single test, so they set a hard multi-minute wall-clock floor.
-# They are high-level end-to-end signal, not inner-loop coverage, so they
-# are OFF the per-PR `Integration Tests` gate and run here instead.
-#
-# This workflow runs on a nightly schedule and on manual dispatch ONLY.
-# It does NOT run per-PR and does NOT run on push-to-main. The exact set
-# of tests is the `nightly` nextest profile's default-filter in
-# `.config/nextest.toml`; the per-PR `ci` profile excludes exactly that
-# set, so a test is on the per-PR gate XOR this nightly gate.
-
+# Daily/manual exhaustive coverage. The full workspace pass deliberately
+# includes PR tests as well as expensive integrations; no default filter
+# can hide a newly added target. It executes as four disjoint nextest hash
+# partitions of that one unfiltered selection, so every listed test still
+# runs exactly once and each shard reports inside the 60-minute budget.
+# The two census targets execute in dtype only.
+# Feature and phase oracles retain their own
+# acceptance commands. All ignored tests still need explicit/manual owners.
 on:
   schedule:
-    # 08:00 UTC daily. Off-peak; no per-PR latency impact. Staggered off
-    # 07:00 so it does not collide with conformance-nightly.yml (which also
-    # runs at 07:00) for runner-minutes and disk on the shared scheduler.
-    - cron: "0 8 * * *"
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: linux-extended-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  heavy-e2e:
-    name: Heavy E2E (Linux)
-    runs-on: ubuntu-latest
-    # The suite is ~27s of test wall on a fast box; allow generous head
-    # room for a slow runner plus compilation cache miss.
-    timeout-minutes: 30
-    # Strip debuginfo from the dev/test build. Debuginfo is the dominant
-    # disk consumer in target/ and this end-to-end suite needs no symbols;
-    # dropping it (alongside the free-disk step below) is what keeps the
-    # workspace build off "No space left on device" / ld bus-error (signal 7).
+  # Devenv-backed jobs retain their execution budget plus 25 minutes for cold setup.
+  #
+  # Runs on main (the nightly schedule and dispatches on main) execute every job
+  # except test-telemetry on the self-hosted warm runners, which substitute from
+  # the private Nix/Kache caches instead of rebuilding from source. The warm
+  # broker admits each of these jobs only from refs/heads/main, so a dispatch on
+  # any other branch (candidate validation) stays GitHub-hosted. test-telemetry
+  # keeps the hosted uv-managed interpreter.
+  #
+  # On main those warm jobs also share the linux-extended-warm-x64 concurrency
+  # group, so a run holds at most one runner of the two-runner pool and leaves
+  # the other free for the pool's other jobs: GitHub Actions has no job
+  # priority (chelis#2543). `queue: max` keeps the waiting jobs pending in
+  # order; the default queue would cancel all but one of them. Off main each
+  # job has its own group, so hosted candidate validation stays parallel.
+  full-workspace:
+    name: Full Workspace (Linux, shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-full-workspace-{1}', github.run_id, matrix.shard) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 85
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py). This is
-      # the in-repo free-disk step every ci.yml build job already runs; the
-      # heavy-e2e job was the only build job missing it, which is why its
-      # workspace build exhausted the runner disk.
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
-      # reset would otherwise flake this nightly with no code change.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI
-      # runners need a matching uv-managed venv before any cargo run
-      # (pyo3-build-config is a transitive build-dep that runs before
-      # main compilation). See ci.yml lint-rust worker for the same
-      # pattern and for why the version is pinned to v8.1.0 rather
-      # than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
 
-      # The `nightly` nextest profile (.config/nextest.toml) selects
-      # exactly the heavy e2e suite via its default-filter and sets
-      # `retries = 2` so a transient gcc/CPU-contention hiccup does not
-      # fail the run. This is the only place the `nightly` profile is
-      # used.
-      - name: Heavy e2e suite
-        run: cargo nextest run --workspace --profile nightly
+      - name: Build product prerequisites
+        run: cargo build --workspace --lib --bins
 
-      # The chelis-std in-language self-test corpus (packages/chelis-std/tests/,
-      # run via `chelis test tests/`). Its integration test is #[ignore] (a
-      # ~170s manual gate), so NOTHING in CI exercised it — neither the per-PR
-      # gate nor `--profile nightly` runs ignored tests, and the corpus rotted
-      # silently (chelis#332/#333). Run it explicitly here so a regression in a
-      # chelis-std module surfaces nightly. `if: always()` so it runs even when
-      # the heavy e2e suite above fails (independent signal).
-      - name: chelis-std self-test corpus
+      - name: Full non-ignored workspace suite
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4
+
+      - name: Verify nextest profile coverage
+        if: matrix.shard == 1
+        run: python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
+
+      - name: Upload full workspace JUnit
         if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-full-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: chelis-std self-test corpus
+        if: always() && matrix.shard == 1
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
-  # Surface a nightly failure as a tracking issue (opens on failure, closes on
-  # green) so a red nightly is impossible to miss — scheduled-run failures do
-  # not show a red status on main, which is how both nightlies stayed red for
-  # days unnoticed.
+  script-nightly:
+    name: Script Integration Tests (Linux)
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-script-nightly', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 85
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-script-nightly
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python "$PYO3_PYTHON" PyYAML==6.0.3
+
+      # Later explicit restores must preserve the same provider partition as rust-cache.
+      - name: Restore script compiler builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      - name: Run script integration tests
+        run: python scripts/ci_script_tests.py nightly
+
+      - name: Save script compiler builds
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+
+      - name: Upload script selection and timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-nightly
+          path: target/ci-script-tests/nightly
+          if-no-files-found: error
+          retention-days: 14
+
+  dtype-phase3-oracle:
+    name: Dtype Phase 0-3 Oracle
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-dtype-phase3-oracle', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # chelis#1730: the exact-main oracle remained healthy but was cancelled
+    # while its exhaustive compiled witness was still executing at 60 minutes.
+    # Preserve the 90-minute budget plus 25 minutes for cold Devenv setup.
+    timeout-minutes: 115
+    permissions:
+      contents: read
+      issues: read
+    env:
+      CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/ci-script-tests/census/timings
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-
+
+      - name: Restore census control builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      - name: Dtype Phase 0-3 oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: python scripts/dtype_phase3_oracle.py
+
+      - name: Validate and report test timing
+        run: >-
+          python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload dtype JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save capacity rustdoc build
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
+      - name: Save census control builds
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+
+      - name: Upload census subprocess timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-census
+          path: target/ci-script-tests/census
+          if-no-files-found: error
+          retention-days: 14
+
+  faithful-observation-phase2-oracle:
+    name: Faithful Observation Phase 2 Oracle
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-faithful-observation-phase2-oracle', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Faithful observation Phase 2 oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: python scripts/faithful_observation_phase2_oracle.py
+
+  compiled-value-ownership-phase0-oracle:
+    name: Compiled Value Ownership Phase 2 Oracle
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-compiled-value-ownership-phase0-oracle', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Compiled value ownership Phase 2 oracle
+        run: python scripts/compiled_value_ownership_oracle.py --phase 2
+
+      - name: Compiled value ownership launch subset
+        run: python scripts/compiled_value_ownership_oracle.py --phase launch
+
+  runtime-representation-phase0-oracle:
+    name: Runtime Representation Phase 2 Oracle
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-runtime-representation-phase0-oracle', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    # chelis#2299: exact-main Phase 1 passed and Phase 2 reached its final
+    # Python/DLPack cohort before the still-running binding census was cancelled
+    # at 90 minutes. Preserve measured completion headroom without weakening it.
+    # Preserve the 120-minute budget plus 25 minutes for cold Devenv setup.
+    timeout-minutes: 145
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Gate (runtime representation stage)
+        run: chelis-gate runtime-representation
+
+      - name: Upload runtime representation execution receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-representation-phase2-receipts
+          path: |
+            target/runtime-representation-phase1/
+            target/runtime-representation-phase2/
+          if-no-files-found: error
+          retention-days: 14
+
+  runtime-extent-oracle:
+    name: Runtime Extent Oracle (chelis#1277)
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-runtime-extent-oracle', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 115
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      # Phase A's wire capacity leg executes the Python binding facade, so the
+      # venv needs that facade's declared dependencies. Reading them from the
+      # bindings' own pyproject.toml keeps one source of truth; pinning them
+      # here would be a second place to forget.
+      - name: Install the Python binding facade dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      # One step, because `--phase final` is chelis#1277's completion oracle:
+      # it runs both registered phases' deduplicated targets, refuses
+      # `--allow-shortfall` outright, and prints each phase's corpus digest
+      # beside the combined one.
+      - name: Runtime extent oracle (completion)
+        run: python scripts/runtime_extent_oracle.py --phase final
+
+  generalize-sweep-oracle-shard:
+    name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-generalize-sweep-oracle-shard-{1}', github.run_id, matrix.shard) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 85
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Typecheck level generalization oracle
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+
+      - name: Verify generalization lane selection
+        if: matrix.shard == 1
+        run: python -m unittest scripts.test_nextest_profile_partition.GeneralizationPartitionTests
+
+      - name: Validate and report test timing
+        run: >-
+          python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+      - name: Upload generalization JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-linux-generalization-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  generalize-sweep-oracle:
+    name: Typecheck Level Generalization Oracle
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-generalize-sweep-oracle', github.run_id) }}
+      queue: max
+    permissions:
+      contents: read
+    needs: [generalize-sweep-oracle-shard]
+    if: always()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every generalization-oracle shard
+        run: python3 scripts/ci_require_success.py generalize-sweep-oracle-shard=${{ needs.generalize-sweep-oracle-shard.result }}
+
+  integration-support:
+    name: Integration Support (Linux, ${{ matrix.slice }})
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [frontend, domain]
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-integration-support-{1}', github.run_id, matrix.slice) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 70
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python "$PYO3_PYTHON" -r bindings/python/pyproject.toml
+
+      - name: Build product prerequisites
+        run: cargo build --workspace --lib --bins
+
+      - name: Gate (integration support subset)
+        run: chelis-gate integration --support-only --support-slice ${{ matrix.slice }}
+
+  backend-sanitizers-full:
+    name: Backend Sanitizers (Full)
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-backend-sanitizers-full', github.run_id) }}
+      queue: max
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
+    timeout-minutes: 70
+    env:
+      CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Set up project CI
+        uses: ./.github/actions/setup-project-ci
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', '.kache.toml') }}
+
+      - name: Backend tests under ASan/UBSan
+        run: cargo test -p chelis-backend-c
+
+  test-telemetry:
+    name: Extended Test Telemetry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [full-workspace, dtype-phase3-oracle, generalize-sweep-oracle-shard]
+    if: ${{ !cancelled() && needs.full-workspace.result == 'success' && needs.dtype-phase3-oracle.result == 'success' && needs.generalize-sweep-oracle-shard.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Download full Linux workspace JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-1
+          path: target/test-telemetry/input/linux-full-1
+
+      - name: Download full Linux workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-2
+          path: target/test-telemetry/input/linux-full-2
+
+      - name: Download full Linux workspace JUnit shard 3
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-3
+          path: target/test-telemetry/input/linux-full-3
+
+      - name: Download full Linux workspace JUnit shard 4
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-4
+          path: target/test-telemetry/input/linux-full-4
+
+      - name: Download dtype JUnit
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-dtype
+          path: target/test-telemetry/input/linux-dtype
+
+      - name: Download generalization JUnit shard 1
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-1
+          path: target/test-telemetry/input/linux-generalization-1
+
+      - name: Download generalization JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-2
+          path: target/test-telemetry/input/linux-generalization-2
+
+      - name: Download generalization JUnit shard 3
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-3
+          path: target/test-telemetry/input/linux-generalization-3
+
+      - name: Download generalization JUnit shard 4
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-generalization-4
+          path: target/test-telemetry/input/linux-generalization-4
+
+      - name: Build cross-lane timing report
+        run: >-
+          uv run --managed-python --python 3.11 --no-project python
+          scripts/ci_test_telemetry.py
+          --shard linux-full-1=target/test-telemetry/input/linux-full-1/junit.xml
+          --shard linux-full-2=target/test-telemetry/input/linux-full-2/junit.xml
+          --shard linux-full-3=target/test-telemetry/input/linux-full-3/junit.xml
+          --shard linux-full-4=target/test-telemetry/input/linux-full-4/junit.xml
+          --shard linux-dtype=target/test-telemetry/input/linux-dtype/junit.xml
+          --shard linux-generalization-1=target/test-telemetry/input/linux-generalization-1/junit.xml
+          --shard linux-generalization-2=target/test-telemetry/input/linux-generalization-2/junit.xml
+          --shard linux-generalization-3=target/test-telemetry/input/linux-generalization-3/junit.xml
+          --shard linux-generalization-4=target/test-telemetry/input/linux-generalization-4/junit.xml
+          --json target/test-telemetry/full/report.json
+          --summary target/test-telemetry/full/summary.md
+          --github-summary "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload cross-lane timing report
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-telemetry-all-lanes
+          path: target/test-telemetry/full
+          if-no-files-found: error
+          retention-days: 14
+
   report:
     name: Surface nightly status
-    needs: heavy-e2e
-    if: always()
-    runs-on: ubuntu-latest
+    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ${{ github.ref == 'refs/heads/main' && 'chelis-ci-warm-x64' || 'ubuntu-latest' }}
+    concurrency:
+      group: ${{ github.ref == 'refs/heads/main' && 'linux-extended-warm-x64' || format('linux-extended-{0}-report', github.run_id) }}
+      queue: max
     permissions:
       issues: write
     steps:
       - name: Open/close nightly-failure tracking issue
         uses: actions/github-script@v7
         env:
-          RESULT: ${{ needs.heavy-e2e.result }}
+          RESULTS: ${{ toJSON(needs) }}
         with:
           script: |
-            const title = 'Nightly failing: Heavy E2E';
+            const title = 'Nightly failing: Linux Extended Validation';
+            const passed = Object.values(JSON.parse(process.env.RESULTS)).every(job => job.result === 'success');
             const { owner, repo } = context.repo;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
             const found = await github.rest.search.issuesAndPullRequests({ q });
             const existing = found.data.items.find(i => i.title === title);
-            if (process.env.RESULT === 'failure') {
+            if (!passed) {
               if (existing) {
                 core.info(`Tracking issue #${existing.number} already open.`);
               } else {
                 const issue = await github.rest.issues.create({
                   owner, repo, title,
-                  body: `The **Heavy E2E** nightly failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the nightly next passes.`,
+                  body: `The **Linux Extended Validation** nightly failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the nightly next passes.`,
                   labels: ['nightly-failure'],
                 });
                 core.info(`Opened tracking issue #${issue.data.number}.`);
               }
-            } else if (process.env.RESULT === 'success' && existing) {
+            } else if (passed && existing) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: existing.number,
                 body: `Nightly green again — ${runUrl}. Closing.`,

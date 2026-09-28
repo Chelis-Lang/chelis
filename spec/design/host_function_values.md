@@ -489,7 +489,7 @@ Shared-lowering positives inspect the IR for:
 - tuple, option, list, and dictionary storage;
 - local binding and dynamic `if`/`match` selection;
 - stored/returned `grad`, `vmap`, `vmap-grad`, and `jit` values; and
-- exact `int8`/`int16`, symbolic-dimension, capture, origin, and span data.
+- exact `i8`/`i16`, symbolic-dimension, capture, origin, and span data.
 
 Resolution negatives cover every unresolved signature/capture/body position.
 Capture tests cover nesting, shadowing, lexical order, and ownership.
@@ -501,7 +501,7 @@ produce a source, header, or runtime artifact.
 
 Positive regression tests compile and run generated C for:
 
-- exact named `int8` and `int16` callbacks;
+- exact named `i8` and `i16` callbacks;
 - forwarded callback parameters;
 - inline higher-order collection callbacks;
 - immediately applied lambdas; and

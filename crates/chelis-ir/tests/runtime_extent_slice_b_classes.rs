@@ -9,7 +9,8 @@
 //! follow from them.
 //!
 //! The defect class these lock out is recovery of a runtime extent's identity
-//! by STRING NAME. `chelis_ir::dag::symbolic_bindings` groups occurrences in a
+//! by STRING NAME. The legacy grouping these replaced, deleted in chelis#665,
+//! put occurrences in a
 //! `BTreeMap<String, _>`, so two axes that happen to share a spelling are
 //! identified with no guard between them, and two axes that are genuinely the
 //! same extent are given different synthesized spellings and guarded twice or
@@ -24,17 +25,17 @@
 //! the guard order follows the assigned slots, and never a separate traversal
 //! by binding name, hash iteration, or node identity." In the IR both branches
 //! collapse to one key: `lower_fn` registers parameter `Load`s in declared
-//! order, and the subexpression path pre-creates them in a deliberately
-//! name-sorted order for build determinism and declares no signature. The ABI
-//! input slot of the declaring `Load` is therefore the assigned slot in both
+//! order, and helpers extracted from declared functions retain that order.
+//! Only signatureless subexpressions assign name-sorted slots for determinism.
+//! The ABI input slot of the declaring `Load` is therefore the assigned slot in both
 //! cases.
 //!
 //! That is the sentence's own conclusion and not an inference from the two
 //! lowering paths, so it must not be "simplified" back to name order by a
 //! reader who sees only the declared-signature branch. The closing clause
 //! also names the failure mode by hand: a `BTreeMap<String, _>` grouping is a
-//! traversal by binding name, which is exactly what `symbolic_bindings` does
-//! today. Several tests below discriminate the slot key from name order.
+//! traversal by binding name, which is exactly what the legacy grouping did.
+//! Several tests below discriminate the slot key from name order.
 
 use chelis_ir::axis_sources::{
     AxisSource, DimClaim, GuardPlacement, RuntimeDimClass, derive_runtime_dim_classes,
@@ -50,8 +51,9 @@ fn named(name: &str) -> DimInfo {
     DimInfo::Named(name.into(), None)
 }
 
-fn f32_load(dag: &mut Dag, name: &str, dims: Vec<DimInfo>) -> NodeId {
+fn f32_load(dag: &mut Dag, decl: chelis_ir::dag::DeclId, name: &str, dims: Vec<DimInfo>) -> NodeId {
     dag.add_node(
+        decl,
         RiscOp::Load { name: name.into() },
         vec![],
         ty(dims, Prim::F32),
@@ -99,8 +101,9 @@ fn class_for(classes: &[RuntimeDimClass], claim: DimClaim) -> &RuntimeDimClass {
 #[test]
 fn interface_members_order_by_abi_input_slot() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())),
@@ -113,12 +116,13 @@ fn interface_members_order_by_abi_input_slot() {
 /// in the opposite order moves the canonical member with the slot, because the
 /// key is the assigned slot. Name order would report `x` both times, so a
 /// by-name implementation passes the first test and fails this one. That is
-/// exactly the `BTreeMap<String, _>` ordering `symbolic_bindings` uses today.
+/// exactly the `BTreeMap<String, _>` ordering the legacy grouping used.
 #[test]
 fn interface_canonical_follows_the_slot_and_not_the_name() {
     let mut dag = Dag::new();
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())),
@@ -132,9 +136,11 @@ fn interface_canonical_follows_the_slot_and_not_the_name() {
 #[test]
 fn an_all_local_class_takes_its_canonical_by_node_position() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
     let first = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -144,6 +150,7 @@ fn an_all_local_class_takes_its_canonical_by_node_position() {
         None,
     );
     let second = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -167,9 +174,11 @@ fn an_all_local_class_takes_its_canonical_by_node_position() {
 #[test]
 fn a_mixed_class_puts_every_interface_member_before_its_local_members() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -178,7 +187,7 @@ fn a_mixed_class_puts_every_interface_member_before_its_local_members() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let declaring = f32_load(&mut dag, "x", vec![named("n")]);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())),
@@ -193,10 +202,11 @@ fn a_mixed_class_puts_every_interface_member_before_its_local_members() {
 #[test]
 fn the_class_list_order_is_not_display_name_order() {
     let mut dag = Dag::new();
-    let z0 = f32_load(&mut dag, "z0", vec![named("z")]);
-    let z1 = f32_load(&mut dag, "z1", vec![named("z")]);
-    let a0 = f32_load(&mut dag, "a0", vec![named("a")]);
-    let a1 = f32_load(&mut dag, "a1", vec![named("a")]);
+    let decl = dag.declare("test");
+    let z0 = f32_load(&mut dag, decl, "z0", vec![named("z")]);
+    let z1 = f32_load(&mut dag, decl, "z1", vec![named("z")]);
+    let a0 = f32_load(&mut dag, decl, "a0", vec![named("a")]);
+    let a1 = f32_load(&mut dag, decl, "a1", vec![named("a")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         claims(&classes),
@@ -222,8 +232,9 @@ fn the_class_list_order_is_not_display_name_order() {
 #[test]
 fn an_all_interface_class_keeps_both_members_with_no_data_use() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         members_of(&classes, DimClaim::Name("n".into())),
@@ -237,8 +248,9 @@ fn an_all_interface_class_keeps_both_members_with_no_data_use() {
 #[test]
 fn a_member_names_its_declaring_load_by_node_id() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     let class = class_for(&classes, DimClaim::Name("n".into()));
     assert_eq!(
@@ -265,11 +277,13 @@ fn a_member_names_its_declaring_load_by_node_id() {
 #[test]
 fn two_classes_sharing_one_node_each_keep_their_own_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("m")]);
-    let rows = f32_load(&mut dag, "r", vec![]);
-    let cols = f32_load(&mut dag, "c", vec![]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("m")]);
+    let rows = f32_load(&mut dag, decl, "r", vec![]);
+    let cols = f32_load(&mut dag, decl, "c", vec![]);
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1), RtDim::Node(2)],
         },
@@ -295,12 +309,14 @@ fn two_classes_sharing_one_node_each_keep_their_own_member() {
 #[test]
 fn one_node_axis_yields_exactly_one_member_under_the_f_of_n_n_splice() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let shared = f32_load(&mut dag, "k", vec![]);
-    let declaring = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let shared = f32_load(&mut dag, decl, "k", vec![]);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("n")]);
     // Both bound slots are the same node, the shape `splice_dag` produces for
     // `f(n, n)`.
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -326,10 +342,12 @@ fn one_node_axis_yields_exactly_one_member_under_the_f_of_n_n_splice() {
 #[test]
 fn a_member_referencing_an_rtdim_slot_reads_that_slot() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
-    let declaring = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -363,9 +381,11 @@ fn a_member_referencing_an_rtdim_slot_reads_that_slot() {
 #[test]
 fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let declaring = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             // Slot 1 does not exist: `inputs` has only the tensor operand.
@@ -383,6 +403,7 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
     // `Expand`'s inputs are untouched, so the absent bound slot this row
     // exists for is unchanged.
     let joined = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![expanded, declaring],
         ty(vec![named("n")], Prim::F32),
@@ -434,8 +455,10 @@ fn a_member_whose_rtdim_slot_is_absent_is_a_typed_receipt_not_a_panic() {
 #[test]
 fn an_identity_stride_axis_is_pass_through_and_not_a_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(1)],
         },
@@ -462,8 +485,10 @@ fn an_identity_stride_axis_is_pass_through_and_not_a_member() {
 #[test]
 fn a_zero_pad_axis_is_pass_through_and_not_a_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let padded = dag.add_node(
+        decl,
         RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(0))]),
         vec![x],
         ty(vec![named("n")], Prim::F32),
@@ -485,8 +510,10 @@ fn a_zero_pad_axis_is_pass_through_and_not_a_member() {
 #[test]
 fn a_non_identity_stride_axis_under_the_inputs_name_is_a_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let strided = dag.add_node(
+        decl,
         RiscOp::Stride {
             strides: vec![RtDim::Lit(2)],
         },
@@ -509,8 +536,10 @@ fn a_non_identity_stride_axis_under_the_inputs_name_is_a_member() {
 #[test]
 fn a_full_axis_symbolic_shrink_mints_a_fresh_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let shrunk = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(RtDim::Lit(0), RtDim::ToEnd)],
         },
@@ -534,9 +563,11 @@ fn a_full_axis_symbolic_shrink_mints_a_fresh_member() {
 #[test]
 fn a_same_tensor_read_under_a_foreign_claim_is_a_member() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("m")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("m")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 1,
             size: RtDim::InputAxis {
@@ -562,8 +593,10 @@ fn a_same_tensor_read_under_a_foreign_claim_is_a_member() {
 #[test]
 fn a_same_tensor_read_under_a_proved_identity_costs_no_guard() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 1,
             size: RtDim::InputAxis {
@@ -599,9 +632,11 @@ fn a_same_tensor_read_under_a_proved_identity_costs_no_guard() {
 #[test]
 fn a_literal_claim_over_a_read_is_a_one_member_class() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -635,8 +670,10 @@ fn a_literal_claim_over_a_read_is_a_one_member_class() {
 #[test]
 fn a_literal_claim_matching_a_literal_size_yields_no_class() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(4),
@@ -660,10 +697,12 @@ fn a_literal_claim_matching_a_literal_size_yields_no_class() {
 #[test]
 fn a_cross_tensor_folded_read_under_a_name_has_exactly_two_members() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("m")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("m")]);
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -703,8 +742,9 @@ fn a_cross_tensor_folded_read_under_a_name_has_exactly_two_members() {
 #[test]
 fn an_all_interface_class_is_an_entry_guard() {
     let mut dag = Dag::new();
-    f32_load(&mut dag, "x", vec![named("n")]);
-    f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    f32_load(&mut dag, decl, "x", vec![named("n")]);
+    f32_load(&mut dag, decl, "y", vec![named("n")]);
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         class_for(&classes, DimClaim::Name("n".into())).placement(&dag),
@@ -712,24 +752,16 @@ fn an_all_interface_class_is_an_entry_guard() {
     );
 }
 
-/// A folded `shape(...)` read is an INTERFACE value, so a class whose members
-/// are all such reads is an ENTRY guard.
-///
-/// Section 4.7 keys on the guard's operands - "an input tensor's axis, a
-/// scalar parameter, or a literal" - and `spec/05` section 2.4.1 admits
-/// `InputAxis` as an `expand` extent read "directly from that tensor's shape
-/// metadata". So the quantity compared is an input tensor's axis, which is
-/// the first item in that list. An earlier draft of this row asserted
-/// `Local`, confusing "is this axis a `Load`'s own" with "is this operand an
-/// input's axis"; that reading made every folded cross-tensor read a local
-/// guard and would have put chelis#1374's guard at the wrong place under the
-/// wrong `<op>`.
+/// A literal result belongs to its producing operation even when its
+/// size is a folded interface shape read (spec/04 §4.7).
 #[test]
-fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
+fn a_literal_result_over_folded_input_axis_reads_is_a_local_guard() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -744,7 +776,7 @@ fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
     let classes = derive_runtime_dim_classes(&dag);
     assert_eq!(
         class_for(&classes, DimClaim::Literal(4)).placement(&dag),
-        GuardPlacement::Entry,
+        GuardPlacement::Local,
     );
 }
 
@@ -758,14 +790,16 @@ fn a_class_whose_members_are_folded_input_axis_reads_is_an_entry_guard() {
 #[test]
 fn classes_survive_vectorize_axis0_as_the_same_set_in_the_same_order() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
     // ONE result reaching both witnesses, not one root each. C2.4 scopes a
     // claim by the results it reaches, so two roots are two signatures and
     // two claims sharing a spelling; joining them is what a single signature
     // with two parameters looks like in the DAG. The property this row names
     // is unchanged.
     let joined = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![x, y],
         ty(vec![named("n")], Prim::F32),
@@ -787,14 +821,16 @@ fn classes_survive_vectorize_axis0_as_the_same_set_in_the_same_order() {
 #[test]
 fn classes_survive_bind_symbolic_dims_unchanged() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let y = f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let y = f32_load(&mut dag, decl, "y", vec![named("n")]);
     // ONE result reaching both witnesses, not one root each. C2.4 scopes a
     // claim by the results it reaches, so two roots are two signatures and
     // two claims sharing a spelling; joining them is what a single signature
     // with two parameters looks like in the DAG. The property this row names
     // is unchanged.
     let joined = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![x, y],
         ty(vec![named("n")], Prim::F32),
@@ -805,6 +841,7 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     let bound = chelis_ir::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("n".to_string(), 4usize)]),
+        &chelis_unord::UnordSet::new(),
     )
     .expect("bind n");
     let after = derive_runtime_dim_classes(&bound);
@@ -962,10 +999,11 @@ fn assert_rebuild_preserves_classes(
 /// Two witnesses of `nn` joined into one rooted result: the smallest graph
 /// that derives a class at all. Each pass fixture below extends it with the
 /// structure that makes that pass rewrite.
-fn two_witness_base(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
-    let x = f32_load(dag, "x", vec![named("nn")]);
-    let y = f32_load(dag, "y", vec![named("nn")]);
+fn two_witness_base(dag: &mut Dag, decl: chelis_ir::dag::DeclId) -> (NodeId, NodeId, NodeId) {
+    let x = f32_load(dag, decl, "x", vec![named("nn")]);
+    let y = f32_load(dag, decl, "y", vec![named("nn")]);
     let joined = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![x, y],
         ty(vec![named("nn")], Prim::F32),
@@ -1023,7 +1061,8 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     // graph, so they keep it. Node ids survive both, so these two assert the
     // stronger `(node, axis)` member equality that the projection cannot make.
     let mut dag = Dag::new();
-    let (_, _, joined) = two_witness_base(&mut dag);
+    let decl = dag.declare("test");
+    let (_, _, joined) = two_witness_base(&mut dag, decl);
     dag.add_root(joined);
     let before = derive_runtime_dim_classes(&dag);
     assert_eq!(
@@ -1035,6 +1074,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     let bound = chelis_ir::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("nn".to_string(), 4usize)]),
+        &chelis_unord::UnordSet::new(),
     )
     .expect("bind nn");
     assert_rebuild_preserves_classes("bind_symbolic_dims", &dag, &bound, "y", "nn", 0, &[]);
@@ -1053,21 +1093,31 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     // `constant_fold` folds a binary op over two `Const` operands. It mutates
     // in place, so node ids survive and the member equality is exact.
     let mut folding = Dag::new();
-    let (_, _, folding_joined) = two_witness_base(&mut folding);
+    let folding_decl = folding.declare("test");
+    let (_, _, folding_joined) = two_witness_base(&mut folding, folding_decl);
     let five = folding.add_node(
+        folding_decl,
         RiscOp::synth_const(Prim::F32, 5.0),
         vec![],
         ty(vec![], Prim::F32),
         None,
     );
     let two = folding.add_node(
+        folding_decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         ty(vec![], Prim::F32),
         None,
     );
-    let difference = folding.add_node(RiscOp::Sub, vec![five, two], ty(vec![], Prim::F32), None);
+    let difference = folding.add_node(
+        folding_decl,
+        RiscOp::Sub,
+        vec![five, two],
+        ty(vec![], Prim::F32),
+        None,
+    );
     let scaled = folding.add_node(
+        folding_decl,
         RiscOp::Add,
         vec![folding_joined, difference],
         ty(vec![named("nn")], Prim::F32),
@@ -1091,9 +1141,11 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
 
     // `dead_code_eliminate` needs a node no root reaches.
     let mut with_dead = Dag::new();
-    let (dead_x, dead_y, dead_joined) = two_witness_base(&mut with_dead);
+    let with_dead_decl = with_dead.declare("test");
+    let (dead_x, dead_y, dead_joined) = two_witness_base(&mut with_dead, with_dead_decl);
     with_dead.add_root(dead_joined);
     with_dead.add_node(
+        with_dead_decl,
         RiscOp::Mul,
         vec![dead_x, dead_y],
         ty(vec![named("nn")], Prim::F32),
@@ -1104,20 +1156,24 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
 
     // `common_subexpr_eliminate` needs two structurally identical nodes.
     let mut with_duplicate = Dag::new();
-    let (dup_x, dup_y, _) = two_witness_base(&mut with_duplicate);
+    let with_duplicate_decl = with_duplicate.declare("test");
+    let (dup_x, dup_y, _) = two_witness_base(&mut with_duplicate, with_duplicate_decl);
     let first = with_duplicate.add_node(
+        with_duplicate_decl,
         RiscOp::Mul,
         vec![dup_x, dup_y],
         ty(vec![named("nn")], Prim::F32),
         None,
     );
     let second = with_duplicate.add_node(
+        with_duplicate_decl,
         RiscOp::Mul,
         vec![dup_x, dup_y],
         ty(vec![named("nn")], Prim::F32),
         None,
     );
     let combined = with_duplicate.add_node(
+        with_duplicate_decl,
         RiscOp::Add,
         vec![first, second],
         ty(vec![named("nn")], Prim::F32),
@@ -1138,8 +1194,10 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     // `fuse` needs an elementwise chain whose intermediate has one consumer,
     // so the two nodes merge into one `FusedElem`.
     let mut chained = Dag::new();
-    let (_, _, chain_joined) = two_witness_base(&mut chained);
+    let chained_decl = chained.declare("test");
+    let (_, _, chain_joined) = two_witness_base(&mut chained, chained_decl);
     let exponentiated = chained.add_node(
+        chained_decl,
         RiscOp::Exp,
         vec![chain_joined],
         ty(vec![named("nn")], Prim::F32),
@@ -1154,13 +1212,25 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     // contraction axis `kk` is the claim, so the class here is the one a real
     // matmul carries.
     let mut contraction = Dag::new();
-    let a = f32_load(&mut contraction, "a", vec![DimInfo::Lit(2), named("kk")]);
-    let b = f32_load(&mut contraction, "b", vec![named("kk"), DimInfo::Lit(3)]);
+    let contraction_decl = contraction.declare("test");
+    let a = f32_load(
+        &mut contraction,
+        contraction_decl,
+        "a",
+        vec![DimInfo::Lit(2), named("kk")],
+    );
+    let b = f32_load(
+        &mut contraction,
+        contraction_decl,
+        "b",
+        vec![named("kk"), DimInfo::Lit(3)],
+    );
     let widened = ty(
         vec![DimInfo::Lit(2), named("kk"), DimInfo::Lit(3)],
         Prim::F32,
     );
     let expanded_a = contraction.add_node(
+        contraction_decl,
         RiscOp::Expand {
             axis: 2,
             size: RtDim::Lit(3),
@@ -1170,6 +1240,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         None,
     );
     let expanded_b = contraction.add_node(
+        contraction_decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(2),
@@ -1178,8 +1249,15 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
         widened.clone(),
         None,
     );
-    let product = contraction.add_node(RiscOp::Mul, vec![expanded_a, expanded_b], widened, None);
+    let product = contraction.add_node(
+        contraction_decl,
+        RiscOp::Mul,
+        vec![expanded_a, expanded_b],
+        widened,
+        None,
+    );
     let contracted = contraction.add_node(
+        contraction_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: Prim::F32,
@@ -1214,14 +1292,16 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
 #[test]
 fn dropping_a_stamped_name_changes_the_derived_classes() {
     let mut dag = Dag::new();
-    f32_load(&mut dag, "x", vec![named("n")]);
-    f32_load(&mut dag, "y", vec![named("n")]);
+    let decl = dag.declare("test");
+    f32_load(&mut dag, decl, "x", vec![named("n")]);
+    f32_load(&mut dag, decl, "y", vec![named("n")]);
     let before = derive_runtime_dim_classes(&dag);
     assert_eq!(before.len(), 1, "the fixture must start with one class");
 
     let mut stripped = Dag::new();
-    f32_load(&mut stripped, "x", vec![named("n")]);
-    f32_load(&mut stripped, "y", vec![DimInfo::Lit(4)]);
+    let stripped_decl = stripped.declare("test");
+    f32_load(&mut stripped, stripped_decl, "x", vec![named("n")]);
+    f32_load(&mut stripped, stripped_decl, "y", vec![DimInfo::Lit(4)]);
     let after = derive_runtime_dim_classes(&stripped);
     assert!(
         after.is_empty(),
@@ -1245,14 +1325,17 @@ fn dropping_a_stamped_name_changes_the_derived_classes() {
 #[test]
 fn a_const_sized_by_its_claim_is_neither_a_member_nor_a_class() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let fill = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![named("n")], Prim::F32),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![x, fill],
         ty(vec![named("n")], Prim::F32),
@@ -1277,7 +1360,9 @@ fn a_const_sized_by_its_claim_is_neither_a_member_nor_a_class() {
 #[test]
 fn a_const_named_axis_reports_the_claim_supplied_source_kind() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let fill = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 0.0),
         vec![],
         ty(vec![named("n")], Prim::F32),
@@ -1310,7 +1395,8 @@ fn a_const_named_axis_reports_the_claim_supplied_source_kind() {
 #[test]
 fn symbolic_params_follow_assigned_slots_not_binding_names() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n"), named("m")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n"), named("m")]);
     dag.add_root(x);
     assert_eq!(
         chelis_ir::dag::symbolic_params(&dag),
@@ -1335,15 +1421,18 @@ fn symbolic_params_follow_assigned_slots_not_binding_names() {
 #[test]
 fn a_class_fed_by_a_scalar_parameter_is_an_entry_guard() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
     let k = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         ty(vec![], Prim::Int64),
         None,
     );
-    let declaring = f32_load(&mut dag, "x", vec![named("k")]);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("k")]);
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1369,16 +1458,19 @@ fn a_class_fed_by_a_scalar_parameter_is_an_entry_guard() {
 #[test]
 fn a_class_fed_by_computed_arithmetic_is_a_local_guard() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
     let k = dag.add_node(
+        decl,
         RiscOp::Load { name: "k".into() },
         vec![],
         ty(vec![], Prim::Int64),
         None,
     );
-    let doubled = dag.add_node(RiscOp::Mul, vec![k, k], ty(vec![], Prim::Int64), None);
-    let declaring = f32_load(&mut dag, "x", vec![named("k")]);
+    let doubled = dag.add_node(decl, RiscOp::Mul, vec![k, k], ty(vec![], Prim::Int64), None);
+    let declaring = f32_load(&mut dag, decl, "x", vec![named("k")]);
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1413,10 +1505,12 @@ fn a_class_fed_by_computed_arithmetic_is_a_local_guard() {
 #[test]
 fn a_claim_on_a_dead_local_intermediate_owes_no_guard() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
     let dead = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1443,10 +1537,12 @@ fn a_claim_on_a_dead_local_intermediate_owes_no_guard() {
 #[test]
 fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let base = f32_load(&mut dag, "b", vec![]);
-    let size = f32_load(&mut dag, "k", vec![]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
     let live = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1461,6 +1557,7 @@ fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
     // with two parameters looks like in the DAG. The property this row names
     // is unchanged.
     let joined = dag.add_node(
+        decl,
         RiscOp::Add,
         vec![live, x],
         ty(vec![named("n")], Prim::F32),
@@ -1488,11 +1585,19 @@ fn the_same_claim_on_a_live_local_intermediate_keeps_its_guard() {
 #[test]
 fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     // A computed tensor, not an input: its axis is not available at entry.
-    let computed = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("n")], Prim::F32), None);
+    let computed = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -1517,7 +1622,7 @@ fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
 //
 // The rule is in the same paragraph as the interface list, and a cast is how a
 // scalar parameter of the wrong width reaches an extent: `reshape(x, [cast(m,
-// int64)])` for an `int32` parameter `m` lands its `RtDim::Node` at the Cast,
+// i64)])` for an `i32` parameter `m` lands its `RtDim::Node` at the Cast,
 // not at the `Load`. Classifying by the slot's immediate producer would make
 // that Local while the bare parameter is Entry, which is the same claim placed
 // two different ways depending on a width conversion.
@@ -1526,14 +1631,17 @@ fn an_input_axis_naming_a_computed_tensor_is_a_local_guard() {
 #[test]
 fn a_cast_of_a_scalar_parameter_takes_the_parameters_placement() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
     let m = dag.add_node(
+        decl,
         RiscOp::Load { name: "m".into() },
         vec![],
         ty(vec![], Prim::Int32),
         None,
     );
     let widened = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Int64,
         },
@@ -1541,8 +1649,9 @@ fn a_cast_of_a_scalar_parameter_takes_the_parameters_placement() {
         ty(vec![], Prim::Int64),
         None,
     );
-    f32_load(&mut dag, "x", vec![named("k")]);
+    f32_load(&mut dag, decl, "x", vec![named("k")]);
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1567,15 +1676,18 @@ fn a_cast_of_a_scalar_parameter_takes_the_parameters_placement() {
 #[test]
 fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
     let mut dag = Dag::new();
-    let base = f32_load(&mut dag, "b", vec![]);
+    let decl = dag.declare("test");
+    let base = f32_load(&mut dag, decl, "b", vec![]);
     let m = dag.add_node(
+        decl,
         RiscOp::Load { name: "m".into() },
         vec![],
         ty(vec![], Prim::Int32),
         None,
     );
-    let doubled = dag.add_node(RiscOp::Mul, vec![m, m], ty(vec![], Prim::Int32), None);
+    let doubled = dag.add_node(decl, RiscOp::Mul, vec![m, m], ty(vec![], Prim::Int32), None);
     let widened = dag.add_node(
+        decl,
         RiscOp::Cast {
             new_precision: Prim::Int64,
         },
@@ -1583,8 +1695,9 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
         ty(vec![], Prim::Int64),
         None,
     );
-    f32_load(&mut dag, "x", vec![named("k")]);
+    f32_load(&mut dag, decl, "x", vec![named("k")]);
     dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Node(1),
@@ -1616,6 +1729,7 @@ fn a_cast_of_computed_arithmetic_takes_the_arithmetics_placement() {
 /// The guard sites of `dag`, as `(node, axis, claim, op)`.
 fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
     chelis_ir::axis_sources::local_dim_guard_sites(dag)
+        .unwrap()
         .into_iter()
         .map(|((node, axis), claim)| (node, axis, claim.claim, claim.op))
         .collect()
@@ -1628,15 +1742,24 @@ fn guard_sites(dag: &Dag) -> Vec<(usize, usize, String, &'static str)> {
 #[test]
 fn a_node_valued_reshape_target_is_a_local_guard_site() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let read = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         ty(vec![], Prim::Int64),
         None,
     );
-    let extent = dag.add_node(RiscOp::Mul, vec![read, read], ty(vec![], Prim::Int64), None);
+    let extent = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![read, read],
+        ty(vec![], Prim::Int64),
+        None,
+    );
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
         },
@@ -1668,8 +1791,10 @@ fn a_node_valued_reshape_target_is_a_local_guard_site() {
 #[test]
 fn a_sym_reshape_target_is_not_a_local_guard_site() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Sym("n".into()), RtDim::Lit(1)],
         },
@@ -1693,9 +1818,9 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
 /// interface value, so its class runs at entry.
 ///
 /// Measured on the shipped compiler with
-/// `def f(x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
+/// `def f[n](x: tensor[n, f32]) -> tensor[n, f32] = { y = mul(x, x); b = sum(x, 0);
 /// insert(b, 0, shape(y, 0)) }`, whose emitted C carries
-/// `numeric trap: domain in expand at int64` at the operation. Removing the arm
+/// `numeric trap: domain in expand at i64` at the operation. Removing the arm
 /// would make the eval lane skip a site the C lane guards, which is the lane
 /// divergence this slice exists to remove, so the arm stays and this row is
 /// what says so.
@@ -1704,20 +1829,24 @@ fn a_sym_reshape_target_is_not_a_local_guard_site() {
 #[test]
 fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
     let computed = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![x, x],
         ty(vec![named("n")], Prim::F32),
         None,
     );
     let base = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![x, x],
         ty(vec![named("n")], Prim::F32),
         None,
     );
     let inserted = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -1747,6 +1876,7 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
     // states it in the site, which is the point of the unification. So the
     // assertion reads the site's own read instruction.
     let observed = chelis_ir::axis_sources::local_dim_guard_sites(&dag)
+        .unwrap()
         .into_iter()
         .find(|((node, axis), _)| *node == inserted.0 && *axis == 0)
         .map(|(_, claim)| claim.observed)
@@ -1769,11 +1899,13 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
 /// fact read two ways, and the `else { continue }` guarding the carrier read in
 /// `local_dim_guard_sites` is unreachable rather than a silent drop.
 ///
-/// That correspondence is what lets [`LocalGuardObservation`] have two variants
-/// instead of three: no class site needs a "cannot be observed" state. If a
-/// future change admits a third source without giving it a carrier, sites would
-/// vanish from BOTH lanes with nothing to show for it, so the property is
-/// asserted rather than trusted.
+/// That correspondence is why no class site needs a "cannot be observed"
+/// state: every admitted source names a readable quantity. If a future change
+/// admits a source without giving it a read instruction, sites would vanish
+/// from BOTH lanes with nothing to show for it, so the property is asserted
+/// rather than trusted. The `OpComputed` admission added its own read
+/// instruction rather than widening the filter alone, which is the shape this
+/// row asks a future widening to take.
 ///
 /// EVIDENTIARY STATUS: disposition lock. It cannot fail on today's tree; it
 /// fails on the tree that widens the source filter without widening the read.
@@ -1783,9 +1915,11 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
     // (`ScalarInput`) and an expand sized from a computed tensor's shape
     // (`InputAxis`).
     let mut dag = Dag::new();
-    let x = f32_load(&mut dag, "x", vec![named("n")]);
-    let size = f32_load(&mut dag, "k", vec![]);
+    let decl = dag.declare("test");
+    let x = f32_load(&mut dag, decl, "x", vec![named("n")]);
+    let size = f32_load(&mut dag, decl, "k", vec![]);
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1)],
         },
@@ -1794,12 +1928,14 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
         None,
     );
     let computed = dag.add_node(
+        decl,
         RiscOp::Mul,
         vec![x, x],
         ty(vec![named("n")], Prim::F32),
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -1811,7 +1947,7 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert!(
         !sites.is_empty(),
         "the fixture must produce sites for the property to say anything",
@@ -1820,11 +1956,21 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
     for ((node, axis), claim) in sites {
         match claim.observed {
             chelis_ir::axis_sources::LocalGuardObservation::Carrier(_) => {}
-            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent => {
-                // A unit-extent site legitimately has no carrier; this fixture
-                // builds none, so reaching here means the class loop took the
-                // wrong branch.
+            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+            | chelis_ir::axis_sources::LocalGuardObservation::ComputedExtent(_) => {
+                // A unit-extent site legitimately has no carrier, and an
+                // op-computed site legitimately computes its own; this fixture
+                // builds neither, so reaching here means the class loop took
+                // the wrong branch.
                 panic!("node {node} axis {axis} is a class site with no carrier");
+            }
+            chelis_ir::axis_sources::LocalGuardObservation::SameShapeAgreement(_) => {
+                panic!(
+                    "node {node} axis {axis} is a producer-owned result site, not a local class site"
+                );
+            }
+            chelis_ir::axis_sources::LocalGuardObservation::MalformedSameShapeAgreement(reason) => {
+                panic!("node {node} axis {axis} has a malformed same-shape relation: {reason}");
             }
         }
     }
@@ -1834,11 +1980,9 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
 /// class whose canonical value the checker already resolved to a literal is
 /// compared against that literal, not against a binder no lane declares.
 ///
-/// The resolved size belongs to the INTERFACE member, not to the guarded one:
-/// a local member whose own dim the checker resolved is exempt by
-/// `a_local_member_the_checker_resolved_is_not_a_guard_site`'s provenance
-/// rule, so the only way a site sees a `Resolved` canonical is when a
-/// different member of its class carries the literal. Built directly because
+/// The resolved size belongs to the interface member in this fixture. A
+/// resolved size on the local member is also a claim, and is exercised by
+/// the backend's numeric_local_extent_claims_execute_exactly matrix. Built directly because
 /// the surface spelling that resolves an input extent this way is the
 /// interface half of chelis#1377, which reaches the ENTRY path instead.
 ///
@@ -1847,20 +1991,30 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
 #[test]
 fn a_resolved_canonical_traps_on_eval_against_its_literal() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         ty(vec![DimInfo::Named("n".into(), Some(4))], Prim::F32),
         None,
     );
     let read = dag.add_node(
+        decl,
         RiscOp::Shape { axis: 0 },
         vec![x],
         ty(vec![], Prim::Int64),
         None,
     );
-    let doubled = dag.add_node(RiscOp::Mul, vec![read, read], ty(vec![], Prim::Int64), None);
+    let doubled = dag.add_node(
+        decl,
+        RiscOp::Mul,
+        vec![read, read],
+        ty(vec![], Prim::Int64),
+        None,
+    );
     let reshaped = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![RtDim::Node(1)],
         },
@@ -1868,7 +2022,7 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
         ty(vec![named("n")], Prim::F32),
         None,
     );
-    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag);
+    let sites = chelis_ir::axis_sources::local_dim_guard_sites(&dag).unwrap();
     assert_eq!(
         sites
             .iter()
@@ -1886,11 +2040,167 @@ fn a_resolved_canonical_traps_on_eval_against_its_literal() {
     })
     .expect_err("the reshape computes 16 against a claim of 4");
     assert!(
-        err.contains("numeric trap: domain in reshape at int64"),
+        err.contains("numeric trap: domain in reshape at i64"),
         "the eval lane renders [04-NUM-9] for a resolved canonical too: {err}"
     );
     assert!(
         err.contains("extent `n`: claimed = 4,"),
         "and compares against the literal, not a binder: {err}"
+    );
+}
+
+/// Literal result claims follow producer order, even when their size sources
+/// refer to interface parameters in a different order.
+#[test]
+fn folded_literal_result_claims_follow_producer_order() {
+    for same_input in [false, true] {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let b = f32_load(&mut dag, decl, "b", vec![]);
+        let z = f32_load(&mut dag, decl, "z", vec![named("rows"), named("cols")]);
+        let a = if same_input {
+            z
+        } else {
+            f32_load(&mut dag, decl, "a", vec![named("other")])
+        };
+        let inner = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(if same_input { 1 } else { 0 }),
+                },
+            },
+            vec![b, a],
+            ty(vec![DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        let outer = dag.add_node(
+            decl,
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::InputAxis {
+                    tensor: 1,
+                    axis: RtAxis::Lit(0),
+                },
+            },
+            vec![inner, z],
+            ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
+            None,
+        );
+        dag.add_root(outer);
+        let classes = derive_runtime_dim_classes(&dag);
+        assert_eq!(
+            claims(&classes),
+            vec![DimClaim::Literal(3), DimClaim::Literal(4)]
+        );
+        assert!(
+            classes
+                .iter()
+                .all(|class| class.placement(&dag) == GuardPlacement::Local)
+        );
+    }
+}
+
+/// chelis#1800's derivation change, and the two halves that must NOT form a
+/// class.
+///
+/// A `Name` class needs two members, because one witness has nothing to
+/// disagree with. The one exception this change adds is a single member whose
+/// source is [`AxisSource::OpComputed`] and whose dim carries a RESOLVED name:
+/// that member has both a number to compare against and an extent the
+/// operation computes to compare, so it is a complete guard, exactly as C2.4
+/// makes a literal its own canonical value. The positive half is observable
+/// from the CLI through
+/// `runtime_extent_slice_b::a_nested_named_result_claim_is_enforced_through_its_resolved_binder`;
+/// these are the negatives, at the layer that decides them.
+///
+/// Both halves matter because the rule was written narrow on purpose. An
+/// unresolved single member has no canonical value for anything to compare
+/// against, and admitting a resolved member with any other source would mint
+/// a class for every literal-shaped input, which is the mint `is_member`'s
+/// `ExternalAxis` rule exists to prevent.
+///
+/// EVIDENTIARY STATUS: regression tests for a rule this change introduces, at
+/// the derivation layer the suite header names as the lock on the derivation.
+/// Neither can fail on the tree before the change, because the single-member
+/// admission did not exist there; each fails on a tree that widens the
+/// admission past the source or past the resolved dim.
+#[test]
+fn a_single_resolved_op_computed_member_forms_a_class_and_its_two_negatives() {
+    // Positive control: one member, `OpComputed` source, resolved dim.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let operand = f32_load(&mut dag, decl, "x", vec![named("r")]);
+    let shrunk = dag.add_node(
+        decl,
+        RiscOp::Shrink {
+            bounds: vec![(
+                RtDim::Lit(1),
+                RtDim::InputAxis {
+                    tensor: 0,
+                    axis: RtAxis::Lit(0),
+                },
+            )],
+        },
+        vec![operand],
+        ty(vec![DimInfo::Named("n".into(), Some(2))], Prim::F32),
+        None,
+    );
+    let _ = shrunk;
+    assert_eq!(
+        claims(&derive_runtime_dim_classes(&dag)),
+        vec![DimClaim::Name("n".into())],
+        "a resolved op-computed member is its own canonical value"
+    );
+    assert_eq!(
+        members_of(
+            &derive_runtime_dim_classes(&dag),
+            DimClaim::Name("n".into())
+        ),
+        vec![(shrunk, 0)],
+        "and the class holds exactly that one member"
+    );
+
+    // Negative one: the SAME member unresolved. Nothing supplies a canonical
+    // value, so C2.4's two-witness rule stands and no class forms.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let operand = f32_load(&mut dag, decl, "x", vec![named("r")]);
+    dag.add_node(
+        decl,
+        RiscOp::Shrink {
+            bounds: vec![(
+                RtDim::Lit(1),
+                RtDim::InputAxis {
+                    tensor: 0,
+                    axis: RtAxis::Lit(0),
+                },
+            )],
+        },
+        vec![operand],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    assert!(
+        !claims(&derive_runtime_dim_classes(&dag)).contains(&DimClaim::Name("n".into())),
+        "an unresolved single member has no canonical value and forms no class"
+    );
+
+    // Negative two: a RESOLVED single member whose source is a `Load` axis.
+    // Admitting it would mint a class for every literal-shaped input.
+    let mut dag = Dag::new();
+    let decl = dag.declare("test");
+    let declared = f32_load(
+        &mut dag,
+        decl,
+        "x",
+        vec![DimInfo::Named("m".into(), Some(4))],
+    );
+    let _ = declared;
+    assert!(
+        !claims(&derive_runtime_dim_classes(&dag)).contains(&DimClaim::Name("m".into())),
+        "a resolved member whose source is an external axis forms no class"
     );
 }

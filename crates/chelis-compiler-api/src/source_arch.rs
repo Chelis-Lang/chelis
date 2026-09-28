@@ -533,7 +533,8 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    fn fork(&self) -> Self {
+    // Every branch supplies its own execution frontier.
+    fn fork_with_paths(&self, paths: Vec<CallPath>) -> Self {
         Self {
             unit: self.unit.clone(),
             module: self.module.clone(),
@@ -548,7 +549,7 @@ impl<'a> CallCollector<'a> {
             local_type_aliases: self.local_type_aliases.clone(),
             block_scope: self.block_scope.clone(),
             binding_depth: self.binding_depth,
-            paths: self.paths.clone(),
+            paths,
         }
     }
 
@@ -651,13 +652,12 @@ impl<'a> CallCollector<'a> {
     }
 
     fn closure_target(&self, path: &CallPath, closure: &syn::ExprClosure) -> CallTarget {
-        let mut collector = self.fork();
         let mut closure_path = CallPath {
             bindings: path.bindings.clone(),
             receiver_bindings: path.receiver_bindings.clone(),
             ..CallPath::default()
         };
-        collector.binding_depth += 1;
+        let closure_depth = self.binding_depth + 1;
         for (index, input) in closure.inputs.iter().enumerate() {
             let mut names = BTreeSet::new();
             collect_pattern_names(input, &mut names);
@@ -667,7 +667,7 @@ impl<'a> CallCollector<'a> {
                     .entry(name.clone())
                     .or_default()
                     .push(ValueBinding {
-                        depth: collector.binding_depth,
+                        depth: closure_depth,
                         value: AbstractValue::Callable(CallTarget::Parameter(index)),
                     });
                 closure_path
@@ -675,12 +675,13 @@ impl<'a> CallCollector<'a> {
                     .entry(name)
                     .or_default()
                     .push(ReceiverBinding {
-                        depth: collector.binding_depth,
+                        depth: closure_depth,
                         owner: pattern_type_owner(input),
                     });
             }
         }
-        collector.paths = vec![closure_path];
+        let mut collector = self.fork_with_paths(vec![closure_path]);
+        collector.binding_depth = closure_depth;
         collector.visit_expr(&closure.body);
         CallTarget::Inline(
             collector
@@ -743,8 +744,7 @@ impl<'a> CallCollector<'a> {
                 self.evaluate_expression_value(path, &unary.expr)
             }
             _ => {
-                let mut collector = self.fork();
-                collector.paths = vec![path];
+                let mut collector = self.fork_with_paths(vec![path]);
                 collector.visit_expr(expression);
                 collector
                     .paths
@@ -862,10 +862,9 @@ impl<'a> CallCollector<'a> {
                 if !pattern_can_match_value(&arm.pat, &scrutinee) {
                     continue;
                 }
-                let mut branch = self.fork();
+                let mut branch = self.fork_with_paths(vec![scrutinee_path.clone()]);
                 branch.binding_depth += 1;
                 let arm_depth = branch.binding_depth;
-                branch.paths = vec![scrutinee_path.clone()];
                 Self::bind_pattern_value(&mut branch.paths, &arm.pat, scrutinee.clone(), arm_depth);
                 let branch_paths = branch.paths.clone();
                 let guard_paths = if let Some((_, guard)) = &arm.guard {
@@ -905,13 +904,12 @@ impl<'a> CallCollector<'a> {
         path: CallPath,
         block: &syn::Block,
     ) -> Vec<(CallPath, AbstractValue)> {
-        let mut branch = self.fork();
+        let mut branch = self.fork_with_paths(vec![path]);
         let outer_imports = branch.local_imports.clone();
         let outer_type_aliases = branch.local_type_aliases.clone();
         branch.block_scope.push(block as *const syn::Block as usize);
         branch.binding_depth += 1;
         let block_depth = branch.binding_depth;
-        branch.paths = vec![path];
 
         let tail = block.stmts.last().and_then(|statement| match statement {
             syn::Stmt::Expr(expression, None) => Some(expression),
@@ -1479,8 +1477,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
                 let evaluated = self.evaluate_expression_value(path, &init.expr);
                 if let Some((_, diverge)) = &init.diverge {
                     for (evaluated_path, _) in &evaluated {
-                        let mut branch = self.fork();
-                        branch.paths = vec![evaluated_path.clone()];
+                        let mut branch = self.fork_with_paths(vec![evaluated_path.clone()]);
                         branch.visit_expr(diverge);
                         values.extend(
                             branch
@@ -1672,8 +1669,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             if let Some(pattern) = pattern {
                 let body_depth = body.binding_depth + 1;
                 Self::bind_pattern(&mut body.paths, pattern, body_depth);
@@ -1732,8 +1728,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
                     AbstractValue::Iterable(values) => {
                         let mut iteration_paths = vec![iterable_path];
                         for value in values {
-                            let mut body = self.fork();
-                            body.paths = iteration_paths;
+                            let mut body = self.fork_with_paths(iteration_paths);
                             let body_depth = body.binding_depth + 1;
                             Self::bind_pattern_value(
                                 &mut body.paths,
@@ -1787,8 +1782,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             let body_depth = body.binding_depth + 1;
             Self::bind_pattern(&mut body.paths, &expression.pat, body_depth);
             body.visit_block(&expression.body);
@@ -1842,8 +1836,7 @@ impl<'ast> Visit<'ast> for CallCollector<'_> {
             if inputs.is_empty() {
                 break;
             }
-            let mut body = self.fork();
-            body.paths = inputs;
+            let mut body = self.fork_with_paths(inputs);
             body.visit_block(&expression.body);
             let mut next_inputs = Vec::new();
             for mut path in body.paths {
@@ -4530,14 +4523,241 @@ fn compiler_path_consumes_the_target_carrying_manifest() {
 
 #[test]
 fn root_manifest_walkers_consume_stamped_nodes_without_list_reconstruction() {
-    let source = include_str!("../../chelis-effects/src/realizability.rs");
+    let audit =
+        audit_root_manifest_carriers(include_str!("../../chelis-effects/src/realizability.rs"))
+            .expect("realizability source parses");
     assert!(
-        !source.contains(".to_list("),
-        "#1082 regression: realizability rebuilt a legacy List from a stamped Node"
+        audit.is_compliant(),
+        "#1082/#1125 regression: realizability must match stamped nodes through \
+         ExprCarrier::DecodedNode without direct Expr::Node patterns or to_list bridges: {audit:?}"
     );
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RootManifestCarrierAudit {
+    decoded_node_paths: usize,
+    direct_expr_node_paths: usize,
+    reserved_to_list_idents: usize,
+}
+
+impl RootManifestCarrierAudit {
+    fn is_compliant(&self) -> bool {
+        self.decoded_node_paths > 0
+            && self.direct_expr_node_paths == 0
+            && self.reserved_to_list_idents == 0
+    }
+}
+
+fn root_manifest_ident(ident: &syn::Ident) -> String {
+    let spelling = ident.to_string();
+    spelling.strip_prefix("r#").unwrap_or(&spelling).to_string()
+}
+
+fn root_manifest_path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
+    let actual = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .map(|ident| ident.strip_prefix("r#").unwrap_or(&ident).to_string())
+        .collect::<Vec<_>>();
+    actual.len() >= expected.len()
+        && actual[actual.len() - expected.len()..]
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+}
+
+fn root_manifest_item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn root_manifest_is_cfg_test(item: &syn::Item) -> bool {
+    root_manifest_item_attrs(item).iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && match &attribute.meta {
+                syn::Meta::List(list) => syn::parse2::<syn::Ident>(list.tokens.clone())
+                    .is_ok_and(|ident| root_manifest_ident(&ident) == "test"),
+                _ => false,
+            }
+    })
+}
+
+struct RootManifestCarrierVisitor {
+    audit: RootManifestCarrierAudit,
+}
+
+impl RootManifestCarrierVisitor {
+    fn count_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    if root_manifest_ident(&ident) == "to_list" {
+                        self.audit.reserved_to_list_idents += 1;
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) => self.count_tokens(group.stream()),
+                proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RootManifestCarrierVisitor {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !root_manifest_is_cfg_test(item) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if root_manifest_path_ends_with(path, &["ExprCarrier", "DecodedNode"]) {
+            self.audit.decoded_node_paths += 1;
+        }
+        if root_manifest_path_ends_with(path, &["Expr", "Node"]) {
+            self.audit.direct_expr_node_paths += 1;
+        }
+        visit::visit_path(self, path);
+    }
+
+    fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+        if root_manifest_ident(ident) == "to_list" {
+            self.audit.reserved_to_list_idents += 1;
+        }
+    }
+
+    fn visit_token_stream(&mut self, tokens: &'ast proc_macro2::TokenStream) {
+        self.count_tokens(tokens.clone());
+    }
+}
+
+fn audit_root_manifest_carriers(source: &str) -> Result<RootManifestCarrierAudit, syn::Error> {
+    let file = syn::parse_file(source)?;
+    let mut visitor = RootManifestCarrierVisitor {
+        audit: RootManifestCarrierAudit::default(),
+    };
+    visitor.visit_file(&file);
+    Ok(visitor.audit)
+}
+
+#[test]
+fn root_manifest_carrier_guard_rejects_each_regression_class() {
+    let direct_node = audit_root_manifest_carriers(
+        r#"
+            fn production(expr: &Expr) {
+                if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
+                if let Expr::Node(_, _) = expr {}
+                let _ = Expr::Node(node, span);
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(!direct_node.is_compliant(), "{direct_node:?}");
+    assert_eq!(direct_node.direct_expr_node_paths, 2);
+
+    let missing_decoded = audit_root_manifest_carriers(
+        r#"
+            fn production(expr: &Expr) { let _ = expr; }
+        "#,
+    )
+    .unwrap();
+    assert!(!missing_decoded.is_compliant(), "{missing_decoded:?}");
+    assert_eq!(missing_decoded.decoded_node_paths, 0);
+
+    for (position, source) in [
+        (
+            "method",
+            "fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} \
+             expr.to_list(); }",
+        ),
+        (
+            "qualified",
+            "fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} \
+             helper::to_list(); }",
+        ),
+        (
+            "import",
+            "use helper::to_list as bridge; \
+             fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} }",
+        ),
+        (
+            "macro",
+            "macro_rules! bridge { () => { r#to_list!() } } \
+             fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} }",
+        ),
+        (
+            "attribute",
+            "#[allow(to_list)] fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} }",
+        ),
+        (
+            "extern alias",
+            "extern crate helper as to_list; \
+             fn production(expr: &Expr) { \
+             if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {} }",
+        ),
+    ] {
+        let audit = audit_root_manifest_carriers(source).unwrap();
+        assert!(
+            !audit.is_compliant() && audit.reserved_to_list_idents > 0,
+            "{position} must reserve the to_list identifier: {audit:?}"
+        );
+    }
+
+    let cfg_test_only = audit_root_manifest_carriers(
+        r#"
+            fn production(expr: &Expr) {
+                if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
+            }
+
+            #[cfg(test)]
+            mod tests {
+                use helper::to_list;
+                fn legacy(expr: &Expr) {
+                    if let Expr::Node(_, _) = expr {}
+                    r#to_list!();
+                }
+            }
+        "#,
+    )
+    .unwrap();
     assert!(
-        source.contains("Expr::Node(node,"),
-        "#1082 regression: realizability has no direct stamped-Node traversal"
+        cfg_test_only.is_compliant(),
+        "actual cfg(test) items are outside the production-file guard: {cfg_test_only:?}"
+    );
+
+    let text_only = audit_root_manifest_carriers(
+        r#"
+            fn production(expr: &Expr) {
+                if let ExprCarrier::DecodedNode(_, _, _) = expr.carrier() {}
+                let _ = "to_list";
+            }
+        "#,
+    )
+    .unwrap();
+    assert!(
+        text_only.is_compliant(),
+        "the reserved surface is identifiers, not string contents: {text_only:?}"
     );
 }
 

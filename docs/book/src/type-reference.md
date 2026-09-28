@@ -16,14 +16,18 @@ The numeric primitives are:
 | `f64` | 64-bit float |
 | `bf16` | bfloat16 |
 | `f16` | IEEE 754 binary16 |
-| `int8` | 8-bit signed integer |
-| `int16` | 16-bit signed integer |
-| `int32` | 32-bit signed integer |
-| `int64` | 64-bit signed integer |
+| `i8` | 8-bit signed integer |
+| `i16` | 16-bit signed integer |
+| `i32` | 32-bit signed integer |
+| `i64` | 64-bit signed integer |
 | `bool` | boolean |
 
 There are no unsigned integer types. `string` exists as a type for parsing and host work,
 and `()` is the unit type.
+
+`key` is the non-numeric type of a random key: `key_from_seed(42i64)` makes one, and
+`tensor[n, key]` holds `n` of them. A key has no arithmetic and no cast, and each key is used
+at most once on every path; see [Effects and Handlers](effects.md#randomness-is-not-an-effect).
 
 ## Tensor types
 
@@ -65,6 +69,7 @@ In a Deep signature this reads:
 ```chelis-deep-fragment
 (defsig {}
   transpose
+  (a b)
   (t-fn {}
     (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))
     (t-tensor {} (d-var {} b) (d-var {} a) (t-prim {} f32))))
@@ -86,11 +91,11 @@ active signed integers), and `Numeric` (their union). `bool` and `string` belong
 family.
 
 ```chelis-surf-fragment
-sig arange[p: Int]: p -> p -> tensor[n, p]
-sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]
+sig arange[n, p: Int]: p -> p -> tensor[n, p]
+sig linspace[n, p: Float]: p -> p -> i64 -> tensor[n, p]
 ```
 
-Calling `arange` at `f32`, or `linspace` at `int32`, is a `PrecisionMismatch` naming the
+Calling `arange` at `f32`, or `linspace` at `i32`, is a `PrecisionMismatch` naming the
 required family. The bound is part of the function's type, not a check on the callee name,
 so it survives aliases, wrappers, higher-order values, and imports. Two bounded variables
 that unify keep the intersection of their families; `Float` and `Int` share nothing, so
@@ -103,18 +108,18 @@ dtype. A bound goes on the declaration's `sig` when it has one, and on its `def`
 ### Rank polymorphism
 
 A rank variable `..r` is a name-preserving spread over a run of dimensions, so one
-definition covers tensors of every rank. It is introduced contextually; a spread name may
-not repeat in a single shape.
+definition covers tensors of every rank. Its name is listed in the declaration's complete
+binder list; a spread name may not repeat in a single shape.
 
 ```chelis-surf
-def relu_any_rank(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_any_rank[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 Spreads can interleave with named anchors, which lets a definition reduce or insert one
 named axis while preserving the rest. Reducing over a named axis:
 
 ```chelis-surf-fragment
-def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] =
+def reduce_seq[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] =
   sum(x, seq)
 ```
 
@@ -149,14 +154,14 @@ sum = add(x, cast(y, f32))
 ```
 
 `cast(e, p)` is the explicit precision change; it preserves dimensions and changes only the
-element type. Integer literals default to `int32` and float literals default to `f32`.
+element type. Integer literals default to `i32` and float literals default to `f32`.
 Three things override a default: a literal suffix, a surrounding known element type, or an
 explicit `cast`.
 
 ```chelis-surf-fragment
 a = cast(x, bf16)        -- precision change
 b = 1.0f64               -- suffix binds f64
-c = cast(3000000000, int64)  -- escape hatch for out-of-int32-range literals
+c = cast(3000000000, i64)  -- escape hatch for out-of-i32-range literals
 ```
 
 The compatibility rules: arithmetic (`add`, `mul`, `sub`, `div`) needs equal numeric
@@ -166,7 +171,7 @@ logical operations (`and`, `or`, `not`) take `bool`; transcendental operations (
 
 `matmul` and `sum` accept an optional accumulator precision, the one place mixed precision
 appears. The default accumulator widens `bf16` and `f16` inputs to `f32` for numerical
-stability and widens `int8` and `int16` to `int32` for overflow safety; a requested
+stability and widens `i8` and `i16` to `i32` for overflow safety; a requested
 accumulator must be at least as wide as the operands and the default.
 
 ## Function types
@@ -206,18 +211,18 @@ A function type can carry an effect set in `eff` metadata. In Surf the effect se
 `! { ... }` suffix on a signature or `def`.
 
 ```chelis-surf-fragment
-sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
+sig report[n]: tensor[n, f32] -> unit ! { IO }
 ```
 
 ```chelis-deep-fragment
-(t-fn {eff: (effects {} random)}
-  (t-tensor {} (d-name {} n) (t-prim {} f32))
-  (t-tensor {} (d-name {} n) (t-prim {} f32)))
+(t-fn {eff: (effects {} io)}
+  (t-tensor {} (d-var {} n) (t-prim {} f32))
+  (t-unit {}))
 ```
 
 Effect inference runs after type inference. A function's effect set is the union of the
-effects of the operations in its body. `Random` comes from `dropout` and `uniform_like` and
-the initializers that call them; it is discharged by `with seed(...)`. `IO` is inferred
+effects of the operations in its body. Randomness is not an effect: `dropout`,
+`uniform_like` and the initializers take a `key` and contribute none. `IO` is inferred
 from host operations such as `print` and file reads. `Resource("device")` marks a region
 validated against the build target through `with device(...)`. See
 [Effects and Handlers](effects.md).
@@ -234,11 +239,11 @@ A borrow leaves the owned binding live and is the idiomatic way to pass a tensor
 read-only operation.
 
 ```chelis-surf-fragment
-def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
+def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)
 ```
 
 ```chelis-deep-fragment
-(t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
+(t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))
 ```
 
 Passing an owned value where a borrow is expected auto-borrows. Passing a borrow where an

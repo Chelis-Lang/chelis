@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -103,13 +104,14 @@ fn diagnostic_kind_oracle_literal() -> crate::schema::Diagnostic {
     crate::schema::Diagnostic {
         kind: "unsupported_feature".to_owned(),
         message: "forged".to_owned(),
-        severity: 1.0,
+        severity: crate::schema::numbers::UnitInterval::new(1.0).expect("valid severity"),
         expected: None,
         got: None,
         suggestions: Vec::new(),
         span: None,
         deep_path: None,
         span_id: None,
+        unsupported: None,
     }
 }
 """
@@ -127,22 +129,31 @@ fn diagnostic_kind_oracle_mutation(mut diagnostic: crate::schema::Diagnostic) {
 
 
 def mutate_diagnostic_vocabulary(source: str) -> str:
+    counts = re.findall(
+        r"impl DiagnosticKind \{\n    pub const ALL: \[Self; (\d+)\] = \[",
+        source,
+    )
+    if len(counts) != 1:
+        raise OracleFailure(
+            "diagnostic vocabulary mutation anchor drifted: expected one ALL declaration"
+        )
+    count = int(counts[0])
     replacements = (
         (
-            "    TypeTotality,\n}\n\nimpl DiagnosticKind",
-            "    TypeTotality,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
+            "    EmptyTestSelection,\n}\n\nimpl DiagnosticKind",
+            "    EmptyTestSelection,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
         ),
         (
-            "    pub const ALL: [Self; 52] = [",
-            "    pub const ALL: [Self; 53] = [",
+            f"    pub const ALL: [Self; {count}] = [",
+            f"    pub const ALL: [Self; {count + 1}] = [",
         ),
         (
-            "        Self::TypeTotality,\n    ];",
-            "        Self::TypeTotality,\n        Self::Phase3OracleKind,\n    ];",
+            "        Self::EmptyTestSelection,\n    ];",
+            "        Self::EmptyTestSelection,\n        Self::Phase3OracleKind,\n    ];",
         ),
         (
-            '            Self::TypeTotality => "TypeTotality",\n',
-            '            Self::TypeTotality => "TypeTotality",\n'
+            '            Self::EmptyTestSelection => "empty_test_selection",\n',
+            '            Self::EmptyTestSelection => "empty_test_selection",\n'
             '            Self::Phase3OracleKind => "phase3_oracle_kind",\n',
         ),
     )
@@ -172,6 +183,7 @@ impl From<WireDiagnostic> for Diagnostic {
             span: wire.span,
             deep_path: wire.deep_path,
             span_id: wire.span_id,
+            unsupported: None,
         }
     }
 }

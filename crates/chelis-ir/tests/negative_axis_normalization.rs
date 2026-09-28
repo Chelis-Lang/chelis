@@ -42,7 +42,7 @@ use chelis_types::types::Prim;
 fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
     let decls = chelis_surf::parser::parse_str(src).map_err(|e| format!("parse: {e:?}"))?;
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .map_err(|e| format!("expand: {e:?}"))?
@@ -68,7 +68,7 @@ fn lower_surf(src: &str) -> Result<chelis_ir::dag::Dag, String> {
 fn check_surf(src: &str) -> Result<(), Vec<String>> {
     let decls = chelis_surf::parser::parse_str(src).expect("parse failed");
     let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
+        &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("expand failed")
@@ -120,9 +120,9 @@ def run(x) = softmax(x, 1)
 /// which rejected negative axes outright with `requires non-negative
 /// axis`; that rejection was the checker-side half of the same bug.
 ///
-/// Per issue #230, `argmax_reduce` / `argmin_reduce` produce `int64`
+/// Per issue #230, `argmax_reduce` / `argmin_reduce` produce `i64`
 /// indices regardless of input dtype, matching the std-package
-/// signature `tensor[a, b, p] -> int32 -> tensor[b, int64]`. The other
+/// signature `tensor[a, b, p] -> i32 -> tensor[b, i64]`. The other
 /// reductions preserve the input dtype.
 #[test]
 fn reductions_negative_last_axis_lower_and_verify() {
@@ -132,8 +132,8 @@ fn reductions_negative_last_axis_lower_and_verify() {
         ("max_reduce", "f32"),
         ("min_reduce", "f32"),
         ("prod_reduce", "f32"),
-        ("argmax_reduce", "int64"),
-        ("argmin_reduce", "int64"),
+        ("argmax_reduce", "i64"),
+        ("argmin_reduce", "i64"),
     ] {
         let src = format!(
             r#"
@@ -159,8 +159,8 @@ fn reductions_positive_axis_control_lower_and_verify() {
         ("max_reduce", "f32"),
         ("min_reduce", "f32"),
         ("prod_reduce", "f32"),
-        ("argmax_reduce", "int64"),
-        ("argmin_reduce", "int64"),
+        ("argmax_reduce", "i64"),
+        ("argmin_reduce", "i64"),
     ] {
         let src = format!(
             r#"
@@ -183,7 +183,7 @@ def run(x) = {op}(x, 1)
 #[test]
 fn gather_negative_axis_lowers_and_verifies() {
     let src = r#"
-sig run: tensor[2, 3, f32] -> tensor[2, int64] -> tensor[2, 2, f32]
+sig run: tensor[2, 3, f32] -> tensor[2, i64] -> tensor[2, 2, f32]
 def run(values, idx) = gather(values, idx, -1)
 "#;
     let dag = lower_surf(src).expect("gather(values, idx, -1) must lower");
@@ -249,7 +249,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
 (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))}
   (var {} softmax)
   (var {type: (t-tensor {} (d-lit {} 2) (d-lit {} 3) (t-prim {} f32))} x)
-  (lit {type: (t-prim {} int32)} 9))
+  (lit {type: (t-prim {} i32)} 9))
 "#;
     let expr = chelis_deep::parser::parse_str(deep_src)
         .expect("parse failed")
@@ -290,7 +290,7 @@ fn lowering_rejects_out_of_range_axis_without_panicking() {
 #[test]
 fn standalone_def_with_separate_sig_lowers_shape_sensitive_param() {
     let src = r#"
-sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
+sig run[a, b]: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, 1)
 "#;
     let dag =
@@ -306,7 +306,7 @@ def run(logits) = softmax(logits, 1)
 #[test]
 fn standalone_def_with_separate_sig_lowers_negative_axis_param() {
     let src = r#"
-sig run: &tensor[a, b, f32] -> tensor[a, b, f32]
+sig run[a, b]: &tensor[a, b, f32] -> tensor[a, b, f32]
 def run(logits) = softmax(logits, -1)
 "#;
     let dag =

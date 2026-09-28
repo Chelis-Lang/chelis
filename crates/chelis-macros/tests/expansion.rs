@@ -5,7 +5,7 @@ use chelis_surf::parser::parse_str;
 
 fn expand_surf(source: &str) -> String {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     print_canonical(expanded.exprs())
 }
@@ -30,6 +30,117 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
     assert!(!text.contains("macro-invoke"));
     assert!(text.contains("max_elem"));
     assert!(text.contains("source: (relu_ref"));
+}
+
+/// Provenance on a macro-introduced typed parameter lands on the parameter's
+/// own map, as it does on a node, and not on the type syntax inside it.
+#[test]
+fn typed_parameter_source_stays_on_the_parameter_map() {
+    let text = expand_surf(
+        r#"
+macro add_one_to(v) = (fn (y: f32) -> add(y, v))(1.0f32)
+def run(y: f32) -> f32 = add_one_to(y)
+"#,
+    );
+    // The canonical printer wraps long maps; compare on single spaces.
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flat.contains("(y_macro_0 {source: (add_one_to"),
+        "the renamed parameter must carry the invocation provenance:\n{text}"
+    );
+    assert!(
+        flat.contains("type: (t-prim {} f32) }))"),
+        "the parameter's own type syntax must stay unannotated:\n{text}"
+    );
+    assert!(
+        !flat.contains("(t-prim {source:"),
+        "provenance must not be stamped onto the type syntax:\n{text}"
+    );
+}
+
+/// A macro invocation is an expression in its caller's binding position.
+/// Replacing it must retain the caller's explicit type obligation and Surf
+/// origin marker on the expansion root.
+#[test]
+fn macro_expansion_retains_caller_binding_ascription() {
+    let text = expand_surf(
+        r#"
+macro twice(v) = add(v, v)
+def run(x: f32) -> f32 = {
+  t: i32 = twice(x)
+  cast(t, f32)
+}
+"#,
+    );
+    assert!(
+        text.contains("surf_binding_type: \"explicit\""),
+        "the expanded binding value must retain the caller's origin marker:\n{text}"
+    );
+    assert!(
+        text.contains("type: (t-prim {} i32)"),
+        "the expanded binding value must retain its authored ascription:\n{text}"
+    );
+}
+
+#[test]
+fn caller_and_template_type_metadata_remain_separate() {
+    let text = expand_surf(
+        r#"
+macro one() = 1.0f32
+def run() -> f32 = {
+  t: i32 = one()
+  cast(t, f32)
+}
+"#,
+    );
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("(block {source: (one),")
+            && flat.contains("surf_binding_type: \"explicit\"")
+            && flat.contains("type: (t-prim {} i32)")
+            && flat.contains("type: (t-prim {} f32)"),
+        "caller and template annotations require independent owners:\n{text}"
+    );
+}
+
+#[test]
+fn template_type_metadata_survives_parameter_substitution() {
+    let text = expand_surf(
+        r#"
+macro as_i32(v) = v : i32
+def run(x: f32) -> f32 = cast(as_i32(x), f32)
+"#,
+    );
+    assert!(
+        text.contains("type: (t-prim {} i32)"),
+        "the template's ascription must constrain the substituted argument:\n{text}"
+    );
+}
+
+/// A typed vocabulary-named parameter uses a prefix metadata wrapper. It is
+/// still a binder, with the same hygiene and provenance as a typed ordinary
+/// name represented by a structural two-element list.
+#[test]
+fn vocabulary_named_typed_parameter_is_hygienized_and_carries_source() {
+    let text = expand_surf(
+        r#"
+macro bump(v) = (fn (record: f32) -> add(record, v))(1.0f32)
+def run(record: f32) -> f32 = bump(record)
+"#,
+    );
+    assert!(
+        text.contains("record_macro_0"),
+        "the macro-introduced parameter must be renamed:\n{text}"
+    );
+    assert!(
+        text.contains("span: \"surf:97..103\"} record)"),
+        "the caller's argument must retain its free reference:\n{text}"
+    );
+    assert!(
+        !text.contains("(t-prim {source:"),
+        "provenance belongs to the parameter, not its type syntax:\n{text}"
+    );
 }
 
 #[test]
@@ -83,7 +194,7 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
         let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
             .expect("surf parse should succeed");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let err = expand_program(&deep, &ExpansionOptions::default())
             .expect_err("a standard-prelude macro name must reject an ordinary def");
         let message = err.to_string();
@@ -96,7 +207,7 @@ fn ordinary_defs_cannot_collide_with_standard_prelude_macros() {
     }
 
     let decls = parse_str("sig residual: f32 -> f32\n").expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let err = expand_program(&deep, &ExpansionOptions::default())
         .expect_err("a standard-prelude macro name must reject an ordinary sig");
     assert!(
@@ -123,7 +234,7 @@ fn ordinary_prelude_names_are_available_when_prelude_loading_is_disabled() {
     for name in ["linear_layer", "residual", "cross_entropy"] {
         let decls = parse_str(&format!("def {name}(x: f32) -> f32 = x\n"))
             .expect("surf parse should succeed");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         expand_program(
             &deep,
             &ExpansionOptions {
@@ -147,7 +258,7 @@ def f(x: f32) -> f32 = capture(x)
 "#,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let expanded = expand_program(&deep, &ExpansionOptions::default()).expect("macro expansion");
     let text = print_canonical(expanded.exprs());
 
@@ -178,7 +289,7 @@ def f(y: f32) -> f32 = bump({
 fn free_references_survive_hygiene() {
     let text = expand_surf(
         r#"
-def f(batch: int32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] =
+def f(batch: i32, x: tensor[batch, hidden, f32], w: tensor[hidden, out_dim, f32], b: tensor[out_dim, f32]) -> tensor[batch, out_dim, f32] =
   linear_layer(x, w, b)
 "#,
     );
@@ -196,7 +307,7 @@ def f(x: f32) -> f32 = loop(x)
 "#,
     )
     .expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let err = expand_program(
         &deep,
         &ExpansionOptions {

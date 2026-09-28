@@ -132,15 +132,17 @@ consistently:
   `.venv/bin/python scripts/regen_all.py --check`. Inside an activated Devenv
   shell the equivalent is `python scripts/<name>.py`.
 - **The gate:** `python3 scripts/gate.py --fast`, `python3 scripts/gate.py
-  --local`, or `python3 scripts/gate.py --list`, in every environment.
-  `scripts/gate.py` is stdlib-only; when `python3` is not already a uv- or
-  Devenv-managed runtime it re-executes itself as
-  `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`
-  and then exports its selected interpreter as `PYO3_PYTHON` to every child
-  command. It never requires a checkout-local `.venv`, and its `--fast` and
-  `--local` preflight warns when one is missing (create it with
-  `uv venv --python 3.11`), because direct cargo and nextest invocations
-  outside the gate fall back to it. Do not invoke the gate through
+  --validation`, or `python3 scripts/gate.py --list`, in every environment.
+  `scripts/gate.py` is stdlib-only. Without an explicit `PYO3_PYTHON` it
+  re-executes itself through this checkout's own interpreter (its Devenv state
+  venv, else `.venv`) whenever `python3` is some other interpreter, another
+  checkout's venv included; with no owned interpreter, an unmanaged `python3`
+  re-executes as
+  `uv run --managed-python --python 3.11 --no-project python scripts/gate.py`.
+  It then exports its selected interpreter as `PYO3_PYTHON` to every child
+  command. Its `--fast` and `--validation` preflight warns when `.venv` is
+  missing (create it with `uv venv --python 3.11`), because the capacity census
+  legs and direct cargo and nextest invocations outside the gate need it. Do not invoke the gate through
   `.venv/bin/python`; the `uv run` form above is the gate's own fallback, not a
   routine invocation.
 - **Direct cargo commands:** `.cargo/config.toml` defaults `PYO3_PYTHON` to
@@ -160,18 +162,35 @@ Install Python dependencies into the venv as needed:
 
 ```sh
 uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
-uv pip install -e bindings/python # chelis Python bindings (optional)
+uv pip install -e bindings/python # editable development install; checks checkout runtime freshness
 ```
 
+Standard wheel builds seal the runtime into the extension; this distribution-only feature
+does not apply to editable installs. See `bindings/python/README.md` for the bounded
+source-free wheel consumer smoke.
+
 **Commit-message hook.** `.githooks/commit-msg` is the tracked commit-msg hook.
-It runs `scripts/check_commit_message.py` through Devenv, `.venv`, or a managed
-uv interpreter, in that order, and resolves its repository at run time, so one
-installed copy is correct from every worktree of a clone and on every branch.
+It runs `scripts/check_commit_message.py` through the activated
+`DEVENV_STATE/venv` when the canonical state is beneath this worktree's
+`.devenv`, then the default `.devenv/state/venv`, `.venv`, or managed uv Python.
+Foreign activated profiles are rejected; the uv fallback discards an inherited
+`UV_PYTHON_PREFERENCE` that conflicts with its explicit managed-Python choice.
+The hook resolves its repository at run time, so one installed copy is correct
+from every worktree of a clone and on every branch.
 On the primary path, cargo-husky installs it: `cargo test` installs a POSIX
 wrapper that invokes the same checker, using the same uv fallback when a
 worktree has neither Devenv nor `.venv`. Both hooks reject AI tool authorship
 markers before Git creates a commit. All listed format and lint hooks remain
 disabled.
+
+Do not reach the hook through `core.hooksPath` instead. That config is
+repository-scoped while a tracked file is branch-scoped, so a worktree on a
+branch without `.githooks` would run no hook at all and accept the commit
+silently, with the `.git/hooks` fallback disabled by the same config. Do not
+reinstate an installer that writes an absolute path either: that names one
+worktree for every worktree, and all of them lose the ability to commit once it
+is deleted (chelis#1409). `scripts/test_commit_hook.py` locks the tracked path,
+the absence of any absolute path, and the accept/reject behavior.
 
 ### Devenv development shell (optional)
 
@@ -219,10 +238,10 @@ After Nix is available, run these steps.
 1. Install the Devenv release that this repository pins:
 
    ```sh
-   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2.2
+   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/360b5eb1397291383d10845a63a0247981bd5598
    ```
 
-2. Make sure that Devenv reports version `2.2.2`:
+2. Make sure that Devenv reports version `2.2.3`:
 
    ```sh
    devenv --version
@@ -265,12 +284,12 @@ Devenv files.
    ```
 
 5. Run the gates through `chelis-gate`, which forwards every argument to
-   `python3 scripts/gate.py`: `--fast` before every push, `--local` once per
-   pull request on the committed candidate:
+   `python3 scripts/gate.py`: `--fast` before every push. CI validates the pushed
+   candidate; `--validation` is available for optional troubleshooting:
 
    ```sh
    chelis-gate --fast
-   chelis-gate --local
+   chelis-gate --validation  # optional
    ```
 
 Use `devenv shell --` to run one command without an interactive shell:
@@ -302,18 +321,25 @@ with:
 
 #### Shell behavior
 
-The repository pins the Devenv modules and update target to release `v2.2.2`.
-Use Devenv 2.2.2 locally when possible. The closed, reviewed CLI range is
-2.2.0 through 2.2.2 so the immutable shared CI action remains supported while
-the repository-owned atomic load-export task removes the concurrency race in
-those versions. CLIs outside that range are rejected before Nix evaluation.
+The repository pins the Devenv CLI and modules to 2.2.3. Other CLI versions
+are rejected before Nix evaluation. The shell's atomic load-export task
+retains concurrent-entry safety.
 
-The upstream `v2.2.2` tag builds a 2.2.2 CLI but its module metadata still
-advertises 2.2.1. Chelis overrides that stale metadata to 2.2.2 so every
-accepted CLI reports the right update target.
-
-`devenv.nix` imports six local configuration modules. `devenv.yaml` defines
+`devenv.nix` imports seven local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
+
+Self-hosted acceptance jobs activate the `ci` or `ci-smt` profile once, require
+a fresh shell initialization receipt, and run subsequent command files with
+`chelis-ci-shell run`. This reuses the project toolchain without repeated shell
+entry and scopes Nix runtime libraries to repository commands rather than
+native GitHub actions. GitHub-hosted jobs keep main's rustup, apt and uv
+toolchain and run the same command files through plain shims; they realize no
+Devenv profile because they cannot reach the private cache.
+The Linux Nix package job uses the protected runner group only for manual
+dispatch on `main`; release and branch runs stay hosted. Its shared cache
+finalizer publishes declared, realized check outputs and verifies signed
+readback. Protected runner admission and source-pin publication remain
+separate operator-controlled steps.
 
 `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
 revisions. Therefore, `devenv update` cannot change them.
@@ -339,6 +365,31 @@ and reads the repository-owned `.kache.toml`. That policy caches test and CLI
 executables, ignores file-backed machine `KACHE_*` overrides, and retains a
 no-Kache correctness control. Ordinary Cargo commands outside Devenv may still
 honor the contributor's Cargo configuration.
+
+The project policy reads and writes the shared S3 cache through
+`https://kache.mesh.cproof.ai` in `us-east-2`, using the
+`sand-dollar-kache-production-010928226848` bucket with an empty prefix and four
+concurrent transfers. It also keys the Nix compiler/linker environment pins so a
+response-file or build-ID policy change cannot reuse the old artifacts.
+Local storage uses Kache's platform default; CI cache activation replaces the
+store/runtime paths and remote write policy with job-owned settings.
+
+For shared-cache access, connect to the trusted Tunnet mesh and supply the public
+signing placeholders required by Kache 0.16.0:
+
+```sh
+export KACHE_S3_ACCESS_KEY=tunnet-anonymous
+export KACHE_S3_SECRET_KEY=tunnet-anonymous
+```
+
+These values are not AWS credentials; network membership authorizes access.
+Do not supply real AWS credentials to this gateway. Remote diagnostics require
+mesh access; compiler-wrapper remote failures fall back to local compilation.
+The Kache smoke and executable-cache regression probes derive local-only configs
+with temporary stores, so they neither require mesh access nor publish fixtures.
+For an offline development session, select a separate config with
+`[cache] local_only = true` via `KACHE_CONFIG` after shell activation; the project's
+`ignore_env = true` intentionally ignores `KACHE_LOCAL_ONLY`.
 
 Chelis's relocatable macOS executable/dSYM representation uses Kache cache-key
 schema 28. Existing schema-27 entries deliberately take one cold miss instead
@@ -500,35 +551,54 @@ target/debug/chelis --help
 cargo run -p chelis-cli --bin chelis -- --help
 ```
 
-`--fast` is the pre-push gate: fix-in-place, run before every push. `--local`
-(chelis#360) is the once-per-pull-request gate: run on the committed candidate
-immediately before marking the draft ready for review, after it is pushed and CI
-has started. `scripts/gate.py` is the single source of truth for the per-PR gate;
-CI runs the same commands:
+A development build of `chelis` or of the Python extension stages the runtime it
+was built with, and first checks that the runtime's sources in this checkout
+have not changed since (`spec/08-backends.md` §2.1). After editing the manifest,
+build script, `src/` or `include/` of `chelis-runtime`, `chelis-abi` or
+`chelis-vocab` (and of `chelis-unord` in an `ownership-ledger` build), or
+`Cargo.lock`, rebuild before `chelis build`; otherwise it fails and names the
+changed files.
+Builds meant to run without this checkout use the `sealed-runtime` feature.
+
+`--fast` is the pre-push gate: fix-in-place, run before every push. `--validation`
+(chelis#360) is optional for troubleshooting or additional local validation. Applicable
+CI checks must pass on the pushed candidate before marking the draft ready for review;
+no per-PR `--validation` run is required. `scripts/gate.py` defines the commands shared with
+the CI gate stages:
 
 ```sh
 python3 scripts/gate.py --list  # re-executes through uv when needed
 python3 scripts/gate.py --fast  # before every push; fixes fmt and tier-0 regeneration in place
-python3 scripts/gate.py --local # once per PR, on the committed candidate
+python3 scripts/gate.py --validation # optional troubleshooting and extra validation
 ```
 
 `--fast` regenerates the tier-0 artifacts (`scripts/regen_all.py --tier 0`) and
 runs `cargo fmt --all` in write mode, then `chelis lint --check .`,
 `cargo clippy -p <crate> --tests` for each changed crate, and one nextest run
 over the drift tripwires; it prints the files it changed and exits non-zero
-only when a check fails. `--local` runs two workspace clippy configurations,
+only when a check fails. `--validation` runs two workspace clippy configurations,
 `cargo fmt --check`, `chelis lint --check .`, the regeneration and compile-fail
 guards, both oracles, and per-crate nextest for the crates changed vs
 `origin/main`; it takes an advisory workstation-wide lease on `gate.lock` under
 `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
-so two full gates in different worktrees do not run at once (`--no-wait`,
-`--lease-timeout SECONDS`, and `--no-lease` change that). Every run other than
+so two full gates in different worktrees do not run at once. Updated runners queue
+in ticket-registration order, report their position, and reap abandoned tickets.
+`--no-wait` exits 4 if the lease or queue cannot admit the caller immediately;
+`--lease-timeout SECONDS` bounds the wait, and `--no-lease` bypasses it. Queue errors
+stop with exit 2. Older worktrees must pick up the queue implementation to participate
+in FIFO ordering. Every run other than
 `--list` writes a JSON summary under `target/gate-reports/` and prints one
 summary line. Push before the review round; the round reviews the pushed
 head while CI runs, and CI is watched by one background waiter, never a
 polling loop. The full workspace nextest stage is CI-owned: open a
-draft PR early and let CI (macOS Smoke is the authoritative workspace
-oracle) run the full suite; see
+draft PR early for Linux CI. The `ci-fast` worker runs every default-feature
+lib/bin unit target and the 17 reviewed integrations in
+[`.config/ci-test-targets.toml`](.config/ci-test-targets.toml); see
+[`docs/ci_validation.md`](docs/ci_validation.md) for coverage and artifacts. Full non-ignored workspace and broad phase-oracle
+validation runs daily at 03:17 UTC in `heavy-e2e.yml`, or by manual dispatch on
+a branch; PR checks do not certify those full phase oracles. Mac workspace validation runs daily at 04:17 UTC
+in `macos-nightly.yml`; dispatch it on the branch for Mac-specific validation.
+It is not a required PR check; see
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why that suite does not belong in the local loop on macOS.
 
@@ -576,6 +646,75 @@ artifacts or GitHub Actions, build a local compiler binary and run:
 
 See [scripts/README.md](scripts/README.md) for the local downstream gate
 workflow.
+
+## Submitting an OpenSpec document change
+
+Chelis's OpenSpec plans live in
+[`Chelis-Lang/openspec`](https://github.com/Chelis-Lang/openspec), the shared
+`chelis-plans` store. Change and capability IDs use the `chelis-` prefix.
+`openspec/config.yaml` points at that store; `openspec/store.lock.yaml` records
+the immutable store commit used by CI. There is no local planning tree.
+The numbered `spec/**` contracts, compiler, tests, and executable acceptance
+oracles remain in this repository. Planning is optional; this migration does
+not activate Phase 0 or make planning validation evidence of code correctness.
+
+Register a store checkout with OpenSpec 1.6.0 before working from a consumer:
+
+```sh
+git clone git@github.com:Chelis-Lang/openspec.git /absolute/path/to/openspec
+openspec store register /absolute/path/to/openspec --id chelis-plans --json
+openspec doctor --json
+```
+Before consumer validation, refuse any local `openspec/specs/` or
+`openspec/changes/` directory, even if empty or containing only ignored files
+such as `.DS_Store`. Preserve unpublished work elsewhere before removing
+obsolete directories. OpenSpec 1.6.0 treats these as a real local root, ignores
+the store declaration with a warning, and can exit successfully with no items.
+That warning or an empty validation is **not** shared-store acceptance.
+
+
+Run `openspec doctor` from the Chelis checkout. It must report `chelis-plans`
+with `root.source: declared`. Registration chooses the local authoring
+checkout; it does **not** enforce the CI lock. For exact-revision validation,
+use an isolated store checkout at the full commit in `openspec/store.lock.yaml`
+and register it with a task-local `XDG_DATA_HOME`. Then run
+`openspec validate --all --strict --no-interactive` from Chelis. A missing store
+must fail rather than falling back to a local tree.
+
+Author plans in a dedicated worktree of the **store repository**, not here:
+
+```sh
+openspec new change chelis-add-thing
+# edit that change's proposal, design, deltas, and tasks
+openspec validate chelis-add-thing --strict --no-interactive
+```
+
+Push the store branch or use its optional `openspec-submit` Devenv command.
+The store owns document-only submission and autoland; no Chelis push submits a
+local plan. Autoland is limited to `chelis-*` planning documents, never tooling,
+schemas, configuration, other domains, or mixed code changes. The store's trusted
+workflows reuse `OPENSPEC_APP_ID` and `OPENSPEC_APP_PRIVATE_KEY`; no new App or
+installation is needed. An unavailable token blocks automatic acceptance;
+ordinary store pull requests remain the review path.
+
+Merge the store plan first, then cite its change ID and full store commit in the
+implementation PR and update the consumer lock to that accepted revision. Keep
+the change active until its related implementation PRs merge; synchronize the
+capability deltas and archive it through the store afterward. Source paths in
+imported documents are relative to Chelis, with their import revision recorded
+in the store's migration evidence.
+
+The `OpenSpec store` workflow uses the pinned shared CI action to verify a
+read-only checkout of the locked commit, store identity/root selection, absence
+of local capability dependencies, and strict validation. It reuses
+`vars.CI_APP_ID` and `secrets.CI_APP_PRIVATE_KEY`, like the other private-input CI
+jobs. The pinned action mints a short-lived `Contents: read` token limited to
+`Chelis-Lang/openspec`. Store autoland keeps its existing `OPENSPEC_APP_*`
+credentials; compiler CI receives no permission to write plans.
+
+See the store's
+[operations guide](https://github.com/Chelis-Lang/openspec/blob/main/docs/store-operations.md)
+for domain rules, acceptance deployment, registration recovery, and rollback.
 
 ## Project Structure
 

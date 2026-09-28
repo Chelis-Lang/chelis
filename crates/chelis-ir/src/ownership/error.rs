@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OwnershipError {
     #[error("ownership lowering has no checked signature for `{function}`")]
@@ -147,12 +145,16 @@ pub enum OwnershipError {
         expected: usize,
         actual: usize,
     },
-    #[error("block b{block} in `{unit}` has inconsistent live owners: {expected:?} vs {actual:?}")]
+    #[error(
+        "block b{block} in `{unit}` is reached with inconsistent live owners: live only on this path: {only_here}; live only on the path already verified: {only_earlier} ({here_count} live here, {earlier_count} earlier)"
+    )]
     JoinMismatch {
         unit: String,
         block: u32,
-        expected: BTreeSet<u32>,
-        actual: BTreeSet<u32>,
+        only_here: String,
+        only_earlier: String,
+        here_count: usize,
+        earlier_count: usize,
     },
     #[error("owner %{owner} reaches `{unit}` b{block} exit without a terminal use")]
     MissingTerminal {

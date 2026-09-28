@@ -22,6 +22,7 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("diagnostic_kind_oracle_literal"), 1)
         self.assertIn('kind: "unsupported_feature".to_owned()', mutated)
+        self.assertIn("unsupported: None", mutated)
 
     def test_kind_write_mutation_targets_the_private_field(self) -> None:
         source = (oracle.REPO_ROOT / oracle.MUTATION_SOURCE).read_text(encoding="utf-8")
@@ -36,6 +37,7 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("impl From<WireDiagnostic> for Diagnostic"), 1)
         self.assertIn("kind: wire.kind", mutated)
+        self.assertIn("unsupported: None", mutated)
 
     def test_wire_bridge_mutation_runs_the_compiler_api_doctests(self) -> None:
         self.assertEqual(
@@ -63,6 +65,20 @@ class DiagnosticKindOracleTests(unittest.TestCase):
             'Self::Phase3OracleKind => "phase3_oracle_kind"',
             mutated,
         )
+
+    def test_vocabulary_mutation_accepts_a_later_count_without_reanchoring(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
+        declared = re.search(r"pub const ALL: \[Self; (\d+)\]", source)
+        self.assertIsNotNone(declared)
+        assert declared is not None
+        original_count = int(declared.group(1))
+        future = source.replace(
+            f"pub const ALL: [Self; {original_count}]",
+            "pub const ALL: [Self; 100]",
+            1,
+        )
+        mutated = oracle.mutate_diagnostic_vocabulary(future)
+        self.assertIn("pub const ALL: [Self; 101]", mutated)
 
     def test_vocabulary_mutation_checks_workspace_libraries(self) -> None:
         self.assertEqual(

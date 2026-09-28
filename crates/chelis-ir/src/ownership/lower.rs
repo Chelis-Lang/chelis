@@ -12,7 +12,7 @@ use chelis_types::CheckedProgram;
 use chelis_types::manifest::RootManifest;
 use chelis_types::types::{Lane, Prim};
 
-use crate::dag::{DimInfo, RiscOp, TensorType};
+use crate::dag::{DimInfo, TensorType};
 use crate::host::{
     ConcreteHostCallback, ConcreteHostCallbackKind, ConcreteHostExpr, ConcreteHostExprKind,
     ConcreteHostFunction, ConcreteHostMatchArm, ConcreteHostProgram, HostBinding, HostDisplayRoot,
@@ -20,7 +20,7 @@ use crate::host::{
 };
 use crate::host_type_state::ConcreteHostType;
 
-use super::classify::{ClassifyError, Placement, ValueClass, classify, render_type};
+use super::classify::{ClassifyError, NonHeapKind, Placement, ValueClass, classify, render_type};
 use super::error::OwnershipError;
 use super::ir::{
     ApplyKind, Block, BlockId, BlockParam, CallableBody, Edge, EdgeId, HostSiteAction,
@@ -467,10 +467,6 @@ fn strip_meta(expr: &Expr) -> &Expr {
 
 fn tag_and_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match strip_meta(expr) {
-        Expr::List(list, _) => {
-            let tag = list.tag()?;
-            Some((tag, list.elements.get(2..)?))
-        }
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -560,6 +556,10 @@ struct UnitLowerer<'a, 'sites> {
     sites: &'sites mut HostSiteBuilder,
     unit_index: usize,
     active_site: Option<HostSiteId>,
+    /// Span of the host expression currently being lowered, saved and restored
+    /// around each expression exactly as `active_site` is. Owners minted while
+    /// it is set record it (chelis#2122).
+    active_span: Option<String>,
 }
 
 impl<'a, 'sites> UnitLowerer<'a, 'sites> {
@@ -590,6 +590,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             sites,
             unit_index,
             active_site: None,
+            active_span: None,
         }
     }
 
@@ -762,6 +763,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 placement,
                 origin,
                 names,
+                span_id: self.active_span.clone(),
             },
         );
         self.owner_depth.insert(id, self.depth());
@@ -833,8 +835,20 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 let depth = self.owner_depth.get(&owner).copied().ok_or_else(|| {
                     self.invariant(format!("owner %{} has no scope depth", owner.0))
                 })?;
-                let movable =
-                    info.origin == OwnerOrigin::Owned && tail.is_some_and(|scope| depth >= scope);
+                // A by-value Copy scalar owns no resource, so a use duplicates
+                // it rather than transferring it. Moving the original owner
+                // would consume it, wrongly leaving a second occurrence of the
+                // same named scalar in one call (`f3(x, x)` in tail position)
+                // reading a dead owner (chelis#2068). Duplicating instead keeps
+                // the original live for every slot. This is scoped strictly to
+                // Copy scalars: a heap value (tensor, string, container, ...)
+                // still moves on its proven last use, so a genuine
+                // use-after-move of an owned resource stays rejected.
+                let is_copy_scalar =
+                    matches!(info.class, ValueClass::NonHeap(NonHeapKind::Scalar(_)));
+                let movable = info.origin == OwnerOrigin::Owned
+                    && !is_copy_scalar
+                    && tail.is_some_and(|scope| depth >= scope);
                 if movable {
                     self.moved.insert(owner);
                     Ok(Operand::move_(owner))
@@ -859,6 +873,12 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     fn borrow(&mut self, value: Value) -> Result<Operand, OwnershipError> {
         match value {
             Value::Fresh(owner) => {
+                // A fresh value projected out of a nested scope carries the
+                // moved marker that suppressed that inner scope's terminal.
+                // Borrowing it in the enclosing scope transfers liveness to
+                // that scope just as binding it does, so its eventual terminal
+                // remains scheduled after the borrow.
+                self.moved.remove(&owner);
                 self.register(owner)?;
                 Ok(Operand::borrow(owner))
             }
@@ -1000,9 +1020,40 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         expr: &ConcreteHostExpr,
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
-        self.with_site(HostSiteKind::Expression, |lowerer| {
-            lowerer.lower_expr_at_site(expr, tail)
+        self.with_expr_span(expr, |lowerer| {
+            lowerer.with_site(HostSiteKind::Expression, |lowerer| {
+                lowerer.lower_expr_at_site(expr, tail)
+            })
         })
+    }
+
+    /// Record `expr`'s span for the owners minted while lowering it, saved and
+    /// restored exactly as `active_site` is. A span-less node keeps the nearest
+    /// enclosing span rather than clearing it: the enclosing source region
+    /// still locates the owner, and host lowering leaves `span_id` empty on
+    /// plenty of interior nodes (chelis#2122).
+    ///
+    /// Every path that lowers an expression goes through here: `lower_expr`,
+    /// and `lower_direct_call_argument`, which reaches `lower_expr_at_site`
+    /// without passing through it and can also return early for a raw literal.
+    ///
+    /// One owner class is knowingly outside it: `materialize_function_ref`
+    /// mints from a `Value::FunctionRef` that outlives the expression scope
+    /// that produced it, so such an owner takes the enclosing region (for
+    /// example the whole tuple in `(identity, 1i64)`). Narrowing it would mean
+    /// carrying a span on the `Value`, tracked as chelis#2319.
+    fn with_expr_span<T>(
+        &mut self,
+        expr: &ConcreteHostExpr,
+        action: impl FnOnce(&mut Self) -> Result<T, OwnershipError>,
+    ) -> Result<T, OwnershipError> {
+        let previous = self.active_span.clone();
+        if expr.span_id.is_some() {
+            self.active_span = expr.span_id.clone();
+        }
+        let result = action(self);
+        self.active_span = previous;
+        result
     }
 
     fn lower_expr_at_site(
@@ -1011,6 +1062,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         tail: Option<usize>,
     ) -> Result<Value, OwnershipError> {
         match &expr.kind {
+            ConcreteHostExprKind::ResultClaimScope { body, .. } => self.lower_expr(body, tail),
+            ConcreteHostExprKind::FormalIngress { value, .. } => self.lower_expr(value, tail),
             ConcreteHostExprKind::Int(value) => {
                 self.define(&ConcreteHostType::Int64, format!("literal {value}"))
             }
@@ -1101,6 +1154,39 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 };
                 self.lower_call(function, values, ty, tail)
             }
+            ConcreteHostExprKind::SignatureEntry { plan, args } => {
+                if plan.observations().nodes().len() != args.len() {
+                    return Err(OwnershipError::CallArityMismatch {
+                        unit: self.unit_name.clone(),
+                        callee: "signature entry".into(),
+                        supplied: args.len(),
+                        declared: plan.observations().nodes().len(),
+                    });
+                }
+                let mut operands = Vec::with_capacity(args.len());
+                for (index, arg) in args.iter().enumerate() {
+                    let actual = expr_type(arg);
+                    if !matches!(actual, ConcreteHostType::Tensor(_)) {
+                        return Err(OwnershipError::CallArgumentType {
+                            unit: self.unit_name.clone(),
+                            callee: "signature entry".into(),
+                            argument: index,
+                            expected: "tensor observation".into(),
+                            actual: render_type(&actual),
+                        });
+                    }
+                    let value = self.with_site(HostSiteKind::Argument, |lowerer| {
+                        lowerer.lower_expr(arg, None)
+                    })?;
+                    operands.push(self.borrow(value)?);
+                }
+                self.apply(
+                    &ConcreteHostType::Unit,
+                    "signature entry".into(),
+                    vec![super::ir::OwnershipUse::Borrow; operands.len()],
+                    operands,
+                )
+            }
             ConcreteHostExprKind::Builtin { name, args, ty } => {
                 if name == "copy" && args.len() == 1 {
                     let value = self.with_site(HostSiteKind::Argument, |lowerer| {
@@ -1185,7 +1271,8 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 default_expr,
                 ty,
             } => self.lower_match_adt(scrutinee, arms, default_expr.as_deref(), ty),
-            ConcreteHostExprKind::Let { bindings, body, .. } => {
+            ConcreteHostExprKind::Let { bindings, body, .. }
+            | ConcreteHostExprKind::RetainedInvocation { bindings, body, .. } => {
                 self.push_scope();
                 let depth = self.depth();
                 for binding in bindings {
@@ -1224,22 +1311,6 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             }
             ConcreteHostExprKind::FlatMap { callback, list, ty } => {
                 self.lower_flat_map(callback, list, ty)
-            }
-            ConcreteHostExprKind::WithSeed { seed, body, ty } => {
-                let seed = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(seed, None)
-                })?;
-                let seed = self.consume(seed, None)?;
-                let body = self.with_site(HostSiteKind::Argument, |lowerer| {
-                    lowerer.lower_expr(body, tail)
-                })?;
-                let body = self.consume(body, tail)?;
-                self.apply(
-                    ty,
-                    "with_seed".to_string(),
-                    vec![super::ir::OwnershipUse::Move; 2],
-                    vec![seed, body],
-                )
             }
         }
     }
@@ -1437,34 +1508,39 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let actual = self.direct_call_argument_type(argument.expr)?;
         self.with_site(HostSiteKind::Argument, |lowerer| {
             lowerer.with_site(HostSiteKind::Expression, |lowerer| {
-                let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
-                    (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
-                        prim.is_integer() || prim.is_float()
-                    }
-                    (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
-                        prim.is_float()
-                    }
-                    _ => false,
-                };
-                if raw_literal_allowed {
-                    let label = match &argument.expr.kind {
-                        ConcreteHostExprKind::Int(value) => format!("literal {value}"),
-                        ConcreteHostExprKind::Float(value) => format!("literal {value}"),
-                        _ => unreachable!("raw literal admission is exhaustive"),
+                // The span covers BOTH ways out of this body: the raw-literal
+                // admission below returns without reaching `lower_expr_at_site`
+                // (chelis#2122 red team round 2).
+                lowerer.with_expr_span(argument.expr, |lowerer| {
+                    let raw_literal_allowed = match (&argument.expr.kind, argument.checked_slot) {
+                        (ConcreteHostExprKind::Int(_), ConcreteHostType::Scalar(prim)) => {
+                            prim.is_integer() || prim.is_float()
+                        }
+                        (ConcreteHostExprKind::Float(_), ConcreteHostType::Scalar(prim)) => {
+                            prim.is_float()
+                        }
+                        _ => false,
                     };
-                    return lowerer.define(argument.checked_slot, label);
-                }
+                    if raw_literal_allowed {
+                        let label = match &argument.expr.kind {
+                            ConcreteHostExprKind::Int(value) => format!("literal {value}"),
+                            ConcreteHostExprKind::Float(value) => format!("literal {value}"),
+                            _ => unreachable!("raw literal admission is exhaustive"),
+                        };
+                        return lowerer.define(argument.checked_slot, label);
+                    }
 
-                if !instantiation.admits(argument.pattern, argument.formal, &actual) {
-                    return Err(OwnershipError::CallArgumentType {
-                        unit: lowerer.unit_name.clone(),
-                        callee: argument.function.to_string(),
-                        argument: argument.index,
-                        expected: render_type(argument.formal),
-                        actual: render_type(&actual),
-                    });
-                }
-                lowerer.lower_expr_at_site(argument.expr, None)
+                    if !instantiation.admits(argument.pattern, argument.formal, &actual) {
+                        return Err(OwnershipError::CallArgumentType {
+                            unit: lowerer.unit_name.clone(),
+                            callee: argument.function.to_string(),
+                            argument: argument.index,
+                            expected: render_type(argument.formal),
+                            actual: render_type(&actual),
+                        });
+                    }
+                    lowerer.lower_expr_at_site(argument.expr, None)
+                })
             })
         })
     }
@@ -1652,14 +1728,98 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         })?;
         self.record_edge(HostSiteKind::BranchEdge, then_block);
         self.record_edge(HostSiteKind::BranchEdge, else_block);
+
+        // `moved` is a single set for the whole unit, but a branch has two
+        // paths. Consuming an enclosing owner on one arm marks it moved
+        // everywhere, so the enclosing scope exit emits no release for the arm
+        // that did NOT consume it, and that owner reaches the join live on one
+        // path only. Lower each arm from the same snapshot and reconcile, so
+        // every owner that survives one arm and not the other carries its
+        // release on the arm that dropped it (chelis#2477).
+        let moved_before = self.moved.clone();
+        let outer_owners: BTreeSet<OwnerId> = self.owners.keys().copied().collect();
+
         self.current = then_block;
         self.push_scope();
         self.lower_join_arm(then_expr, join)?;
+        let moved_after_then = self.moved.clone();
+        // An arm with nested control flow ends in a different block than the
+        // one it started in, and the release belongs on the block that jumps
+        // to the join. Emitting into the arm's entry block would place it
+        // before that block's own terminator, so a later borrow inside the arm
+        // would read a released owner.
+        let then_end = self.current;
+
+        self.moved = moved_before;
         self.current = else_block;
         self.push_scope();
         self.lower_join_arm(else_expr, join)?;
+        let moved_after_else = self.moved.clone();
+        let else_end = self.current;
+
+        self.moved = moved_after_then
+            .union(&moved_after_else)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        self.release_on_arm(
+            then_end,
+            &moved_after_else,
+            &moved_after_then,
+            &outer_owners,
+        )?;
+        self.release_on_arm(
+            else_end,
+            &moved_after_then,
+            &moved_after_else,
+            &outer_owners,
+        )?;
+
         self.current = join;
         Ok(Value::Fresh(join_owner))
+    }
+
+    /// Release, in `arm`'s block, every pre-existing owner that the sibling
+    /// arm consumed and this one did not. Restricted to owners that existed
+    /// before the branch: anything minted inside an arm does not exist on the
+    /// other path and its own scope exit already covers it.
+    ///
+    /// These are emitted with `ProvisionalScopeExit`, exactly like a scope
+    /// exit, so `last_use::schedule` re-places them with every other
+    /// provisional release rather than treating them as fixed.
+    fn release_on_arm(
+        &mut self,
+        arm: BlockId,
+        moved_by_sibling: &BTreeSet<OwnerId>,
+        moved_by_arm: &BTreeSet<OwnerId>,
+        outer_owners: &BTreeSet<OwnerId>,
+    ) -> Result<(), OwnershipError> {
+        let owed: Vec<OwnerId> = moved_by_sibling
+            .difference(moved_by_arm)
+            .copied()
+            .filter(|owner| outer_owners.contains(owner))
+            .filter(|owner| {
+                self.owners
+                    .get(owner)
+                    .is_some_and(|info| info.origin == OwnerOrigin::Owned)
+            })
+            .collect();
+        let restore = self.current;
+        self.current = arm;
+        for owner in owed {
+            let heap = self
+                .owners
+                .get(&owner)
+                .is_some_and(|info| info.class.is_heap());
+            if heap {
+                self.emit_scope_exit(Op::Drop {
+                    owner: Operand::move_(owner),
+                });
+            } else {
+                self.emit_scope_exit(Op::Discard { owner });
+            }
+        }
+        self.current = restore;
+        Ok(())
     }
 
     fn lower_match_option(
@@ -2156,8 +2316,15 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             .names
             .insert(names[0].clone(), Place::Owner(element));
         let depth = self.depth();
+        // The step keeps the item after the predicate reads it, so the
+        // predicate runs one scope deeper than the item: no use of the item
+        // there is its last, and a consuming use, such as a by-value call to a
+        // named definition, receives its own copy (chelis#2577).
+        self.push_scope();
+        let predicate_depth = self.depth();
         let predicate = self.lower_callback_body(callback, &[element])?;
-        let predicate = self.consume(predicate, Some(depth))?;
+        let predicate = self.consume(predicate, Some(predicate_depth))?;
+        self.exit_scope()?;
         let item = self.consume(Value::Named(element), Some(depth))?;
         let carried = self.consume(Value::Named(acc), Some(depth))?;
         let next = self.mint(ty, Placement::Value, OwnerOrigin::Owned, Vec::new())?;
@@ -2363,7 +2530,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
         let Some(helper_ref) = self.helpers.get(helper) else {
             return Err(self.invariant(format!("tensor helper {helper} does not exist")));
         };
-        if is_identity_helper(helper_ref) && args.len() == 1 {
+        if helper_ref.identity_input().is_some() && args.len() == 1 {
             return self.lower_expr(&args[0], tail);
         }
         let mut operands = Vec::with_capacity(args.len());
@@ -2382,28 +2549,15 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
     }
 }
 
-fn is_identity_helper(helper: &HostTensorHelper) -> bool {
-    if helper.dag.roots().len() != 1 || helper.inputs.len() != 1 {
-        return false;
-    }
-    let Some(node) = helper.dag.get(helper.dag.roots()[0]) else {
-        return false;
-    };
-    match &node.op {
-        RiscOp::Load { name } => {
-            node.output_type == helper.output && helper.inputs[0].name == *name
-        }
-        _ => false,
-    }
-}
-
 fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
     match &expr.kind {
         ConcreteHostExprKind::Int(_) => ConcreteHostType::Int64,
         ConcreteHostExprKind::Float(_) => ConcreteHostType::Float64,
         ConcreteHostExprKind::Bool(_) => ConcreteHostType::Bool,
         ConcreteHostExprKind::String(_) => ConcreteHostType::String,
-        ConcreteHostExprKind::Unit => ConcreteHostType::Unit,
+        ConcreteHostExprKind::Unit | ConcreteHostExprKind::SignatureEntry { .. } => {
+            ConcreteHostType::Unit
+        }
         ConcreteHostExprKind::List(_, ty)
         | ConcreteHostExprKind::Tuple(_, ty)
         | ConcreteHostExprKind::Var(_, ty)
@@ -2415,14 +2569,16 @@ fn expr_type(expr: &ConcreteHostExpr) -> ConcreteHostType {
         | ConcreteHostExprKind::MatchOption { ty, .. }
         | ConcreteHostExprKind::MatchAdt { ty, .. }
         | ConcreteHostExprKind::Let { ty, .. }
+        | ConcreteHostExprKind::RetainedInvocation { ty, .. }
         | ConcreteHostExprKind::Map { ty, .. }
         | ConcreteHostExprKind::Filter { ty, .. }
         | ConcreteHostExprKind::Fold { ty, .. }
         | ConcreteHostExprKind::Scan { ty, .. }
         | ConcreteHostExprKind::Partition { ty, .. }
         | ConcreteHostExprKind::FlatMap { ty, .. }
-        | ConcreteHostExprKind::WithSeed { ty, .. }
-        | ConcreteHostExprKind::TensorCall { ty, .. } => ty.clone(),
+        | ConcreteHostExprKind::TensorCall { ty, .. }
+        | ConcreteHostExprKind::ResultClaimScope { ty, .. }
+        | ConcreteHostExprKind::FormalIngress { ty, .. } => ty.clone(),
     }
 }
 
@@ -2521,12 +2677,11 @@ pub(super) fn materialize_manifest_roots(
 }
 
 fn display_root(root: &chelis_types::manifest::RootEntry) -> HostDisplayRoot {
-    let short_def = root
-        .def_name
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .or_else(|| root.def_name.rsplit_once('.').map(|(_, tail)| tail))
-        .unwrap_or(root.def_name.as_str());
+    let short_def = if chelis_types::is_linker_format_name(&root.def_name) {
+        chelis_types::demangle_ident(&root.def_name)
+    } else {
+        root.def_name.clone()
+    };
     let suffix = root
         .name
         .strip_prefix(root.def_name.as_str())

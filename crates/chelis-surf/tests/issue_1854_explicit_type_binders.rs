@@ -1,0 +1,577 @@
+//! chelis#1854: Surf type variables are introduced only by a declaration's
+//! explicit `[..]` binder list. Unknown lowercase scalar and tensor-precision
+//! names must remain `t-prim` so the shared Deep type resolver can reject them.
+
+use chelis_deep::{parser::parse_str as parse_deep, printer::print_canonical_flat};
+use chelis_surf::{
+    ast::Decl,
+    desugar::desugar_program,
+    format::format_program,
+    parser::parse_str,
+    resugar::{ResugarError, normalize_deep_for_surface_roundtrip, resugar_program},
+};
+
+const UNKNOWN_DTYPES: [&str; 7] = [
+    "float32", "fp32", "int33", "double", "half", "f8e4m3", "f8e5m2",
+];
+
+fn deep(source: &str) -> String {
+    let declarations = parse_str(source).expect("Surf fixture must parse");
+    print_canonical_flat(&desugar_program(&declarations).expect("Surf fixture must desugar"))
+}
+
+#[test]
+fn unlisted_scalar_names_lower_to_unknown_primitives() {
+    for name in UNKNOWN_DTYPES {
+        for source in [
+            format!("def ident(x: {name}) -> {name} = x"),
+            format!("sig ident: {name} -> {name}\ndef ident(x) = x"),
+        ] {
+            let rendered = deep(&source);
+            assert!(
+                rendered.contains(&format!("(t-prim {{}} {name})")),
+                "`{name}` must reach primitive resolution: {rendered}"
+            );
+            assert!(
+                !rendered.contains(&format!("(t-var {{}} {name})")),
+                "`{name}` must not become an implicit type binder: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unlisted_tensor_precision_names_lower_to_unknown_primitives() {
+    let rendered = deep("sig ident: tensor[n, p] -> tensor[n, p]\ndef ident(x) = x");
+    assert!(
+        rendered.contains("(d-var {} n)"),
+        "the dimension remains structurally a variable use: {rendered}"
+    );
+    assert!(
+        rendered.contains("(t-prim {} p)") && !rendered.contains("(t-var {} p)"),
+        "an unlisted precision name must not become a type binder: {rendered}"
+    );
+    assert!(
+        rendered.contains("(defsig {} ident (t-fn "),
+        "the monomorphic Deep form must omit a binder-list child: {rendered}"
+    );
+}
+
+#[test]
+fn declared_binders_lower_to_variable_forms_in_both_signature_forms() {
+    for (source, name) in [
+        ("def ident[a](x: a) -> a = x", "a"),
+        ("sig ident[a]: a -> a\ndef ident(x) = x", "a"),
+        ("def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = x", "p"),
+        (
+            "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\ndef ident(x) = x",
+            "p",
+        ),
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains(&format!("(t-var {{}} {name})")),
+            "a declared binder must lower to `t-var`: {source}\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!("(t-prim {{}} {name})")),
+            "a declared binder must not lower to `t-prim`: {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn matching_def_annotations_reuse_the_standalone_signature_binders() {
+    let rendered = deep(
+        "sig ident[n, p]: tensor[n, p] -> tensor[n, p]\n\
+         def ident(x: tensor[n, p]) -> tensor[n, p] = x",
+    );
+    assert!(
+        rendered.contains("(defsig {} ident (n p) ")
+            && rendered.matches("(d-var {} n)").count() >= 2
+            && rendered.matches("(t-var {} p)").count() >= 2
+            && !rendered.contains("(t-prim {} p)"),
+        "the owning sig binder scope must cover matching-def annotations: {rendered}"
+    );
+}
+
+#[test]
+fn declaration_body_annotations_reuse_one_explicit_binder_scope() {
+    for source in [
+        "def ident[p](x: p) -> p = { y: p = x\n y }",
+        "def ident[p](x: p) -> p = { apply = fn(y: p) -> y\n apply(x) }",
+        "def ident[p](x: p) -> p = (x: p)",
+        "def ident[p](xs: List[p]) -> List[p] = { ys: List[p] = xs\n ys }",
+        "sig ident[p]: p -> p\ndef ident(x) = { y: p = x\n y }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { y: tensor[n, p] = x\n y }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         { apply = fn(y: tensor[n, p]) -> y\n apply(x) }",
+        "def ident[n, p](x: tensor[n, p]) -> tensor[n, p] = \
+         (x: tensor[n, p])",
+        "def f[n, p](a: tensor[n, p]) -> tensor[n, p] = \
+         { b: tensor[n, p] = a\n b }\n\
+         def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(t-var {} p)") && !rendered.contains("(t-prim {} p)"),
+            "one declaration binder scope must cover every body type position: \
+             {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn body_only_declaration_binders_synthesize_and_round_trip_a_defsig() {
+    for (source, binder, annotation) in [
+        ("def maker[p]() = fn (x: p) -> x", "p", "(t-var {} p)"),
+        (
+            "def maker[n]() = fn (x: tensor[n, f32]) -> x",
+            "n",
+            "(d-var {} n)",
+        ),
+        (
+            "def maker[r]() = fn (x: tensor[..r, f32]) -> x",
+            "r",
+            "(d-rank {} r)",
+        ),
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains(&format!("(defsig {{}} maker ({binder}) "))
+                && rendered.contains("(t-fn {} (t-var {} _))")
+                && rendered.contains(annotation),
+            "P4b requires a body-only binder to retain a structural defsig carrier: \
+             {source}\n{rendered}"
+        );
+
+        let program = parse_deep(&rendered).expect("desugared Deep must parse");
+        let recovered = resugar_program(&program).expect("body-only binder carrier must resugar");
+        let redeep =
+            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
+        assert!(
+            redeep.contains(&format!("(defsig {{}} maker ({binder}) "))
+                && redeep.contains(annotation),
+            "canonical Surf/Deep round-trip must preserve the body-only binder: \
+             {source}\n{redeep}"
+        );
+    }
+}
+
+#[test]
+fn polymorphic_value_defsig_resugars_as_a_standalone_signature() {
+    let original = parse_deep(
+        "(defsig {} empty (p) (t-adt {} List (t-var {} p)))
+         (def {} empty (var {} Nil))",
+    )
+    .expect("polymorphic value fixture must parse");
+
+    let recovered =
+        resugar_program(&original).expect("polymorphic value signature must be representable");
+    assert!(
+        matches!(
+            recovered.as_slice(),
+            [
+                Decl::Sig {
+                    name,
+                    type_binders,
+                    ..
+                },
+                Decl::LetDef { name: value_name, ty: None, .. }
+            ] if name == "empty"
+                && value_name == "empty"
+                && type_binders.len() == 1
+                && type_binders[0].name == "p"
+        ),
+        "the binder-bearing signature must remain standalone: {recovered:#?}"
+    );
+    assert_eq!(
+        format_program(&recovered),
+        "sig empty[p]: List[p]\nempty = Nil\n"
+    );
+    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("derived Surf spans must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&original)
+                .expect("original fixture must normalize"),
+        ),
+        "the standalone signature and untyped value must recover the original Deep"
+    );
+}
+
+#[test]
+fn monomorphic_value_defsig_keeps_the_canonical_inline_binding() {
+    let original = parse_deep(
+        "(defsig {} empty_i64 (t-adt {} List (t-prim {} i64)))
+         (def {} empty_i64 (var {} Nil))",
+    )
+    .expect("monomorphic value fixture must parse");
+
+    let recovered =
+        resugar_program(&original).expect("monomorphic value signature must be representable");
+    assert!(
+        matches!(
+            recovered.as_slice(),
+            [Decl::LetDef {
+                name,
+                ty: Some(_),
+                ..
+            }] if name == "empty_i64"
+        ),
+        "a monomorphic value remains one inline typed binding: {recovered:#?}"
+    );
+}
+
+#[test]
+fn polymorphic_property_binders_are_structural_and_round_trip() {
+    let source = "@property accepts[p] forall(x: p):\n  true\n";
+    let parsed = parse_str(source).expect("explicit property binders must parse");
+    assert_eq!(format_program(&parsed), source);
+    let serialized = serde_json::to_string(&parsed).expect("property AST serializes");
+    let decoded: Vec<Decl> = serde_json::from_str(&serialized).expect("property AST deserializes");
+    assert_eq!(
+        decoded, parsed,
+        "Surf AST serialization must retain the property binder list"
+    );
+
+    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let rendered = print_canonical_flat(&lowered);
+    assert!(
+        rendered.contains("(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool)))")
+            && rendered.matches("(x {type: (t-var {} p)})").count() == 2,
+        "the defsig and property quantifier metadata must share binder `p`: {rendered}"
+    );
+
+    let recovered =
+        resugar_program(&lowered).expect("the polymorphic property must resugar canonically");
+    assert_eq!(format_program(&recovered), source);
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(&recovered).expect("Surf fixture must desugar")
+            )
+            .expect("recovered property must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&lowered)
+                .expect("original property must normalize"),
+        ),
+        "Deep -> Surf -> Deep must preserve the property declaration binders"
+    );
+}
+
+#[test]
+fn bounded_property_binders_reuse_the_declaration_binder_model() {
+    let rendered = deep("@property accepts[p: Float] forall(x: p):\n  true");
+    assert!(
+        rendered.contains(
+            "(defsig {dtype_bounds: {p: float}} accepts (p) \
+             (t-fn {} (t-var {} p) (t-prim {} bool)))"
+        ),
+        "a property bound must ride on its defsig: {rendered}"
+    );
+}
+
+#[test]
+fn property_binder_lists_reject_duplicate_and_forbidden_names() {
+    for (source, needle) in [
+        (
+            "@property accepts[p, p] forall(x: p): true",
+            "duplicate binder `p`",
+        ),
+        (
+            "@property accepts[f32] forall(x: f32): true",
+            "dtype spelling `f32` cannot be a declaration binder",
+        ),
+    ] {
+        let error = parse_str(source).expect_err("invalid property binder list must reject");
+        assert!(
+            error.to_string().contains(needle),
+            "wrong property-binder diagnostic for `{source}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn property_body_type_positions_use_one_declaration_scope() {
+    let rendered = deep(
+        "@property accepts[n, p] forall(x: p) where \
+         (fn(y: p) -> true)(x):\n  (fn(z: tensor[n, p]) -> true)(to_tensor([x]))",
+    );
+    assert!(
+        rendered.contains("(t-var {} p)"),
+        "ordinary quantifier and body types must see property binder `p`: {rendered}"
+    );
+    assert!(
+        rendered.contains("(d-var {} n)")
+            && rendered.contains("(t-var {} p)")
+            && !rendered.contains("(t-prim {} p)"),
+        "property tensor precision slots must share the declaration binder scope: {rendered}"
+    );
+}
+
+#[test]
+fn nested_module_body_tensor_precision_binders_round_trip() {
+    let source = "module Demo.BodyScope\n\
+                  def f[n, p](a: tensor[n, p]) -> tensor[n, p] = {\n\
+                    b: tensor[n, p] = a\n\
+                    b\n\
+                  }\n\
+                  def main() -> tensor[2, f32] = f(to_tensor([1.0f32, 2.0f32]))\n";
+    let parsed = parse_str(source).expect("nested-module fixture must parse");
+    let lowered = desugar_program(&parsed).expect("Surf fixture must desugar");
+    let rendered = print_canonical_flat(&lowered);
+    assert!(
+        rendered.contains("(module ")
+            && rendered.contains("(t-var {} p)")
+            && !rendered.contains("(t-prim {} p)"),
+        "nested module bodies must reuse their declaration binder scope: {rendered}"
+    );
+
+    let recovered = resugar_program(&lowered).expect("nested module must resugar");
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(
+                &desugar_program(&recovered).expect("Surf fixture must desugar")
+            )
+            .expect("recovered nested module must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&lowered)
+                .expect("original nested module must normalize"),
+        ),
+    );
+}
+
+#[test]
+fn nested_module_property_resugaring_preserves_binders() {
+    let original = parse_deep(concat!(
+        "(module {surf_path: \"Demo.Property\"} demo.property ",
+        "(defsig {} accepts (p) (t-fn {} (t-var {} p) (t-prim {} bool))) ",
+        "(def {chelis_role: \"property\", property_source_kind: \"user\", ",
+        "property_quantifiers: (params {} (x {type: (t-var {} p)})), ",
+        "property_preconditions: (tuple {})} accepts ",
+        "(fn {} (params {} (x {type: (t-var {} p)})) ",
+        "(lit {type: (t-prim {} bool)} true))))",
+    ))
+    .expect("nested polymorphic property fixture must parse");
+
+    let recovered = resugar_program(&original).expect("nested property must resugar");
+    assert_eq!(
+        format_program(&recovered),
+        "module Demo.Property\n@property accepts[p] forall(x: p):\n  true\n"
+    );
+    let redesugared = desugar_program(&recovered).expect("Surf fixture must desugar");
+    assert_eq!(
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&redesugared)
+                .expect("nested recovered property must normalize"),
+        ),
+        print_canonical_flat(
+            &normalize_deep_for_surface_roundtrip(&original)
+                .expect("nested original property must normalize"),
+        ),
+    );
+}
+
+#[test]
+fn monomorphic_properties_keep_the_existing_canonical_spelling() {
+    let source = "@property accepts forall(x: i32):\n  true\n";
+    let parsed = parse_str(source).expect("monomorphic property parses");
+    assert_eq!(format_program(&parsed), source);
+    let recovered = resugar_program(&desugar_program(&parsed).expect("Surf fixture must desugar"))
+        .expect("monomorphic property resugars");
+    assert_eq!(format_program(&recovered), source);
+}
+
+#[test]
+fn body_annotations_without_a_declaration_binder_remain_unbound() {
+    for (source, variable, forbidden) in [
+        (
+            "def maker() = fn (x: p) -> x",
+            "(t-prim {} p)",
+            "(t-var {} p)",
+        ),
+        (
+            "def maker() = fn (x: tensor[2, p]) -> x",
+            "(t-prim {} p)",
+            "(t-var {} p)",
+        ),
+        (
+            "def maker() = fn (x: tensor[n, f32]) -> x",
+            "(d-var {} n)",
+            "(defsig {} maker (n) ",
+        ),
+        (
+            "def maker() = fn (x: tensor[..r, f32]) -> x",
+            "(d-rank {} r)",
+            "(defsig {} maker (r) ",
+        ),
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains(variable) && !rendered.contains(forbidden),
+            "an ordinary body annotation must not manufacture a declaration binder: \
+             {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn matching_def_cannot_declare_a_second_binder_list() {
+    let error = parse_str(
+        "sig ident[a]: a -> a\n\
+         def ident[a](x: a) -> a = x",
+    )
+    .expect_err("one declaration has one binder owner");
+    assert!(
+        error
+            .to_string()
+            .contains("a declaration's `defsig` owns its binder list"),
+        "wrong duplicate-owner diagnostic: {error}"
+    );
+}
+
+#[test]
+fn duplicate_surf_binder_names_are_rejected_before_desugaring() {
+    let error = parse_str("sig ident[a, a]: a -> a\ndef ident(x) = x")
+        .expect_err("a declaration cannot bind one name twice");
+    assert!(
+        error.to_string().contains("duplicate binder `a`"),
+        "wrong duplicate-binder diagnostic: {error}"
+    );
+}
+
+#[test]
+fn dimension_and_rank_variables_require_declared_binders() {
+    let unlisted = deep("sig shaped: tensor[n, f32] -> tensor[..r, f32]\ndef shaped(x) = x");
+    assert!(
+        unlisted.contains("(defsig {} shaped (t-fn ")
+            && unlisted.contains("(d-var {} n)")
+            && unlisted.contains("(d-rank {} r)"),
+        "unlisted variables must remain uses outside an empty binder list: {unlisted}"
+    );
+
+    let listed = deep("sig shaped[n, r]: tensor[n, f32] -> tensor[..r, f32]\ndef shaped(x) = x");
+    assert!(
+        listed.contains("(defsig {} shaped (n r) ")
+            && listed.contains("(d-var {} n)")
+            && listed.contains("(d-rank {} r)"),
+        "listed dimension and rank binders must be carried explicitly: {listed}"
+    );
+}
+
+#[test]
+fn forbidden_dtype_vocabulary_is_rejected_at_the_surf_binder_list() {
+    for (name, source) in [
+        ("f32", "def shaped[f32](x: tensor[f32, i32]) -> i32 = 0i32"),
+        (
+            "f8e4m3",
+            "def shaped[f8e4m3](x: tensor[f8e4m3, i32]) -> i32 = 0i32",
+        ),
+        (
+            "i32",
+            "def shaped[i32](x: tensor[..i32, f32]) -> i32 = 0i32",
+        ),
+        (
+            "f8e5m2",
+            "def shaped[f8e5m2](x: tensor[..f8e5m2, f32]) -> i32 = 0i32",
+        ),
+        ("bool", "def constant[bool]() -> i32 = 1i32"),
+        ("u8", "def constant[u8]() -> i32 = 1i32"),
+        ("int32", "def constant[int32]() -> i32 = 1i32"),
+        ("complex64", "def constant[complex64]() -> i32 = 1i32"),
+    ] {
+        let error = parse_str(source).expect_err("dtype vocabulary cannot be rebound");
+        assert!(
+            error.to_string().contains(&format!("`{name}`"))
+                && error.to_string().contains("cannot be a declaration binder"),
+            "wrong forbidden-binder diagnostic for `{name}`: {error}"
+        );
+    }
+}
+
+#[test]
+fn arbitrary_non_dtype_names_remain_legal_surf_binders() {
+    for source in [
+        "def shaped[float32](x: tensor[float32, f32]) -> tensor[float32, f32] = x",
+        "def shaped[float32](x: tensor[..float32, f32]) -> tensor[..float32, f32] = x",
+        "def constant[float32]() -> i32 = 1i32",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(defsig {}")
+                && rendered.contains("(float32)")
+                && (rendered.contains("(d-var {} float32)")
+                    || rendered.contains("(d-rank {} float32)")
+                    || rendered.contains("(t-prim {} i32)")),
+            "an arbitrary intentional binder must remain legal: {source}\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn active_primitive_t_vars_have_no_resugar_fallback() {
+    let program = parse_deep(
+        "(defsig {} ident (f32)
+           (t-fn {} (t-var {} f32) (t-var {} f32)))
+         (def {} ident (fn {} (params {} x) (var {} x)))",
+    )
+    .expect("structural Deep fixture must parse");
+    let error = resugar_program(&program).expect_err("active primitives cannot be Surf binders");
+    assert_eq!(
+        error,
+        ResugarError::InvalidSurfaceIdentifier {
+            name: "f32".to_string(),
+            role: "type variable",
+        }
+    );
+}
+
+#[test]
+fn deep_defsig_ingress_reports_the_declared_arity_before_child_decoding() {
+    for (source, actual) in [
+        ("(defsig {} ident)", 1),
+        ("(defsig {} ident (a) (t-var {} a) (t-prim {} f32))", 4),
+    ] {
+        let error = parse_deep(source).expect_err("invalid defsig arity must reject");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!(
+                "wrong child count for `defsig`: expected Range(2, 3), got {actual}"
+            )),
+            "arity must preempt child decoding for `{source}`: {rendered}"
+        );
+        assert!(
+            !rendered.contains("undecodable type head"),
+            "a child-role diagnostic must not mask the defsig arity: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn declared_but_unused_unbounded_binders_are_preserved() {
+    for source in [
+        "def constant[a]() -> i32 = 1i32",
+        "sig constant[a]: i32 -> i32\ndef constant(x) = x",
+    ] {
+        let rendered = deep(source);
+        assert!(
+            rendered.contains("(defsig {} constant (a) "),
+            "a vacuous explicit quantifier must remain structural: {rendered}"
+        );
+        let program = parse_deep(&rendered).expect("desugared Deep must parse");
+        let recovered = resugar_program(&program).expect("unused unbounded binder must resugar");
+        let redeep =
+            print_canonical_flat(&desugar_program(&recovered).expect("Surf fixture must desugar"));
+        assert!(
+            redeep.contains("(defsig {} constant (a) "),
+            "round-trip must preserve the declared binder: {redeep}"
+        );
+    }
+}

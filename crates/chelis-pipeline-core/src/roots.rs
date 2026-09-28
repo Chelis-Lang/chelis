@@ -79,7 +79,6 @@ fn collect_checked_decl_names(
 
 fn tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
     match expr {
-        DeepExpr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
         _ => None,
     }
@@ -119,18 +118,10 @@ fn extend_root_names(
 
 fn expr_type_metadata(expr: &DeepExpr) -> Option<&DeepExpr> {
     let metadata = match expr {
-        DeepExpr::List(list, _) => match list.elements.get(1) {
-            Some(DeepExpr::Map(metadata, _)) => metadata,
-            _ => return None,
-        },
         DeepExpr::Node(node, _) => node.meta(),
         _ => return None,
     };
-    metadata
-        .entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    metadata.ty().map(|ty| ty.expression())
 }
 
 fn symbol_name(expr: &DeepExpr) -> Option<&str> {
@@ -186,7 +177,7 @@ mod tests {
     #[test]
     fn mixed_tuple_declaration_keeps_each_canonical_position() {
         let source = "(def {} mixed (tuple {} \
-            (lit {type: (t-prim {} int32)} 1) \
+            (lit {type: (t-prim {} i32)} 1) \
             (lit {type: (t-tensor {} (d-name {} n) (t-prim {} f32))} 2.0)))";
         let expressions =
             chelis_deep::parser::parse_str(source).expect("mixed tuple Deep must parse");

@@ -287,7 +287,7 @@ fn unused_import_package(entry_body: &str) -> (tempfile::TempDir, std::path::Pat
     std::fs::write(
         root.join("mylib/src/shapes.ch"),
         "module Mylib.Shapes\nexport (scale)\n\n\
-         def scale(a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)\n",
+         def scale[k](a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)\n",
     )
     .unwrap();
 
@@ -394,8 +394,8 @@ result = compute()
 #[test]
 fn issue_820_concat_def_evaluates_as_root() {
     let source = r#"
-a: List[int32] = [cast(1, int32), cast(2, int32)]
-b: List[int32] = [cast(3, int32), cast(4, int32)]
+a: List[i32] = [cast(1, i32), cast(2, i32)]
+b: List[i32] = [cast(3, i32), cast(4, i32)]
 result = concat(a, b)
 "#;
     let (stdout, stderr, success) = eval_file(source);
@@ -524,7 +524,7 @@ z = print("host")
 /// observation boundary.
 #[test]
 fn pure_nullary_definition_is_an_executable_c_root() {
-    let source = "def answer() -> int32 = cast(42, int32)\n";
+    let source = "def answer() -> i32 = cast(42, i32)\n";
     let (manifest, stderr, eval_ok) = eval_json_file(source, Some("c"));
     assert!(eval_ok, "C-target manifest probe failed: {stderr}");
     let answer = manifest["manifest"]["entries"]
@@ -557,7 +557,7 @@ fn pure_nullary_definition_is_an_executable_c_root() {
     );
     assert_eq!(stdout.trim(), "answer = 42");
 
-    let parameterized = build_c("def identity(x: int32) -> int32 = x\n");
+    let parameterized = build_c("def identity(x: i32) -> i32 = x\n");
     assert!(
         parameterized.success,
         "an unselected parameterized declaration must still build as an object: {}",
@@ -575,9 +575,9 @@ fn pure_nullary_definition_is_an_executable_c_root() {
 /// function wrapper itself carries no statically selected ADT constructor.
 #[test]
 fn pure_nullary_tuple_and_record_roots_expand_and_execute() {
-    let source = "type Pair = | Pair { left: int32, right: int32 }\n\
-                  def tupled() -> (int32, int32) = (cast(1, int32), cast(2, int32))\n\
-                  def answer() -> Pair = Pair { left: cast(3, int32), right: cast(4, int32) }\n";
+    let source = "type Pair = | Pair { left: i32, right: i32 }\n\
+                  def tupled() -> (i32, i32) = (cast(1, i32), cast(2, i32))\n\
+                  def answer() -> Pair = Pair { left: cast(3, i32), right: cast(4, i32) }\n";
     let (manifest, stderr, eval_ok) = eval_json_file(source, Some("c"));
     assert!(eval_ok, "nullary product manifest probe failed: {stderr}");
     let manifest_names = manifest["manifest"]["entries"]
@@ -614,8 +614,8 @@ fn pure_nullary_tuple_and_record_roots_expand_and_execute() {
 /// for pure nullary roots must not introduce their own alphabetical order.
 #[test]
 fn pure_nullary_host_roots_preserve_manifest_order() {
-    let source = "def zed() -> int32 = cast(1, int32)\n\
-                  def alpha() -> int32 = cast(2, int32)\n";
+    let source = "def zed() -> i32 = cast(1, i32)\n\
+                  def alpha() -> i32 = cast(2, i32)\n";
     let (manifest, stderr, eval_ok) = eval_json_file(source, Some("c"));
     assert!(eval_ok, "C-target manifest probe failed: {stderr}");
     let names = manifest["manifest"]["entries"]
@@ -645,8 +645,8 @@ fn pure_nullary_host_roots_preserve_manifest_order() {
 /// manifest order; appending either class after the other is non-conforming.
 #[test]
 fn nullary_and_value_host_roots_preserve_manifest_order() {
-    let source = "def zed() -> int32 = cast(1, int32)\n\
-                  alpha = cast(2, int32)\n";
+    let source = "def zed() -> i32 = cast(1, i32)\n\
+                  alpha = cast(2, i32)\n";
     let (manifest, stderr, eval_ok) = eval_json_file(source, Some("c"));
     assert!(eval_ok, "C-target manifest probe failed: {stderr}");
     let names = manifest["manifest"]["entries"]
@@ -676,8 +676,8 @@ fn nullary_and_value_host_roots_preserve_manifest_order() {
 /// dependency after the Host binding that consumes it.
 #[test]
 fn host_manifest_order_preserves_lowering_dependencies() {
-    let source = "rows: List[List[int64]] = [[cast(1, int64)], [cast(2, int64)]]\n\
-                  padded = pad_sequences(rows, cast(0, int64))\n\
+    let source = "rows: List[List[i64]] = [[cast(1, i64)], [cast(2, i64)]]\n\
+                  padded = pad_sequences(rows, cast(0, i64))\n\
                   report = to_string(shape(padded, 0))\n\
                   shown = print(report)\n";
     let build = build_c(source);
@@ -798,11 +798,11 @@ z = print("hello")
 #[test]
 fn manifest_completeness_eval_lane() {
     let source = r#"
-type Pair = | Pair { left: int32, right: int32 }
-scalar_root = cast(7, int32)
+type Pair = | Pair { left: i32, right: i32 }
+scalar_root = cast(7, i32)
 tensor_root = insert(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
-tuple_root = (cast(1, int32), (cast(2, int32), cast(3, int32)))
-record_root = Pair { left: cast(4, int32), right: cast(5, int32) }
+tuple_root = (cast(1, i32), (cast(2, i32), cast(3, i32)))
+record_root = Pair { left: cast(4, i32), right: cast(5, i32) }
 "#;
     let (json, stderr, success) = eval_json_file(source, None);
     assert!(success, "eval completeness probe failed: {stderr}");
@@ -838,8 +838,8 @@ record_root = Pair { left: cast(4, int32), right: cast(5, int32) }
 /// in both the target-aware manifest and the realized root sequence.
 #[test]
 fn manifest_completeness_keeps_dynamic_shape_value_roots() {
-    let source = "rows: List[List[int64]] = [[cast(1, int64)], [cast(2, int64)]]\n\
-                  padded = pad_sequences(rows, cast(0, int64))\n";
+    let source = "rows: List[List[i64]] = [[cast(1, i64)], [cast(2, i64)]]\n\
+                  padded = pad_sequences(rows, cast(0, i64))\n";
     let (json, stderr, success) = eval_json_file(source, Some("c"));
     assert!(success, "dynamic-shape manifest probe failed: {stderr}");
     let manifest_names = json["manifest"]["entries"]
@@ -864,7 +864,7 @@ fn manifest_completeness_keeps_dynamic_shape_value_roots() {
 #[test]
 fn eval_rejects_unknown_manifest_target_without_fallback() {
     let output = Command::new(chelis_bin())
-        .args(["eval", "--target", "not-a-target", "cast(1, int32)"])
+        .args(["eval", "--target", "not-a-target", "cast(1, i32)"])
         .output()
         .expect("run eval with invalid target");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -879,11 +879,11 @@ fn eval_rejects_unknown_manifest_target_without_fallback() {
 #[test]
 fn manifest_completeness_c_lane() {
     let source = r#"
-type Pair = | Pair { left: int32, right: int32 }
-scalar_root = cast(7, int32)
+type Pair = | Pair { left: i32, right: i32 }
+scalar_root = cast(7, i32)
 tensor_root = insert(scalar_to_tensor(cast(0.25, f32)), 0, 2i64)
-tuple_root = (cast(1, int32), (cast(2, int32), cast(3, int32)))
-record_root = Pair { left: cast(4, int32), right: cast(5, int32) }
+tuple_root = (cast(1, i32), (cast(2, i32), cast(3, i32)))
+record_root = Pair { left: cast(4, i32), right: cast(5, i32) }
 "#;
     let (json, stderr, eval_success) = eval_json_file(source, Some("c"));
     assert!(eval_success, "C-target manifest probe failed: {stderr}");

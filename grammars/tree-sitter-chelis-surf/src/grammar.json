@@ -1389,10 +1389,6 @@
         },
         {
           "type": "STRING",
-          "value": "Random"
-        },
-        {
-          "type": "STRING",
           "value": "Accum"
         },
         {
@@ -1920,17 +1916,8 @@
           "type": "FIELD",
           "name": "handler",
           "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "seed"
-              },
-              {
-                "type": "STRING",
-                "value": "device"
-              }
-            ]
+            "type": "STRING",
+            "value": "device"
           }
         },
         {

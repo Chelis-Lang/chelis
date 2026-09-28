@@ -37,6 +37,7 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
         globals: Vec::new(),
         global_tensor_helpers: Vec::new(),
         functions: vec![HostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "the_fn".to_string(),
             params: vec![HostParam {
                 name: "x".to_string(),
@@ -50,13 +51,17 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
             summary_rejections: Vec::new(),
         }],
         summary_rejections: Vec::new(),
+        adt_layouts: Vec::new(),
     }
 }
 
 /// True if any emitted line declares a zero-length array, e.g.
 /// `chelis_value adt_fields0[0];` or `chelis_value tuple_values0[0];`.
 fn has_zero_length_array(src: &str) -> bool {
-    src.lines().any(|line| line.contains("[0];"))
+    src.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("chelis_value ") && line.contains("[0];")
+    })
 }
 
 // ---- Nullary ADT variant -------------------------------------------------
@@ -82,7 +87,9 @@ fn issue_310_nullary_adt_variant_emits_no_zero_length_array() {
     );
     // The construct call must pass a NULL field pointer with count 0.
     assert!(
-        src.contains("chelis_string_from_cstr(\"Nothing\")"),
+        src.contains(
+            r#"chelis_string_from_utf8((const uint8_t *)"\116\157\164\150\151\156\147", INT64_C(7))"#,
+        ),
         "{src}"
     );
     assert!(
@@ -115,7 +122,12 @@ fn issue_310_adt_variant_with_fields_still_emits_array() {
         src.contains("[1];"),
         "single-field ADT variant must still declare a `[1];` array:\n{src}"
     );
-    assert!(src.contains("chelis_string_from_cstr(\"Just\")"), "{src}");
+    assert!(
+        src.contains(
+            r#"chelis_string_from_utf8((const uint8_t *)"\112\165\163\164", INT64_C(4))"#,
+        ),
+        "{src}"
+    );
     assert!(src.contains("chelis_adt_construct("), "{src}");
     // Must NOT degrade to NULL/0 when fields are present.
     assert!(
@@ -203,6 +215,7 @@ fn pedantic_compile_error(test_name: &str, c_source: &str) -> Option<String> {
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",

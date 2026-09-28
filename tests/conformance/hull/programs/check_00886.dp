@@ -1,1 +1,7 @@
-(def {} answer (fn {} (params {} (__chk {type: (t-prim {} f32)})) (match {} (lit {type: (t-prim {} int64)} 7) (arm {} (pat-var {} xa) () (lit {type: (t-prim {} f32)} 3.0)))))
+(def {}
+  answer
+  (fn {}
+    (params {} (__chk {type: (t-prim {} f32)}))
+    (match {}
+      (lit {type: (t-prim {} i64)} 7)
+      (arm {} (pat-var {} xa) () (lit {type: (t-prim {} f32)} 3.0)))))

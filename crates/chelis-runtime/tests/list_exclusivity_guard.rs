@@ -1,6 +1,6 @@
 //! chelis#943: the in-place list mutators must refuse a shared list.
 //!
-//! `chelis_list_push` and `chelis_list_extend` are the whole reason this
+//! `chelis_list_push_moved` and `chelis_list_extend_moved` are the whole reason this
 //! change set is safe. `List[T]` is *specified* immutable
 //! (`spec/04-type-system.md:695`, `chelis_project_plan.md:437`) and the
 //! ABI encodes it — `chelis_list_append` takes `*const chelis_list` and
@@ -24,7 +24,7 @@
 use std::process::Command;
 
 use chelis_runtime::{
-    chelis_list_empty, chelis_list_extend, chelis_list_push, chelis_list_release,
+    chelis_list_empty, chelis_list_extend_moved, chelis_list_push_moved, chelis_list_release,
     chelis_list_retain, chelis_list_with_capacity, chelis_scalar_from_bits, chelis_value,
     chelis_value_box_scalar, CHELIS_DTYPE_I64,
 };
@@ -72,27 +72,27 @@ fn shared_list_mutation_child() {
                 // The second owner. This is the condition the guard exists for:
                 // pushing now would mutate a view someone else still holds.
                 chelis_list_retain(list);
-                chelis_list_push(list, int_value(1));
+                chelis_list_push_moved(list, int_value(1));
             }
             "extend" => {
                 let list = chelis_list_empty();
                 chelis_list_retain(list);
                 let src = chelis_list_empty();
-                chelis_list_push(src, int_value(2));
-                chelis_list_extend(list, src);
+                chelis_list_push_moved(src, int_value(2));
+                chelis_list_extend_moved(list, src);
             }
             "negative_capacity" => {
                 chelis_list_with_capacity(-1);
             }
             "push_null" => {
-                chelis_list_push(std::ptr::null_mut(), int_value(1));
+                chelis_list_push_moved(std::ptr::null_mut(), int_value(1));
             }
             "extend_null" => {
-                chelis_list_extend(std::ptr::null_mut(), std::ptr::null());
+                chelis_list_extend_moved(std::ptr::null_mut(), std::ptr::null_mut());
             }
             "self_extend" => {
                 let list = chelis_list_empty();
-                chelis_list_extend(list, list);
+                chelis_list_extend_moved(list, list);
             }
             other => panic!("unknown child case {other}"),
         }
@@ -110,15 +110,15 @@ fn list_capacity_refuses_negative_values() {
 
 #[test]
 fn in_place_list_mutators_refuse_null_destinations() {
-    assert_child_refuses("push_null", "chelis_list_push on a null list");
-    assert_child_refuses("extend_null", "chelis_list_extend on a null list");
+    assert_child_refuses("push_null", "chelis_list_push_moved on a null list");
+    assert_child_refuses("extend_null", "chelis_list_extend_moved on a null list");
 }
 
 #[test]
 fn list_extend_refuses_source_aliasing_destination() {
     assert_child_refuses(
         "self_extend",
-        "chelis_list_extend source aliases destination",
+        "chelis_list_extend_moved source aliases destination",
     );
 }
 
@@ -126,8 +126,8 @@ fn list_extend_refuses_source_aliasing_destination() {
 fn in_place_list_mutators_refuse_a_shared_list() {
     let test_binary = std::env::current_exe().expect("current test binary");
     for (case, symbol) in [
-        ("push", "chelis_list_push"),
-        ("extend", "chelis_list_extend"),
+        ("push", "chelis_list_push_moved"),
+        ("extend", "chelis_list_extend_moved"),
     ] {
         let output = Command::new(&test_binary)
             .args(["--exact", "shared_list_mutation_child", "--nocapture"])
@@ -157,19 +157,19 @@ fn in_place_list_mutators_refuse_a_shared_list() {
 fn exclusively_owned_lists_accept_in_place_mutation() {
     unsafe {
         let list = chelis_list_empty();
-        chelis_list_push(list, int_value(1));
-        chelis_list_push(list, int_value(2));
+        chelis_list_push_moved(list, int_value(1));
+        chelis_list_push_moved(list, int_value(2));
 
         let src = chelis_list_empty();
-        chelis_list_push(src, int_value(3));
-        chelis_list_extend(list, src);
+        chelis_list_push_moved(src, int_value(3));
+        chelis_list_extend_moved(list, src);
 
         assert_eq!(
             chelis_runtime::chelis_list_len(list),
             3,
             "an exclusively owned list must accept push and extend"
         );
-        chelis_list_release(src);
+        // `extend_moved` consumed `src`.
         chelis_list_release(list);
     }
 }

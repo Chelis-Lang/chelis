@@ -992,18 +992,26 @@ fn find_load_in_cone(dag: &Dag, root: NodeId, name: &str) -> Option<NodeId> {
 }
 
 fn add_named_store(dag: &mut Dag, name: &str, input: NodeId) {
-    let ty = dag
+    let source = dag
         .get(input)
-        .unwrap_or_else(|| panic!("missing node for store `{name}`"))
-        .output_type
-        .clone();
-    dag.add_node(RiscOp::Store { name: name.into() }, vec![input], ty, None);
+        .unwrap_or_else(|| panic!("missing node for store `{name}`"));
+    let (decl, ty) = (source.owner, source.output_type.clone());
+    dag.add_node(
+        decl,
+        RiscOp::Store { name: name.into() },
+        vec![input],
+        ty,
+        None,
+    );
 }
 
+/// An id-preserving copy, so every owner stands.
 fn dag_without_roots(dag: &Dag) -> Dag {
     let mut out = Dag::new();
+    out.inherit_declarations(dag);
     for node in dag.nodes() {
         out.add_node(
+            node.owner,
             node.op.clone(),
             node.inputs.clone(),
             node.output_type.clone(),
@@ -1056,57 +1064,6 @@ fn tool_available(tool: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn cpu_runtime_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-/// Resolve the workspace `target/` directory from the running binary rather
-/// than a `CARGO_MANIFEST_DIR`-relative path, so an external
-/// `CARGO_TARGET_DIR` (e.g. a concurrent agent building into
-/// `target/agents/<name>`) is honored. `cpu_runtime_library` is only reached
-/// from the `bench_phase1e` binary, which lives at `<target>/<profile>/<bin>`
-/// (a test binary would instead be at `<target>/<profile>/deps/<bin>`); strip
-/// a trailing `deps` component if present, then drop the profile component to
-/// reach `<target>`. See chelis#747.
-fn target_dir_from_current_exe() -> PathBuf {
-    let exe = std::env::current_exe().expect("could not determine current executable");
-    let mut profile_dir = exe
-        .parent()
-        .expect("executable should have a parent directory");
-    if profile_dir.file_name().and_then(|name| name.to_str()) == Some("deps") {
-        profile_dir = profile_dir
-            .parent()
-            .expect("`deps` directory should have a parent");
-    }
-    profile_dir
-        .parent()
-        .map(PathBuf::from)
-        .expect("profile directory should have a parent target directory")
-}
-
-fn cpu_runtime_library() -> PathBuf {
-    let target_dir = target_dir_from_current_exe();
-    for dir in [
-        target_dir.join("debug/deps"),
-        target_dir.join("release/deps"),
-    ] {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-                {
-                    return path;
-                }
-            }
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for e2e benchmarks");
-}
-
 fn hip_runtime_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-backend-hip/runtime")
 }
@@ -1118,7 +1075,7 @@ fn compile_and_run_c(
     requirements: chelis_backend_c::toolchain::CodegenRequirements,
 ) -> Result<(f64, String), String> {
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
-    write_runtime_files(temp.path(), false)?;
+    let runtime_archive = write_runtime_files(temp.path(), false)?;
     for (name, source) in model_sources {
         fs::write(temp.path().join(name), source)
             .map_err(|e| format!("write {name} failed: {e}"))?;
@@ -1135,8 +1092,7 @@ fn compile_and_run_c(
     for (name, _) in model_sources {
         cmd.arg(temp.path().join(name));
     }
-    cmd.arg("-L").arg(temp.path());
-    cmd.arg("-lchelis_runtime");
+    cmd.arg(&runtime_archive);
     cmd.args(&toolchain.link_flags);
     cmd.arg("-o").arg(&bin);
 
@@ -1176,7 +1132,7 @@ fn compile_and_run_hip(
     link_flags: &[String],
 ) -> Result<(f64, String), String> {
     let temp = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
-    write_runtime_files(temp.path(), true)?;
+    let runtime_archive = write_runtime_files(temp.path(), true)?;
     for (name, source) in model_sources {
         fs::write(temp.path().join(name), source)
             .map_err(|e| format!("write {name} failed: {e}"))?;
@@ -1192,8 +1148,7 @@ fn compile_and_run_hip(
     for (name, _) in model_sources {
         cmd.arg(temp.path().join(name));
     }
-    cmd.arg("-L").arg(temp.path());
-    cmd.arg("-lchelis_runtime");
+    cmd.arg(&runtime_archive);
     cmd.arg("-lpthread");
     cmd.arg("-ldl");
     cmd.args(link_flags);
@@ -1306,24 +1261,12 @@ int main(void) {
     }
 }
 
-fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
-    let cpu_runtime = cpu_runtime_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        fs::write(
-            dir.join(header),
-            fs::read_to_string(cpu_runtime.join(header))
-                .map_err(|e| format!("read {header} failed: {e}"))?,
-        )
-        .map_err(|e| format!("write {header} failed: {e}"))?;
-    }
-    fs::copy(cpu_runtime_library(), dir.join("libchelis_runtime.a"))
-        .map_err(|e| format!("copy libchelis_runtime.a failed: {e}"))?;
+/// Stage the runtime this build carries, with its public headers, into `dir`
+/// and return the staged archive to link by exact path. For HIP benchmarks the
+/// HIP backend header is copied alongside it.
+fn write_runtime_files(dir: &Path, hip: bool) -> Result<PathBuf, String> {
+    let staged = chelis_runtime_bundle::stage(dir)
+        .map_err(|e| format!("stage the carried runtime failed: {e}"))?;
     if hip {
         let hip_runtime = hip_runtime_dir();
         fs::write(
@@ -1333,7 +1276,7 @@ fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
         )
         .map_err(|e| format!("write chelis_hip_runtime.h failed: {e}"))?;
     }
-    Ok(())
+    Ok(staged.archive)
 }
 
 fn write_linreg_data(path: &Path) -> Result<(), String> {

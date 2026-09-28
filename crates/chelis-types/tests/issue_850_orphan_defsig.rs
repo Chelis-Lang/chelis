@@ -51,16 +51,16 @@ fn paired_defsig_and_def_are_accepted() {
 
 #[test]
 fn def_without_defsig_remains_valid() {
-    let got = errors("(def {} inferred (lit {type: (t-prim {} int32)} 1))");
+    let got = errors("(def {} inferred (lit {type: (t-prim {} i32)} 1))");
     assert!(got.is_empty(), "defsig-less def rejected: {got:#?}");
 }
 
 #[test]
 fn a_previous_library_def_does_not_back_a_new_units_orphan_defsig() {
     let library =
-        parse_str("(def {} existing (lit {type: (t-prim {} int32)} 1))").expect("library fixture");
+        parse_str("(def {} existing (lit {type: (t-prim {} i32)} 1))").expect("library fixture");
     let context = build_type_env_from_library(&library).expect("library must check");
-    let next = parse_str("(defsig {} existing (t-prim {} int32))").expect("next fixture");
+    let next = parse_str("(defsig {} existing (t-prim {} i32))").expect("next fixture");
     let errors = check_ir_with_context(&context, &next)
         .expect_err("a defsig must be backed in its own check unit")
         .errors;

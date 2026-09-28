@@ -2,7 +2,7 @@
 //!
 //! Attacks:
 //!   - End-to-end accumulator plumbing: a hand-built IR with a
-//!     non-default accumulator (e.g., int8 reduce_sum + int64
+//!     non-default accumulator (e.g., i8 reduce_sum + i64
 //!     accumulator) must verify and the verify must respect the
 //!     non-default field, not silently use the operand precision.
 //!   - Result-precision invariant per spec §5.7.1: for reduce_sum,
@@ -35,8 +35,10 @@ fn tensor(prec: Prim, dims: Vec<usize>) -> TensorType {
 #[test]
 fn ir_verify_rejects_sum_with_output_precision_not_matching_accumulator() {
     let mut dag = Dag::new();
-    // Build a Load of int8 tensor.
+    let decl = dag.declare("test");
+    // Build a Load of i8 tensor.
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -45,9 +47,10 @@ fn ir_verify_rejects_sum_with_output_precision_not_matching_accumulator() {
         None,
     );
     // Construct a Sum that VIOLATES the §5.7.1 invariant: output
-    // precision is int8 but accumulator field is int32. The verifier
+    // precision is i8 but accumulator field is i32. The verifier
     // must catch this.
     let bad_sum_id = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -72,7 +75,9 @@ fn ir_verify_rejects_sum_with_output_precision_not_matching_accumulator() {
 #[test]
 fn ir_verify_accepts_sum_int8_with_int32_accumulator_int32_output() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -81,6 +86,7 @@ fn ir_verify_accepts_sum_int8_with_int32_accumulator_int32_output() {
         None,
     );
     let sum_id = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::Int32,
@@ -93,7 +99,7 @@ fn ir_verify_accepts_sum_int8_with_int32_accumulator_int32_output() {
     let errs = verify::verify(&dag);
     assert!(
         errs.is_empty(),
-        "int8 sum with int32 accumulator + int32 output must verify; \
+        "i8 sum with i32 accumulator + i32 output must verify; \
          got: {errs:?}"
     );
 }
@@ -102,7 +108,9 @@ fn ir_verify_accepts_sum_int8_with_int32_accumulator_int32_output() {
 fn ir_verify_accepts_sum_f32_with_explicit_f64_wider_accumulator() {
     // Spec §5.7.1: explicit accumulator wider than the default is admitted.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let inp = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "xs".to_string().into(),
         },
@@ -111,6 +119,7 @@ fn ir_verify_accepts_sum_f32_with_explicit_f64_wider_accumulator() {
         None,
     );
     let sum_id = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F64,
@@ -135,7 +144,9 @@ fn ir_verify_accepts_sum_f32_with_explicit_f64_wider_accumulator() {
 #[test]
 fn ir_verify_rejects_blas_matmul_int8_per_spec_5_7_2() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "a".to_string().into(),
         },
@@ -144,6 +155,7 @@ fn ir_verify_rejects_blas_matmul_int8_per_spec_5_7_2() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "b".to_string().into(),
         },
@@ -151,8 +163,9 @@ fn ir_verify_rejects_blas_matmul_int8_per_spec_5_7_2() {
         tensor(Prim::Int8, vec![3, 2]),
         None,
     );
-    // Hand-build an int8 BlasMatmul. Per §5.7.2 this should be rejected.
+    // Hand-build an i8 BlasMatmul. Per §5.7.2 this should be rejected.
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -173,14 +186,16 @@ fn ir_verify_rejects_blas_matmul_int8_per_spec_5_7_2() {
     assert!(
         errs.iter()
             .any(|e| e.contains("F1") || e.contains("integer")),
-        "IR verify rejection of int8 matmul must mention F1 or integer; got: {errs:?}"
+        "IR verify rejection of i8 matmul must mention F1 or integer; got: {errs:?}"
     );
 }
 
 #[test]
 fn ir_verify_admits_blas_matmul_bf16() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "a".to_string().into(),
         },
@@ -189,6 +204,7 @@ fn ir_verify_admits_blas_matmul_bf16() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "b".to_string().into(),
         },
@@ -197,6 +213,7 @@ fn ir_verify_admits_blas_matmul_bf16() {
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -220,7 +237,9 @@ fn ir_verify_admits_blas_matmul_bf16() {
 #[test]
 fn ir_verify_admits_blas_matmul_f16() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "a".to_string().into(),
         },
@@ -229,6 +248,7 @@ fn ir_verify_admits_blas_matmul_f16() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "b".to_string().into(),
         },
@@ -237,6 +257,7 @@ fn ir_verify_admits_blas_matmul_f16() {
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -260,7 +281,9 @@ fn ir_verify_admits_blas_matmul_f16() {
 #[test]
 fn ir_verify_admits_blas_matmul_f64_with_dgemm_accumulator() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "a".to_string().into(),
         },
@@ -269,6 +292,7 @@ fn ir_verify_admits_blas_matmul_f64_with_dgemm_accumulator() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "b".to_string().into(),
         },
@@ -277,6 +301,7 @@ fn ir_verify_admits_blas_matmul_f64_with_dgemm_accumulator() {
         None,
     );
     let mm = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![],
             m: DimExpr::Concrete(2),
@@ -326,9 +351,9 @@ fn matmul_with_accumulator_rejects_f32_when_default_is_f32() {
 
 #[test]
 fn sum_with_accumulator_int64_operand_with_int32_acc_rejected() {
-    // int64 operand, int32 accumulator: narrower than the int64 default.
+    // i64 operand, i32 accumulator: narrower than the i64 default.
     let err = RiscOp::sum_with_accumulator(0, Prim::Int64, Prim::Int32)
-        .expect_err("int64 sum with int32 accumulator must be rejected (narrower)");
+        .expect_err("i64 sum with i32 accumulator must be rejected (narrower)");
     assert!(err.contains("§5.7.1"));
 }
 

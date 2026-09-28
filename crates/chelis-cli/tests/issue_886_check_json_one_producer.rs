@@ -88,6 +88,7 @@ const CHECK_KIND_SPELLINGS: &[&str] = &[
     "UnknownForm",
     "MalformedForm",
     "Other",
+    "unsupported_feature",
     // effect diagnostics share the array
     "UnhandledEffect",
     "InvalidHandler",
@@ -116,8 +117,9 @@ fn every_emitted_kind_is_a_known_spelling() {
     // than reaching a consumer that keys on it.
     for source in [
         "def f(x: f32) -> f32 = add(x, nope)\n",
-        "def g(x: f32) -> f32 = add(x, cast(1, int32))\n",
-        "def k(x: int64) -> int64 = copy(x)\n",
+        "def g(x: f32) -> f32 = add(x, cast(1, i32))\n",
+        "def k(x: i64) -> i64 = copy(x)\n",
+        "def p() -> f32 = par { 1.0; 2.0 }\n",
     ] {
         let report = check_json(source);
         for error in report["errors"].as_array().expect("errors array") {
@@ -248,7 +250,7 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
     // compares through `serde_json::json!`, which erases member order, so
     // until now no test pinned the bytes of an effect diagnostic at all.
     let effect = check_stdout_bytes(
-        "def noisy(x: tensor[3, f32]) -> tensor[3, f32] ! {} = dropout(x, 0.5f32)\n",
+        "def noisy(x: tensor[3, f32]) -> tensor[3, f32] ! {} = { _ = print(x)\n x }\n",
     );
     let effect_rendered = String::from_utf8(effect).expect("stdout is UTF-8");
     let effect_line = effect_rendered
@@ -258,10 +260,351 @@ fn the_error_object_member_order_is_pinned_to_its_bytes() {
     assert_eq!(
         effect_line,
         "  \"errors\": [{\"kind\":\"UnhandledEffect\",\"message\":\"Function `noisy` is \
-         declared with effects `{}` but its body performs effects `{Random}` that were \
+         declared with effects `{}` but its body performs effects `{IO}` that were \
          not declared\",\"severity\":0.8,\"suggestions\":[\"Either add the missing \
-         effect(s) to the signature of `noisy` (e.g. `! { Random }`) or refactor the \
+         effect(s) to the signature of `noisy` (e.g. `! { IO }`) or refactor the \
          body so it does not perform them.\"]}]",
         "an effect diagnostic's member order and spelling are the wire contract too"
     );
+}
+
+/// The document with every number replaced by `N`.
+///
+/// Node counts move whenever the checker's walk changes, so pinning them
+/// would make an unrelated change fail here for the wrong reason. The
+/// LAYOUT is the published contract: member order, the two-space indent,
+/// and which values sit on one line. This keeps the layout claim exact and
+/// drops only the arithmetic, which other tests own.
+fn document_shape(source: &str) -> Vec<String> {
+    let rendered = String::from_utf8(check_stdout_bytes(source)).expect("stdout is UTF-8");
+    rendered
+        .lines()
+        .map(|line| {
+            let mut shape = String::new();
+            let mut in_number = false;
+            for character in line.chars() {
+                let numeric = character.is_ascii_digit() || character == '.' || character == '-';
+                if numeric && !shape.ends_with('"') {
+                    if !in_number {
+                        shape.push('N');
+                        in_number = true;
+                    }
+                } else {
+                    in_number = false;
+                    shape.push(character);
+                }
+            }
+            shape
+        })
+        .collect()
+}
+
+/// Run `chelis check` on a file with the given extension and contents.
+fn check_output(extension: &str, source: &str, extra: &[&str]) -> std::process::Output {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join(format!("probe.{extension}"));
+    fs::write(&path, source).expect("write fixture");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check"])
+        .args(extra)
+        .arg(&path)
+        .output()
+        .expect("run chelis check")
+}
+
+#[test]
+fn the_document_layout_is_the_published_contract() {
+    // [04-FIT-11]. The document used to be a `format!` template, so this
+    // layout was whatever the string literal said; it is now whatever the
+    // report type serializes to. Both must be the same bytes, because the
+    // document is a reward surface, the hull conformance input, and a
+    // downstream shell surface -- adopting a typed producer is not licence
+    // to restyle it.
+    assert_eq!(
+        document_shape("def f(x: f32) -> f32 = add(x, x)\n"),
+        vec![
+            "{",
+            "  \"score\": N,",
+            "  \"components\": {",
+            "    \"parse\": N,",
+            "    \"structure\": N,",
+            "    \"names\": N,",
+            "    \"types\": N",
+            "  },",
+            "  \"typed_nodes\": N,",
+            "  \"untyped_nodes\": N,",
+            "  \"total_nodes\": N,",
+            "  \"unresolved_names\": [],",
+            "  \"errors\": []",
+            "}",
+        ],
+        "the clean document's layout"
+    );
+}
+
+#[test]
+fn an_integral_score_is_not_respelled_as_a_double() {
+    // The single highest-risk byte in this change. `serde_json` writes an
+    // integral `f64` as `1.0`; the template it replaces used `format!`, so
+    // `1` is what shipped, and 17 CLI test files assert the substring
+    // `"score": 1`. A stock formatter passes every structural assertion in
+    // this file and fails here.
+    let rendered =
+        String::from_utf8(check_stdout_bytes("def f(x: f32) -> f32 = add(x, x)\n")).expect("UTF-8");
+    assert!(rendered.contains("\"score\": 1,"), "{rendered}");
+    assert!(!rendered.contains("\"score\": 1.0"), "{rendered}");
+}
+
+#[test]
+fn a_failure_before_the_checker_emits_the_same_document() {
+    // The failures that short-circuit INSIDE the producer reach the report
+    // type, not a display string and not a second producer that happens to
+    // agree with the first.
+    //
+    // This is NOT [04-FIT-12] satisfied, and must not be read as it. §6.4
+    // keeps its "not fully implemented" caveat.
+    //
+    // The REASON changed after this comment was written, so do not trust an
+    // older reading of it. It used to be that an unreadable or non-UTF-8
+    // `.ch`, a style-gate rejection, and directory mode all bypassed the
+    // report and emitted a display string; chelis#1679 routed every one of
+    // those through it. What survives is one level up: `chelis check <dir>`
+    // on a directory it cannot enumerate fails in `discover_check_files`
+    // before any file is reached, so there is no per-file report to produce.
+    // That is the envelope surface, which spec/04 does not specify, and
+    // chelis#1678 owns both it and the caveat's eventual removal.
+    //
+    // `check_output` sets `CHELIS_STYLE_GATE_DISABLE=1`, which makes one of
+    // the five fixtures below unrepresentative of default CLI behaviour: a
+    // whitespace-only `.ch` is rejected by the style gate first and never
+    // reaches the producer. It is kept because it shares its code site with
+    // the truly-empty case, which IS representative; four of the five hold
+    // with the gate on.
+    //
+    // The `.dp` cases matter on their own: the Deep arm has its own
+    // short-circuit sites, and a fix applied only to the Surf arm would
+    // leave them outside the contract. The Deep arm used to be the stricter
+    // of the two -- it reported an unreadable `.dp` while the Surf arm
+    // bypassed -- which is what chelis#1679 converged, so the two now agree.
+    for (extension, source, label) in [
+        (
+            "ch",
+            "def f(x: f32) -> f32 = add(x,\n",
+            "surf parse failure",
+        ),
+        ("ch", "", "empty surf program"),
+        ("ch", "   \n\n", "whitespace-only surf program"),
+        ("dp", "(this is not deep)\n", "deep parse failure"),
+        ("dp", "", "empty deep program"),
+    ] {
+        let output = check_output(extension, source, &[]);
+        let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+        let parsed: chelis_compiler_api::schema::WireCheckResult = serde_json::from_str(&stdout)
+            .unwrap_or_else(|error| {
+                panic!("{label} must emit a full report document; {error}\n{stdout}")
+            });
+        assert_eq!(
+            parsed.errors.len(),
+            1,
+            "{label} reports exactly one diagnostic; got {stdout}"
+        );
+        let kind = &parsed.errors[0].kind;
+        assert!(
+            CHECK_KIND_SPELLINGS.contains(&kind.as_str()),
+            "{label} must use a governed kind spelling, got {kind:?}"
+        );
+        // chelis#207/#731: a non-empty errors array and the exit status
+        // agree on every path, including this one.
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{label} carries errors, so it must exit 2"
+        );
+        assert_eq!(
+            document_shape_of(&stdout),
+            vec![
+                "{",
+                "  \"score\": N,",
+                "  \"components\": {",
+                "    \"parse\": N,",
+                "    \"structure\": N,",
+                "    \"names\": N,",
+                "    \"types\": N",
+                "  },",
+                "  \"typed_nodes\": N,",
+                "  \"untyped_nodes\": N,",
+                "  \"total_nodes\": N,",
+                "  \"unresolved_names\": [],",
+                "  \"errors\": [{...}]",
+                "}",
+            ],
+            "{label} emits the same document shape as the checker's own path"
+        );
+    }
+}
+
+/// `document_shape`, for stdout already in hand, with the `errors` array
+/// elided so the assertion is about the DOCUMENT rather than the
+/// diagnostics its own tests pin.
+fn document_shape_of(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|line| {
+            if let Some(prefix) = line.strip_suffix("]")
+                && prefix.starts_with("  \"errors\": [{")
+            {
+                return "  \"errors\": [{...}]".to_string();
+            }
+            let mut shape = String::new();
+            let mut in_number = false;
+            for character in line.chars() {
+                let numeric = character.is_ascii_digit() || character == '.' || character == '-';
+                if numeric && !shape.ends_with('"') {
+                    if !in_number {
+                        shape.push('N');
+                        in_number = true;
+                    }
+                } else {
+                    in_number = false;
+                    shape.push(character);
+                }
+            }
+            shape
+        })
+        .collect()
+}
+
+#[test]
+fn inferred_signatures_is_a_member_of_the_report_not_a_spliced_fragment() {
+    // [04-FIT-13]. The rows used to be rendered to a string and spliced
+    // between two literal keys of the template, which is why `CheckResult`
+    // had no field for them and "move the outer object to `CheckResult`"
+    // could not work as originally filed.
+    let source = "def add_one(x: f32) -> f32 = add(x, x)\n";
+
+    let without = check_output("ch", source, &[]);
+    let parsed: chelis_compiler_api::schema::WireCheckResult =
+        serde_json::from_slice(&without.stdout).expect("JSON");
+    assert!(
+        parsed.inferred_signatures.is_none(),
+        "absent by omission when the caller did not ask"
+    );
+    assert!(
+        !String::from_utf8_lossy(&without.stdout).contains("inferred_signatures"),
+        "absent means absent, not null"
+    );
+
+    let with = check_output("ch", source, &["--show-inferred"]);
+    let stdout = String::from_utf8(with.stdout).expect("UTF-8");
+    let parsed: chelis_compiler_api::schema::WireCheckResult =
+        serde_json::from_str(&stdout).expect("JSON");
+    // `Vec`, not a `Value` that has to be re-checked for arrayness: the
+    // carrier makes the sequence a sequence.
+    let rows = parsed.inferred_signatures.expect("present when requested");
+    assert_eq!(rows.len(), 1, "one def, one row: {stdout}");
+    assert_eq!(rows[0].function, "add_one");
+
+    // Position and single-line rendering are part of the document, not of
+    // the rows: the member sits between `unresolved_names` and `errors`,
+    // where the template spliced it.
+    let lines: Vec<&str> = stdout.lines().collect();
+    let index = lines
+        .iter()
+        .position(|line| line.starts_with("  \"inferred_signatures\": ["))
+        .unwrap_or_else(|| panic!("no inferred_signatures line in:\n{stdout}"));
+    assert!(lines[index].ends_with("],"), "the rows stay on one line");
+    assert!(lines[index - 1].starts_with("  \"unresolved_names\":"));
+    assert!(lines[index + 1].starts_with("  \"errors\":"));
+}
+
+#[test]
+fn a_rejected_program_still_reports_the_requested_member() {
+    // "Requested but empty" and "not requested" are different documents. A
+    // consumer that asked for the rows and got none has been told there are
+    // none; a consumer that did not ask has been told nothing.
+    let output = check_output(
+        "ch",
+        "def f(x: f32) -> f32 = add(x, nope)\n",
+        &["--show-inferred"],
+    );
+    let parsed: chelis_compiler_api::schema::WireCheckResult =
+        serde_json::from_slice(&output.stdout).expect("JSON");
+    assert!(
+        parsed
+            .inferred_signatures
+            .as_ref()
+            .is_some_and(Vec::is_empty),
+        "the member is present and empty, not absent"
+    );
+    assert!(!parsed.errors.is_empty(), "the fixture must be rejected");
+}
+
+#[test]
+fn the_cli_holds_no_second_producer_of_the_document() {
+    // [04-FIT-11]'s structural half. Every other test here reads the
+    // document's BYTES, and bytes cannot distinguish one producer from two
+    // that agree -- which is precisely the state this issue describes: the
+    // template and `CheckResult` emitted the same shape for as long as
+    // someone kept them in step by hand.
+    //
+    // So this reads the source instead. The document's keys may not appear
+    // as string literals in the CLI at all: their only spelling is the
+    // report type's field names, and their only renderer is
+    // `CheckResult::to_report_json`.
+    //
+    // It is a SPELLING HEURISTIC, not a proof, and should not be read as
+    // one. It catches the two forms a template is actually written in; a
+    // red-team pass got a byte-identical second producer past it using
+    // `concat!` on split fragments, and another using a `const` array of
+    // the keys with `{:?}`. A source grep cannot be complete, and chasing
+    // each new spelling would be filling gaps rather than fixing a class.
+    // What it buys is that the removed defect cannot come back by the route
+    // it left by; the byte pins above are what catch a producer that
+    // reappears some other way, by disagreeing with them.
+    //
+    // If you are here because you added a report field: add it to
+    // `CheckResult`. If you are here because you need a document the type
+    // cannot express, that is a change to the type, not a second template.
+    //
+    // Scope, stated so it is a known limit rather than an assumed one: this
+    // reads `chelis-cli`'s `main.rs` only, because that is where both
+    // removed templates lived and where a regression would most plausibly
+    // reappear. A producer written into another crate would not be caught
+    // here; the byte pins above are what would catch it, by disagreeing.
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("read the CLI source");
+    for key in [
+        "score",
+        "components",
+        "typed_nodes",
+        "untyped_nodes",
+        "total_nodes",
+        "unresolved_names",
+        "inferred_signatures",
+        // `errors` is deliberately NOT in this list, and the reason is not
+        // an oversight: `cmd_check`'s DIRECTORY mode emits a different
+        // document, the envelope `{"files":[...],"errors":[]}`, whose own
+        // `errors` key collides with the report's. Adding it here fails on
+        // that envelope, which is not a second producer of the report. The
+        // seven keys above are unique to the report, which is what makes them
+        // usable as a signature. (The collision is with the two literal
+        // forms this checks; `\"errors\": [` with a space would not match
+        // the envelope. Excluded anyway -- the key is not distinctive.)
+    ] {
+        // BOTH quote forms. A red-team pass evaded the first version of this
+        // check by writing the replacement template as a raw string literal
+        // (`r#"..."#`), where the document's keys need no backslash and the
+        // escaped spelling never appears. Checking only the form the removed
+        // code happened to use is checking for a typo, not for a producer.
+        for literal in [format!("\\\"{key}\\\""), format!("\"{key}\":")] {
+            assert!(
+                !source.contains(&literal),
+                "`{literal}` is spelled as a string literal in the CLI source. \
+                 The check report has one producer (`CheckResult::to_report_json`); \
+                 a template that spells its keys is the defect chelis#886 removed."
+            );
+        }
+    }
 }

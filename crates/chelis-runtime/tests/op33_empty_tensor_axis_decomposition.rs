@@ -77,7 +77,7 @@ fn run_case(case: &str) {
                 let out = chelis_tensor_cumsum(input, -1);
                 assert_eq!(chelis_tensor_numel(out), 0);
             }
-            "cumsum-int64-max-extents" => {
+            "cumsum-i64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 0]);
                 let out = chelis_tensor_cumsum(input, 2);
                 assert_eq!(chelis_tensor_numel(out), 0);
@@ -105,7 +105,7 @@ fn run_case(case: &str) {
                 assert_eq!(chelis_tensor_numel(values), 0);
                 assert_eq!(chelis_tensor_numel(indices), 0);
             }
-            "sort-int64-max-extents" => {
+            "sort-i64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 0]);
                 let sorted = chelis_tensor_sort(input, 2);
                 let values = chelis_tensor_borrow_value(chelis_tuple_get(sorted, 0));
@@ -125,7 +125,7 @@ fn run_case(case: &str) {
                 let out = chelis_tensor_trace(input, 2, 4);
                 assert_eq!(chelis_tensor_numel(out), 0);
             }
-            "trace-int64-max-extents" => {
+            "trace-i64-max-extents" => {
                 let input = tensor(&[i64::MAX, i64::MAX, 1, 0, 1]);
                 let out = chelis_tensor_trace(input, 2, 4);
                 assert_eq!(chelis_tensor_numel(out), 0);
@@ -176,14 +176,14 @@ fn run_case(case: &str) {
 const CASES: &[&str] = &[
     "cumsum-overflow-axis",
     "cumsum-overflow-negative-axis",
-    "cumsum-int64-max-extents",
+    "cumsum-i64-max-extents",
     "cumsum-hang-axis",
     "cumsum-spin-middle-axis",
     "sort-overflow-axis",
-    "sort-int64-max-extents",
+    "sort-i64-max-extents",
     "sort-hang-axis",
     "trace-overflow-axis",
-    "trace-int64-max-extents",
+    "trace-i64-max-extents",
     "trace-hang-axis",
     "legal-cumsum",
     "legal-sort",

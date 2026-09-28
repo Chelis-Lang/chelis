@@ -63,10 +63,17 @@
 //! Membership (chelis#1494): a `match` arm whose literal pattern cannot denote
 //! the scrutinee's primitive. `pattern_bindings` did nothing at `pat-lit`, so
 //! `spec/04-type-system.md` [04-PAT-1]'s constraint went unchecked and an
-//! `f32` pattern against an `int32` scrutinee scored 1.0 with an empty error
+//! `f32` pattern against an `i32` scrutinee scored 1.0 with an empty error
 //! list while the arm could never match. The paired positive control is the
 //! same program with a matching literal family, which must stay at 1.0 so the
 //! rejection cannot creep into a well-formed match.
+//!
+//! Membership (chelis#2109): a locally bound untyped lambda passed to `vmap`
+//! bypassed the launch-core inline-lambda fence and let the checker certify a
+//! false result type at score 1.0. The focused CLI matrix owns Surf/Deep
+//! parity, the correct-result rejection, nested type holes, alias propagation,
+//! and typed local controls; these corpus rows keep the class-wide score
+//! invariant explicit.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -78,7 +85,7 @@ mod common;
 
 use common::write_file;
 
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// `chelis check` score for a program written with the given extension.
 fn check_score(program: &str, ext: &str) -> f64 {
@@ -123,13 +130,61 @@ fn surf_known_bad_programs_score_below_one() {
         (
             "issue_668_rank_divergent_elementwise",
             "module Repro.RankDivergent\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {\n\
                s = stride(x, 2i64)\n\
                e = insert(x, 0i32, 2i64)\n\
                add(s, e)\n\
              }\n\
              out = f(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_untyped_local_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_wildcard_local_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v: _) -> sum(v, 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_nested_tuple_hole_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] =\n\
+               vmap(fn (pair: (tensor[4, 3, f32], _)) -> \
+                 sum(pair.1, 0i32))((copy(t), t))\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_tuple_destructured_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               (mapped, keep) = (fn (v) -> sum(v, 0i32), 0i32)\n\
+               vmap(mapped)(t)\n\
+             }\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "issue_2109_block_forwarded_vmap_lambda",
+            "def probe(t: tensor[5, 4, 3, f32]) -> tensor[4, 3, f32] = {\n\
+               mapped = fn (v) -> sum(v, 0i32)\n\
+               alias = {\n\
+                 forwarded = mapped\n\
+                 forwarded\n\
+               }\n\
+               vmap(alias)(t)\n\
+             }\n"
                 .to_string(),
             ".ch",
         ),
@@ -179,27 +234,23 @@ fn surf_known_bad_programs_score_below_one() {
             format!("def g(x: f32) -> f32 = {MASKED_ERROR}\ndef f(x: f32) -> f32 = jit(g)(x)\n"),
             ".ch",
         ),
-        // chelis#709: the two effect-handler bodies (now checked).
-        (
-            "with_seed_body",
-            format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n"),
-            ".ch",
-        ),
+        // chelis#709: the effect-handler body (now checked). Its `with seed`
+        // sibling left with the retired handler (chelis#2413).
         (
             "with_device_body",
             format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n"),
             ".ch",
         ),
-        // chelis#709 escalation: an int64 body from an `-> f32` fn.
+        // chelis#709 escalation: an i64 body from an `-> f32` fn.
         (
             "masked_return_type",
-            "def f() -> f32 = with seed(42i64) { cast(5, int64) }\n".to_string(),
+            "def f() -> f32 = with device(\"gpu:0\") { cast(5, i64) }\n".to_string(),
             ".ch",
         ),
         // chelis#731 §C1.5 / chelis#771: an unsuffixed seed literal.
         (
             "unsuffixed_seed",
-            "def f() -> f32 = with seed(42) { add(cast(1.0, f32), cast(2.0, f32)) }\n".to_string(),
+            "def f() -> key = key_from_seed(42)\n".to_string(),
             ".ch",
         ),
         // chelis#755 (Phase 2 join): field access on a multi-variant ADT.
@@ -231,12 +282,12 @@ fn surf_known_bad_programs_score_below_one() {
         ),
         (
             "scatter_elements_string_axis",
-            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, \"bad\")\n".to_string(),
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, \"bad\")\n".to_string(),
             ".ch",
         ),
         (
             "scatter_elements_oob_axis",
-            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 99)\n".to_string(),
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 99)\n".to_string(),
             ".ch",
         ),
         (
@@ -246,18 +297,18 @@ fn surf_known_bad_programs_score_below_one() {
         ),
         (
             "scatter_elements_string_data",
-            "def f(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) = scatter_elements(\"bad\", indices, updates, 0)\n".to_string(),
+            "def f(indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) = scatter_elements(\"bad\", indices, updates, 0)\n".to_string(),
             ".ch",
         ),
         (
             "literal_pattern_float_vs_int_scrutinee",
-            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1.5 => 1.5\n  | _ => 2.5\n}\n"
+            "module ScrutineeSigned\n\ndef g(n: i32) -> i32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1.5 => 1.5\n  | _ => 2.5\n}\n"
                 .to_string(),
             ".ch",
         ),
         (
             "literal_pattern_out_of_range_vs_int8_scrutinee",
-            "def g(n: int8) -> int8 = add(0i8, n)\n\n             r: int32 = match g(1i8) with {\n  | 300 => 10\n  | _ => 20\n}\n"
+            "def g(n: i8) -> i8 = add(0i8, n)\n\n             r: i32 = match g(1i8) with {\n  | 300 => 10\n  | _ => 20\n}\n"
                 .to_string(),
             ".ch",
         ),
@@ -293,17 +344,17 @@ fn malformed_dp_forms_score_below_one() {
         ("dp_pipe_no_kids", wrap("(pipe {})"), ".dp"),
         (
             "dp_tuple_get_one_kid",
-            wrap("(tuple-get {} (lit {type: (t-prim {} int32)} 0))"),
+            wrap("(tuple-get {} (lit {type: (t-prim {} i32)} 0))"),
             ".dp",
         ),
         (
             "dp_record_non_symbol_head",
-            wrap("(record {} (lit {type: (t-prim {} int32)} 1))"),
+            wrap("(record {} (lit {type: (t-prim {} i32)} 1))"),
             ".dp",
         ),
         (
             "dp_access_one_kid",
-            wrap("(access {} (lit {type: (t-prim {} int32)} 1))"),
+            wrap("(access {} (lit {type: (t-prim {} i32)} 1))"),
             ".dp",
         ),
         (
@@ -317,19 +368,15 @@ fn malformed_dp_forms_score_below_one() {
         (
             "dp_unknown_effect_kind",
             wrap(
-                "(handle-effect {effect: teleport} (lit {type: (t-prim {} int64)} 42) \
+                "(handle-effect {effect: teleport} (lit {type: (t-prim {} i64)} 42) \
                  (lit {type: (t-prim {} f32)} 2.5))",
             ),
             ".dp",
         ),
-        // chelis#731 red team F2: a negative int64-literal seed (the RNG lanes
-        // fold it to seed 0, breaking [05-RNG-1]).
+        // A wrong-dtype signed seed remains rejected; negative i64 is valid.
         (
-            "dp_negative_int64_seed",
-            wrap(
-                "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} -1) \
-                 (lit {type: (t-prim {} f32)} 2.5))",
-            ),
+            "dp_negative_int32_seed",
+            wrap("(app {} (var {} key_from_seed) (lit {type: (t-prim {} i32)} -1))"),
             ".dp",
         ),
         (
@@ -347,7 +394,7 @@ fn malformed_dp_forms_score_below_one() {
         (
             "dp_handle_effect_extra_child",
             wrap(
-                "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) \
+                "(handle-effect {effect: resource} (lit {type: (t-prim {} string)} \"gpu:0\") \
                  (lit {type: (t-prim {} f32)} 2.5) (lit {type: (t-prim {} f32)} 9.0))",
             ),
             ".dp",
@@ -374,14 +421,14 @@ fn malformed_dp_forms_score_below_one() {
 fn bare_atom_expression_position_scores_below_one() {
     let wrap_body = |body: &str| {
         format!(
-            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} i32)}})) {body})))\n"
         )
     };
     let wrap_unit_sig = |body: &str| {
         format!(
             "(module {{}} m.main \
-             (defsig {{}} f (t-fn {{}} (t-prim {{}} int32) (t-unit {{}}))) \
-             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+             (defsig {{}} f (t-fn {{}} (t-prim {{}} i32) (t-unit {{}}))) \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} i32)}})) {body})))\n"
         )
     };
     let cases: Vec<(&str, String, &str)> = vec![
@@ -431,14 +478,14 @@ fn bare_atom_expression_position_scores_below_one() {
 fn bare_atom_expression_position_rejects_at_parse() {
     let wrap_body = |body: &str| {
         format!(
-            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} i32)}})) {body})))\n"
         )
     };
     let wrap_unit_sig = |body: &str| {
         format!(
             "(module {{}} m.main \
-             (defsig {{}} f (t-fn {{}} (t-prim {{}} int32) (t-unit {{}}))) \
-             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+             (defsig {{}} f (t-fn {{}} (t-prim {{}} i32) (t-unit {{}}))) \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} i32)}})) {body})))\n"
         )
     };
     let cases: Vec<(&str, String, &str)> = vec![
@@ -568,14 +615,14 @@ fn declaration_only_known_bad_programs_score_below_one() {
         ),
         (
             "dup_defsig",
-            "(defsig {} foo (t-fn {} (t-prim {} int32) (t-prim {} int32))) \
-             (defsig {} foo (t-fn {} (t-prim {} int32) (t-prim {} int32)))"
+            "(defsig {} foo (t-fn {} (t-prim {} i32) (t-prim {} i32))) \
+             (defsig {} foo (t-fn {} (t-prim {} i32) (t-prim {} i32)))"
                 .to_string(),
             ".dp",
         ),
         (
             "dup_typealias",
-            "type Foo = f32\ntype Foo = int32\n".to_string(),
+            "type Foo = f32\ntype Foo = i32\n".to_string(),
             ".ch",
         ),
         (
@@ -604,12 +651,12 @@ fn post_phase_checker_controls_still_score_one() {
         ),
         (
             "valid_scatter_elements",
-            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n",
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, i32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n",
             ".ch",
         ),
         (
             "matching_literal_pattern_family",
-            "module ScrutineeSigned\n\ndef g(n: int32) -> int32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1 => 1.5\n  | _ => 2.5\n}\n",
+            "module ScrutineeSigned\n\ndef g(n: i32) -> i32 = add(1, n)\n\n             r: f32 = match g(2) with {\n  | 1 => 1.5\n  | _ => 2.5\n}\n",
             ".ch",
         ),
     ];
@@ -770,11 +817,11 @@ fn pp8_readable_slots_still_score_one() {
         ("pp8_vmap_axis_absent", pp8_vmap("")),
         (
             "pp8_vmap_axis_zero",
-            pp8_vmap("(lit {type: (t-prim {} int32)} 0)"),
+            pp8_vmap("(lit {type: (t-prim {} i32)} 0)"),
         ),
         (
             "pp8_vmap_axis_cast_wrapped",
-            pp8_vmap("(cast {} (lit {type: (t-prim {} int64)} 0) (t-prim {} int32))"),
+            pp8_vmap("(cast {} (lit {type: (t-prim {} i64)} 0) (t-prim {} i32))"),
         ),
         ("pp8_pat_ctor_real_head", pp8_pat_ctor("Non")),
         ("pp8_pat_record_real_head", pp8_pat_record("Circle")),
@@ -889,8 +936,8 @@ fn pp8_record_update_kv(key: &str) -> String {
 
 fn pp8_pat_lit(value: &str) -> String {
     pp8_wrap(&format!(
-        "(defsig {{}} pl (t-fn {{}} (t-prim {{}} int32) (t-prim {{}} f32)))\n\
-         (def {{}} pl (fn {{}} (params {{}} (n {{type: (t-prim {{}} int32)}}))\n\
+        "(defsig {{}} pl (t-fn {{}} (t-prim {{}} i32) (t-prim {{}} f32)))\n\
+         (def {{}} pl (fn {{}} (params {{}} (n {{type: (t-prim {{}} i32)}}))\n\
          (match {{}} (var {{}} n)\n\
          (arm {{}} (pat-lit {{}} {value}) () (lit {{type: (t-prim {{}} f32)}} 1.0))\n\
          (arm {{}} (pat-wild {{}}) () (lit {{type: (t-prim {{}} f32)}} 2.0)))))"

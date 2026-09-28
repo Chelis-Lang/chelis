@@ -49,7 +49,7 @@ use chelis_types::{check_linearity, check_typed_program};
 
 fn check_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckError>> {
     let decls = parse_str(source).expect("surf parse should succeed");
-    let deep = desugar_program(&decls);
+    let deep = desugar_program(&decls).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep).expect("type check should succeed");
     check_linearity(&checked).map(|_| ())
 }
@@ -74,8 +74,8 @@ def get_col[n](df: Frame[n]) -> tensor[n, f32] = match df with {
 }
 def f[n](df: Frame[n]) -> tensor[n, f32] = {
   c = get_col(df)
-  inner = fn (i: int64) -> add(c, c)
-  add(c, inner(cast(0, int64)))
+  inner = fn (i: i64) -> add(c, c)
+  add(c, inner(cast(0, i64)))
 }
 "#,
     )
@@ -94,8 +94,8 @@ fn closure_that_only_reads_capture_via_outer_let_binding_is_a_borrow_capture() {
     check_surf(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: int64) -> add(x, x)
-  add(x, g(cast(0, int64)))
+  g = fn (i: i64) -> add(x, x)
+  add(x, g(cast(0, i64)))
 }
 "#,
     )
@@ -164,8 +164,8 @@ fn closure_that_consumes_via_returning_capture_still_trips_use_after_consume() {
     let errors = check_surf(
         r#"
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: int64) -> x
-  z = g(cast(0, int64))
+  g = fn (i: i64) -> x
+  z = g(cast(0, i64))
   add(x, z)
 }
 "#,
@@ -193,8 +193,8 @@ fn closure_that_consumes_via_app_arg_still_trips_use_after_consume() {
         r#"
 def grab(t: tensor[4, f32]) -> tensor[4, f32] = t
 def f(x: tensor[4, f32]) -> tensor[4, f32] = {
-  g = fn (i: int64) -> grab(x)
-  z = g(cast(0, int64))
+  g = fn (i: i64) -> grab(x)
+  z = g(cast(0, i64))
   add(x, z)
 }
 "#,

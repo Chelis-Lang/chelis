@@ -87,6 +87,12 @@ mod tests {
             "wide_float = 1.0f64\n",
             "default_int_commitment = 42i32\n",
             "default_float_commitment = 1.0f32\n",
+            // spec/02 §P10a: an integer body under a float suffix is
+            // [04-LIT-1]'s exact `literal_source: integer` form (chelis#2119).
+            "integer_bodied_float = 42f64\n",
+            "wide_integer_bodied_float = 8000000f32\n",
+            "largest_f16_integer_body = 65504f16\n",
+            "largest_finite_f16_integer_body = 65519f16\n",
             "negative_int_pattern = match x with { | -42 => 0 }\n",
             "negative_float_pattern = match x with { | -0.0 => 0 }\n",
             "minimum_int_pattern = match x with { | -9223372036854775808 => 0 }\n",
@@ -101,15 +107,15 @@ mod tests {
             "different_record_pattern = match p with { | Point { x: y } => y }\n",
             "later_pipe_argument = x |> fn (v) -> f(y, v)\n",
             "controls = \"\\u{8}\\u{1f}\\u{7f}\\u{85}\\0\\t\\n\\r\\\"\\\\\"\n",
-            "@property bounded forall(x: int32) where x <= 1: true\n",
-            "@property grouped_operand forall(x: int32, y: int32) where (x + 1) <= y: true\n",
+            "@property bounded forall(x: i32) where x <= 1: true\n",
+            "@property grouped_operand forall(x: i32, y: i32) where (x + 1) <= y: true\n",
             "@property contracted forall():\n  true\n  with contract = \"std.identity\"\n",
             "result = seed\n  |> f\n  |> g\n  |> h\n",
             "result = {\n  x =\n    seed\n    |> f\n    |> g\n    |> h\n  x\n}\n",
             // spec/02 §P4c dtype-family bounds (chelis#1417), on both
             // declaration forms and at every family.
             "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
-            "sig linspace[p: Float]: p -> p -> int64 -> tensor[n, p]\n",
+            "sig linspace[p: Float]: p -> p -> i64 -> tensor[n, p]\n",
             "sig total[p: Numeric]: p -> p -> p\n",
             "def only_ints[p: Int](x: p) -> p = x\n",
             "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
@@ -170,7 +176,7 @@ mod tests {
     fn surf_v019_tree_sitter_keeps_the_permissive_declaration_boundary() {
         for source in [
             "type Point = | Point { x: f32 }\ndef update(p: Point) -> Point = p\n  with { x: 1.0f32 }\n",
-            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true\n",
+            "@property p forall(x: i32) where if lte(x, 1i32)\n  then true\n  else false: true\n",
         ] {
             assert_surf_parser_parity(source, true);
         }
@@ -197,9 +203,9 @@ mod tests {
     fn surf_v019_tree_sitter_rejects_newline_led_non_continuations() {
         for source in [
             // block binding value
-            "def f() -> int32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  + 2i32\n  x\n}\n",
             // block tail
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
             // `do` item
             "def f() -> bool = {\n  x = do {\n    true\n    == false\n  }\n  x\n}\n",
             // `par` item
@@ -217,8 +223,8 @@ mod tests {
     #[test]
     fn surf_v019_tree_sitter_keeps_the_exact_block_continuation_set() {
         for source in [
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
-            "def f() -> int32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  + 2i32\n}\n",
+            "def f() -> i32 = {\n  x = 1i32\n  x\n  * 2i32\n}\n",
             "def f() -> bool = {\n  x = 1i32\n  x\n  == 2i32\n}\n",
             "def f() -> bool = {\n  x = true\n  x\n  && false\n}\n",
             "def f() -> bool = {\n  x = true\n  x\n  || false\n}\n",
@@ -256,16 +262,16 @@ mod tests {
             "result = do { f(x); g(y); }\n",
             "result = Some(x,)\n",
             "result = match x with { | Some(v,) => v }\n",
-            "sig trailing_type: Option[int32,]\n",
+            "sig trailing_type: Option[i32,]\n",
             "type Trailing[a,] = | Trailing(a,)\n",
-            "type TrailingRecord = | TrailingRecord { value: int32, }\n",
+            "type TrailingRecord = | TrailingRecord { value: i32, }\n",
             "import Demo (value,)\n",
             "export (value,)\n",
             "result = grad(f, wrt=(x, y,),)\n",
             "result = vmap(f, axis=1,)\n",
             "result = cast(x, f64,)\n",
-            "result = cast_trunc(x, int32,)\n",
-            "result = with seed(1,) { x }\n",
+            "result = cast_trunc(x, i32,)\n",
+            "result = with device(\"gpu:0\",) { x }\n",
             "def resource() ! { Resource(\"gpu:0\",), } = ()\n",
             "value = \"\\u{08}\\u{0}\\u{9}\\u{a}\\u{d}\\u{22}\\u{5c}\\u{41}\\u{B}\"\n",
             "value = match x with { | -9_223_372_036_854_775_808 => 0 }\n",
@@ -279,6 +285,18 @@ mod tests {
             "result = 1.5(x)\n",
             "result = \"a\"(x)\n",
             "result = 50.f\n",
+            // chelis#2119: a float body carrying digits past the shortest
+            // round-trippable spelling decodes to the same value, so both
+            // parsers admit it and `chelis fmt` canonicalizes it.
+            "value = 1.00\n",
+            "value = 42.00f32\n",
+            "value = 1.00000000000000001\n",
+            "value = 0.10000000000000001\n",
+            "value = 0.10000000000000001f64\n",
+            "value = 0.319381530f64\n",
+            "value = 0.99999999999980993f64\n",
+            "value = 86.50532032941677f64\n",
+            "value = 007.5\n",
         ] {
             assert_surf_parser_parity(source, true);
         }
@@ -296,7 +314,6 @@ mod tests {
             "result = a < b < c\n",
             "result = vmap(f, 1)\n",
             "result = vmap(f, axis=0)\n",
-            "result = 42f64\n",
             "value: Option[] = None\n",
             "def f[](x) = x\n",
             "type Empty = | Empty()\n",
@@ -306,11 +323,6 @@ mod tests {
             "export ()\n",
             "value = match x with { | 42i64 => 0 }\n",
             "value = match x with { | 1.0f64 => 0 }\n",
-            "value = 1.00\n",
-            "value = 42.00f32\n",
-            "value = 1.00000000000000001\n",
-            "value = 0.10000000000000001\n",
-            "value = 0.10000000000000001f64\n",
             "value = 9223372036854775808\n",
             "value = 9223372036854775808i64\n",
             "value = 9223372036854775809\n",
@@ -320,7 +332,7 @@ mod tests {
             "value = match x with { | 9223372036854775808 => 0 }\n",
             "value: tensor[9223372036854775808, f32] = x\n",
             "@property bad forall():\n  true\n  with contract = contract_name\n",
-            "@property grouped forall(x: int32) where (x <= 1): true\n",
+            "@property grouped forall(x: i32) where (x <= 1): true\n",
             "value = \"raw\tcontrol\"\n",
             "value = \"raw\u{8}control\"\n",
             "value = \"raw\u{7f}control\"\n",
@@ -331,6 +343,18 @@ mod tests {
             "value = 0x10_\n",
             "value = 0b_10\n",
             "value = 1e3_\n",
+            // chelis#2119: an integer body keeps the canonical decimal rule,
+            // with or without a float suffix, and no radix form carries one.
+            "value = 007\n",
+            "value = 007f64\n",
+            "value = 0b1010f32\n",
+            "value = 0x10f64\n",
+            // chelis#2119: an integer body binds at the suffix width, so a
+            // magnitude that rounds to infinity there is not a literal of that
+            // type. f16 is the only width an i64 body can overflow.
+            "value = 65520f16\n",
+            "value = 65536f16\n",
+            "value = 9223372036854775807f16\n",
             "result = Point { x: x }\n",
             "result = match p with { | Point { x: x } => x }\n",
             "result = x |> fn (v) -> f(v, y)\n",
@@ -347,6 +371,30 @@ mod tests {
             "result = x > fn (v) -> f(v)\n",
         ] {
             assert_surf_parser_parity(source, false);
+        }
+    }
+
+    /// spec/02 §P5a: randomness has no handler and no effect, so the
+    /// retired `with seed(...)` handler and the `Random` effect name are
+    /// parse errors in both parsers. The property-test option
+    /// `with seed = ...` is a different production and stays accepted.
+    #[test]
+    fn surf_tree_sitter_rejects_the_retired_randomness_spellings() {
+        for source in [
+            "result = with seed(1i64) { x }\n",
+            "result = with seed(1,) { x }\n",
+            "def f() -> i32 ! { Random } = 1i32\n",
+            "def f() -> i32 ! { IO, Random } = 1i32\n",
+            "sig f: i32 -> i32 ! { Random }\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+        for source in [
+            "result = with device(\"gpu:0\") { x }\n",
+            "def f() -> i32 ! { IO } = 1i32\n",
+            "@property p forall(): true\n  with seed = 1i64\n",
+        ] {
+            assert_surf_parser_parity(source, true);
         }
     }
 

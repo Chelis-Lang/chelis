@@ -60,10 +60,24 @@ pub enum ParseError {
         "integer magnitude `{found}` is only valid after unary `-`; write `-{found}` at byte {offset}"
     )]
     SignedMinimumMagnitudeRequiresNegation { found: String, offset: usize },
+    /// A retired counter-stream spelling: the `with seed(...)` handler or the
+    /// `Random` effect name. Randomness has no handler and no effect; a random
+    /// primitive takes an explicit key (spec/02 §P5a, spec/05 §2.7).
+    #[error(
+        "`{spelling}` is not Surf: randomness has no handler or effect; a random \
+         primitive takes an explicit key, for example \
+         `dropout(key_from_seed(42i64), x, 0.5)` (spec/02 §P5a) at byte {offset}"
+    )]
+    RetiredRandomness {
+        spelling: &'static str,
+        offset: usize,
+    },
 }
 
 struct Parser {
-    tokens: Vec<Token>,
+    // Lookahead owns a cursor, but shares the immutable stream. Cloning every
+    // token for each BlockBinding made generated scalar modules quadratic.
+    tokens: std::sync::Arc<[Token]>,
     pos: usize,
     module_allowed: bool,
     mode: ParseMode,
@@ -91,14 +105,82 @@ pub fn parse_legacy_v018(tokens: &[Token]) -> Result<Vec<Decl>, ParseError> {
 
 fn parse_with_mode(tokens: &[Token], mode: ParseMode) -> Result<Vec<Decl>, ParseError> {
     let mut p = Parser {
-        tokens: tokens.to_vec(),
+        tokens: tokens.into(),
         pos: 0,
         module_allowed: true,
         mode,
     };
     let decls = p.parse_program()?;
     validate_property_names(&decls)?;
+    validate_bound_ownership(&decls)?;
     Ok(decls)
+}
+
+/// A standalone signature owns the declaration's complete binder list
+/// (spec/02 §P4b, spec/03 §2.2). Reject a second list on the matching `def`
+/// before desugaring could create two authorities for one declaration.
+pub(crate) fn validate_bound_ownership(decls: &[Decl]) -> Result<(), ParseError> {
+    let signatures: UnordSet<_> = decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Sig { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for decl in decls {
+        if let Decl::FunDef {
+            type_binders, span, ..
+        }
+        | Decl::Sig {
+            type_binders, span, ..
+        }
+        | Decl::Property {
+            type_binders, span, ..
+        } = decl
+        {
+            let mut declared = UnordSet::new();
+            for binder in type_binders {
+                if crate::dtype_name::is_forbidden_binder_name(&binder.name) {
+                    return Err(ParseError::Expected {
+                        expected:
+                            "a declaration binder outside the primitive and reserved dtype vocabulary"
+                                .into(),
+                        found: format!(
+                            "dtype spelling `{}` cannot be a declaration binder",
+                            binder.name
+                        ),
+                        offset: span.offset,
+                    });
+                }
+                if !declared.insert(binder.name.as_str()) {
+                    return Err(ParseError::Expected {
+                        expected: "one declaration per binder".into(),
+                        found: format!("duplicate binder `{}`", binder.name),
+                        offset: span.offset,
+                    });
+                }
+            }
+        }
+        match decl {
+            Decl::FunDef {
+                name,
+                type_binders,
+                span,
+                ..
+            } if signatures.contains(name.as_str()) && !type_binders.is_empty() => {
+                return Err(ParseError::Expected {
+                    expected:
+                        "binders on the signature: a declaration's `defsig` owns its binder list"
+                            .into(),
+                    found: format!("second binder list on def `{name}`"),
+                    offset: span.offset,
+                });
+            }
+            Decl::Module { decls, .. } => validate_bound_ownership(decls)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_str(source: &str) -> Result<Vec<Decl>, ParseError> {
@@ -140,11 +222,10 @@ fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), Pars
         let expected = match &token.kind {
             TokenKind::Int(value) => Some(value.to_string()),
             TokenKind::Float(value) => Some(crate::format::canonical_float(*value)),
-            TokenKind::TypedInt(value, suffix) if suffix.is_float() => Some(format!(
-                "{}{}",
-                crate::format::canonical_float(*value as f64),
-                suffix.as_str()
-            )),
+            // An integer body under a float suffix keeps its integer spelling:
+            // spec/02-surf-syntax.md §P10a binds it as [04-LIT-1]'s exact
+            // `literal_source: integer` form, which is not the decimal-bodied
+            // literal in another spelling (chelis#2119).
             TokenKind::TypedInt(value, suffix) => Some(format!("{value}{}", suffix.as_str())),
             TokenKind::TypedFloat(value, suffix) => Some(format!(
                 "{}{}",
@@ -174,10 +255,19 @@ fn validate_literal_spellings(source: &str, tokens: &[Token]) -> Result<(), Pars
 
 fn validate_finite_literals(source: &str, tokens: &[Token]) -> Result<(), ParseError> {
     for token in tokens {
-        if matches!(
-            &token.kind,
-            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) if !value.is_finite()
-        ) {
+        let non_finite = match &token.kind {
+            TokenKind::Float(value) | TokenKind::TypedFloat(value, _) => !value.is_finite(),
+            // An integer body under a float suffix binds the exact integer at
+            // the suffix width (§P10a), so its representability is decided by
+            // that width, not by the i64 body. `65520f16` rounds to infinity
+            // and has no Surf literal, exactly as `1e400` has none
+            // (chelis#2119).
+            TokenKind::TypedInt(value, suffix) if suffix.is_float() => {
+                !crate::resugar::round_integer_at_float_width(*value, *suffix).is_finite()
+            }
+            _ => false,
+        };
+        if non_finite {
             let found = source
                 .get(token.span.offset..token.span.end())
                 .unwrap_or_default();
@@ -193,20 +283,28 @@ fn validate_finite_literals(source: &str, tokens: &[Token]) -> Result<(), ParseE
 fn accepted_literal_alias(found: &str, expected: &str, kind: &TokenKind) -> bool {
     match kind {
         TokenKind::Str(_) => true,
-        TokenKind::TypedInt(_, suffix) if suffix.is_float() => found == expected,
+        // An integer-bodied literal must already be the canonical decimal
+        // spelling, or a value-preserving radix form: a redundant leading zero
+        // reads as C octal to a human and is refused rather than normalized.
+        // A float suffix does not relax this, so `007f64` stays an error.
         TokenKind::Int(_) | TokenKind::TypedInt(_, _) | TokenKind::IntMinMagnitude(_) => {
             let lower = found.to_ascii_lowercase();
-            lower.starts_with("0x") || lower.starts_with("0b") || found.replace('_', "") == expected
+            let radix = lower.starts_with("0x") || lower.starts_with("0b");
+            if radix && matches!(kind, TokenKind::TypedInt(_, suffix) if suffix.is_float()) {
+                // spec/04-type-system.md §5.5: an integer radix form carries no
+                // float suffix. Hex is already a lex error under maximal munch;
+                // this refuses the binary spelling for the same reason.
+                return false;
+            }
+            radix || found.replace('_', "") == expected
         }
-        TokenKind::Float(_) | TokenKind::TypedFloat(_, _) => {
-            let core = found
-                .strip_suffix("bf16")
-                .or_else(|| found.strip_suffix("f16"))
-                .or_else(|| found.strip_suffix("f32"))
-                .or_else(|| found.strip_suffix("f64"))
-                .unwrap_or(found);
-            core.contains(['e', 'E']) || found.replace('_', "") == expected
-        }
+        // Every finite decimal float body decodes to the value its canonical
+        // spelling round-trips to, so redundant precision, padded zeroes, and
+        // exponent forms are all value-preserving input aliases the printer
+        // normalizes rather than parse errors (spec/02-surf-syntax.md §P10,
+        // chelis#2119). Malformed separators are already a lex error and a
+        // non-finite decode is rejected by `validate_finite_literals`.
+        TokenKind::Float(_) | TokenKind::TypedFloat(_, _) => true,
         _ => true,
     }
 }
@@ -685,7 +783,7 @@ impl Parser {
             span: Span::new(self.current_offset(), 0),
         });
         let mut nested = Parser {
-            tokens: expr_tokens,
+            tokens: expr_tokens.into(),
             pos: 0,
             module_allowed: false,
             mode: self.mode,
@@ -1004,6 +1102,11 @@ impl Parser {
 
     fn parse_property_decl_after_at(&mut self, start: Span) -> Result<Decl, ParseError> {
         let (name, _) = self.expect_ident()?;
+        let type_binders = if *self.peek() == TokenKind::LBracket {
+            self.parse_type_binder_list()?
+        } else {
+            Vec::new()
+        };
         let (forall, _) = self.expect_ident()?;
         if forall != "forall" {
             return Err(ParseError::Expected {
@@ -1046,6 +1149,7 @@ impl Parser {
             .unwrap_or_else(|| expr_span(&body));
         Ok(Decl::Property {
             name,
+            type_binders,
             params,
             preconditions,
             body,
@@ -1942,8 +2046,9 @@ impl Parser {
             TokenKind::Cast => Some(CastMode::Checked),
             TokenKind::CastTrunc => Some(CastMode::Trunc),
             _ => None,
-        } && let Some(precision) = self.peek_one_arg_cast_precision()
+        } && let Some((precision, precision_span)) = self.peek_one_arg_cast_precision()
         {
+            self.reject_retired_integer_dtype_name(&precision, precision_span)?;
             let cast_tok = self.advance(); // consume Cast / CastTrunc
             let span = cast_tok.span;
             self.advance(); // consume LParen
@@ -1990,7 +2095,7 @@ impl Parser {
     /// the precision identifier (the type name). Otherwise `None`.
     /// Used by `parse_pipe_stage` to recognize the H3 one-arg
     /// `cast(type)` pipe-stage form without consuming tokens on miss.
-    fn peek_one_arg_cast_precision(&self) -> Option<String> {
+    fn peek_one_arg_cast_precision(&self) -> Option<(String, Span)> {
         // Caller has already verified `self.peek() == Cast`. We need to
         // look at the token after Cast (skipping newlines), then the
         // token after that, etc. Using `peek_after_current` would only
@@ -2032,8 +2137,11 @@ impl Parser {
             pos += 1;
         }
         // Expect Ident (the precision name).
-        let precision = match self.tokens.get(pos).map(|t| &t.kind) {
-            Some(TokenKind::Ident(name)) => name.clone(),
+        let (precision, precision_span) = match self.tokens.get(pos) {
+            Some(token) => match &token.kind {
+                TokenKind::Ident(name) => (name.clone(), token.span),
+                _ => return None,
+            },
             _ => return None,
         };
         pos += 1;
@@ -2050,7 +2158,7 @@ impl Parser {
         ) {
             return None;
         }
-        Some(precision)
+        Some((precision, precision_span))
     }
 
     /// Pick a fresh `__chelis_pipe[N]` parameter name. Mirrors the desugar
@@ -2478,7 +2586,8 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
-        let (precision, _) = self.expect_ident()?;
+        let (precision, precision_span) = self.expect_ident()?;
+        self.reject_retired_integer_dtype_name(&precision, precision_span)?;
         self.consume_trailing_comma_before(&TokenKind::RParen);
         let end = self.expect(&TokenKind::RParen)?;
         Ok(Expr::Cast(
@@ -2667,7 +2776,14 @@ impl Parser {
 
     fn parse_with_handler(&mut self) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume With
+        let handler_offset = self.current_offset();
         let (handler_name, _) = self.expect_ident()?;
+        if handler_name == "seed" {
+            return Err(ParseError::RetiredRandomness {
+                spelling: "with seed",
+                offset: handler_offset,
+            });
+        }
         self.expect(&TokenKind::LParen)?;
         let arg = self.parse_expr(0)?;
         self.consume_trailing_comma_before(&TokenKind::RParen);
@@ -2675,10 +2791,9 @@ impl Parser {
         let body = self.parse_block_inner(true)?;
         let span = start.merge(expr_span(&body));
         match handler_name.as_str() {
-            "seed" => Ok(Expr::WithSeed(Box::new(arg), Box::new(body), span)),
             "device" => Ok(Expr::WithDevice(Box::new(arg), Box::new(body), span)),
             _ => Err(ParseError::Expected {
-                expected: "`seed` or `device` effect handler".into(),
+                expected: "`device` effect handler".into(),
                 found: handler_name,
                 offset: self.current_offset(),
             }),
@@ -3034,6 +3149,7 @@ impl Parser {
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
+                self.reject_retired_integer_dtype_name(&name, tok.span)?;
                 Ok(TypeExpr::Named(name, tok.span))
             }
             TokenKind::TypeIdent(name) => {
@@ -3124,8 +3240,8 @@ impl Parser {
                 let end = self.expect(&TokenKind::RBracket)?;
                 // Last item should be the precision (a Named ident)
                 let precision = items.pop().unwrap();
-                let prec_name = match &precision {
-                    TypeExpr::Named(n, _) => n.clone(),
+                let (prec_name, prec_span) = match &precision {
+                    TypeExpr::Named(n, span) => (n.clone(), *span),
                     _ => {
                         return Err(ParseError::Expected {
                             expected: "precision type name".into(),
@@ -3159,7 +3275,11 @@ impl Parser {
                         seen_spreads.push(n);
                     }
                 }
-                Ok(TypeExpr::Tensor(items, prec_name, tok.span.merge(end.span)))
+                Ok(TypeExpr::Tensor(
+                    items,
+                    TensorPrecision::new(prec_name, prec_span),
+                    tok.span.merge(end.span),
+                ))
             }
             TokenKind::Amp => {
                 let tok = self.advance();
@@ -3218,6 +3338,14 @@ impl Parser {
         if let TokenKind::Int(n) = self.peek().clone() {
             let tok = self.advance();
             return Ok(TypeExpr::Named(n.to_string(), tok.span));
+        }
+        if *self.peek() == TokenKind::Underscore {
+            let tok = self.advance();
+            return Err(ParseError::Expected {
+                expected: "a tensor dimension (`*` for a dynamic extent), a named rank spread, or a precision type name".into(),
+                found: "inference hole `_`".into(),
+                offset: tok.span.offset,
+            });
         }
         self.parse_type_atom()
     }
@@ -3634,6 +3762,22 @@ impl Parser {
         Ok(Some(effects))
     }
 
+    fn reject_retired_integer_dtype_name(&self, name: &str, span: Span) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical
+            && let Some(canonical) = crate::desugar::migrated_integer_dtype_name(name)
+        {
+            return Err(ParseError::Expected {
+                expected: format!(
+                    "canonical integer dtype `{canonical}`; run \
+                     `chelis migrate surf --from 0.18` to rewrite v0.18 source"
+                ),
+                found: format!("retired v0.18 integer dtype `{name}`"),
+                offset: span.offset,
+            });
+        }
+        Ok(())
+    }
+
     fn parse_effect_expr(&mut self) -> Result<EffectExpr, ParseError> {
         match self.peek().clone() {
             TokenKind::Ident(name) => {
@@ -3641,7 +3785,10 @@ impl Parser {
                 match name.as_str() {
                     "diff" if self.mode == ParseMode::LegacyV018 => Ok(EffectExpr::Diff(tok.span)),
                     "random" if self.mode == ParseMode::LegacyV018 => {
-                        Ok(EffectExpr::Random(tok.span))
+                        Err(ParseError::RetiredRandomness {
+                            spelling: "random",
+                            offset: tok.span.offset,
+                        })
                     }
                     "accum" if self.mode == ParseMode::LegacyV018 => {
                         Ok(EffectExpr::Accum(tok.span))
@@ -3659,7 +3806,10 @@ impl Parser {
                 let tok = self.advance();
                 match name.as_str() {
                     "Diff" => Ok(EffectExpr::Diff(tok.span)),
-                    "Random" => Ok(EffectExpr::Random(tok.span)),
+                    "Random" => Err(ParseError::RetiredRandomness {
+                        spelling: "Random",
+                        offset: tok.span.offset,
+                    }),
                     "Accum" => Ok(EffectExpr::Accum(tok.span)),
                     "IO" => Ok(EffectExpr::Io(tok.span)),
                     "Test" => Ok(EffectExpr::Test(tok.span)),
@@ -3766,7 +3916,6 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Realize(_, s) => *s,
         Expr::Copy(_, s) => *s,
         Expr::Borrow(_, s) => *s,
-        Expr::WithSeed(_, _, s) => *s,
         Expr::WithDevice(_, _, s) => *s,
         Expr::Par(_, s) => *s,
         Expr::Do(_, s) => *s,
@@ -3905,19 +4054,37 @@ mod tests {
 
     #[test]
     fn sig_effect_annotation() {
-        let decls = p("sig f: f32 -> f32 ! {Diff, Random, Resource(\"gpu:0\")}");
+        let decls = p("sig f: f32 -> f32 ! {Diff, Resource(\"gpu:0\")}");
         match &decls[0] {
             Decl::Sig { effects, .. } => {
                 let effects = effects.as_ref().expect("effects");
-                assert_eq!(effects.len(), 3);
+                assert_eq!(effects.len(), 2);
                 assert!(matches!(effects[0], EffectExpr::Diff(_)));
-                assert!(matches!(effects[1], EffectExpr::Random(_)));
                 assert!(
-                    matches!(effects[2], EffectExpr::Resource(ref device, _) if device == "gpu:0")
+                    matches!(effects[1], EffectExpr::Resource(ref device, _) if device == "gpu:0")
                 );
             }
             _ => panic!("expected Sig"),
         }
+    }
+
+    #[test]
+    fn random_effect_name_is_a_typed_rejection() {
+        // The counter stream's `Random` effect was retired with the explicit
+        // key switch (#2413): naming it is a typed parse error that points at
+        // keys, never a silently accepted or unknown-effect crash.
+        let err = p_err("sig f: f32 -> f32 ! {Diff, Random}");
+        assert!(
+            matches!(
+                err,
+                ParseError::RetiredRandomness {
+                    spelling: "Random",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("key_from_seed"), "got {err}");
     }
 
     #[test]
@@ -4516,24 +4683,24 @@ mod tests {
     }
 
     #[test]
-    fn with_seed_block_binding_then_tail_parses() {
+    fn with_device_block_binding_then_tail_parses() {
         // Positive #5b: parse_with_handler routes through parse_block, so
-        // the bounded tail applies to `with seed(..) { .. }` too.
+        // the bounded tail applies to `with device(..) { .. }` too.
         let e = body(
-            "def f(x) = with seed(42) {
+            "def f(x) = with device(\"gpu:0\") {
                 y = 1
                 f(y)
             }",
         );
         match e {
-            Expr::WithSeed(_, body, _) => match *body {
+            Expr::WithDevice(_, body, _) => match *body {
                 Expr::Block(ref bindings, ref tail, _) => {
                     assert_eq!(bindings.len(), 1);
                     assert!(matches!(**tail, Expr::Apply(_, _, _)));
                 }
                 ref other => panic!("expected Block body, got {other:?}"),
             },
-            _ => panic!("expected WithSeed, got {e:?}"),
+            _ => panic!("expected WithDevice, got {e:?}"),
         }
     }
 
@@ -4658,9 +4825,9 @@ mod tests {
         // Negative #14 (chelis#1267): canonical Surf v0.19 rejects `;` as a
         // block separator (spec/02-surf-syntax.md §P5, §P12), so the
         // diagnostic must not list `;` among the acceptable spellings. The
-        // issue's reproducer spelled the values `cast(1, int64)`; the suffix
+        // issue's reproducer spelled the values `cast(1, i64)`; the suffix
         // form fails identically and keeps the fixture free of type sugar.
-        let src = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }";
+        let src = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }";
         let err = parse_str(src).unwrap_err();
         let offset = match err {
             ParseError::SemicolonBlockSeparator { offset } => offset,
@@ -4696,7 +4863,7 @@ mod tests {
         // than being rewritten into a `;` lecture. In canonical mode the
         // generic wording names only the newline, because that is the only
         // separator the grammar accepts here.
-        let src = "def f() -> int64 = { a = 1i64";
+        let src = "def f() -> i64 = { a = 1i64";
         let err = parse_str(src).unwrap_err();
         match err {
             ParseError::Expected {
@@ -4739,7 +4906,7 @@ mod tests {
         // be bound ... move it to tail position", which is false twice for
         // this input: `add(a, 1i64)` IS the tail, and nothing is unbound.
         // Taking that advice (`_ = add(a, 1i64);`) just landed on the `;`.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
     }
 
     #[test]
@@ -4748,7 +4915,7 @@ mod tests {
         // preceding newline is consumed first and the old code still fell
         // through to the bare-statement message.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
             0,
         );
     }
@@ -4775,20 +4942,20 @@ mod tests {
         // is a legal v0.18 spelling the migrator rewrites to `a = 1i64`, so
         // migrated-era source reaches it. Unguarded it left the value's token
         // range empty and reported an offsetless "unexpected end of input".
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n", 0);
     }
 
     #[test]
     fn block_semicolon_on_its_own_line_before_a_binding_value_names_the_semicolon_rule() {
         // Negative #24: the same position reached across newlines, where the
         // separator count is already nonzero.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
     }
 
     #[test]
     fn block_semicolon_after_a_typed_binder_names_the_semicolon_rule() {
         // Negative #25: the type annotation moves the `=` but not the rule.
-        assert_semicolon_rule_at("def f() -> int64 = {\n  a: int64 = ;1i64\n  a\n}\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = {\n  a: i64 = ;1i64\n  a\n}\n", 0);
     }
 
     #[test]
@@ -4796,7 +4963,7 @@ mod tests {
         // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
         // migrator accepts and rewrites, so the guard must stay canonical
         // only or the migration path stops working on real source.
-        let decls = parse_str_legacy_v018("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n")
+        let decls = parse_str_legacy_v018("def f() -> i64 = {\n  a = ; 1i64\n  a\n}\n")
             .expect("v0.18 accepts a `;` before a binding value");
         assert_eq!(decls.len(), 1);
     }
@@ -4810,7 +4977,7 @@ mod tests {
         // end of input" with no offset at all, which the LSP then rendered
         // past the end of the file.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
             0,
         );
     }
@@ -4819,7 +4986,7 @@ mod tests {
     fn block_semicolon_leading_a_binding_line_names_the_semicolon_rule() {
         // Negative #21: the same shape with the next binding on the `;` line.
         assert_semicolon_rule_at(
-            "def f() -> int64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
+            "def f() -> i64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
             0,
         );
     }
@@ -4828,7 +4995,7 @@ mod tests {
     fn block_containing_only_a_semicolon_names_the_semicolon_rule() {
         // Negative #22: `;` at the leading separator position, before any
         // binding exists. Also previously "unexpected end of input".
-        assert_semicolon_rule_at("def f() -> int64 = { ; }\n", 0);
+        assert_semicolon_rule_at("def f() -> i64 = { ; }\n", 0);
     }
 
     #[test]
@@ -4837,7 +5004,7 @@ mod tests {
         // the v0.18 helpers, so nothing pinned that a canonical block parses
         // at all. Without this, every negative above could pass on a parser
         // that rejected every block.
-        let decls = parse_str("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
+        let decls = parse_str("def f() -> i64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
             .expect("a newline-separated canonical block parses");
         assert_eq!(decls.len(), 1);
     }
@@ -4850,7 +5017,7 @@ mod tests {
         // diagnostic into the chelis#1267 defect reborn inside its own fix:
         // advice that does not work. `migrate_source_v018` is the library
         // path behind that CLI command (`cmd_migrate` in chelis-cli).
-        let repro = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+        let repro = "def main() -> i64 = { a = 1i64; b = 2i64; add(a, b) }\n";
         parse_str(repro).expect_err("the reproducer must not parse canonically");
         let migrated = crate::format::migrate_source_v018(repro)
             .expect("the migrator rewrites the `;` block the diagnostic points at");
@@ -4867,7 +5034,7 @@ mod tests {
         // two grammars accept different separators. `;` is genuinely one of
         // v0.18's, so dropping it from the legacy message would be the
         // chelis#1267 defect pointed the other way.
-        let err = parse_str_legacy_v018("def f() -> int64 = { a = 1i64").unwrap_err();
+        let err = parse_str_legacy_v018("def f() -> i64 = { a = 1i64").unwrap_err();
         match err {
             ParseError::Expected {
                 ref expected,
@@ -4887,7 +5054,7 @@ mod tests {
         // `chelis migrate surf --from 0.18` still reads `;` as a block
         // separator, so the new wording is scoped to canonical Surf v0.19
         // rather than claiming `;` is never a block separator.
-        let decls = parse_str_legacy_v018("def main() -> int64 = { a = 1i64; add(a, 2i64) }")
+        let decls = parse_str_legacy_v018("def main() -> i64 = { a = 1i64; add(a, 2i64) }")
             .expect("v0.18 blocks accept `;` separators");
         assert_eq!(decls.len(), 1);
     }
@@ -4909,15 +5076,21 @@ mod tests {
     }
 
     #[test]
-    fn with_seed_handler_expr() {
-        let e = body("def f() = with seed(42) { dropout(x, 0.5) }");
-        match e {
-            Expr::WithSeed(seed, body, _) => {
-                assert!(matches!(*seed, Expr::Lit(Literal::Int(42), _)));
-                assert!(matches!(*body, Expr::Block(_, _, _)));
-            }
-            _ => panic!("expected WithSeed, got {e:?}"),
-        }
+    fn retired_seed_handler_is_a_typed_rejection() {
+        // `with seed` was retired with the explicit key switch (#2413): the
+        // parser names the retired form and points at explicit keys.
+        let err = p_err("def f() = with seed(42i64) { dropout(x, 0.5) }");
+        assert!(
+            matches!(
+                err,
+                ParseError::RetiredRandomness {
+                    spelling: "with seed",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("key_from_seed"), "got {err}");
     }
 
     #[test]
@@ -5031,11 +5204,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tensor_inference_hole_spellings_are_rejected_at_parse_time() {
+        for source in [
+            "x: tensor[_, 4, f32] = x",
+            "x: tensor[4, _] = x",
+            "x: tensor[.._, f32] = x",
+        ] {
+            assert!(
+                parse_str(source).is_err(),
+                "tensor inference-hole spelling must not reach desugaring: {source}"
+            );
+        }
+        assert!(
+            parse_str("x: tensor[*, 4, f32] = x").is_ok(),
+            "`*` remains the explicit dynamic-dimension spelling"
+        );
+    }
+
     // chelis#258 / rank polymorphism Tier-2: `..r` rank-variable spread.
 
     #[test]
     fn rank_spread_parses_as_sole_dim() {
-        let decls = p("def f(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
+        let decls = p("def f[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)");
         let Decl::FunDef {
             ret_ty: Some(ret), ..
         } = &decls[0]
@@ -5060,8 +5251,9 @@ mod tests {
     fn rank_spread_adjacent_to_concrete_dim_parses() {
         // Tier-3: `..r` interleaved with concrete anchors is now valid syntax
         // (`tensor[..pre, seq, ..post, f32]`); the boundary moved to unification.
-        let decls =
-            p("def f(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x");
+        let decls = p(
+            "def f[pre, post](x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = x",
+        );
         let Decl::FunDef {
             ret_ty: Some(ret), ..
         } = &decls[0]
@@ -5097,7 +5289,7 @@ mod tests {
         // The erasure *tier* is deferred (no all-reduce primitive), so a body
         // like `sum(x, 0)` is rejected at check time by Body Discipline — this
         // test only pins that the surface shape is parseable.
-        let decls = p("def sum_all(x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
+        let decls = p("def sum_all[r](x: &tensor[..r, f32]) -> tensor[f32] = sum(x, 0)");
         assert!(matches!(&decls[0], Decl::FunDef { .. }));
     }
 
@@ -5163,7 +5355,7 @@ mod tests {
 
     #[test]
     fn empty_list_literal_with_type() {
-        let decls = p("xs: List[int64] = []");
+        let decls = p("xs: List[i64] = []");
         match &decls[0] {
             Decl::LetDef {
                 ty: Some(TypeExpr::App(name, args, _)),
@@ -5172,7 +5364,7 @@ mod tests {
             } => {
                 assert_eq!(name, "List");
                 assert_eq!(args.len(), 1);
-                assert!(matches!(&args[0], TypeExpr::Named(inner, _) if inner == "int64"));
+                assert!(matches!(&args[0], TypeExpr::Named(inner, _) if inner == "i64"));
                 assert!(matches!(value, Expr::List(items, _) if items.is_empty()));
             }
             other => panic!("expected typed empty list let, got {other:?}"),
@@ -6210,7 +6402,7 @@ mod tests {
         // third boundary rule. It is not the property-OPTION path covered
         // above; confusing the two is what left that consumer untested.
         let property_predicate =
-            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true";
+            "@property p forall(x: i32) where if lte(x, 1i32)\n  then true\n  else false: true";
         assert!(
             parse_str(property_predicate).is_ok(),
             "a split `if` must survive a property predicate: {:?}",

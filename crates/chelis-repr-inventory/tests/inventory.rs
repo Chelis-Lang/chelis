@@ -6,7 +6,9 @@
 //! controls that matter most are the ones proving an unregistered file and an
 //! unclassifiable type word both fail rather than disappearing.
 
-use chelis_repr_inventory::c_ast::{ConditionalArms, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE};
+use chelis_repr_inventory::c_ast::{
+    ConditionalArms, DEVICE_CXX_LANE, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE,
+};
 use chelis_repr_inventory::{
     SourceClass, lane_for, scan_c_header, scan_c_source, scan_rust_source,
 };
@@ -173,6 +175,29 @@ fn a_raw_element_pointer_cast_is_admitted_and_a_byte_cast_is_not() {
     // `u8` is the raw byte carrier, inventoried through `direct-data-access`.
     // Treating it as an element would make every byte cast a dtype seam.
     assert!(kinds(RUNTIME, "fn f(p: *mut u8) -> *mut u8 { p as *mut u8 }").is_empty());
+}
+
+#[test]
+fn a_typed_cast_of_descriptor_data_keeps_one_direct_access_identity() {
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+typedef struct { void *data; } chelis_probe_tensor;
+extern void consume(const float *);
+static inline void probe(const chelis_probe_tensor *tensor) {
+    consume((const float *)tensor->data);
+}
+"#,
+    )
+    .expect("descriptor cast must scan");
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.owner == "probe")
+        .map(|row| (row.kind, row.sample))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "direct-data-access");
+    assert!(rows[0].1.contains("(const float *)tensor->data"));
 }
 
 #[test]
@@ -634,6 +659,7 @@ fn a_rust_seam_outside_every_declaration_fails_closed() {
 // ---------------------------------------------------------------------------
 
 const HIP_HEADER: &str = "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h";
+const DEVICE_OWNER_CPP: &str = "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp";
 const METAL_HEADER: &str = "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h";
 
 fn c_owners(source: &str) -> Vec<(String, String)> {
@@ -1234,6 +1260,151 @@ fn an_include_outside_the_universe_fails_closed() {
     assert!(error.message.contains("parser.h"), "{}", error.message);
 }
 
+#[cfg(unix)]
+#[test]
+fn symlinked_compiler_resource_includes_preserve_the_universe_boundary() {
+    use std::io::Write;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::{Command, Stdio};
+
+    let path = std::env::var_os("PATH").expect("clang requires PATH");
+    let cwd = std::env::current_dir().expect("current directory");
+    let clang = std::env::split_paths(&path)
+        .map(|directory| cwd.join(directory).join("clang"))
+        .find(|candidate| candidate.is_file())
+        .expect("clang on PATH");
+    let resource = Command::new(&clang)
+        .env_clear()
+        .env("PATH", &path)
+        .arg("-print-resource-dir")
+        .output()
+        .expect("query real clang resource directory");
+    assert!(
+        resource.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resource.stderr)
+    );
+    let resource = std::path::PathBuf::from(
+        String::from_utf8(resource.stdout)
+            .expect("resource directory is UTF-8")
+            .trim(),
+    );
+
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let root = scratch.path();
+    // Match a split compiler installation: the wrapper owns resource-root,
+    // but its include directory belongs to a separate compiler package.
+    let wrapper = root.join("clang-wrapper/resource-root");
+    let compiler = root.join("clang-lib/lib/clang/21");
+    let includes = compiler.join("include");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&wrapper).expect("wrapper resource directory");
+    std::fs::create_dir_all(&includes).expect("compiler include directory");
+    std::fs::create_dir(&bin).expect("wrapper bin directory");
+    std::fs::copy(resource.join("include/stdint.h"), includes.join("stdint.h"))
+        .expect("copy real freestanding compiler header");
+    symlink(&includes, wrapper.join("include")).expect("link resource includes");
+    let quote = |value: &std::path::Path| {
+        format!(
+            "'{}'",
+            value.to_str().expect("UTF-8 path").replace('\'', "'\\''")
+        )
+    };
+    let executable = bin.join("clang");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nexec {} -resource-dir {} \"$@\"\n",
+            quote(&clang),
+            quote(&wrapper)
+        ),
+    )
+    .expect("write clang wrapper");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .expect("make clang wrapper executable");
+    let wrapped_path =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path)))
+            .expect("wrapper PATH");
+    let staged = root.join(HEADER);
+    std::fs::create_dir_all(staged.parent().expect("header parent"))
+        .expect("fixture include directory");
+    let scan = |source: &str| {
+        std::fs::write(&staged, source).expect("write source");
+        // Only the scanner subprocess sees the wrapper; parallel tests keep
+        // their own PATH and real compiler.
+        let mut child = Command::new(env!("CARGO_BIN_EXE_chelis-repr-inventory"))
+            .args(["--repo"])
+            .arg(root)
+            .env("PATH", &wrapped_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run inventory scanner");
+        child
+            .stdin
+            .take()
+            .expect("scanner stdin")
+            .write_all(
+                serde_json::to_string(&[HEADER])
+                    .expect("path manifest")
+                    .as_bytes(),
+            )
+            .expect("send path manifest");
+        child.wait_with_output().expect("scanner output")
+    };
+    let accepted = scan("#include <stdint.h>\nextern uint8_t *chelis_probe_own(void);\n");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(&accepted.stdout).expect("inventory JSON");
+    let identities: Vec<_> = output["rows"]
+        .as_array()
+        .expect("inventory rows")
+        .iter()
+        .map(|row| {
+            (
+                row["kind"].as_str().unwrap(),
+                row["owner"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(identities, [("raw-element-pointer", "chelis_probe_own")]);
+
+    let unrelated = root.join("unrelated-package.h");
+    std::fs::write(&unrelated, "extern float *chelis_probe_outside(void);\n")
+        .expect("write unrelated header");
+    symlink(&unrelated, includes.join("escape.h")).expect("link escaping header");
+    let wrapper_header = wrapper.join("outside.h");
+    let compiler_header = compiler.join("outside.h");
+    for header in [&wrapper_header, &compiler_header] {
+        std::fs::write(header, "extern float *chelis_probe_outside(void);\n")
+            .expect("write non-include compiler file");
+    }
+    for header in [
+        unrelated,
+        wrapper_header,
+        compiler_header,
+        wrapper.join("include/escape.h"),
+    ] {
+        let rejected = scan(&format!("#include \"{}\"\n", header.display()));
+        let error = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            !rejected.status.success(),
+            "{} was admitted",
+            header.display()
+        );
+        assert!(
+            error.contains("outside the inventory universe"),
+            "{}: {error}",
+            header.display()
+        );
+    }
+}
+
 #[test]
 fn a_pointer_to_an_element_array_is_a_carrier() {
     let rows = c_owners("void chelis_probe_rows(float (*rows)[4]);");
@@ -1288,6 +1459,7 @@ fn a_multi_dimensional_extent_renders_every_dimension() {
 fn the_objective_c_header_is_read_through_its_own_lane() {
     assert_eq!(lane_for(METAL_HEADER), OBJECTIVE_C_LANE);
     assert_eq!(lane_for(HIP_HEADER), HIP_LANE);
+    assert_eq!(lane_for(DEVICE_OWNER_CPP), DEVICE_CXX_LANE);
     assert_eq!(lane_for(HEADER), PUBLIC_C_LANE);
     let rows = scan_c_header(METAL_HEADER, &tracked_source(METAL_HEADER))
         .expect("the Objective-C header must scan");
@@ -1319,11 +1491,38 @@ fn the_objective_c_header_is_read_through_its_own_lane() {
 }
 
 #[test]
+fn the_real_device_owner_companion_is_parsed_as_complete_cxx() {
+    let rows = scan_c_header(DEVICE_OWNER_CPP, &tracked_source(DEVICE_OWNER_CPP))
+        .expect("the complete opaque device owner companion must scan");
+    assert!(
+        rows.iter()
+            .any(|row| row.owner == "chelis_device_tensor_import"),
+        "the C++ lane did not visit the owner implementation: {rows:?}"
+    );
+}
+
+#[test]
+fn a_cxx_decltype_cannot_hide_an_element_pointer() {
+    let rows = scan_c_source(
+        DEVICE_OWNER_CPP,
+        "decltype((float *)0) chelis_probe_pointer();",
+        DEVICE_CXX_LANE,
+    )
+    .expect("a complete C++ declaration must scan");
+    assert!(
+        rows.iter().any(|row| {
+            row.kind == "raw-element-pointer" && row.owner == "chelis_probe_pointer"
+        }),
+        "the explicit float pointer inside decltype was hidden: {rows:?}"
+    );
+}
+
+#[test]
 fn the_scan_is_independent_of_the_ambient_sdk_state() {
     // A HIP SDK on CPATH, or a ROCm include directory, must not change what
     // the header means: the lane parses under the committed stub SDK and a
-    // scrubbed environment. Planting a hipblas header on CPATH would
-    // otherwise flip `__has_include` and remove the fallback prototypes.
+    // scrubbed environment. Planting a different hipBLAS header on CPATH
+    // would otherwise replace the required committed fixture.
     let scratch = tempfile::tempdir().expect("scratch dir");
     let hipblas = scratch.path().join("hipblas");
     std::fs::create_dir_all(&hipblas).expect("mkdir");
@@ -1333,15 +1532,13 @@ fn the_scan_is_independent_of_the_ambient_sdk_state() {
     )
     .expect("write");
     let source = tracked_source(HIP_HEADER);
+    let expected = scan_c_header(HIP_HEADER, &source).expect("the committed fixture must scan");
     // SAFETY: the test owns its process environment and restores it below.
     unsafe { std::env::set_var("CPATH", scratch.path()) };
     let rows = scan_c_header(HIP_HEADER, &source);
     unsafe { std::env::remove_var("CPATH") };
     let rows = rows.expect("the ambient SDK path must be invisible to the scan");
-    assert!(
-        rows.iter().any(|row| row.owner == "hipblasSgemm"),
-        "the header's own fallback prototypes are the ones inventoried: {rows:?}"
-    );
+    assert_eq!(rows, expected, "ambient CPATH changed the inventoried rows");
 }
 
 // ---------------------------------------------------------------------------

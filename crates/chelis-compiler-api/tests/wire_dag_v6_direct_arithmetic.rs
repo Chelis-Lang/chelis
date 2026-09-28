@@ -4,23 +4,27 @@ use chelis_compiler_api::schema::{
 
 fn direct_sub_payload(version: Option<u32>) -> String {
     let mut payload = serde_json::json!({
+        "declarations": ["entry"],
         "nodes": [
             {
                 "id": 0,
                 "op": {"kind": "load", "name": "left"},
                 "inputs": [],
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0, "activation": null,
                 "output_type": {"dims": [], "precision": "f32"}
             },
             {
                 "id": 1,
                 "op": {"kind": "load", "name": "right"},
                 "inputs": [],
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0, "activation": null,
                 "output_type": {"dims": [], "precision": "f32"}
             },
             {
                 "id": 2,
                 "op": {"kind": "sub"},
                 "inputs": [0, 1],
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0, "activation": null,
                 "output_type": {"dims": [], "precision": "f32"}
             }
         ],
@@ -32,14 +36,16 @@ fn direct_sub_payload(version: Option<u32>) -> String {
     payload.to_string()
 }
 
-fn count_payload(axes: &[usize]) -> String {
+fn count_payload(axes: &[i32]) -> String {
     serde_json::json!({
-        "schema_version": 7,
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "declarations": ["entry"],
         "nodes": [
             {
                 "id": 0,
                 "op": {"kind": "load", "name": "mask"},
                 "inputs": [],
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0, "activation": null,
                 "output_type": {
                     "dims": [
                         {"kind": "lit", "size": 2},
@@ -53,6 +59,7 @@ fn count_payload(axes: &[usize]) -> String {
                 "id": 1,
                 "op": {"kind": "count", "axes": axes},
                 "inputs": [0],
+                "shape_deps": [], "span_id": null, "merged_spans": [], "declaration": 0, "activation": null,
                 "output_type": {
                     "dims": [{"kind": "lit", "size": 3}],
                     "precision": "int64"
@@ -94,13 +101,16 @@ fn assert_version_rejected_before_node_decode(payload: &str, expected: &str) {
 
 #[test]
 fn current_exact_wire_round_trips_direct_sub_identity() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 7);
-    let payload = direct_sub_payload(Some(7));
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 20);
+    let payload = direct_sub_payload(Some(WIRE_DAG_SCHEMA_VERSION));
     let decoded = WireDag::from_validated_json(&payload).expect("exact current Sub must decode");
     assert!(matches!(decoded.nodes[2].op, WireRiscOp::Sub));
 
     let encoded = serde_json::to_value(&decoded).expect("exact current Sub must re-encode");
-    assert_eq!(encoded["schema_version"], 7);
+    assert_eq!(
+        encoded["schema_version"],
+        serde_json::json!(WIRE_DAG_SCHEMA_VERSION)
+    );
     assert_eq!(encoded["nodes"][2]["op"]["kind"], "sub");
 }
 
@@ -123,13 +133,14 @@ fn missing_older_and_future_versions_fail_before_node_decode() {
     };
 
     assert_version_rejected_before_node_decode(&unknown_op(None), "missing");
-    for version in 1..=6 {
+    for version in 1..=11 {
         assert_version_rejected_before_node_decode(
             &unknown_op(Some(version)),
             &version.to_string(),
         );
     }
-    assert_version_rejected_before_node_decode(&unknown_op(Some(8)), "8");
+    let future = WIRE_DAG_SCHEMA_VERSION + 1;
+    assert_version_rejected_before_node_decode(&unknown_op(Some(future)), &future.to_string());
 }
 
 #[test]
@@ -149,8 +160,14 @@ fn current_wire_includes_the_canonical_count_form_owned_by_issue_1287() {
         let error = WireDag::from_validated_json(&count_payload(&axes))
             .expect_err("noncanonical or out-of-range Count axes must reject");
         let message = error.to_string();
+        let names_axis_failure = message.contains("axis") || message.contains("axes");
         assert!(
-            message.contains("Count") && (message.contains("axis") || message.contains("axes")),
+            names_axis_failure
+                && if axes == [3] {
+                    message.contains("input rank")
+                } else {
+                    message.contains("Count")
+                },
             "Count axes {axes:?} produced the wrong rejection: {error}"
         );
     }
@@ -170,9 +187,15 @@ fn current_wire_has_no_legacy_pad_migration_or_raw_fill_spelling() {
     }"#;
     assert_version_rejected_before_node_decode(legacy, "4");
 
-    let raw_current = legacy.replace("\"schema_version\": 4", "\"schema_version\": 7");
+    let mut raw_current: serde_json::Value = serde_json::from_str(legacy).unwrap();
+    raw_current["schema_version"] = WIRE_DAG_SCHEMA_VERSION.into();
+    raw_current["nodes"][0]["shape_deps"] = serde_json::json!([]);
+    raw_current["nodes"][0]["span_id"] = serde_json::Value::Null;
+    raw_current["nodes"][0]["merged_spans"] = serde_json::json!([]);
+    let raw_current = raw_current.to_string();
     let error = WireDag::from_validated_json(&raw_current)
         .expect_err("current Pad.fill must use an exact ScalarValue payload");
     assert!(matches!(error, WireDagDecodeError::Parse(_)));
+    assert!(error.to_string().contains("floating point"), "{error}");
     assert!(serde_json::from_str::<WireDag>(&raw_current).is_err());
 }

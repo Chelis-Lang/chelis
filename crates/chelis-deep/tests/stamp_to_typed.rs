@@ -498,7 +498,7 @@ fn type_ingress_accepts_the_complete_authored_type_grammar() {
         "(t-tensor {} (d-name {} *) (t-prim {} f32))",
         "(t-tensor {} (d-name {} batch) (d-var {} width) (d-lit {} 3) (d-rank {} tail) (t-var {} t0))",
         "(t-adt {} List (t-var {} t0))",
-        "(t-adt {} Map (t-prim {} string) (t-tuple {} (t-prim {} int64) (t-unit {})))",
+        "(t-adt {} Map (t-prim {} string) (t-tuple {} (t-prim {} i64) (t-unit {})))",
         "(t-tuple {} (t-prim {} bool) (t-ref {} (t-adt {} List (t-var {} t0))))",
         "(t-fn {eff: (effects {} random (resource {} \"gpu:0\"))} (t-ref {} (t-tensor {} (d-rank {} r0) (t-var {} t0))) (t-tuple {} (t-var {} t0) (t-unit {})))",
     ];
@@ -642,7 +642,7 @@ fn type_ingress_rejects_every_non_type_carrier_and_role_swap() {
 #[test]
 fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
     for source in [
-        "(defsig {} bad (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
+        "(defsig {} bad (r) (t-fn {} (t-adt {} Rows (d-rank {} r)) (t-unit {})))",
         "(def {} bad (fn {} (params {} (x {type: (t-adt {} Rows (d-rank {} r))})) (var {} x)))",
     ] {
         let error = chelis_deep::parse_and_stamp_file(source)
@@ -650,6 +650,14 @@ fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
         let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
             panic!("expected a stamp rejection, got: {error:?}");
         };
+        if let StampErrorKind::NodeError(chelis_deep::node::NodeError::Metadata(ref error)) =
+            stamp.kind
+        {
+            assert_eq!(error.key, "type");
+            let detail = error.detail.as_deref().expect("type-role diagnostic");
+            assert!(detail.contains("NominalArgument") && detail.contains("d-rank"));
+            continue;
+        }
         assert!(
             matches!(
                 stamp.kind,
@@ -668,7 +676,7 @@ fn file_ingress_rejects_rank_spreads_in_nominal_argument_slots() {
 fn file_ingress_keeps_nominal_dimensions_and_tensor_rank_spreads_legal() {
     for source in [
         "(defsig {} sized (t-fn {} (t-adt {} Rows (d-lit {} 3)) (t-unit {})))",
-        "(defsig {} ranked (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
+        "(defsig {} ranked (r) (t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)) (t-unit {})))",
     ] {
         chelis_deep::parse_and_stamp_file(source)
             .unwrap_or_else(|error| panic!("spec-valid file ingress was rejected: {error}"));
@@ -785,10 +793,19 @@ fn the_class_set_is_closed_and_each_member_is_covered() {
         FormClass::ListWithoutTagSymbol,
         FormClass::MetadataMap,
         FormClass::MetadataAnnotatedForm,
+        FormClass::ExtensionData,
     ];
     for class in all {
         // Exhaustiveness tripwire: a new variant breaks this match.
         match class {
+            FormClass::ExtensionData => {
+                let data = chelis_deep::RawExpr::ExtensionData(
+                    chelis_deep::ExtensionData::parse("(var {} x)").unwrap(),
+                );
+                assert_eq!(FormClass::of(&data), class);
+                assert!(chelis_deep::stamp_to_typed(vec![data]).is_err());
+                continue;
+            }
             FormClass::BareIdentifier
             | FormClass::BareIntegerLiteral
             | FormClass::BareFloatLiteral
@@ -806,7 +823,7 @@ fn the_class_set_is_closed_and_each_member_is_covered() {
             "{class:?} has no [03-PROG-2] coverage case"
         );
     }
-    assert_eq!(HEADLESS_TOP_LEVEL_FORMS.len(), all.len());
+    assert_eq!(HEADLESS_TOP_LEVEL_FORMS.len() + 1, all.len());
 }
 
 #[test]

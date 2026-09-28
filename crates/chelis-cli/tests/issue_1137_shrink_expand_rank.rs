@@ -12,8 +12,8 @@ fn source(expand_size: &str, consume: bool) -> String {
     format!(
         "module Repro.ShrinkExpandRank\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = insert(x, cast(0, int32), {expand_size})\n\
-         s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(0, int64), cast(2, int64)]])\n\
+         e = insert(x, cast(0, i32), {expand_size})\n\
+         s = shrink(e, [[cast(0, i64), cast(1, i64)], [cast(0, i64), cast(2, i64)]])\n\
          out = {tail}\n"
     )
 }
@@ -22,9 +22,9 @@ fn runtime_bound_source(start: &str, end: &str) -> String {
     format!(
         "module Repro.ShrinkExpandRuntimeBound\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = insert(x, cast(0, int32), cast(2, int64))\n\
-         k = shape(x, cast(0, int32))\n\
-         s = shrink(e, [[cast(0, int64), cast(1, int64)], [{start}, {end}]])\n\
+         e = insert(x, cast(0, i32), cast(2, i64))\n\
+         k = shape(x, cast(0, i32))\n\
+         s = shrink(e, [[cast(0, i64), cast(1, i64)], [{start}, {end}]])\n\
          out = relu(s)\n"
     )
 }
@@ -33,9 +33,9 @@ fn runtime_bound_movement_consumer_source(consumer: &str) -> String {
     format!(
         "module Repro.ShrinkExpandMovementConsumer\n\
          x = to_tensor([cast(11.0, f32), cast(22.0, f32)])\n\
-         e = insert(x, cast(0, int32), cast(2, int64))\n\
-         k = shape(x, cast(0, int32))\n\
-         s = shrink(e, [[cast(0, int64), cast(1, int64)], [cast(k - k, int64), k]])\n\
+         e = insert(x, cast(0, i32), cast(2, i64))\n\
+         k = shape(x, cast(0, i32))\n\
+         s = shrink(e, [[cast(0, i64), cast(1, i64)], [cast(k - k, i64), k]])\n\
          out = {consumer}\n"
     )
 }
@@ -138,18 +138,18 @@ fn assert_consumed_case(expand_size: &str, stem: &str) {
 
 #[test]
 fn consumed_shrink_over_literal_expand_keeps_rank_two() {
-    assert_consumed_case("cast(2, int64)", "shrink_expand_literal");
+    assert_consumed_case("cast(2, i64)", "shrink_expand_literal");
 }
 
 #[test]
 fn consumed_shrink_over_shape_expand_keeps_rank_two() {
-    assert_consumed_case("shape(x, cast(0, int32))", "shrink_expand_shape");
+    assert_consumed_case("shape(x, cast(0, i32))", "shrink_expand_shape");
 }
 
 #[test]
 fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
     assert_consumed_case(
-        "cast(shape(x, cast(0, int32)), int64)",
+        "cast(shape(x, cast(0, i32)), i64)",
         "shrink_expand_cast_shape",
     );
 }
@@ -172,7 +172,7 @@ fn consumed_shrink_over_cast_shape_expand_keeps_rank_two() {
 /// row, `shrink.elementwise_const.build`, recorded at `typed_unsupported`.
 #[test]
 fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
-    let source = runtime_bound_source("cast(0, int64)", "k");
+    let source = runtime_bound_source("cast(0, i64)", "k");
     let eval = eval_stdout(&source, "shrink_expand_runtime_end");
     let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_end");
     assert_eq!(
@@ -183,7 +183,7 @@ fn consumed_shrink_with_runtime_end_agrees_between_eval_and_c() {
 
 #[test]
 fn consumed_shrink_with_runtime_start_agrees_between_eval_and_c() {
-    let source = runtime_bound_source("cast(k - k, int64)", "cast(2, int64)");
+    let source = runtime_bound_source("cast(k - k, i64)", "cast(2, i64)");
     let eval = eval_stdout(&source, "shrink_expand_runtime_start");
     let (_, compiled) = build_and_run(&source, "shrink_expand_runtime_start");
     assert_eq!(
@@ -195,7 +195,7 @@ fn consumed_shrink_with_runtime_start_agrees_between_eval_and_c() {
 #[test]
 fn zero_pad_after_runtime_shrink_keeps_the_repaired_rank() {
     let source = runtime_bound_movement_consumer_source(
-        "pad(s, [[cast(0, int64), cast(0, int64)], [cast(0, int64), cast(0, int64)]], cast(0.0, f32))",
+        "pad(s, [[cast(0, i64), cast(0, i64)], [cast(0, i64), cast(0, i64)]], cast(0.0, f32))",
     );
     let eval = eval_stdout(&source, "shrink_expand_zero_pad");
     let (_, compiled) = build_and_run(&source, "shrink_expand_zero_pad");
@@ -207,8 +207,7 @@ fn zero_pad_after_runtime_shrink_keeps_the_repaired_rank() {
 
 #[test]
 fn identity_stride_after_runtime_shrink_keeps_the_repaired_rank() {
-    let source =
-        runtime_bound_movement_consumer_source("stride(s, cast(1, int64), cast(1, int64))");
+    let source = runtime_bound_movement_consumer_source("stride(s, cast(1, i64), cast(1, i64))");
     let eval = eval_stdout(&source, "shrink_expand_identity_stride");
     let (_, compiled) = build_and_run(&source, "shrink_expand_identity_stride");
     assert_eq!(
@@ -225,11 +224,11 @@ fn user_dimension_name_cannot_capture_runtime_shrink_extent() {
     // different one. Otherwise C incorrectly guards the three-element slice
     // against the four-element input dimension.
     let source = "module Repro.ShrinkGeneratedDimCollision\n\
-sig crop: tensor[_rt_shrink_dim_8_0, f32] -> tensor[u, f32]\n\
+sig crop[u]: tensor[_rt_shrink_dim_8_0, f32] -> tensor[u, f32]\n\
 def crop(x) = {\n\
-  k = shape(x, cast(0, int32))\n\
-  z = cast(k - k, int64)\n\
-  stop = cast(k - cast(1, int64), int64)\n\
+  k = shape(x, cast(0, i32))\n\
+  z = cast(k - k, i64)\n\
+  stop = cast(k - cast(1, i64), i64)\n\
   shrink(x, [[z, stop]])\n\
 }\n\
 out = crop(to_tensor([\n\
@@ -248,7 +247,7 @@ out = crop(to_tensor([\n\
 
 #[test]
 fn directly_returned_shrink_over_expand_remains_a_positive_control() {
-    let source = source("cast(2, int64)", false);
+    let source = source("cast(2, i64)", false);
     let eval = eval_stdout(&source, "shrink_expand_direct");
     let (_, compiled) = build_and_run(&source, "shrink_expand_direct");
     assert_eq!(compiled, eval, "direct-return control must stay green");
@@ -259,7 +258,7 @@ fn consumed_shrink_without_expand_remains_a_positive_control() {
     let source = "module Repro.ShrinkDirectInput\n\
 sig f: tensor[2, 2, f32] -> tensor[1, 2, f32]\n\
 def f(x) = {\n\
-  s = shrink(x, [[cast(0, int64), cast(1, int64)], [cast(0, int64), cast(2, int64)]])\n\
+  s = shrink(x, [[cast(0, i64), cast(1, i64)], [cast(0, i64), cast(2, i64)]])\n\
   relu(s)\n\
 }\n\
 out = f(to_tensor([[cast(11.0, f32), cast(22.0, f32)], [cast(33.0, f32), cast(44.0, f32)]]))\n";
@@ -270,7 +269,7 @@ out = f(to_tensor([[cast(11.0, f32), cast(22.0, f32)], [cast(33.0, f32), cast(44
 
 #[test]
 fn invalid_shrink_bounds_still_fail_loudly() {
-    let source = "out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[cast(1, int64), cast(1, int64)]])\n";
+    let source = "out = shrink(to_tensor([cast(1.0, f32), cast(2.0, f32)]), [[cast(1, i64), cast(1, i64)]])\n";
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("invalid_bounds.ch");
     fs::write(&path, source).expect("write source");

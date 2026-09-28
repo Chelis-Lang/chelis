@@ -35,6 +35,7 @@ fn info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn parameter_info(prim: Prim, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Parameter,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -56,6 +58,7 @@ fn value_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -481,6 +484,278 @@ fn edge_terminals_are_closed_path_local_consumes() {
     ));
 }
 
+/// chelis#2122: a join mismatch has to say WHICH owner the two paths disagree
+/// about, and what it is called in source. Two owner-id sets alone are not
+/// actionable.
+#[test]
+fn join_mismatch_names_the_owners_the_paths_disagree_about() {
+    let make = |named: bool| {
+        let mut second = info(Prim::Int64, OwnerOrigin::Owned);
+        if named {
+            second.names = vec!["carry".into()];
+        }
+        let mut first = info(Prim::String, OwnerOrigin::Owned);
+        if named {
+            first.names = vec!["text".into()];
+        }
+        roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), first),
+                (OwnerId(2), second),
+            ]),
+        )
+    };
+
+    // The whole message, not fragments of it: fragment assertions cannot see
+    // the two directions being swapped, the counts being swapped, or stray
+    // whitespace in the format literal.
+    assert_eq!(
+        verify_raw(make(true)).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]; live only on the path already \
+         verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
+    );
+
+    // Negative parity: with no source names, the message still identifies the
+    // owner by id and prints no empty bracket.
+    let anonymous = verify_raw(make(false)).unwrap_err().to_string();
+    assert!(
+        anonymous.contains("%2") && !anonymous.contains("[]"),
+        "an unnamed owner is identified by id alone: {anonymous}"
+    );
+}
+
+/// chelis#2122: when lowering recorded a span for the owner, the join mismatch
+/// names the source region beside the binding name. Without one it prints the
+/// owner exactly as before, with no placeholder.
+#[test]
+fn join_mismatch_reports_the_span_when_lowering_recorded_one() {
+    let make = |span: Option<&str>| {
+        let mut carried = info(Prim::Int64, OwnerOrigin::Owned);
+        carried.names = vec!["carry".into()];
+        carried.span_id = span.map(str::to_string);
+        roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), carried),
+            ]),
+        )
+    };
+
+    assert_eq!(
+        verify_raw(make(Some("surf:120..135")))
+            .unwrap_err()
+            .to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]@surf:120..135; live only on the path \
+         already verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
+    );
+
+    assert_eq!(
+        verify_raw(make(None)).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %2[carry]; live only on the path already \
+         verified: none (2 live here, 1 earlier)"
+            .replace("         ", " ")
+    );
+}
+
+/// chelis#2122: a span id is an opaque producer string. One that is empty, or
+/// that carries the separators this single-line message is built from, must not
+/// reach the diagnostic: it would end the label in a dangling `@`, or forge a
+/// clause or a second owner. Such an id renders as no span at all.
+#[test]
+fn join_mismatch_drops_a_span_id_that_could_restructure_the_message() {
+    let render_with = |span: &str| {
+        let mut carried = info(Prim::Int64, OwnerOrigin::Owned);
+        carried.names = vec!["carry".into()];
+        carried.span_id = Some(span.to_string());
+        verify_raw(roots(
+            vec![
+                block(
+                    0,
+                    vec![BlockParam {
+                        owner: OwnerId(0),
+                        mode: ParamMode::EntryBorrow,
+                    }],
+                    vec![define(1), define(2)],
+                    Terminator::Branch {
+                        condition: Operand::borrow(OwnerId(0)),
+                        then_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![
+                                edge_terminal(90, Terminal::Drop(OwnerId(1))),
+                                edge_terminal(91, Terminal::Discard(OwnerId(2))),
+                            ],
+                        },
+                        else_edge: Edge {
+                            id: EdgeId::UNASSIGNED,
+                            target: BlockId(1),
+                            args: Vec::new(),
+                            terminals: vec![edge_terminal(92, Terminal::Drop(OwnerId(1)))],
+                        },
+                    },
+                ),
+                block(1, vec![], vec![], Terminator::Exit),
+            ],
+            BTreeMap::from([
+                (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+                (OwnerId(1), info(Prim::String, OwnerOrigin::Owned)),
+                (OwnerId(2), carried),
+            ]),
+        ))
+        .unwrap_err()
+        .to_string()
+    };
+
+    let clean = render_with("surf:120..135");
+    assert!(clean.contains("%2[carry]@surf:120..135"), "{clean}");
+
+    for hostile in [
+        "",
+        "   ",
+        "surf:1..2; live only on the path already verified: %99[forged]",
+        "surf:1..2, %98[forged]",
+        "surf:1..2\nINJECTED",
+    ] {
+        let rendered = render_with(hostile);
+        assert!(
+            rendered.contains("%2[carry];"),
+            "an id that cannot be rendered safely leaves the owner unadorned, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("forged") && !rendered.contains("INJECTED"),
+            "no part of the id reaches the message: {rendered}"
+        );
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "the diagnostic stays one line: {rendered}"
+        );
+    }
+}
+
+/// The two sides are not interchangeable: an owner live only on the path being
+/// verified now must not be reported as live only on the path verified before,
+/// and the counts follow the same order (chelis#2122 red team, F2).
+#[test]
+fn join_mismatch_reports_each_direction_on_its_own_side() {
+    let mut alpha = info(Prim::String, OwnerOrigin::Owned);
+    alpha.names = vec!["alpha".into()];
+    let mut beta = info(Prim::String, OwnerOrigin::Owned);
+    beta.names = vec!["beta".into(), "beta_alias".into()];
+    let gamma = info(Prim::String, OwnerOrigin::Owned);
+    let program = roots(
+        vec![
+            block(
+                0,
+                vec![BlockParam {
+                    owner: OwnerId(0),
+                    mode: ParamMode::EntryBorrow,
+                }],
+                vec![define(1), define(2), define(3)],
+                Terminator::Branch {
+                    condition: Operand::borrow(OwnerId(0)),
+                    then_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
+                        target: BlockId(1),
+                        args: Vec::new(),
+                        terminals: vec![edge_terminal(90, Terminal::Drop(OwnerId(1)))],
+                    },
+                    else_edge: Edge {
+                        id: EdgeId::UNASSIGNED,
+                        target: BlockId(1),
+                        args: Vec::new(),
+                        terminals: vec![
+                            edge_terminal(91, Terminal::Drop(OwnerId(2))),
+                            edge_terminal(92, Terminal::Drop(OwnerId(3))),
+                        ],
+                    },
+                },
+            ),
+            block(1, vec![], vec![], Terminator::Exit),
+        ],
+        BTreeMap::from([
+            (OwnerId(0), info(Prim::Bool, OwnerOrigin::ExternalBorrow)),
+            (OwnerId(1), alpha),
+            (OwnerId(2), beta),
+            (OwnerId(3), gamma),
+        ]),
+    );
+
+    assert_eq!(
+        verify_raw(program).unwrap_err().to_string(),
+        "block b1 in `roots` is reached with inconsistent live owners: \
+         live only on this path: %1[alpha]; live only on the path already \
+         verified: %2[beta,beta_alias], %3 (2 live here, 3 earlier)"
+            .replace("         ", " ")
+    );
+}
+
 #[test]
 fn edge_arguments_are_transferred_before_path_local_terminals() {
     let program = roots(
@@ -894,6 +1169,7 @@ fn direct_call_argument_class_matches_the_callable_body_parameter() {
             placement: Placement::Value,
             origin: OwnerOrigin::Owned,
             names: Vec::new(),
+            span_id: None,
         },
     );
     assert!(matches!(
@@ -1103,6 +1379,76 @@ fn verified_live_byte_bound_overflow_fails_closed() {
         super::verify::verify(&program),
         Err(OwnershipError::LiveByteBoundOverflow { .. })
     ));
+}
+
+/// chelis#2331 deferred the `add_live_byte_bounds` diagnostic context behind a
+/// closure so the success path stops formatting a string it discards. That
+/// text is part of the ownership error surface, so pin its exact bytes on the
+/// path that builds it: two owned heap tensors whose byte costs each convert
+/// and whose sum does not.
+///
+/// The summation inside `live_byte_cost` is what overflows here, rather than
+/// the per-operation transient accounting, because a `DirectCall` destination
+/// deliberately skips that transient (a callee's peak is composed separately).
+/// The post-operation live-set sum is therefore the first addition to see both
+/// owners.
+#[test]
+fn verified_live_byte_summation_overflow_names_the_unit() {
+    // 2^61 f32 elements is 2^63 bytes: each owner converts, the pair does not.
+    let half = 1usize << 61;
+    let body = block(
+        0,
+        Vec::new(),
+        vec![
+            define(0),
+            Op::Apply {
+                dest: Some(OwnerId(1)),
+                label: "second live tensor".into(),
+                kind: ApplyKind::DirectCall { callee: UnitId(1) },
+                schema: OperationSchema::new(Vec::new(), Some(ValueClass::Heap(HeapKind::Tensor))),
+                args: Vec::new(),
+            },
+            Op::Drop {
+                owner: Operand::move_(OwnerId(0)),
+            },
+        ],
+        Terminator::Return {
+            result: Operand::move_(OwnerId(1)),
+        },
+    );
+    let program = RawProgram {
+        units: vec![
+            Unit {
+                id: UnitId(0),
+                name: "roots".into(),
+                kind: UnitKind::Roots,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: None,
+                entry: BlockId(0),
+                blocks: vec![block(0, Vec::new(), Vec::new(), Terminator::Exit)],
+                owners: BTreeMap::new(),
+            },
+            Unit {
+                id: UnitId(1),
+                name: "summed".into(),
+                kind: UnitKind::Function,
+                schedule: ScheduleState::Phase2ScopeExit,
+                callable_body: Some(CallableBody::new(BlockId(0))),
+                entry: BlockId(0),
+                blocks: vec![body],
+                owners: BTreeMap::from([
+                    (OwnerId(0), fixed_tensor_info(half)),
+                    (OwnerId(1), fixed_tensor_info(half)),
+                ]),
+            },
+        ],
+    };
+
+    let error = super::verify::verify(&program).expect_err("the live-set sum must overflow");
+    let OwnershipError::LiveByteBoundOverflow { context } = error else {
+        panic!("expected a live-byte overflow, got {error:?}");
+    };
+    assert_eq!(context, "summing live owners in `summed`");
 }
 
 #[test]
@@ -1695,6 +2041,7 @@ fn payload_census_rejects_a_missing_match_option_binding_and_wrong_kind() {
 fn host_payload_sites_and_actions_are_bound_to_their_structural_unit() {
     let host = ConcreteHostProgram {
         functions: vec![ConcreteHostFunction {
+            helper_result_claim_axes: Vec::new(),
             name: "identity".into(),
             params: Vec::new(),
             ret_ty: ConcreteHostType::Unit,
@@ -1903,9 +2250,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
         precision: Prim::F32,
     };
     let mut dag = Dag::new();
-    let load = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let copied = dag.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
-    let dropped = dag.add_node(RiscOp::Drop, vec![copied], ty.clone(), None);
+    let decl = dag.declare("test");
+    let load = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![load], ty.clone(), None);
+    let dropped = dag.add_node(decl, RiscOp::Drop, vec![copied], ty.clone(), None);
     let mut plan = DagOwnershipPlan::lower(&dag).unwrap();
     plan.verify(&dag).unwrap();
     plan.directives[2] = DagDirective::OwnedDrop {
@@ -1918,9 +2272,21 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_drop = Dag::new();
-    let borrowed =
-        borrowed_drop.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let dropped = borrowed_drop.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let borrowed_drop_decl = borrowed_drop.declare("test");
+    let borrowed = borrowed_drop.add_node(
+        borrowed_drop_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let dropped = borrowed_drop.add_node(
+        borrowed_drop_decl,
+        RiscOp::Drop,
+        vec![borrowed],
+        ty.clone(),
+        None,
+    );
     let mut plan = DagOwnershipPlan::lower(&borrowed_drop).unwrap();
     assert!(matches!(
         plan.directives[1],
@@ -1936,8 +2302,15 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut unterminated = Dag::new();
-    let load = unterminated.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    unterminated.add_node(RiscOp::Neg, vec![load], ty, None);
+    let unterminated_decl = unterminated.declare("test");
+    let load = unterminated.add_node(
+        unterminated_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    unterminated.add_node(unterminated_decl, RiscOp::Neg, vec![load], ty, None);
     let mut plan = DagOwnershipPlan::lower(&unterminated).unwrap();
     plan.directives.pop();
     assert!(matches!(
@@ -1946,13 +2319,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_realize = Dag::new();
+    let borrowed_realize_decl = borrowed_realize.declare("test");
     let borrowed = borrowed_realize.add_node(
+        borrowed_realize_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType::scalar_f32(),
         None,
     );
     let realized = borrowed_realize.add_node(
+        borrowed_realize_decl,
         RiscOp::Realize,
         vec![borrowed],
         TensorType::scalar_f32(),
@@ -1974,13 +2350,16 @@ fn dag_verification_checks_mutated_directives_and_terminal_completeness() {
     ));
 
     let mut borrowed_store = Dag::new();
+    let borrowed_store_decl = borrowed_store.declare("test");
     let borrowed = borrowed_store.add_node(
+        borrowed_store_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType::scalar_f32(),
         None,
     );
     let stored = borrowed_store.add_node(
+        borrowed_store_decl,
         RiscOp::Store { name: "out".into() },
         vec![borrowed],
         TensorType::scalar_f32(),
@@ -2009,9 +2388,17 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
         precision: Prim::F32,
     };
     let mut stored = Dag::new();
-    let load = stored.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let copied = stored.add_node(RiscOp::Copy, vec![load], ty.clone(), None);
+    let stored_decl = stored.declare("test");
+    let load = stored.add_node(
+        stored_decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let copied = stored.add_node(stored_decl, RiscOp::Copy, vec![load], ty.clone(), None);
     let output = stored.add_node(
+        stored_decl,
         RiscOp::Store { name: "out".into() },
         vec![copied],
         ty.clone(),
@@ -2023,13 +2410,15 @@ fn store_terminal_can_be_an_exported_root_but_drop_cannot() {
     assert!(plan.render().contains("store-root n2"));
 
     let mut dropped = Dag::new();
+    let dropped_decl = dropped.declare("test");
     let value = dropped.add_node(
+        dropped_decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let terminal = dropped.add_node(RiscOp::Drop, vec![value], ty, None);
+    let terminal = dropped.add_node(dropped_decl, RiscOp::Drop, vec![value], ty, None);
     dropped.add_root(terminal);
     let error = DagOwnershipPlan::lower(&dropped).unwrap_err();
     assert!(matches!(error, OwnershipError::LoweringInvariant { .. }));
@@ -2067,6 +2456,7 @@ fn typed_info(ty: ConcreteHostType, origin: OwnerOrigin) -> OwnerInfo {
         placement: Placement::Value,
         origin,
         names: Vec::new(),
+        span_id: None,
     }
 }
 
@@ -3369,4 +3759,133 @@ fn cyclic_jump_with_a_reachable_exit_uses_the_fixed_point() {
         "the iteration-local owner must die before the ordinary Jump back-edge"
     );
     super::last_use::verify_canonical(&program).unwrap();
+}
+
+/// chelis#2205: the container-consumer table's key is the row's heap kind on
+/// both the result and the named operand, not a bare result-equals-operand
+/// comparison.
+///
+/// Evidentiary status: DISPOSITION LOCK for the representation the #2225
+/// review arrived at. Each negative row names the one comparison that rejects
+/// it, and deleting that comparison from `container_consumer_operand` makes
+/// exactly that row match. Without the kind on the row, `builtin:concat`
+/// against a dictionary matches and routes a dictionary to
+/// `chelis_list_concat_owned`; the kind is what makes that shape not a row by
+/// construction rather than an emitter guard firing after the scheduler has
+/// already retired the operand's terminal.
+#[test]
+fn a_consumer_row_matches_only_its_own_heap_kind() {
+    use super::ir::container_consumer_operand;
+    let list = ValueClass::Heap(HeapKind::List);
+    let dict = ValueClass::Heap(HeapKind::Dict);
+    let tensor = ValueClass::Heap(HeapKind::Tensor);
+    let string = ValueClass::Heap(HeapKind::String);
+
+    for (label, class) in [
+        ("builtin:append", list),
+        ("builtin:concat", list),
+        ("builtin:skip", list),
+        ("builtin:dict_insert", dict),
+        ("builtin:dict_merge", dict),
+        ("builtin:dict_remove", dict),
+        ("builtin:string_concat", string),
+    ] {
+        assert_eq!(
+            container_consumer_operand(label, Some(class), |_| Some(class)),
+            Some(0),
+            "{label} consumes its operand at its own kind"
+        );
+    }
+
+    // Rejected by the result comparison: the row's kind is List.
+    assert_eq!(
+        container_consumer_operand("builtin:concat", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `concat` row"
+    );
+    // The same test on chelis#2334's row. `skip` is the one row whose
+    // result is a sub-range of its operand rather than a grown copy, so
+    // it is worth pinning that membership still turns on the kind and
+    // not on the shape.
+    assert_eq!(
+        container_consumer_operand("builtin:skip", Some(dict), |_| Some(dict)),
+        None,
+        "a dictionary application never matches the list-kinded `skip` row"
+    );
+    // Rejected by the result comparison: the row's kind is Dict.
+    assert_eq!(
+        container_consumer_operand("builtin:dict_merge", Some(list), |_| Some(list)),
+        None,
+        "a list application never matches the dictionary-kinded `dict_merge` row"
+    );
+    // Rejected by the operand comparison: the result carries the row's kind
+    // but the named operand does not.
+    assert_eq!(
+        container_consumer_operand("builtin:dict_insert", Some(dict), |_| Some(list)),
+        None,
+        "the named operand must carry the row's kind too"
+    );
+    // Rejected by the result comparison, and the shape tensor `concat`
+    // actually has: a `List[tensor]` of parts producing a tensor.
+    assert_eq!(
+        container_consumer_operand("builtin:concat", Some(tensor), |_| Some(list)),
+        None,
+        "tensor `concat` shares the label and is still not a row"
+    );
+    // Rejected by the result comparison: the row's kind is String. A list
+    // `concat` and a string `concat` are different labels, but a reader who
+    // dropped the kind would have `builtin:string_concat` accept a list and
+    // route it to `chelis_string_concat_owned`.
+    assert_eq!(
+        container_consumer_operand("builtin:string_concat", Some(list), |_| Some(list)),
+        None,
+        "a list application never matches the string-kinded `string_concat` row"
+    );
+    // Rejected by the result comparison: the row's kind is List, and a string
+    // is the operand class `string_concat` shares with nothing else here.
+    assert_eq!(
+        container_consumer_operand("builtin:append", Some(string), |_| Some(string)),
+        None,
+        "a string application never matches the list-kinded `append` row"
+    );
+    // Rejected by the label lookup: kind agreement alone is not membership.
+    // `chunk`, `map`, `flatten`, `zip` and `enumerate` all take a list and
+    // return a list.
+    for label in [
+        "builtin:chunk",
+        "builtin:map",
+        "builtin:flatten",
+        "builtin:zip",
+        "builtin:enumerate",
+        "builtin:dict_keys",
+    ] {
+        assert_eq!(
+            container_consumer_operand(label, Some(list), |_| Some(list)),
+            None,
+            "{label} is not a row, however well its classes agree"
+        );
+    }
+    // The two string builtins that produce a substring of their operand are
+    // deliberately not rows: they return a sub-range rather than a grown
+    // copy, so in-place is a memmove of the remainder rather than an
+    // amortised append, and neither is an accumulation shape. This is the
+    // same disposition `drop` and `take` carry for lists under chelis#943.
+    for label in ["builtin:string_slice", "builtin:string_trim"] {
+        assert_eq!(
+            container_consumer_operand(label, Some(string), |_| Some(string)),
+            None,
+            "{label} produces a substring and is not a consumer row"
+        );
+    }
+    // Rejected by the result comparison: a non-heap result cannot carry a
+    // heap kind.
+    assert_eq!(
+        container_consumer_operand(
+            "builtin:append",
+            Some(ValueClass::NonHeap(NonHeapKind::Unit)),
+            |_| { Some(list) }
+        ),
+        None,
+        "a unit-returning application is not a container consumer"
+    );
 }

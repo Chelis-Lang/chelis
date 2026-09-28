@@ -1,0 +1,6283 @@
+"""Change-owned CI planning, execution, schema, and receipt controls."""
+from __future__ import annotations
+
+import contextlib
+import copy
+from dataclasses import replace
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+from scripts import ci_change_owned as owned
+from scripts import ci_detect_docs_only as detect
+from scripts import runtime_representation_oracle
+
+
+OWNER = {
+    "workflow": "heavy-e2e.yml",
+    "job": "full-workspace",
+    "cadence": "daily 03:17 UTC and workflow_dispatch",
+    "reason": "real build path is nightly-owned",
+    "tracking_issue": "chelis#1824",
+}
+
+
+def package(
+    name: str,
+    targets: list[tuple[str, str, list[str]]],
+    *,
+    root: str | None = None,
+    features: dict[str, list[str]] | None = None,
+    dependencies: tuple[str, ...] = (),
+) -> dict:
+    root = root or f"crates/{name}"
+    return {
+        "id": f"{name} 0.1.0 (path+file:///{root})",
+        "name": name,
+        "manifest_path": f"/repo/{root}/Cargo.toml",
+        "features": features or {"default": []},
+        "dependencies": [
+            {
+                "name": dependency,
+                "rename": None,
+                "kind": None,
+                "optional": False,
+                "uses_default_features": True,
+                "features": [],
+                "target": None,
+                "registry": None,
+                "path": f"/repo/crates/{dependency}",
+                "req": "*",
+                "source": None,
+            }
+            for dependency in dependencies
+        ],
+        "targets": [
+            {
+                "name": target,
+                "kind": ["test"],
+                "src_path": f"/repo/{src}",
+                "required-features": required,
+            }
+            for target, src, required in targets
+        ],
+    }
+
+
+def metadata(*packages: dict) -> dict:
+    return {
+        "workspace_root": "/repo",
+        "workspace_members": [item["id"] for item in packages],
+        "packages": list(packages),
+    }
+
+
+def config_text(
+    *,
+    standing: tuple[str, str] = ("p", "smoke"),
+    target_exclusion: tuple[str, str] = ("p", "heavy"),
+    test_exclusion: tuple[str, str, str] = ("p", "smoke", "slow_case"),
+    manual_only_target: tuple[str, str] | None = None,
+    path_rule: str = "scripts/",
+    required_package_rule: tuple[str, tuple[str, ...]] | None = None,
+) -> str:
+    owner = "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+    manual = ""
+    if manual_only_target is not None:
+        manual = f"""
+[[manual_only_target]]
+package = {json.dumps(manual_only_target[0])}
+name = {json.dumps(manual_only_target[1])}
+{owner}
+"""
+    required = ""
+    if required_package_rule is not None:
+        prefix, packages = required_package_rule
+        required = f"""
+[[required_package_rule]]
+prefix = {json.dumps(prefix)}
+packages = {json.dumps(packages)}
+reason = "binder and defsig contract changes require every affected package owner"
+tracking_issue = "chelis#1854"
+"""
+    return f"""version = 3
+
+[[standing_target]]
+package = {json.dumps(standing[0])}
+name = {json.dumps(standing[1])}
+
+[[target_exclusion]]
+package = {json.dumps(target_exclusion[0])}
+name = {json.dumps(target_exclusion[1])}
+{owner}
+
+[[test_exclusion]]
+package = {json.dumps(test_exclusion[0])}
+target = {json.dumps(test_exclusion[1])}
+name = {json.dumps(test_exclusion[2])}
+{owner}
+{manual}
+{required}
+
+[[path_rule]]
+prefix = {json.dumps(path_rule)}
+disposition = "owner"
+{owner}
+"""
+
+
+GATE_REASON = "the gate needs a checkout the PR workers do not have"
+Q_GATE = "`cargo test -p q --test smoke -- --ignored`"
+Q_CASE = "`cargo test -p q --test smoke q_case -- --ignored --exact --nocapture`"
+
+
+def manual_gate_row(
+    package: str = "q",
+    name: str = "smoke",
+    **overrides: object,
+) -> str:
+    """One manual_gate_target row; an override of None drops that field."""
+    values = {
+        "package": package,
+        "name": name,
+        "manual_gates": ["q_gate"],
+        "reason": GATE_REASON,
+        "tracking_issue": "chelis#1824",
+        **overrides,
+    }
+    fields = "\n".join(
+        f"{key} = {json.dumps(value)}"
+        for key, value in values.items()
+        if value is not None
+    )
+    return f"\n[[manual_gate_target]]\n{fields}\n"
+
+
+def manual_gates_doc(*rows: tuple[str, str]) -> str:
+    """A docs/manual_gates.md whose wired table holds exactly ``rows``.
+
+    The following section also runs ``q::smoke``; only the wired table may
+    bind or stale a manual-gate row.
+    """
+    body = "\n".join(
+        f"| `{name}` | `q` | {command} | none | test |" for name, command in rows
+    )
+    return (
+        "# Chelis Manual Gates\n\n"
+        "## Ignored tests (wired manual gates)\n\n"
+        "| Test | Crate | Manual command | Prerequisite | Owning phase |\n"
+        "|---|---|---|---|---|\n"
+        f"{body}\n\n"
+        "## Not yet wired (named in spec, no `#[ignore]`'d test)\n\n"
+        "| Gate | Crate | Manual command | Prerequisite | Owning phase |\n"
+        "|---|---|---|---|---|\n"
+        "| `q_unwired` | `q` | `cargo test -p q --test smoke` | none | test |\n"
+    )
+
+
+def gate_sources(document: str | None = None) -> dict[str, str]:
+    sources = fixture_sources()
+    sources[owned.MANUAL_GATES_PATH] = (
+        manual_gates_doc(("q_gate", Q_GATE)) if document is None else document
+    )
+    return sources
+
+
+def fixture_metadata() -> dict:
+    return metadata(
+        package(
+            "p",
+            [
+                ("smoke", "crates/p/tests/smoke.rs", []),
+                ("heavy", "crates/p/tests/heavy.rs", []),
+                ("gated", "crates/p/tests/gated.rs", ["extra"]),
+                ("default_gated", "crates/p/tests/default_gated.rs", ["enabled"]),
+            ],
+            features={"default": ["enabled"], "enabled": [], "extra": []},
+        ),
+        package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+    )
+
+
+def fixture_sources() -> dict[str, str]:
+    return {
+        "crates/p/tests/smoke.rs": (
+            "#[test]\nfn fast_case() {}\n#[test]\nfn slow_case() {}\n"
+        ),
+        "crates/p/tests/heavy.rs": "#[test]\nfn heavy_case() {}\n",
+        "crates/p/tests/gated.rs": "#[test]\nfn gated_case() {}\n",
+        "crates/p/tests/default_gated.rs": "#[test]\nfn default_case() {}\n",
+        "crates/q/tests/smoke.rs": "#[test]\nfn q_case() {}\n",
+    }
+
+
+def load_config(content: str | None = None) -> owned.Config:
+    content = content or config_text()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.toml"
+        path.write_text(content)
+        return owned.read_config(path)
+
+
+def duration_baseline(
+    weights: dict[owned.Identity, int] | None = None,
+) -> owned.DurationBaseline:
+    if weights is None:
+        return owned.load_duration_baseline()
+    return owned.DurationBaseline(
+        default_milliseconds=owned.DEFAULT_DURATION_MILLISECONDS,
+        targets=weights,
+        digest="d" * 64,
+    )
+
+
+def shard_fields(
+    change_owned: list[owned.Identity],
+    package_expansion: list[owned.Identity],
+) -> dict:
+    baseline = duration_baseline()
+    change_owned_shards, change_owned_planning = owned.change_owned_shard_plan(
+        change_owned,
+        baseline,
+    )
+    expansion_shards, expansion_planning = owned.package_expansion_shard_plan(
+        package_expansion,
+        baseline,
+    )
+    return {
+        "target_dispositions": [
+            owned.package_expansion_execution_disposition(
+                expansion_shards,
+                expansion_planning,
+            )
+        ],
+        "shard_planning": {
+            "change_owned": change_owned_planning,
+            "package_expansion": {
+                "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+            },
+        },
+        "shards": {
+            "change_owned": change_owned_shards,
+            "package_expansion": owned.shard_map(package_expansion),
+        },
+    }
+
+
+def set_package_expansion(
+    plan: dict,
+    identities: list[owned.Identity],
+    *,
+    weights: dict[owned.Identity, int] | None = None,
+) -> owned.DurationBaseline:
+    baseline = duration_baseline(weights)
+    standing_reuse = set(plan["standing_coverage_reuse"])
+    change_owned_shards, change_owned_planning = owned.change_owned_shard_plan(
+        [
+            owned.Identity.parse(value)
+            for value in plan["change_owned"]
+            if value not in standing_reuse
+        ],
+        baseline,
+    )
+    shards, planning = owned.package_expansion_shard_plan(
+        identities,
+        baseline,
+    )
+    plan["eligible_targets"] = sorted(
+        set(plan["eligible_targets"])
+        | {identity.canonical for identity in identities}
+    )
+    plan["target_features"].update(
+        {identity.canonical: [] for identity in identities}
+    )
+    plan["package_expansion"] = sorted(
+        identity.canonical for identity in identities
+    )
+    plan["shard_planning"]["change_owned"] = change_owned_planning
+    plan["target_dispositions"] = [
+        row
+        for row in plan["target_dispositions"]
+        if row.get("kind") != owned.PACKAGE_EXPANSION_EXECUTION_KIND
+    ]
+    plan["target_dispositions"].append(
+        owned.package_expansion_execution_disposition(shards, planning)
+    )
+    plan["shard_planning"]["package_expansion"] = {
+        "algorithm": owned.PACKAGE_EXPANSION_COMPATIBILITY_ALGORITHM,
+    }
+    plan["shards"]["change_owned"] = change_owned_shards
+    plan["shards"]["package_expansion"] = owned.shard_map(identities)
+    return baseline
+
+
+def set_colocated_package_expansion(
+    plan: dict,
+    identities: list[owned.Identity],
+) -> tuple[int, owned.DurationBaseline]:
+    anchors = [
+        owned.Identity(f"anchor-{index}", "heavy")
+        for index in range(len(owned.SHARDS) - 1)
+    ]
+    weights = {
+        **{anchor: 1_000_000 for anchor in anchors},
+        **{identity: 1_000 for identity in identities},
+    }
+    baseline = set_package_expansion(
+        plan,
+        [*anchors, *identities],
+        weights=weights,
+    )
+    shard = next(
+        shard
+        for shard in owned.SHARDS
+        if identities[0].canonical
+        in owned.execution_shards(plan, "package-expansion")[str(shard)]
+    )
+    if not all(
+        identity.canonical
+        in owned.execution_shards(plan, "package-expansion")[str(shard)]
+        for identity in identities
+    ):
+        raise AssertionError("fixture targets were not assigned together")
+    return shard, baseline
+
+
+class SchemaTests(unittest.TestCase):
+    def test_strict_schema_reads_all_six_row_kinds(self) -> None:
+        config = load_config(
+            config_text(
+                manual_only_target=("q", "smoke"),
+                required_package_rule=("crates/p/src/contract.rs", ("p", "q")),
+            )
+        )
+        self.assertEqual(config.version, 3)
+        self.assertEqual(config.standing_targets, (owned.Identity("p", "smoke"),))
+        self.assertEqual(tuple(config.target_exclusions), (owned.Identity("p", "heavy"),))
+        self.assertEqual(
+            tuple(config.test_exclusions),
+            (owned.TestIdentity("p", "smoke", "slow_case"),),
+        )
+        self.assertEqual(
+            tuple(config.manual_only_targets),
+            (owned.Identity("q", "smoke"),),
+        )
+        self.assertEqual(
+            config.required_package_rules[0].prefix,
+            "crates/p/src/contract.rs",
+        )
+        self.assertEqual(
+            config.required_package_rules[0].packages,
+            ("p", "q"),
+        )
+        self.assertEqual(config.path_rules[0].prefix, "scripts/")
+
+    def test_malformed_unknown_duplicate_and_ambiguous_rows_fail(self) -> None:
+        valid = config_text()
+        mutations = [
+            valid.replace("version = 3", "version = 2", 1),
+            valid + "\nunknown = true\n",
+            valid + '\n[[standing_target]]\npackage = "p"\nname = "smoke"\n',
+            config_text(manual_only_target=("q", "smoke"))
+            + '\n[[manual_only_target]]\npackage = "q"\nname = "smoke"\n'
+            + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+            + "\n",
+            valid + f'\n[[path_rule]]\nprefix = "scripts/"\ndisposition = "owner"\n'
+            + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+            + "\n",
+            valid + f'\n[[path_rule]]\nprefix = "scripts/sub/"\ndisposition = "owner"\n'
+            + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items())
+            + "\n",
+            config_text(
+                required_package_rule=("crates/p/src/contract.rs", ("p",))
+            )
+            + '\n[[required_package_rule]]\nprefix = "crates/p/src/contract.rs"\n'
+            + 'packages = ["p"]\nreason = "duplicate"\ntracking_issue = "chelis#1854"\n',
+            config_text(
+                required_package_rule=("crates/p/src/", ("p",))
+            )
+            + '\n[[required_package_rule]]\nprefix = "crates/p/src/contract.rs"\n'
+            + 'packages = ["p"]\nreason = "overlap"\ntracking_issue = "chelis#1854"\n',
+            valid.replace('reason = "real build path is nightly-owned"', "reason = \"\"", 1),
+            valid.replace(
+                'tracking_issue = "chelis#1824"',
+                'tracking_issue = "PR-126"',
+                1,
+            ),
+            valid.replace('name = "smoke"', 'name = "../smoke"', 1),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation[-100:]), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.toml"
+                path.write_text(mutation)
+                with self.assertRaises(ValueError):
+                    owned.read_config(path)
+
+    def test_stale_package_target_test_and_path_rule_fail_closed(self) -> None:
+        config = load_config()
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+        cases = [
+            (config_text(standing=("missing", "smoke")), "package"),
+            (config_text(standing=("p", "missing")), "target"),
+            (config_text(test_exclusion=("p", "smoke", "missing_case")), "test"),
+            (
+                config_text(manual_only_target=("missing", "smoke")),
+                "manual-only package",
+            ),
+            (
+                config_text(manual_only_target=("p", "missing")),
+                "manual-only target",
+            ),
+            (config_text(path_rule="missing/"), "path rule"),
+            (
+                config_text(
+                    required_package_rule=(
+                        "crates/p/src/contract.rs",
+                        ("missing",),
+                    )
+                ),
+                "required package rule",
+            ),
+        ]
+        for content, message in cases:
+            with self.subTest(message=message):
+                candidate = load_config(content)
+                with self.assertRaisesRegex(ValueError, message):
+                    owned.validate_config(
+                        candidate,
+                        fixture_metadata(),
+                        tracked,
+                        fixture_sources().__getitem__,
+                    )
+        owned.validate_config(
+            config, fixture_metadata(), tracked, fixture_sources().__getitem__
+        )
+
+    def test_feature_gated_standing_manual_and_excluded_targets_are_valid(self) -> None:
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+        for content in (
+            config_text(standing=("p", "gated")),
+            config_text(manual_only_target=("p", "gated")),
+            config_text(target_exclusion=("p", "gated")),
+            config_text(test_exclusion=("p", "gated", "gated_case")),
+        ):
+            with self.subTest(content=content):
+                owned.validate_config(
+                    load_config(content),
+                    fixture_metadata(),
+                    tracked,
+                    fixture_sources().__getitem__,
+                )
+
+    def test_deleted_exact_path_rule_is_live_from_base_inventory(self) -> None:
+        config = load_config(config_text(path_rule="removed-root.toml"))
+        with self.assertRaisesRegex(ValueError, "path rule"):
+            owned.validate_config(
+                config,
+                fixture_metadata(),
+                set(fixture_sources()),
+                fixture_sources().__getitem__,
+            )
+        owned.validate_config(
+            config,
+            fixture_metadata(),
+            set(fixture_sources()) | {"removed-root.toml"},
+            fixture_sources().__getitem__,
+        )
+
+    def test_target_and_test_exclusions_cannot_contradict_other_rows(self) -> None:
+        standing_excluded = config_text(target_exclusion=("p", "smoke"))
+        test_under_excluded = config_text(
+            target_exclusion=("p", "heavy"),
+            test_exclusion=("p", "heavy", "heavy_case"),
+        )
+        manual_standing = config_text(manual_only_target=("p", "smoke"))
+        manual_excluded = config_text(manual_only_target=("p", "heavy"))
+        manual_test_excluded = config_text(
+            manual_only_target=("p", "smoke"),
+            test_exclusion=("p", "smoke", "slow_case"),
+        )
+        for content in (
+            standing_excluded,
+            test_under_excluded,
+            manual_standing,
+            manual_excluded,
+            manual_test_excluded,
+        ):
+            with self.subTest(content=content):
+                with self.assertRaises(ValueError):
+                    load_config(content)
+
+    def test_manual_gate_rows_are_exact_and_combine_with_no_other_row(self) -> None:
+        config = load_config(config_text() + manual_gate_row())
+        self.assertEqual(
+            config.manual_gate_targets,
+            {
+                owned.Identity("q", "smoke"): owned.ManualGate(
+                    ("q_gate",), GATE_REASON, "chelis#1824"
+                )
+            },
+        )
+        cases = [
+            (config_text() + manual_gate_row(workflow="ci.yml"), "requires exactly"),
+            (config_text() + manual_gate_row(reason=None), "requires exactly"),
+            (config_text() + manual_gate_row(manual_gates=None), "requires exactly"),
+            (config_text() + manual_gate_row(reason=" "), "reason must be"),
+            (config_text() + manual_gate_row(manual_gates=[]), "manual_gates must"),
+            (
+                config_text() + manual_gate_row(manual_gates=["q_gate", "q_gate"]),
+                "manual_gates must",
+            ),
+            (config_text() + manual_gate_row(manual_gates=[" q_gate"]), "manual_gates must"),
+            (config_text() + manual_gate_row(manual_gates="q_gate"), "manual_gates must"),
+            (config_text() + manual_gate_row(tracking_issue="#1824"), "chelis#N"),
+            (
+                config_text() + manual_gate_row() + manual_gate_row(),
+                "duplicate manual_gate_target",
+            ),
+            (config_text() + manual_gate_row("p", "heavy"), "excluded targets"),
+            (
+                config_text(standing=("q", "smoke")) + manual_gate_row(),
+                "cannot be standing",
+            ),
+            (
+                config_text(manual_only_target=("q", "smoke")) + manual_gate_row(),
+                "manual-only",
+            ),
+            (
+                config_text(standing=("q", "smoke"))
+                + manual_gate_row("p", "smoke"),
+                "test exclusions are forbidden",
+            ),
+        ]
+        for content, message in cases:
+            with self.subTest(message=message, row=content[-160:]):
+                with self.assertRaisesRegex(ValueError, message):
+                    load_config(content)
+
+    def test_manual_gate_rows_bind_exactly_the_wired_entries_that_run_them(
+        self,
+    ) -> None:
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(row: str, sources: dict[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + row),
+                fixture_metadata(),
+                tracked,
+                sources.__getitem__,
+            )
+
+        validate(manual_gate_row(), gate_sources())
+        validate(
+            manual_gate_row(manual_gates=["q_case", "q_nextest", "q_all"]),
+            gate_sources(
+                manual_gates_doc(
+                    ("q_case", Q_CASE),
+                    (
+                        "q_nextest",
+                        "`cargo nextest run --package=q --test=smoke "
+                        "-- --ignored --test-threads=1`",
+                    ),
+                    (
+                        "q_all",
+                        "`cargo nextest run -p q --test smoke --run-ignored all "
+                        "--ignore-default-filter`",
+                    ),
+                )
+            ),
+        )
+        other_target = "`cargo test -p q --test other -- --ignored`"
+        cases = [
+            (manual_gate_row(package="missing"), gate_sources(), "stale manual-gate package"),
+            (manual_gate_row(name="missing"), gate_sources(), "stale manual-gate target"),
+            (manual_gate_row(), fixture_sources(), "cannot read docs/manual_gates.md"),
+            (manual_gate_row(manual_gates=["absent"]), gate_sources(), "names 0 rows"),
+            (manual_gate_row(manual_gates=["q_unwired"]), gate_sources(), "names 0 rows"),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", Q_GATE), ("q_gate", Q_GATE))),
+                "names 2 rows",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", other_target))),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", "`cargo test -p p --test smoke`"))
+                ),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", "`scripts/hip_test.py -p q --test smoke`"))
+                ),
+                "not a recognized Cargo test run",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(
+                        ("q_gate", Q_GATE[:-1] + " && " + other_target[1:])
+                    )
+                ),
+                "does not run exactly q::smoke",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", "Run the smoke suite by hand"))),
+                "not one code span",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(
+                        ("q_gate", Q_GATE),
+                        ("q_other", "`cargo nextest run -p q --test smoke`"),
+                    )
+                ),
+                "does not cite docs/manual_gates.md entries that run it",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", Q_GATE)).replace(
+                        "## Ignored tests (wired manual gates)",
+                        "## Ignored tests",
+                    )
+                ),
+                "exactly one",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(
+                    manual_gates_doc(("q_gate", Q_GATE)).replace(
+                        "| Manual command |", "| Command |", 1
+                    )
+                ),
+                "has no Test",
+            ),
+            (
+                manual_gate_row(),
+                gate_sources(manual_gates_doc(("q_gate", Q_GATE + " | extra"))),
+                "malformed docs/manual_gates.md table row",
+            ),
+        ]
+        for row, sources, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate(row, sources)
+
+    def test_manual_gate_citations_run_the_whole_ignored_suite(self) -> None:
+        """A cited command that runs no ignored test, or only a filtered part."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(row: str, *entries: tuple[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + row),
+                fixture_metadata(),
+                tracked,
+                gate_sources(manual_gates_doc(*entries)).__getitem__,
+            )
+
+        validate(
+            manual_gate_row(manual_gates=["q_gate", "q_case"]),
+            ("q_gate", Q_GATE),
+            ("q_case", Q_CASE),
+        )
+        nextest = "cargo nextest run -p q --test smoke --run-ignored only"
+        validate(manual_gate_row(), ("q_gate", f"`{nextest} --ignore-default-filter`"))
+        # Without the flag the profile's default-filter applies, so this entry
+        # counts only beside a whole-suite one.
+        validate(
+            manual_gate_row(manual_gates=["q_gate", "q_nextest"]),
+            ("q_gate", Q_GATE),
+            ("q_nextest", f"`{nextest}`"),
+        )
+        cases = [
+            ("`cargo test -p q --test smoke`", "does not run exactly q::smoke"),
+            ("`cargo nextest run -p q --test smoke`", "does not run exactly q::smoke"),
+            ("`cargo test -p q --test smoke --no-run -- --ignored`", "'--no-run'"),
+            ("`cargo test -p q --test smoke -- --ignored --list`", "'--list'"),
+            ("`cargo test -p q --test smoke -- --list`", "'--list'"),
+            (
+                "`cargo nextest run -p q --test smoke --run-ignored default`",
+                "--run-ignored value",
+            ),
+            ("`false && cargo test -p q --test smoke -- --ignored`", "not `cargo test`"),
+            ("`echo cargo test -p q --test smoke -- --ignored`", "not `cargo test`"),
+            ("`cargo test -p q --test smoke -- --ignored &&`", "not `cargo test`"),
+            (Q_CASE, "cites no docs/manual_gates.md entry that runs its whole"),
+            (
+                "`cargo test -p q --test smoke no_such_test -- --ignored --exact`",
+                "cites no docs/manual_gates.md entry that runs its whole",
+            ),
+            (f"`{nextest}`", "cites no docs/manual_gates.md entry that runs its whole"),
+            (
+                f"`NEXTEST_PROFILE=nightly {nextest} --ignore-default-filter`",
+                "environment assignment 'NEXTEST_PROFILE=nightly'",
+            ),
+            (
+                "`RUSTFLAGS=--cfg=skip_all cargo test -p q --test smoke -- --ignored`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
+            ),
+            (
+                "`CARGO_TARGET_DIR=/tmp/t cargo test -p q --test smoke -- --ignored`",
+                "environment assignment 'CARGO_TARGET_DIR=/tmp/t'",
+            ),
+            (
+                f"`{Q_GATE[1:-1]} && RUSTFLAGS=--cfg=skip_all {Q_GATE[1:-1]}`",
+                "environment assignment 'RUSTFLAGS=--cfg=skip_all'",
+            ),
+        ]
+        for command, message in cases:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ValueError, message):
+                    validate(manual_gate_row(), ("q_gate", command))
+        with self.assertRaisesRegex(ValueError, "cites no docs/manual_gates.md entry"):
+            validate(
+                manual_gate_row(manual_gates=["q_gate", "q_case"]),
+                ("q_gate", Q_CASE),
+                ("q_case", Q_CASE.replace("q_case", "q_other")),
+            )
+
+    def test_manual_gate_commands_naming_the_target_must_classify(self) -> None:
+        """An unrecognized spelling is rejected where it could run the target."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(*entries: tuple[str, str]) -> None:
+            owned.validate_config(
+                load_config(config_text() + manual_gate_row()),
+                fixture_metadata(),
+                tracked,
+                gate_sources(manual_gates_doc(*entries)).__getitem__,
+            )
+
+        # Rows that do not name the target are left alone, however spelled.
+        validate(
+            ("q_gate", Q_GATE),
+            ("other_token", "`GITHUB_TOKEN=$(gh auth token) cargo test -p q --test other`"),
+            ("other_hip", "`scripts/hip_test.py -p q --test other -- --ignored`"),
+            ("smoke_extra", "`scripts/hip_test.py -p q --test smoke_extra -- --ignored`"),
+            ("other_prose", "Run the other reproducer by hand"),
+        )
+        smoke = "cargo test -p q --test smoke -- --ignored"
+        other = "cargo test -p q --test other -- --ignored"
+        spellings = [
+            "cargo t -p q --test smoke -- --ignored",
+            "cargo +stable test -p q --test smoke -- --ignored",
+            "env X=1 cargo test -p q --test smoke -- --ignored",
+            "scripts/hip_test.py -p q --test smoke -- --ignored",
+            "NAME=$(gh auth token) cargo test -p q --test smoke -- --ignored",
+            "cargo test -p q --test smoke --tests -- --ignored",
+            "cargo test -p q --test smoke -- --ignored&&cargo test -p q --test other",
+            'cargo test -p q --test "smoke" -- --ignored',
+            'cargo test -p q --test smo""ke -- --ignored',
+        ]
+        for spelling in spellings:
+            with self.subTest(uncited=spelling):
+                with self.assertRaisesRegex(ValueError, "'q_extra'"):
+                    validate(("q_gate", Q_GATE), ("q_extra", f"`{spelling}`"))
+        with self.subTest(uncited="prose"):
+            with self.assertRaisesRegex(ValueError, "not one code span"):
+                validate(("q_gate", Q_GATE), ("q_extra", "Run smoke by hand"))
+        with self.subTest(uncited="environment assignment"):
+            with self.assertRaisesRegex(ValueError, "environment assignment 'X=1'"):
+                validate(("q_gate", Q_GATE), ("q_extra", f"`X=1 {Q_GATE[1:-1]}`"))
+        cited = [
+            f"{smoke} && {other.replace('cargo test', 'cargo t')}",
+            f"{smoke} && {other.replace('cargo', 'cargo +stable')}",
+            f"{smoke} && env X=1 {other}",
+            f"{smoke} && scripts/hip_test.py -p q --test other",
+            "cargo test -p q --test smoke --tests -- --ignored",
+            f"{smoke}&&{other}",
+            f"{smoke} ; cargo build -p q",
+            f'{smoke} "&&" {other}',
+        ]
+        for spelling in cited:
+            with self.subTest(cited=spelling):
+                with self.assertRaisesRegex(ValueError, "'q_gate'"):
+                    validate(("q_gate", f"`{spelling}`"))
+
+    def test_manual_gate_rows_are_only_the_rows_the_wired_table_shows(self) -> None:
+        """A cited row the rendered wired-gates table does not show is rejected."""
+        tracked = set(fixture_sources()) | {"scripts/tool.py"}
+
+        def validate(document: str) -> None:
+            owned.validate_config(
+                load_config(config_text() + manual_gate_row()),
+                fixture_metadata(),
+                tracked,
+                gate_sources(document).__getitem__,
+            )
+
+        document = manual_gates_doc(("q_gate", Q_GATE))
+        header = "| Test | Crate | Manual command | Prerequisite | Owning phase |"
+        separator = "|---|---|---|---|---|"
+        row = f"| `q_gate` | `q` | {Q_GATE} | none | test |"
+        table = f"{header}\n{separator}\n{row}"
+        self.assertIn(table, document)
+        validate(document)
+        placements = {
+            "an HTML comment": document.replace(row, f"<!--\n{row}\n-->"),
+            "a fenced block": document.replace(row, f"```\n{row}\n```"),
+            "prose after the table": document.replace(
+                row, f"\nThe table ends above.\n\n{row}"
+            ),
+            "a separate ### table": document.replace(
+                row, f"\n### Retired gates\n\n{header}\n{separator}\n{row}"
+            ),
+            "a second table": document.replace(
+                row, f"\n{header}\n{separator}\n{row}"
+            ),
+            "a commented-out whole table": document.replace(
+                table, f"<!--\n{table}\n-->"
+            ),
+        }
+        for placement, hidden in placements.items():
+            with self.subTest(placement=placement):
+                with self.assertRaisesRegex(
+                    ValueError, "lies outside the wired-gates table"
+                ):
+                    validate(hidden)
+
+    def test_repository_manual_gate_rows_cite_live_wired_entries(self) -> None:
+        """Manual-gate config stays valid and direct changes retain routing."""
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        self.assertTrue(config.manual_gate_targets)
+        owned.validate_manual_gate_entries(
+            config.manual_gate_targets,
+            (root / owned.MANUAL_GATES_PATH).read_text(),
+        )
+
+        path = "crates/chelis-python/tests/manual_reef_context.rs"
+        workspace = metadata(
+            package(
+                "chelis-python",
+                [("manual_reef_context", path, [])],
+            ),
+            package(
+                "chelis-cli",
+                [("shoals_oracle", "crates/chelis-cli/tests/shoals_oracle.rs", [])],
+            ),
+        )
+        minimal = replace(
+            config,
+            standing_targets=(),
+            manual_only_targets={},
+            target_exclusions={},
+            test_exclusions={},
+            required_package_rules=(),
+            path_rules=(),
+        )
+        plan = owned.make_plan(
+            mode="pull_request",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", path)],
+            base_metadata=workspace,
+            candidate_metadata=workspace,
+            config=minimal,
+            tracked_paths={path, owned.MANUAL_GATES_PATH},
+            source_reader=lambda path: (root / path).read_text(),
+        )
+        changed_path = next(
+            row for row in plan["path_dispositions"] if row["path"] == path
+        )
+        self.assertEqual(changed_path.get("execution_mode"), "manual-gate")
+
+    def test_repository_manifest_has_exact_selected_inventory_and_owners(self) -> None:
+        config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        self.assertTrue({
+            owned.Identity("chelis-types", "expand_insert_dispatch_family"),
+            owned.Identity("chelis-types", "issue_1294_standard_lowerings"),
+        } <= set(config.standing_targets))
+        self.assertEqual(len(config.target_exclusions), 5)
+        self.assertEqual(len(config.test_exclusions), 6)
+        self.assertEqual(
+            set(config.manual_only_targets),
+            {
+                owned.Identity("chelis-backend-hip", "device_entry_execution"),
+                owned.Identity(
+                    "chelis-cli", "issue_1417_stdlib_dtype_family_bounds"
+                ),
+            },
+        )
+        device_entry_owner = config.manual_only_targets[
+            owned.Identity("chelis-backend-hip", "device_entry_execution")
+        ]
+        self.assertEqual(
+            (
+                device_entry_owner.workflow,
+                device_entry_owner.job,
+                device_entry_owner.tracking_issue,
+            ),
+            ("ci.yml", "change-owned-shard", "chelis#1863"),
+        )
+        manual_owner = config.manual_only_targets[
+            owned.Identity("chelis-cli", "issue_1417_stdlib_dtype_family_bounds")
+        ]
+        self.assertEqual(
+            (manual_owner.workflow, manual_owner.job, manual_owner.tracking_issue),
+            ("ci.yml", "change-owned-shard", "chelis#1824"),
+        )
+        hip_manual_owner = config.target_exclusions[
+            owned.Identity("chelis-backend-hip", "logical_comparison_where_gpu")
+        ]
+        self.assertEqual(
+            (
+                hip_manual_owner.workflow,
+                hip_manual_owner.job,
+                hip_manual_owner.tracking_issue,
+            ),
+            (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "chelis#1284",
+            ),
+        )
+        metal_manual_owner = config.target_exclusions[
+            owned.Identity("chelis-backend-metal", "gpu_correctness")
+        ]
+        self.assertEqual(
+            (
+                metal_manual_owner.workflow,
+                metal_manual_owner.job,
+                metal_manual_owner.cadence,
+                metal_manual_owner.tracking_issue,
+            ),
+            (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "manual-required on the exact reviewed candidate",
+                "chelis#893",
+            ),
+        )
+        self.assertEqual(
+            manual_owner.cadence,
+            "pull_request and exact-candidate workflow_dispatch when directly modified",
+        )
+        for owner in (
+            *(
+                owner
+                for owner in config.target_exclusions.values()
+                if owner.tracking_issue == "chelis#1824"
+            ),
+            *config.test_exclusions.values(),
+        ):
+            self.assertEqual(owner.workflow, "heavy-e2e.yml")
+            self.assertEqual(owner.job, "full-workspace")
+            self.assertEqual(owner.cadence, "daily 03:17 UTC and workflow_dispatch")
+        self.assertEqual(
+            sum(
+                owner.tracking_issue == "chelis#1824"
+                for owner in (
+                    *config.target_exclusions.values(),
+                    *config.test_exclusions.values(),
+                )
+            ),
+            8,
+        )
+        recursive = owned.TestIdentity(
+            "chelis-cli",
+            "issue_1293_redteam_round4",
+            "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c",
+        )
+        self.assertEqual(
+            config.test_exclusions[recursive].tracking_issue,
+            "chelis#1293",
+        )
+        broad_unsupported = {
+            "examples/",
+            "tests/",
+            "scripts/",
+            ".github/",
+            ".config/",
+            "grammars/",
+            "editors/",
+            "nix/",
+            "devenv/",
+            "benchmarks/",
+        }
+        self.assertFalse(
+            broad_unsupported & {rule.prefix for rule in config.path_rules}
+        )
+        self.assertEqual(
+            {
+                rule.prefix: rule.packages
+                for rule in config.required_package_rules
+            },
+            {
+                "Cargo.lock": ("chelis-runtime-bundle",),
+                "crates/chelis-abi/": ("chelis-runtime-bundle",),
+                "crates/chelis-deep/src/dtype_bounds.rs": ("chelis-types",),
+                "crates/chelis-deep/src/role.rs": ("chelis-types",),
+                "crates/chelis-deep/src/stamp_to_typed.rs": (
+                    "chelis-types",
+                ),
+                "crates/chelis-runtime/": ("chelis-runtime-bundle",),
+                "crates/chelis-surf/src/ast.rs": ("chelis-types",),
+                "crates/chelis-surf/src/desugar.rs": ("chelis-types",),
+                "crates/chelis-surf/src/dtype_name.rs": ("chelis-types",),
+                "crates/chelis-surf/src/format.rs": ("chelis-types",),
+                "crates/chelis-surf/src/parser.rs": ("chelis-types",),
+                "crates/chelis-surf/src/resugar.rs": ("chelis-types",),
+                "crates/chelis-types/src/deep_type.rs": ("chelis-types",),
+                "crates/chelis-types/src/infer/": ("chelis-types",),
+                "crates/chelis-types/src/session.rs": ("chelis-types",),
+                "crates/chelis-unord/": ("chelis-runtime-bundle",),
+                "crates/chelis-vocab/": ("chelis-runtime-bundle",),
+            },
+        )
+        root = Path(__file__).resolve().parents[1]
+        heavy = (root / ".github/workflows/heavy-e2e.yml").read_text()
+        self.assertIn("\n  full-workspace:\n", heavy)
+        self.assertIn('cron: "17 3 * * *"', heavy)
+        heavy_rule = next(
+            rule
+            for rule in config.path_rules
+            if rule.prefix == ".github/workflows/heavy-e2e.yml"
+        )
+        self.assertEqual(heavy_rule.disposition, "owner")
+        self.assertIsNotNone(heavy_rule.owner)
+        self.assertEqual(
+            (heavy_rule.owner.workflow, heavy_rule.owner.job),
+            ("ci.yml", "script-unit"),
+        )
+        for rule in config.path_rules:
+            if rule.owner is not None:
+                workflow = (root / ".github/workflows" / rule.owner.workflow).read_text()
+                self.assertIn(f"\n  {rule.owner.job}:\n", workflow)
+        by_path = {rule.prefix: rule for rule in config.path_rules}
+        dual_consumer_examples = {
+            "examples/kinded_nominal_dimensions.ch": (
+                "parity_kinded_nominal_dimensions"
+            ),
+            "examples/unicode_string_foundation.ch": (
+                "parity_unicode_string_foundation"
+            ),
+        }
+        for path, cli_test in dual_consumer_examples.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(
+                    rule.packages,
+                    ("chelis-cli", "chelis-e2e"),
+                )
+                self.assertIn(
+                    cli_test,
+                    owned.test_functions(
+                        (root / "crates/chelis-cli/tests/parity.rs").read_text()
+                    ),
+                )
+                self.assertIn(
+                    "spec_all_executable_examples_parse_and_check",
+                    owned.test_functions(
+                        (root / "crates/chelis-e2e/tests/spec_suite.rs").read_text()
+                    ),
+                )
+                neighbor = path.removesuffix(".ch") + "_extra.ch"
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in config.path_rules),
+                    f"{neighbor} inherited authority from an exact example rule",
+                )
+        nested_tuple_projection = by_path[
+            "examples/nested_tuple_projection.ch"
+        ]
+        self.assertEqual(nested_tuple_projection.disposition, "packages")
+        self.assertEqual(
+            nested_tuple_projection.packages,
+            ("chelis-cli", "chelis-e2e"),
+        )
+        self.assertFalse(
+            nested_tuple_projection.matches(
+                "examples/nested_tuple_projection_extra.ch"
+            )
+        )
+        for source, test in (
+            (
+                "crates/chelis-cli/tests/parity.rs",
+                "parity_nested_tuple_projection",
+            ),
+            (
+                "crates/chelis-e2e/tests/spec_suite.rs",
+                "spec_all_executable_examples_parse_and_check",
+            ),
+        ):
+            with self.subTest(source=source, test=test):
+                self.assertIn(
+                    test,
+                    owned.test_functions((root / source).read_text()),
+                )
+        runtime_extent_oracle_tests = by_path["scripts/test_runtime_extent_oracle.py"]
+        self.assertEqual(
+            (
+                runtime_extent_oracle_tests.owner.workflow,
+                runtime_extent_oracle_tests.owner.job,
+                runtime_extent_oracle_tests.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "chelis#1277"),
+        )
+        wire_structural_tests = by_path[
+            "scripts/test_capacity_census_wire_structural.py"
+        ]
+        self.assertEqual(wire_structural_tests.disposition, "owner")
+        self.assertEqual(
+            (
+                wire_structural_tests.owner.workflow,
+                wire_structural_tests.owner.job,
+                wire_structural_tests.owner.cadence,
+                wire_structural_tests.owner.tracking_issue,
+            ),
+            (
+                "heavy-e2e.yml",
+                "runtime-extent-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#729",
+            ),
+        )
+        wire_census = by_path["spec/design/capacity_census_wire.json"]
+        self.assertEqual(wire_census.disposition, "packages")
+        self.assertEqual(wire_census.packages, ("chelis-compiler-api",))
+        census_owner_paths = (
+            "scripts/capacity_census_wire_calls.py",
+            "scripts/test_capacity_census_wire_calls.py",
+        )
+        census_owner_rules = [by_path[path] for path in census_owner_paths]
+        for path, rule in zip(census_owner_paths, census_owner_rules, strict=True):
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "heavy-e2e.yml",
+                        "dtype-phase3-oracle",
+                        "daily and workflow_dispatch",
+                        "chelis#2048",
+                    ),
+                )
+        script_runner = by_path["scripts/ci_script_tests.py"]
+        self.assertEqual(
+            (
+                script_runner.owner.workflow,
+                script_runner.owner.job,
+                script_runner.owner.cadence,
+                script_runner.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "pull_request and push", "chelis#1824"),
+        )
+        for neighbor in (
+            "scripts/capacity_census_wire_calls_extra.py",
+            "scripts/test_capacity_census_wire_calls_extra.py",
+            "scripts/ci_script_tests_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(
+                        rule.matches(neighbor)
+                        for rule in (*census_owner_rules, script_runner)
+                    ),
+                    f"{neighbor} inherited an exact CI owner",
+                )
+        timing_baseline = by_path["scripts/test_timing_baseline.json"]
+        self.assertEqual(timing_baseline.prefix, "scripts/test_timing_baseline.json")
+        self.assertEqual(timing_baseline.disposition, "owner")
+        self.assertEqual(
+            (
+                timing_baseline.owner.workflow,
+                timing_baseline.owner.job,
+                timing_baseline.owner.cadence,
+                timing_baseline.owner.tracking_issue,
+            ),
+            ("ci.yml", "script-unit", "pull_request and push", "chelis#1824"),
+        )
+        self.assertFalse(
+            timing_baseline.matches("scripts/test_timing_baseline_extra.json"),
+            "a neighboring timing artifact inherited the exact baseline owner",
+        )
+        self.assertEqual(by_path["scripts/test_nextest_profile_partition.py"].owner.job,
+                         "full-workspace")
+        deep_spec = by_path["spec/03-deep-syntax.md"]
+        self.assertEqual(deep_spec.disposition, "packages")
+        self.assertEqual(
+            deep_spec.packages,
+            ("chelis-deep", "chelis-surf", "chelis-types", "chelis-compiler-api"),
+        )
+        python_bindings = by_path["bindings/python/tests/"]
+        self.assertEqual(python_bindings.disposition, "packages")
+        self.assertEqual(python_bindings.packages, ("chelis-python",))
+        for path in (
+            "examples/checked_reshape.ch",
+            "examples/checked_sparse_axes.ch",
+            "examples/count_bool_axes.ch",
+            "examples/count_bool_device_entry.ch",
+            "examples/dict_foundation.ch",
+            "examples/hello_tensor.ch",
+            "examples/induction_bond.ch",
+            "examples/integer_functions.ch",
+            "examples/iter_foundation.ch",
+            "examples/list_foundation.ch",
+            "examples/recursive_cast_targets.ch",
+            "examples/recursive_generic.ch",
+            "examples/scalar_string_foundation.ch",
+            "examples/tensor_structural_ops.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-e2e",))
+        for path in (
+            "examples/illustrative/moe_gather_duplicate_indices.ch",
+            "examples/illustrative/phase3g_text_pipeline/src/main.ch",
+            "examples/illustrative/process_run_chelis_version.ch",
+            "examples/illustrative/runtime_shape_semantics.ch",
+            "examples/illustrative/scatter_replace_last_write_wins.ch",
+            "examples/illustrative/sparse_summary_def_wrapper.ch",
+            "examples/nautilus_quantile_contract/fixtures/nautilus/src/stats.ch",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, ("chelis-cli",))
+        explicit_binder_example_owners = {
+            "examples/checked_runtime_extents.ch": ("chelis-cli",),
+            "examples/dropout_staged_claim.ch": ("chelis-cli",),
+            "examples/illustrative/mlp.ch": ("chelis-surf",),
+            "examples/rank_poly_borrow.ch": ("chelis-cli",),
+        }
+        explicit_binder_example_rules = []
+        for path, packages in explicit_binder_example_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, packages)
+                explicit_binder_example_rules.append(rule)
+        for neighbor in (
+            "examples/checked_runtime_extents_extra.ch",
+            "examples/dropout_staged_claim_extra.ch",
+            "examples/illustrative/mlp_extra.ch",
+            "examples/rank_poly_borrow_extra.ch",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in explicit_binder_example_rules),
+                    f"{neighbor} inherited authority from an exact example rule",
+                )
+        for path in (
+            "scripts/builtin_atom_semantic_contracts.py",
+            "scripts/capacity_census_wire_materialization.py",
+            "scripts/capacity_census_wire_operations.py",
+            "scripts/front_end_performance_fixtures.py",
+            "scripts/integer_dtype_spelling_oracle.py",
+            "scripts/nautilus_local_gate.py",
+            "scripts/runtime_extent_cache_compatibility.py",
+            "scripts/test_compiled_value_ownership_oracle.py",
+            "scripts/test_faithful_observation_phase2_oracle.py",
+            "scripts/test_front_end_performance_fixtures.py",
+            "scripts/test_integer_dtype_spelling_oracle.py",
+            "scripts/test_runtime_extent_cache_compatibility.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+        exact_job_owners = {
+            "editors/vscode/syntaxes/chelis.tmLanguage.json": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "scripts/diagnostic_kind_oracle.py": (
+                "ci.yml",
+                "diagnostic-kind-oracle",
+            ),
+            "scripts/compiled_value_ownership_oracle.py": (
+                "heavy-e2e.yml",
+                "compiled-value-ownership-phase0-oracle",
+            ),
+            "scripts/faithful_observation_phase2_oracle.py": (
+                "heavy-e2e.yml",
+                "faithful-observation-phase2-oracle",
+            ),
+            "spec/registry/builtin_semantic_identities.md": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "tests/conformance/hull/build_corpus.py": (
+                "ci.yml",
+                "script-unit",
+            ),
+            "tests/conformance/hull/known_conservative.json": (
+                "conformance.yml",
+                "conformance",
+            ),
+            "tests/conformance/hull/programs/": (
+                "conformance.yml",
+                "conformance",
+            ),
+        }
+        for path, expected in exact_job_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    expected,
+                )
+        diagnostic_kind_oracle = by_path["scripts/diagnostic_kind_oracle.py"]
+        self.assertFalse(
+            diagnostic_kind_oracle.matches(
+                "scripts/diagnostic_kind_oracle_extra.py"
+            ),
+            "a neighboring script inherited diagnostic-kind oracle ownership",
+        )
+        builtin_registry_rule = by_path[
+            "spec/registry/builtin_semantic_identities.md"
+        ]
+        self.assertFalse(
+            builtin_registry_rule.matches(
+                "spec/registry/builtin_semantic_identities_extra.md"
+            ),
+            "a neighboring registry inherited the exact script-unit owner",
+        )
+        package_owners = {
+            "spec/05-risc-primitives.md": ("chelis-cli",),
+            "tests/support/c_preprocessor.rs": ("chelis-cli",),
+            "tests/support/capacity_census_stdlib.rs": ("chelis-cli",),
+            "tests/support/capacity_census_stdlib_tests.rs": ("chelis-cli",),
+            "tests/support/helper_summary_fatal.ch": (
+                "chelis-cli",
+                "chelis-compiler-api",
+                "chelis-ir",
+            ),
+        }
+        for path, expected in package_owners.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "packages")
+                self.assertEqual(rule.packages, expected)
+        c_preprocessor = by_path["tests/support/c_preprocessor.rs"]
+        self.assertFalse(
+            c_preprocessor.matches("tests/support/c_preprocessor_extra.rs"),
+            "a neighboring support file inherited capacity-census ownership",
+        )
+        remediation = by_path["spec/design/remediation_roadmap.md"]
+        self.assertEqual(remediation.disposition, "owner")
+        self.assertEqual(
+            (remediation.owner.workflow, remediation.owner.job),
+            ("ci.yml", "docs"),
+        )
+        for path in (
+            ".config/ci-change-owned-durations.json",
+            ".github/workflows/conformance.yml",
+            ".github/workflows/pr-base-retarget.yml",
+            ".github/workflows/pr-candidate-receipt.yml",
+            "scripts/ci_candidate_lifecycle.py",
+            "scripts/ci_candidate_identity.py",
+            "scripts/ci_candidate_receipt.py",
+            "scripts/ci_contract_paths.py",
+            "scripts/ci_rebase_reuse.py",
+            "scripts/ci_retarget_validation.py",
+            "scripts/test_ci_candidate_lifecycle.py",
+            "scripts/test_ci_candidate_identity.py",
+            "scripts/test_ci_candidate_receipt.py",
+            "scripts/test_ci_contract_paths.py",
+            "scripts/test_changelog.py",
+            "scripts/test_ci_rebase_reuse.py",
+            "scripts/test_ci_retarget_validation.py",
+            "scripts/gate.py",
+        ):
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+
+    def test_grad_selector_identity_oracle_has_exact_positive_ownership(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        self.assertTrue(
+            {
+                owned.Identity("chelis-types", "issue_1955_grad_selector_checker"),
+                owned.Identity("chelis-surf", "issue_1955_grad_selector_identity"),
+                owned.Identity(
+                    "chelis-compiler-api", "issue_1955_grad_selector_pipeline"
+                ),
+                owned.Identity("chelis-cli", "issue_1955_grad_selector_identity"),
+                owned.Identity("chelis-cli", "parity"),
+            }
+            <= set(config.standing_targets)
+        )
+
+        expected_owners = {
+            "scripts/grad_selector_identity_oracle.py": (
+                "ci.yml",
+                "ci-fast",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+            "scripts/test_grad_selector_identity_oracle.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+            "examples/illustrative/grad_selector_provenance.ch": (
+                "ci.yml",
+                "ci-fast",
+                "pull_request and push",
+                "chelis#1955",
+            ),
+        }
+        for path, expected in expected_owners.items():
+            with self.subTest(path=path):
+                classification, package_matches, rules = (
+                    owned.static_path_classification(path, (), config)
+                )
+                self.assertEqual(classification, "rule")
+                self.assertEqual(package_matches, [])
+                self.assertEqual(len(rules), 1)
+                rule = rules[0]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    expected,
+                )
+
+    def test_stale_nightly_fixture_paths_have_exact_automated_owners(self) -> None:
+        config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        expected = {
+            "scripts/runtime_representation_phase1.py": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "scripts/test_runtime_representation_phase1.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#893",
+            ),
+            "scripts/runtime_representation_phase2.py": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "scripts/test_runtime_representation_phase2.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#893",
+            ),
+            "scripts/test_unrepresentable_domain_oracle.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#908",
+            ),
+            "scripts/unrepresentable_domain_oracle.py": (
+                "heavy-e2e.yml",
+                "integration-support",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#908",
+            ),
+            "spec/design/runtime_representation_phase1_tests.json": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+            "spec/design/runtime_representation_phase2_tests.json": (
+                "heavy-e2e.yml",
+                "runtime-representation-phase0-oracle",
+                "daily 03:17 UTC and workflow_dispatch",
+                "chelis#893",
+            ),
+        }
+        by_path = {rule.prefix: rule for rule in config.path_rules}
+        exact_rules = []
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = by_path[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+                exact_rules.append(rule)
+
+        self.assertNotIn("scripts/", by_path)
+        self.assertNotIn("spec/design/", by_path)
+        for neighbor in (
+            "scripts/runtime_representation_phase1_extra.py",
+            "scripts/test_runtime_representation_phase1_extra.py",
+            "scripts/runtime_representation_phase2_extra.py",
+            "scripts/test_runtime_representation_phase2_extra.py",
+            "scripts/test_unrepresentable_domain_oracle_extra.py",
+            "scripts/unrepresentable_domain_oracle_extra.py",
+            "spec/design/runtime_representation_phase1_tests_extra.json",
+            "spec/design/runtime_representation_phase2_tests_extra.json",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(
+                    any(rule.matches(neighbor) for rule in exact_rules),
+                    f"{neighbor} inherited authority from an exact fixture rule",
+                )
+
+    def test_canonical_release_shared_pins_have_required_gate_owners(self) -> None:
+        from scripts import bump_compiler_pins as bump
+
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        paths = [*bump.PINNED_REAL_TOML_FILES,
+                 *(path / "reef.lock" for path in bump.PINNED_REAL_LOCK_DIRS)]
+        example_paths = {str(path.relative_to(root)) for path in paths
+                         if path.is_relative_to(root / "examples")}
+        self.assertEqual(len(example_paths), 5)
+        for path in sorted(example_paths):
+            with self.subTest(path=path):
+                rules = [rule for rule in config.path_rules if rule.matches(path)]
+                self.assertEqual(len(rules), 1, path)
+                rule = rules[0]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual((rule.owner.workflow, rule.owner.job), ("ci.yml", "ci-fast"))
+        self.assertIn(owned.Identity("chelis-cli", "compiler_pin_tripwire"), config.standing_targets)
+        hull = str(bump.HULL_MANIFEST.relative_to(root))
+        rules = [rule for rule in config.path_rules if rule.matches(hull)]
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].prefix, hull)
+        self.assertEqual((rules[0].owner.workflow, rules[0].owner.job),
+                         ("conformance.yml", "conformance"))
+        # Neighboring unreviewed sources must not inherit release-pin authority.
+        for path in ("examples/illustrative/phase3g_text_pipeline/new.ch",
+                     "examples/nautilus_quantile_contract/new.ch",
+                     "tests/conformance/hull/new.json"):
+            self.assertFalse(any(rule.matches(path) for rule in config.path_rules), path)
+            self.assertFalse(owned.is_docs_only([path]))
+
+    def test_reviewed_release_inputs_do_not_admit_unknown_siblings(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        self.assertEqual(
+            owned.classify_changed_paths(
+                [
+                    ".github/workflows/release.yml",
+                    ".github/scripts/verify_release_smt.py",
+                    ".github/workflows/new-release-lane.yml",
+                    ".github/scripts/verify_release_future.py",
+                ],
+                config=config,
+                packages=(),
+            ),
+            [
+                (".github/scripts/verify_release_future.py", "unclassified"),
+                (".github/workflows/new-release-lane.yml", "unclassified"),
+            ],
+        )
+
+    def test_configuration_closure_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/check_configuration_closure.py",
+            "scripts/test_check_configuration_closure.py",
+        }
+        rules = [
+            rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        ]
+        self.assertEqual({rule.prefix for rule in rules}, expected)
+        for rule in rules:
+            with self.subTest(path=rule.prefix):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (rule.owner.workflow, rule.owner.job),
+                    ("ci.yml", "script-unit"),
+                )
+        for neighbor in (
+            "scripts/check_configuration_closure_extra.py",
+            "scripts/test_check_configuration_closure_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules))
+
+    def test_ecosystem_drift_helpers_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/drift_prepare_dependencies.py",
+            "scripts/test_drift_prepare_dependencies.py",
+            "scripts/test_ecosystem_drift_workflow.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    ("ci.yml", "script-unit", "pull_request and push", "chelis#2268"),
+                )
+        for neighbor in (
+            "scripts/drift_prepare_dependencies_extra.py",
+            "scripts/test_drift_prepare_dependencies_extra.py",
+            "scripts/test_ecosystem_drift_workflow_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_wire_invocation_owner_scripts_have_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/capacity_census_wire_invocation_owners.py": (
+                "heavy-e2e.yml",
+                "dtype-phase3-oracle",
+                "daily and workflow_dispatch",
+                "chelis#2048",
+            ),
+            "scripts/test_capacity_census_wire_invocation_owners.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#2048",
+            ),
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), set(expected))
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = rules[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+        for neighbor in (
+            "scripts/capacity_census_wire_invocation_owners_extra.py",
+            "scripts/test_capacity_census_wire_invocation_owners_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_cache_publication_census_scripts_have_exact_automated_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/capacity_census_cache_publication.py": (
+                "heavy-e2e.yml",
+                "dtype-phase3-oracle",
+                "daily and workflow_dispatch",
+                "chelis#1730",
+            ),
+            "scripts/test_capacity_census_cache_publication.py": (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1730",
+            ),
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), set(expected))
+        for path, owner_identity in expected.items():
+            with self.subTest(path=path):
+                rule = rules[path]
+                self.assertEqual(rule.prefix, path)
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    owner_identity,
+                )
+        for neighbor in (
+            "scripts/capacity_census_cache_publication_extra.py",
+            "scripts/test_capacity_census_cache_publication_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_pre_phase4c_composite_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/dtype_pre_phase4c_oracle.py",
+            "scripts/test_dtype_pre_phase4c_oracle.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "ci.yml",
+                        "script-unit",
+                        "pull_request and push",
+                        "chelis#1296",
+                    ),
+                )
+        for neighbor in (
+            "scripts/dtype_pre_phase4c_oracle_extra.py",
+            "scripts/test_dtype_pre_phase4c_oracle_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_rejection_issue_manifest_has_an_exact_script_unit_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        path = "spec/design/loud_unsupported_issue_manifest.json"
+        rules = [rule for rule in config.path_rules if rule.matches(path)]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule.prefix, path)
+        self.assertEqual(rule.disposition, "owner")
+        self.assertIsNotNone(rule.owner)
+        self.assertEqual(
+            (
+                rule.owner.workflow,
+                rule.owner.job,
+                rule.owner.cadence,
+                rule.owner.tracking_issue,
+            ),
+            (
+                "ci.yml",
+                "script-unit",
+                "pull_request and push",
+                "chelis#1870",
+            ),
+        )
+        self.assertFalse(
+            rule.matches("spec/design/loud_unsupported_issue_manifest_extra.json")
+        )
+
+    def test_path_rules_cannot_override_existing_docs_only_policy(self) -> None:
+        for path in ("README.md", "spec/05-risc-primitives.md", "new-tools/new.py"):
+            text = config_text() + (
+                f'\n[[path_rule]]\nprefix = "{path}"\ndisposition = "docs_only"\n'
+            )
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "disposition"):
+                load_config(text)
+
+
+class DurationBaselineTests(unittest.TestCase):
+    def _write_expansion_sample(self, root: Path) -> tuple[Path, Path]:
+        identities = [owned.Identity("p", "alpha"), owned.Identity("p", "beta")]
+        plan = {
+            "version": owned.PLAN_VERSION,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": "e" * 40,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p"],
+            "eligible_targets": [identity.canonical for identity in identities],
+            "target_features": {identity.canonical: [] for identity in identities},
+            "change_owned": [],
+            "package_expansion": [],
+            "standing_targets": [],
+            "standing_coverage_reuse": [],
+            "manual_only_targets": [],
+            "manual_gate_targets": [],
+            "target_exclusions": [],
+            "test_exclusions": [],
+            **shard_fields([], []),
+        }
+        set_package_expansion(plan, identities)
+        owned.attach_plan_digest(plan)
+        plan_path = root / "plan.json"
+        plan_path.write_bytes(owned.canonical_json(plan))
+        receipts_root = root / "receipts"
+        for shard in owned.SHARDS:
+            selected = owned.execution_shards(plan, "package-expansion")[str(shard)]
+            output = receipts_root / f"shard-{shard}"
+            output.mkdir(parents=True)
+            tests = [f"{canonical}::case" for canonical in selected]
+            timings = {
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:04Z",
+                "elapsed_seconds": 4.0 if selected else 0.0,
+                "workspace_products": None,
+                "targets": {
+                    canonical: {
+                        "command_group": [canonical],
+                        "list_started_at": "2026-09-16T00:00:00Z",
+                        "list_finished_at": "2026-09-16T00:00:01Z",
+                        "list_seconds": 1.0,
+                        "run_started_at": "2026-09-16T00:00:01Z",
+                        "run_finished_at": "2026-09-16T00:00:04Z",
+                        "run_seconds": 3.0,
+                    }
+                    for canonical in selected
+                },
+            }
+            junit = "<testsuites>" + "".join(
+                f'<testsuite><testcase classname="{canonical}" name="case" time="2.5"/></testsuite>'
+                for canonical in selected
+            ) + "</testsuites>"
+            sidecars = {
+                "commands.json": owned.canonical_json([]),
+                "timings.json": owned.canonical_json(timings),
+                "test-list.json": owned.canonical_json({
+                    "selected_targets": selected,
+                    "selected_tests": tests,
+                    "executed_targets": selected,
+                    "executed_tests": tests,
+                    "not_applicable_targets": [],
+                    "manual_gate_tests": [],
+                }),
+                "junit.xml": junit.encode(),
+            }
+            for name, payload in sidecars.items():
+                (output / name).write_bytes(payload)
+            receipt = {
+                "version": owned.RECEIPT_VERSION,
+                "lane": "package-expansion",
+                "shard": shard,
+                "plan_digest": plan["plan_digest"],
+                "selected_targets": selected,
+                "executed_targets": selected,
+                "selected_tests": tests,
+                "executed_tests": tests,
+                "manual_gate_tests": [],
+                "commands_file": "commands.json",
+                "timings_file": "timings.json",
+                "test_list_file": "test-list.json",
+                "junit_file": "junit.xml",
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:04Z",
+                "elapsed_seconds": timings["elapsed_seconds"],
+                "soft_budget_seconds": owned.SOFT_BUDGET_SECONDS,
+                "soft_budget_exceeded": False,
+                "sidecars": {name: owned.sha256_bytes(payload) for name, payload in sidecars.items()},
+                "success": True,
+                "failures": [],
+            }
+            owned.attach_receipt_digest(receipt)
+            (output / "receipt.json").write_bytes(owned.canonical_json(receipt))
+        return plan_path, receipts_root
+
+    def test_builder_uses_complete_expansion_junit_and_keeps_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = self._write_expansion_sample(Path(tmp))
+            seed = owned.DURATION_BASELINE_PATH
+            result = owned.build_duration_baseline([sample], seed=seed)
+            self.assertEqual(result["targets"]["p::alpha"]["milliseconds"], 4000)
+            self.assertEqual(result["targets"]["p::beta"]["milliseconds"], 4000)
+            self.assertIn("chelis-backend-c::exec_compile", result["targets"])
+            self.assertEqual(
+                len(result["sources"]),
+                len(owned._strict_json_object(seed)["sources"]) + 1,
+            )
+
+    def test_builder_rejects_incomplete_expansion_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, receipts = sample = self._write_expansion_sample(Path(tmp))
+            receipt_path = next(receipts.rglob("receipt.json"))
+            receipt = json.loads(receipt_path.read_text())
+            receipt["success"] = False
+            receipt["failures"] = ["test failed"]
+            owned.attach_receipt_digest(receipt)
+            receipt_path.write_bytes(owned.canonical_json(receipt))
+            with self.assertRaisesRegex(ValueError, "successful.*expansion|expansion.*successful"):
+                owned.build_duration_baseline([sample])
+
+    def test_grouped_expansion_time_is_apportioned_by_junit_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            junit = Path(tmp) / "junit.xml"
+            junit.write_text(
+                '<testsuites><testcase classname="p::alpha" name="case" time="9"/>'
+                '<testcase classname="p::beta" name="case" time="1"/></testsuites>'
+            )
+            group = ["p::alpha", "p::beta"]
+            timing = {
+                "command_group": group,
+                "list_started_at": "now",
+                "list_finished_at": "now",
+                "list_seconds": 1.0,
+                "run_started_at": "now",
+                "run_finished_at": "now",
+                "run_seconds": 19.0,
+            }
+            receipt = {
+                "success": True,
+                "failures": [],
+                "selected_targets": group,
+                "executed_targets": group,
+                "selected_tests": [f"{target}::case" for target in group],
+                "executed_tests": [f"{target}::case" for target in group],
+                "manual_gate_tests": [],
+            }
+            timings = {"targets": {target: dict(timing) for target in group}}
+            result = owned._expansion_duration_observations(receipt, timings, junit)
+            self.assertEqual(result[owned.Identity("p", "alpha")], 18_000)
+            self.assertEqual(result[owned.Identity("p", "beta")], 2_000)
+            timings["targets"]["p::beta"]["run_seconds"] = 20.0
+            with self.assertRaisesRegex(ValueError, "grouped timing rows disagree"):
+                owned._expansion_duration_observations(receipt, timings, junit)
+            timings["targets"]["p::beta"]["run_seconds"] = 19.0
+            receipt["executed_tests"] = ["p::alpha::case"]
+            with self.assertRaisesRegex(ValueError, "incomplete coverage"):
+                owned._expansion_duration_observations(receipt, timings, junit)
+
+    def _write_sample(
+        self,
+        root: Path,
+        *,
+        candidate_sha: str,
+        list_seconds: float,
+        run_seconds: float,
+        receipt_success: bool,
+        plan_version: int = owned.PLAN_VERSION,
+    ) -> tuple[Path, Path]:
+        identity = owned.Identity("p", "smoke")
+        plan = {
+            "version": plan_version,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": candidate_sha,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p"],
+            "eligible_targets": [identity.canonical],
+            "target_features": {identity.canonical: []},
+            "change_owned": [identity.canonical],
+            "package_expansion": [],
+            "standing_targets": [],
+            "standing_coverage_reuse": [],
+            "manual_only_targets": [],
+            "manual_gate_targets": [],
+            "target_exclusions": [],
+            "test_exclusions": [],
+            **shard_fields([identity], []),
+        }
+        owned.attach_plan_digest(plan)
+        plan_path = root / "plan.json"
+        plan_path.write_bytes(owned.canonical_json(plan))
+        receipts_root = root / "receipts"
+
+        for shard in owned.SHARDS:
+            selected = plan["shards"]["change_owned"][str(shard)]
+            output = receipts_root / f"shard-{shard}"
+            output.mkdir(parents=True)
+            tests = [f"{canonical}::fast_case" for canonical in selected]
+            timings = {
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:01Z",
+                "elapsed_seconds": list_seconds + run_seconds,
+                "workspace_products": None,
+                "targets": {
+                    canonical: {
+                        "command_group": [canonical],
+                        "list_started_at": "2026-09-16T00:00:00Z",
+                        "list_finished_at": "2026-09-16T00:00:00Z",
+                        "list_seconds": list_seconds,
+                        "run_started_at": "2026-09-16T00:00:00Z",
+                        "run_finished_at": "2026-09-16T00:00:01Z",
+                        "run_seconds": run_seconds,
+                    }
+                    for canonical in selected
+                },
+            }
+            sidecars = {
+                "commands.json": owned.canonical_json([]),
+                "timings.json": owned.canonical_json(timings),
+                "test-list.json": owned.canonical_json(
+                    {
+                        "selected_targets": selected,
+                        "selected_tests": tests,
+                        "executed_targets": selected,
+                        "executed_tests": tests,
+                    }
+                ),
+                "junit.xml": b"<testsuite/>\n",
+            }
+            for name, payload in sidecars.items():
+                (output / name).write_bytes(payload)
+            failed = bool(selected) and not receipt_success
+            receipt = {
+                "version": owned.RECEIPT_VERSION,
+                "lane": "change-owned",
+                "shard": shard,
+                "plan_digest": plan["plan_digest"],
+                "selected_targets": selected,
+                "executed_targets": selected,
+                "selected_tests": tests,
+                "executed_tests": tests,
+                "manual_gate_tests": [],
+                "commands_file": "commands.json",
+                "timings_file": "timings.json",
+                "test_list_file": "test-list.json",
+                "junit_file": "junit.xml",
+                "started_at": "2026-09-16T00:00:00Z",
+                "finished_at": "2026-09-16T00:00:01Z",
+                "elapsed_seconds": list_seconds + run_seconds,
+                "soft_budget_seconds": None,
+                "soft_budget_exceeded": False,
+                "sidecars": {
+                    name: owned.sha256_bytes(payload)
+                    for name, payload in sidecars.items()
+                },
+                "success": not failed,
+                "failures": ["test verdict failed"] if failed else [],
+            }
+            owned.attach_receipt_digest(receipt)
+            (output / "receipt.json").write_bytes(owned.canonical_json(receipt))
+        return plan_path, receipts_root
+
+    def test_builder_uses_max_completed_observation_independent_of_verdict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            first_sample = self._write_sample(
+                first,
+                candidate_sha="b" * 40,
+                list_seconds=1.0,
+                run_seconds=4.0,
+                receipt_success=False,
+            )
+            second_sample = self._write_sample(
+                second,
+                candidate_sha="c" * 40,
+                list_seconds=1.0,
+                run_seconds=6.0,
+                receipt_success=True,
+            )
+            result = owned.build_duration_baseline(
+                [first_sample, second_sample]
+            )
+            self.assertEqual(
+                result["targets"]["p::smoke"],
+                {"milliseconds": 7000, "samples": 2},
+            )
+            output = root / "baseline.json"
+            output.write_bytes(owned.canonical_json(result))
+            baseline = owned.load_duration_baseline(output)
+            self.assertEqual(
+                baseline.targets[owned.Identity("p", "smoke")],
+                7000,
+            )
+
+    def test_baseline_rejects_duplicate_keys_and_invalid_durations(self) -> None:
+        duplicate = (
+            '{"version":1,"version":1,"default_milliseconds":30000,'
+            '"sources":[],"targets":{}}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baseline.json"
+            path.write_text(duplicate)
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                owned.load_duration_baseline(path)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_milliseconds": 30000,
+                        "sources": [
+                            {
+                                "candidate_sha": "b" * 40,
+                                "plan_digest": "c" * 64,
+                            }
+                        ],
+                        "targets": {
+                            "p::smoke": {
+                                "milliseconds": 0,
+                                "samples": 1,
+                            }
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                owned.load_duration_baseline(path)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_milliseconds": 1,
+                        "sources": [
+                            {
+                                "candidate_sha": "b" * 40,
+                                "plan_digest": "c" * 64,
+                            }
+                        ],
+                        "targets": {
+                            "p::smoke": {
+                                "milliseconds": 1,
+                                "samples": 1,
+                            }
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "must be 30000"):
+                owned.load_duration_baseline(path)
+
+    def test_builder_rejects_nonfinite_authenticated_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = self._write_sample(
+                Path(tmp),
+                candidate_sha="b" * 40,
+                list_seconds=1.0,
+                run_seconds=float("nan"),
+                receipt_success=True,
+            )
+            with self.assertRaisesRegex(ValueError, "finite"):
+                owned.build_duration_baseline([sample])
+
+    def test_builder_rejects_a_plan_older_than_the_current_version(self) -> None:
+        """Receipts of the current version bind only a current plan."""
+        for version in (2, 3, owned.PLAN_VERSION - 1):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
+                sample = self._write_sample(
+                    Path(tmp),
+                    candidate_sha="b" * 40,
+                    list_seconds=1.0,
+                    run_seconds=1.0,
+                    receipt_success=True,
+                    plan_version=version,
+                )
+                with self.assertRaisesRegex(
+                    ValueError, f"unsupported duration sample plan version: {version}"
+                ):
+                    owned.build_duration_baseline([sample])
+
+
+class MetadataAndDiffTests(unittest.TestCase):
+    def test_every_feature_set_is_discovered_and_duplicate_names_are_package_qualified(self) -> None:
+        targets = owned.all_integration_targets(fixture_metadata())
+        self.assertEqual(
+            targets[owned.Identity("p", "default_gated")].required_features,
+            ("enabled",),
+        )
+        self.assertEqual(
+            targets[owned.Identity("p", "gated")].required_features,
+            ("extra",),
+        )
+        self.assertIn(owned.Identity("p", "smoke"), targets)
+        self.assertIn(owned.Identity("q", "smoke"), targets)
+        self.assertNotEqual(
+            targets[owned.Identity("p", "smoke")].src_path,
+            targets[owned.Identity("q", "smoke")].src_path,
+        )
+        self.assertEqual(
+            owned.TestIdentity.parse("p::smoke::nested::case").test,
+            "nested::case",
+        )
+
+    def test_rename_diff_is_parsed_as_delete_and_add(self) -> None:
+        raw = (
+            b"M\0crates/p/src/lib.rs\0"
+            b"R097\0crates/p/tests/old.rs\0crates/p/tests/new.rs\0"
+            b"D\0removed.txt\0"
+        )
+        records = owned.parse_name_status_z(raw)
+        self.assertEqual(
+            [(record.status, record.old_path, record.path) for record in records],
+            [
+                ("M", None, "crates/p/src/lib.rs"),
+                ("R097", "crates/p/tests/old.rs", "crates/p/tests/new.rs"),
+                ("D", None, "removed.txt"),
+            ],
+        )
+        self.assertEqual(
+            owned.diff_paths(records),
+            {"crates/p/src/lib.rs", "crates/p/tests/old.rs", "crates/p/tests/new.rs", "removed.txt"},
+        )
+
+    def test_rename_diff_accepts_git_similarity_scores_from_zero_through_one_hundred(
+        self,
+    ) -> None:
+        statuses = ("R0", "R00", "R000", "R7", "R07", "R007", "R97", "R097", "R100")
+        raw = b"".join(
+            f"{status}\0old-{status}\0new-{status}\0".encode()
+            for status in statuses
+        )
+        records = owned.parse_name_status_z(raw)
+        self.assertEqual([record.status for record in records], list(statuses))
+
+    def test_malformed_nul_diff_is_rejected(self) -> None:
+        for raw in (
+            b"M\0path",
+            b"R100\0old\0",
+            b"C100\0old\0copy\0",
+            b"R101\0old\0new\0",
+            b"R0000\0old\0new\0",
+            b"Rxx\0old\0new\0",
+            b"U\0path\0",
+            b"X\0path\0",
+            b"\0path\0",
+        ):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                owned.parse_name_status_z(raw)
+
+
+class PlanningTests(unittest.TestCase):
+    def plan(
+        self,
+        records: list[owned.ChangeRecord],
+        *,
+        base: dict | None = None,
+        candidate: dict | None = None,
+        config: owned.Config | None = None,
+        tracked: set[str] | None = None,
+        sources: dict[str, str] | None = None,
+    ) -> dict:
+        sources = sources or fixture_sources()
+        return owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=records,
+            base_metadata=base or fixture_metadata(),
+            candidate_metadata=candidate or fixture_metadata(),
+            config=config or load_config(),
+            tracked_paths=tracked or (set(sources) | {"scripts/tool.py"}),
+            source_reader=sources.__getitem__,
+        )
+
+    def test_removed_shared_path_retires_without_retaining_dead_routing(self) -> None:
+        path = "retired-tools/tool.py"
+        sources = fixture_sources()
+        tracked = set(sources) | {"scripts/tool.py"}
+        arguments = dict(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[
+                owned.ChangeRecord("D", path),
+                owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+            ],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=tracked,
+            base_tracked_paths=tracked | {path},
+            source_reader=sources.__getitem__,
+        )
+        plan = owned.make_plan(**arguments)
+        self.assertEqual(plan["path_dispositions"][0],
+                         {"path": path, "status": "D", "kind": "shared_path_deleted"})
+        self.assertEqual(plan["change_owned"], ["p::smoke"])
+        for overrides in (
+            {"tracked_paths": tracked | {path}},
+            {"base_tracked_paths": tracked},
+            {"records": [owned.ChangeRecord("A", path)]},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                ValueError, "unclassified changed path"
+            ):
+                owned.make_plan(**(arguments | overrides))
+
+    def test_direct_target_and_package_expansion_are_disjoint(self) -> None:
+        plan = self.plan(
+            [
+                owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                owned.ChangeRecord("M", "crates/p/src/lib.rs"),
+            ]
+        )
+        self.assertEqual(plan["change_owned"], ["p::smoke"])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(
+            plan["shards"]["change_owned"],
+            owned.shard_map([]),
+        )
+        self.assertIn("p::default_gated", plan["package_expansion"])
+        self.assertNotIn("p::smoke", plan["package_expansion"])
+        self.assertNotIn("p::heavy", plan["package_expansion"])
+        self.assertEqual(plan["selected_packages"], ["p"])
+        self.assertEqual(plan["config_digest"], owned.config_digest(load_config()))
+        owned.verify_plan_digest(plan)
+
+    def test_direct_feature_gated_target_is_owned_with_sealed_features(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")]
+        )
+
+        self.assertEqual(plan["change_owned"], ["p::gated"])
+        self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        disposition = plan["path_dispositions"][0]
+        self.assertEqual(
+            disposition["kind"],
+            "integration_target_directly_modified",
+        )
+        self.assertNotIn("required_features", disposition)
+        owned.verify_plan_digest(plan)
+
+    def test_direct_excluded_feature_gated_target_keeps_its_owner(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")],
+            config=load_config(config_text(target_exclusion=("p", "gated"))),
+        )
+
+        self.assertEqual(plan["change_owned"], [])
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["selected_packages"], [])
+        self.assertEqual(
+            plan["path_dispositions"][0]["kind"],
+            "integration_target_excluded",
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["owner"],
+            OWNER,
+        )
+        self.assertEqual(plan["target_features"]["p::gated"], ["extra"])
+        owned.verify_plan_digest(plan)
+
+    def test_real_hardware_targets_route_out_of_ubuntu_lanes_to_manual_oracle(
+        self,
+    ) -> None:
+        repository_config = owned.read_config(
+            Path(__file__).resolve().parents[1] / ".config/ci-test-targets.toml"
+        )
+        cases = (
+            (
+                owned.Identity("chelis-backend-hip", "logical_comparison_where_gpu"),
+                "crates/chelis-backend-hip/tests/logical_comparison_where_gpu.rs",
+                "the runtime-representation hardware manifest registers the exact real-HIP command",
+                "chelis#1284",
+                {
+                    "lane": "hip-typed-nonnumeric",
+                    "status": "manual-required",
+                    "command": (
+                        "scripts/hip_test.py -p chelis-backend-hip "
+                        "--test logical_comparison_where_gpu "
+                        "-- --ignored --test-threads=1"
+                    ),
+                },
+            ),
+            (
+                owned.Identity("chelis-backend-metal", "gpu_correctness"),
+                "crates/chelis-backend-metal/tests/gpu_correctness.rs",
+                "the runtime-representation hardware manifest registers the exact Metal command",
+                "chelis#893",
+                {
+                    "lane": "metal",
+                    "status": "manual-required",
+                    "command": (
+                        "cargo test -p chelis-backend-metal --test gpu_correctness "
+                        "-- --ignored --test-threads=1"
+                    ),
+                },
+            ),
+        )
+        for identity, source, reason, tracking_issue, probe in cases:
+            with self.subTest(identity=identity.canonical):
+                hardware_metadata = metadata(
+                    package(
+                        "p",
+                        [("smoke", "crates/p/tests/smoke.rs", [])],
+                    ),
+                    package(
+                        identity.package,
+                        [(identity.target, source, [])],
+                    )
+                )
+                config = owned.Config(
+                    version=repository_config.version,
+                    standing_targets=(owned.Identity("p", "smoke"),),
+                    manual_only_targets={
+                        identity: repository_config.manual_only_targets[identity]
+                        for identity in (identity,)
+                        if identity in repository_config.manual_only_targets
+                    },
+                    manual_gate_targets={},
+                    target_exclusions={
+                        identity: repository_config.target_exclusions[identity]
+                        for identity in (identity,)
+                        if identity in repository_config.target_exclusions
+                    },
+                    test_exclusions={},
+                    required_package_rules=(),
+                    path_rules=(),
+                )
+                plan = owned.make_plan(
+                    mode="pull_request",
+                    base_sha="a" * 40,
+                    candidate_sha="b" * 40,
+                    event_pr_head="b" * 40,
+                    records=[owned.ChangeRecord("M", source)],
+                    base_metadata=hardware_metadata,
+                    candidate_metadata=hardware_metadata,
+                    config=config,
+                    tracked_paths={source, "crates/p/tests/smoke.rs"},
+                    source_reader=lambda path, source=source: (
+                        "#[test]\nfn ignored_hardware_tests() {}"
+                        if path == source
+                        else "#[test]\nfn standing() {}"
+                    ),
+                )
+
+                self.assertNotIn(identity.canonical, plan["change_owned"])
+                self.assertNotIn(identity.canonical, plan["package_expansion"])
+                self.assertEqual(
+                    plan["path_dispositions"],
+                    [
+                        {
+                            "path": source,
+                            "status": "M",
+                            "kind": "integration_target_excluded",
+                            "identity": identity.canonical,
+                            "owner": {
+                                "workflow": "heavy-e2e.yml",
+                                "job": "runtime-representation-phase0-oracle",
+                                "cadence": "manual-required on the exact reviewed candidate",
+                                "reason": reason,
+                                "tracking_issue": tracking_issue,
+                            },
+                        }
+                    ],
+                )
+                self.assertIn(
+                    probe, runtime_representation_oracle.hardware_probe_manifest()
+                )
+                owned.verify_plan_digest(plan)
+
+    def test_plan_rejects_incomplete_or_malformed_target_features(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/p/tests/gated.rs")]
+        )
+        mutations = [
+            lambda value: value["target_features"].pop("p::gated"),
+            lambda value: value["target_features"].update(
+                {"p::gated": ["extra", "extra"]}
+            ),
+            lambda value: value["target_features"].update(
+                {"p::gated": ["../extra"]}
+            ),
+        ]
+
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                malformed = copy.deepcopy(plan)
+                mutate(malformed)
+                owned.attach_plan_digest(malformed)
+                with self.assertRaisesRegex(ValueError, "target_features"):
+                    owned.verify_plan_digest(malformed)
+
+    def test_required_package_rule_promotes_complete_package_to_required(self) -> None:
+        sources = fixture_sources() | {"crates/p/src/contract.rs": ""}
+        plan = owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/contract.rs")],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(
+                config_text(
+                    required_package_rule=(
+                        "crates/p/src/contract.rs",
+                        ("p",),
+                    )
+                )
+            ),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertNotIn("required_packages", plan)
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::gated", "p::smoke"],
+        )
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["standing_coverage_reuse"], ["p::smoke"])
+        self.assertEqual(
+            plan["path_dispositions"][0]["required_package_rules"],
+            [
+                {
+                    "rule": "crates/p/src/contract.rs",
+                    "packages": ["p"],
+                    "reason": (
+                        "binder and defsig contract changes require every "
+                        "affected package owner"
+                    ),
+                    "tracking_issue": "chelis#1854",
+                }
+            ],
+        )
+        owned.verify_plan_digest(plan)
+        incomplete = copy.deepcopy(plan)
+        incomplete["change_owned"].remove("p::default_gated")
+        owned.attach_plan_digest(incomplete)
+        with self.assertRaisesRegex(
+            ValueError,
+            "required package targets must be change-owned",
+        ):
+            owned.verify_plan_digest(incomplete)
+
+    def test_targeted_rebase_promotes_the_affected_package_to_required(self) -> None:
+        sources = fixture_sources()
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertEqual(plan["mode"], "targeted_rebase")
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::gated", "p::smoke"],
+        )
+        self.assertEqual(plan["package_expansion"], [])
+        self.assertEqual(plan["standing_coverage_reuse"], [])
+        self.assertEqual(
+            plan["shards"]["change_owned"],
+            owned.change_owned_shard_plan(
+                [
+                    owned.Identity("p", "default_gated"),
+                    owned.Identity("p", "gated"),
+                    owned.Identity("p", "smoke"),
+                ],
+                duration_baseline(),
+            )[0],
+        )
+        owned.verify_plan_digest(plan)
+
+    def test_targeted_rebase_includes_reverse_workspace_dependents(self) -> None:
+        sources = fixture_sources()
+        metadata_with_dependency = fixture_metadata()
+        metadata_with_dependency["packages"][1]["dependencies"] = package(
+            "q", [], dependencies=("p",)
+        )["dependencies"]
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            base_metadata=metadata_with_dependency,
+            candidate_metadata=metadata_with_dependency,
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+
+        self.assertEqual(plan["selected_packages"], ["p", "q"])
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::gated", "p::smoke", "q::smoke"],
+        )
+        owned.verify_plan_digest(plan)
+
+    def test_targeted_rebase_preserves_the_trusted_package_frontier(self) -> None:
+        sources = fixture_sources()
+        plan = owned.make_plan(
+            mode="targeted_rebase",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            event_pr_head="c" * 40,
+            records=[
+                owned.ChangeRecord("D", "crates/p/tests/default_gated.rs")
+            ],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+            targeted_packages=("p",),
+        )
+
+        self.assertEqual(plan["selected_packages"], ["p"])
+        self.assertEqual(
+            plan["change_owned"],
+            ["p::default_gated", "p::gated", "p::smoke"],
+        )
+        owned.verify_plan_digest(plan)
+
+    def test_direct_manual_only_target_is_required_and_plan_bound(self) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")],
+            config=load_config(config_text(manual_only_target=("q", "smoke"))),
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        self.assertEqual(
+            plan["manual_only_targets"],
+            [{"identity": "q::smoke", "owner": OWNER}],
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["execution_mode"],
+            "ignored-only",
+        )
+        mutated = copy.deepcopy(plan)
+        mutated["manual_only_targets"] = []
+        with self.assertRaises(ValueError):
+            owned.verify_plan_digest(mutated)
+
+    def test_direct_manual_gate_target_is_required_listed_and_plan_bound(
+        self,
+    ) -> None:
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")],
+            config=load_config(config_text() + manual_gate_row()),
+            sources=gate_sources(),
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        self.assertEqual(
+            plan["manual_gate_targets"],
+            [
+                {
+                    "identity": "q::smoke",
+                    "manual_gates": ["q_gate"],
+                    "reason": GATE_REASON,
+                    "tracking_issue": "chelis#1824",
+                }
+            ],
+        )
+        self.assertEqual(
+            plan["path_dispositions"][0]["execution_mode"],
+            "manual-gate",
+        )
+        owned.verify_plan_digest(plan)
+        mutated = copy.deepcopy(plan)
+        mutated["manual_gate_targets"] = []
+        with self.assertRaisesRegex(ValueError, "digest"):
+            owned.verify_plan_digest(mutated)
+        # A redigested plan still cannot declare a malformed or conflicting row.
+        row = plan["manual_gate_targets"][0]
+        for label, rows, extra in (
+            ("extra field", [{**row, "owner": OWNER}], {}),
+            ("no entries", [{**row, "manual_gates": []}], {}),
+            ("ineligible", [{**row, "identity": "q::missing"}], {}),
+            ("duplicate", [row, row], {}),
+            ("standing", [{**row, "identity": "p::smoke"}], {}),
+            (
+                "excluded",
+                [row],
+                {"target_exclusions": [{"identity": "q::smoke", "owner": OWNER}]},
+            ),
+        ):
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(plan)
+                mutated["manual_gate_targets"] = rows
+                mutated.update(extra)
+                owned.attach_plan_digest(mutated)
+                with self.assertRaisesRegex(ValueError, "manual.gate"):
+                    owned.verify_plan_digest(mutated)
+
+    def test_candidate_baseline_rejects_self_consistent_duration_rewrite(
+        self,
+    ) -> None:
+        baseline = duration_baseline()
+        plan = self.plan(
+            [owned.ChangeRecord("M", "crates/q/tests/smoke.rs")]
+        )
+        self.assertEqual(plan["change_owned"], ["q::smoke"])
+        planning = plan["shard_planning"]["change_owned"]
+        planning["baseline_digest"] = "e" * 64
+        planning["default_milliseconds"] = 1
+        planning["weights_milliseconds"] = {"q::smoke": 1}
+        shards, estimates = owned.duration_shard_map(
+            {owned.Identity("q", "smoke"): 1}
+        )
+        plan["shards"]["change_owned"] = shards
+        planning["estimated_milliseconds"] = estimates
+        owned.attach_plan_digest(plan)
+
+        owned.verify_plan_digest(plan)
+        with self.assertRaisesRegex(ValueError, "checked-out baseline"):
+            owned.verify_plan_digest(plan, duration_baseline=baseline)
+
+    def test_mixed_code_and_new_prose_use_the_existing_docs_only_disposition(self) -> None:
+        for path in ("changelog.d/new-fix.fixed.md", "docs/new-page.md",
+                     "spec/design/new-assessment.md"):
+            with self.subTest(path=path):
+                plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                                  owned.ChangeRecord("A", path)])
+                self.assertEqual(plan["change_owned"], ["p::smoke"])
+                self.assertEqual(plan["path_dispositions"][1],
+                                 {"path": path, "status": "A", "kind": "docs_only"})
+
+    def test_executable_docs_and_unknown_code_still_require_a_reviewed_mapping(self) -> None:
+        for path in ("spec/05-risc-primitives.md", "docs/investigations/remediation_status_2026_08_04.md",
+                     "openspec/config.yaml", "new-tools/check.py"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "unclassified changed path"):
+                self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs"),
+                           owned.ChangeRecord("A", path)])
+    def test_added_target_is_owned_and_renamed_target_is_delete_plus_add(self) -> None:
+        base = metadata(
+            package("p", [("old", "crates/p/tests/old.rs", []), ("heavy", "crates/p/tests/heavy.rs", [])]),
+            package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+        )
+        candidate = metadata(
+            package("p", [("new", "crates/p/tests/new.rs", []), ("heavy", "crates/p/tests/heavy.rs", [])]),
+            package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+        )
+        content = config_text(standing=("q", "smoke"), target_exclusion=("p", "heavy"),
+                              test_exclusion=("q", "smoke", "q_case"))
+        config = load_config(content)
+        sources = {
+            "crates/p/tests/new.rs": "#[test]\nfn new_case() {}\n",
+            "crates/p/tests/heavy.rs": "#[test]\nfn heavy_case() {}\n",
+            "crates/q/tests/smoke.rs": "#[test]\nfn q_case() {}\n",
+        }
+        plan = owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("R100", "crates/p/tests/new.rs", "crates/p/tests/old.rs")],
+            base_metadata=base,
+            candidate_metadata=candidate,
+            config=config,
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+        self.assertEqual(plan["change_owned"], ["p::new"])
+        disposition = {row["path"]: row for row in plan["path_dispositions"]}
+        self.assertEqual(disposition["crates/p/tests/old.rs"]["kind"], "integration_target_deleted")
+        self.assertEqual(disposition["crates/p/tests/new.rs"]["kind"], "integration_target_added")
+
+    def test_manifest_only_added_target_is_change_owned(self) -> None:
+        base = fixture_metadata()
+        candidate = metadata(
+            package(
+                "p",
+                [
+                    ("smoke", "crates/p/tests/smoke.rs", []),
+                    ("heavy", "crates/p/tests/heavy.rs", []),
+                    ("gated", "crates/p/tests/gated.rs", ["extra"]),
+                    (
+                        "default_gated",
+                        "crates/p/tests/default_gated.rs",
+                        ["enabled"],
+                    ),
+                    ("new", "crates/p/tests/existing.rs", []),
+                ],
+                features={"default": ["enabled"], "enabled": [], "extra": []},
+            ),
+            package("q", [("smoke", "crates/q/tests/smoke.rs", [])]),
+        )
+        sources = fixture_sources() | {
+            "crates/p/tests/existing.rs": "#[test]\nfn existing_case() {}\n"
+        }
+        plan = owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", "crates/p/Cargo.toml")],
+            base_metadata=base,
+            candidate_metadata=candidate,
+            config=load_config(),
+            tracked_paths=set(sources) | {"scripts/tool.py", "crates/p/Cargo.toml"},
+            source_reader=sources.__getitem__,
+        )
+        self.assertIn("p::new", plan["change_owned"])
+        self.assertIn(
+            {
+                "identity": "p::new",
+                "kind": "integration_target_added",
+                "src_path": "crates/p/tests/existing.rs",
+            },
+            plan["target_dispositions"],
+        )
+
+    def test_unknown_path_and_ambiguous_package_roots_fail(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unclassified changed path"):
+            self.plan([owned.ChangeRecord("A", "brand-new-root/file.txt")])
+        nested = metadata(
+            package(
+                "outer",
+                [
+                    ("one", "nested/tests/one.rs", []),
+                    ("heavy", "nested/tests/heavy.rs", []),
+                ],
+                root="nested",
+            ),
+            package(
+                "inner",
+                [
+                    ("two", "nested/inner/tests/two.rs", []),
+                    ("smoke", "nested/inner/tests/smoke.rs", []),
+                ],
+                root="nested/inner",
+            ),
+        )
+        nested_config = load_config(
+            config_text(
+                standing=("outer", "one"),
+                target_exclusion=("outer", "heavy"),
+                test_exclusion=("inner", "two", "two_case"),
+            )
+        )
+        nested_sources = {
+            "nested/tests/one.rs": "#[test]\nfn one_case() {}\n",
+            "nested/tests/heavy.rs": "#[test]\nfn heavy_case() {}\n",
+            "nested/inner/tests/two.rs": "#[test]\nfn two_case() {}\n",
+            "nested/inner/tests/smoke.rs": "#[test]\nfn smoke_case() {}\n",
+            "scripts/tool.py": "",
+        }
+        with self.assertRaisesRegex(ValueError, "ambiguous package path"):
+            owned.make_plan(
+                mode="push",
+                base_sha="a" * 40,
+                candidate_sha="b" * 40,
+                records=[owned.ChangeRecord("M", "nested/inner/src/lib.rs")],
+                base_metadata=nested,
+                candidate_metadata=nested,
+                config=nested_config,
+                tracked_paths=set(nested_sources),
+                source_reader=nested_sources.__getitem__,
+            )
+
+    def test_path_owner_and_package_rules_have_exact_dispositions(self) -> None:
+        package_owner = config_text().replace(
+            'prefix = "scripts/"\ndisposition = "owner"\n'
+            + "\n".join(f'{key} = {json.dumps(value)}' for key, value in OWNER.items()),
+            'prefix = "scripts/"\ndisposition = "packages"\npackages = ["p", "q"]',
+        )
+        config = load_config(package_owner)
+        sources = fixture_sources()
+        plan = owned.make_plan(
+            mode="push",
+            base_sha="a" * 40,
+            candidate_sha="b" * 40,
+            records=[owned.ChangeRecord("M", "scripts/tool.py")],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=config,
+            tracked_paths=set(sources) | {"scripts/tool.py"},
+            source_reader=sources.__getitem__,
+        )
+        self.assertEqual(plan["selected_packages"], ["p", "q"])
+        self.assertEqual(plan["path_dispositions"][0]["kind"], "path_rule_packages")
+
+    def test_kinded_nominal_dimensions_exact_rule_selects_both_consumers_and_removal_fails_closed(
+        self,
+    ) -> None:
+        path = "examples/kinded_nominal_dimensions.ch"
+        cli_parity = "crates/chelis-cli/tests/parity.rs"
+        e2e_spec_suite = "crates/chelis-e2e/tests/spec_suite.rs"
+        cli_heavy = "crates/chelis-cli/tests/heavy.rs"
+        sources = {
+            cli_parity: "#[test]\nfn parity_kinded_nominal_dimensions() {}\n",
+            e2e_spec_suite: (
+                "#[test]\nfn spec_all_executable_examples_parse_and_check() {}\n"
+                "#[test]\nfn excluded_case() {}\n"
+            ),
+            cli_heavy: "#[test]\nfn heavy_case() {}\n",
+            "scripts/tool.py": "",
+            path: "out = 1i64\n",
+        }
+        consumer_metadata = metadata(
+            package(
+                "chelis-cli",
+                [
+                    ("parity", cli_parity, []),
+                    ("heavy", cli_heavy, []),
+                ],
+            ),
+            package(
+                "chelis-e2e",
+                [("spec_suite", e2e_spec_suite, [])],
+            ),
+        )
+        base_config = config_text(
+            standing=("chelis-cli", "parity"),
+            target_exclusion=("chelis-cli", "heavy"),
+            test_exclusion=("chelis-e2e", "spec_suite", "excluded_case"),
+        )
+        exact_rule = f"""
+
+[[path_rule]]
+prefix = {json.dumps(path)}
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e"]
+"""
+
+        def plan(config: owned.Config) -> dict:
+            return owned.make_plan(
+                mode="push",
+                base_sha="a" * 40,
+                candidate_sha="b" * 40,
+                records=[owned.ChangeRecord("M", path)],
+                base_metadata=consumer_metadata,
+                candidate_metadata=consumer_metadata,
+                config=config,
+                tracked_paths=set(sources),
+                source_reader=sources.__getitem__,
+            )
+
+        selected = plan(load_config(base_config + exact_rule))
+        self.assertEqual(
+            selected["path_dispositions"],
+            [
+                {
+                    "path": path,
+                    "status": "M",
+                    "kind": "path_rule_packages",
+                    "rule": path,
+                    "packages": ["chelis-cli", "chelis-e2e"],
+                }
+            ],
+        )
+        self.assertEqual(
+            selected["selected_packages"],
+            ["chelis-cli", "chelis-e2e"],
+        )
+        self.assertTrue(
+            {
+                "chelis-cli::parity",
+                "chelis-e2e::spec_suite",
+            }
+            <= set(selected["package_expansion"])
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"unclassified changed path: {path}",
+        ):
+            plan(load_config(base_config))
+
+    def test_targeted_preflight_rejects_a_path_shared_by_integration_targets(self) -> None:
+        shared = "crates/p/tests/shared.rs"
+        duplicate = metadata(
+            package(
+                "p",
+                [
+                    ("first", shared, []),
+                    ("second", shared, []),
+                ],
+            )
+        )
+
+        self.assertEqual(
+            owned.targeted_rebase_preflight_path_classification(
+                shared,
+                base_metadata=duplicate,
+                candidate_metadata=duplicate,
+                config=load_config(),
+            ),
+            "ambiguous_integration_target",
+        )
+
+    def test_targeted_preflight_rejects_every_reused_standing_owner(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        reused = [
+            rule
+            for rule in config.path_rules
+            if rule.owner is not None
+            and (rule.owner.workflow, rule.owner.job)
+            in owned.TARGETED_REBASE_REUSED_OWNER_JOBS
+        ]
+        self.assertTrue(reused)
+        for rule in reused:
+            with self.subTest(path=rule.prefix):
+                self.assertEqual(
+                    owned.targeted_rebase_preflight_path_classification(
+                        rule.prefix,
+                        base_metadata=fixture_metadata(),
+                        candidate_metadata=fixture_metadata(),
+                        config=config,
+                    ),
+                    "reused_standing_owner",
+                )
+
+        self.assertEqual(
+            owned.targeted_rebase_preflight_path_classification(
+                "scripts/gate.py",
+                base_metadata=fixture_metadata(),
+                candidate_metadata=fixture_metadata(),
+                config=config,
+            ),
+            "rule",
+        )
+
+    def test_exact_reduction_oracle_scripts_have_exact_script_unit_owners(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        config = owned.read_config(root / ".config/ci-test-targets.toml")
+        expected = {
+            "scripts/dtype_exact_reductions_oracle.py",
+            "scripts/test_dtype_exact_reductions_oracle.py",
+        }
+        rules = {
+            rule.prefix: rule
+            for rule in config.path_rules
+            if rule.prefix in expected
+        }
+        self.assertEqual(set(rules), expected)
+        for path, rule in rules.items():
+            with self.subTest(path=path):
+                self.assertEqual(rule.disposition, "owner")
+                self.assertIsNotNone(rule.owner)
+                self.assertEqual(
+                    (
+                        rule.owner.workflow,
+                        rule.owner.job,
+                        rule.owner.cadence,
+                        rule.owner.tracking_issue,
+                    ),
+                    (
+                        "ci.yml",
+                        "script-unit",
+                        "pull_request and push",
+                        "chelis#1281",
+                    ),
+                )
+        for neighbor in (
+            "scripts/dtype_exact_reductions_oracle_extra.py",
+            "scripts/test_dtype_exact_reductions_oracle_extra.py",
+        ):
+            with self.subTest(neighbor=neighbor):
+                self.assertFalse(any(rule.matches(neighbor) for rule in rules.values()))
+
+    def test_targeted_frontier_rejects_a_nightly_excluded_target(self) -> None:
+        frontier = owned.targeted_rebase_frontier(
+            ["crates/p/tests/heavy.rs"],
+            base_metadata=fixture_metadata(),
+            candidate_metadata=fixture_metadata(),
+            config=load_config(),
+        )
+
+        self.assertEqual(frontier["packages"], [])
+        self.assertEqual(
+            frontier["unsafe_paths"], ["crates/p/tests/heavy.rs"]
+        )
+
+    def test_excluded_direct_target_resolves_to_alternative_owner(self) -> None:
+        plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/heavy.rs")])
+        self.assertEqual(plan["change_owned"], [])
+        disposition = plan["path_dispositions"][0]
+        self.assertEqual(disposition["kind"], "integration_target_excluded")
+        self.assertEqual(disposition["owner"]["workflow"], "heavy-e2e.yml")
+
+    def test_plan_digest_detects_mutation(self) -> None:
+        plan = self.plan([owned.ChangeRecord("M", "crates/p/tests/smoke.rs")])
+        for key, value in (
+            ("change_owned", []),
+            ("standing_coverage_reuse", []),
+            ("config_digest", "0" * 64),
+        ):
+            mutated = copy.deepcopy(plan)
+            mutated[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                owned.verify_plan_digest(mutated)
+
+    def test_pr_candidate_requires_two_parents_and_exact_event_head(self) -> None:
+        with mock.patch.object(owned, "git_output") as git_output:
+            git_output.return_value = b"merge base head extra\n"
+            with self.assertRaisesRegex(ValueError, "exactly two parents"):
+                owned.resolve_pr_commits(Path("/repo"), "merge", "head")
+            git_output.return_value = b"merge base other\n"
+            with self.assertRaisesRegex(ValueError, "event pull-request head"):
+                owned.resolve_pr_commits(Path("/repo"), "merge", "head")
+            git_output.return_value = b"merge base head\n"
+            self.assertEqual(
+                owned.resolve_pr_commits(Path("/repo"), "merge", "head"),
+                ("base", "merge"),
+            )
+
+    def test_targeted_rebase_plans_between_synthetic_candidates(self) -> None:
+        prior_candidate = "a" * 40
+        current_candidate = "b" * 40
+        pr_head = "c" * 40
+        current_base = "d" * 40
+        metadata = fixture_metadata()
+        config = load_config()
+        with (
+            mock.patch.object(
+                owned,
+                "_commit",
+                side_effect=lambda _repo, value: {
+                    "HEAD": current_candidate,
+                    "prior": prior_candidate,
+                    "head": pr_head,
+                }.get(value, value),
+            ),
+            mock.patch.object(
+                owned,
+                "resolve_pr_commits",
+                return_value=(current_base, current_candidate),
+            ),
+            mock.patch.object(owned, "read_config", return_value=config),
+            mock.patch.object(owned, "metadata_at", return_value=metadata),
+            mock.patch.object(
+                owned,
+                "diff_at",
+                return_value=[owned.ChangeRecord("M", "crates/p/src/lib.rs")],
+            ) as diff_at,
+            mock.patch.object(
+                owned,
+                "tracked_paths_at",
+                return_value=set(fixture_sources()),
+            ),
+            mock.patch.object(owned, "make_plan", return_value={"plan": "ok"}) as make,
+        ):
+            result = owned.generate_plan(
+                Path("/repo"),
+                event_name="targeted_rebase",
+                pr_head="head",
+                before="prior",
+                after="",
+                config_path=Path("config.toml"),
+                targeted_packages=("p",),
+            )
+
+        self.assertEqual(result, {"plan": "ok"})
+        diff_at.assert_called_once_with(
+            Path("/repo"), prior_candidate, current_candidate
+        )
+        self.assertEqual(make.call_args.kwargs["base_sha"], prior_candidate)
+        self.assertEqual(make.call_args.kwargs["candidate_sha"], current_candidate)
+        self.assertEqual(make.call_args.kwargs["event_pr_head"], pr_head)
+        self.assertEqual(make.call_args.kwargs["targeted_packages"], ("p",))
+
+
+class ShardingAndExecutionTests(unittest.TestCase):
+    def test_expansion_deadline_preserves_receipts_at_every_command_boundary(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        later = owned.Identity("q", "later")
+        for expired_call, truncated_junit in (
+            (0, False), (1, False), (2, False), (3, False),
+            (4, False), (4, True), (None, False),
+        ):
+            with self.subTest(expired_call=expired_call, truncated_junit=truncated_junit), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                plan = self._plan(lane="package-expansion")
+                shard, fixture_baseline = set_colocated_package_expansion(
+                    plan,
+                    [identity, later],
+                )
+                owned.attach_plan_digest(plan)
+                calls = []
+
+                def run(command, **kwargs):
+                    index = len(calls)
+                    calls.append((command, kwargs))
+                    if index == expired_call:
+                        if truncated_junit:
+                            junit = target / "nextest/ci-full/junit.xml"
+                            junit.parent.mkdir(parents=True, exist_ok=True)
+                            junit.write_text('<testsuite><testcase name="fast_case"/>')
+                        raise subprocess.TimeoutExpired(
+                            command, kwargs.get("timeout", 0),
+                            output=b"partial stdout", stderr=b"partial stderr",
+                        )
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    package = command[command.index("-p") + 1]
+                    name = command[command.index("--test") + 1]
+                    if command[2] == "list":
+                        cases = {"fast_case": {"ignored": False, "filter-match": {"status": "matches"}}}
+                        if name == "smoke":
+                            cases["slow_case"] = {"ignored": False, "filter-match": {"status": "mismatch"}}
+                        payload = {"rust-suites": {f"{package}::{name}": {"testcases": cases}}}
+                        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    junit.write_text(
+                        f'<testsuite><testcase name="fast_case" '
+                        f'classname="{package}::{name}"/></testsuite>'
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                    mock.patch.object(owned, "_commit", return_value="b" * 40),
+                ):
+                    receipt = owned.execute_shard(
+                        plan, lane="package-expansion", shard=shard,
+                        output=root / "receipt", repo=root, runner=run,
+                        duration_baseline=fixture_baseline,
+                    )
+                self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+                self.assertEqual(receipt["selected_targets"], [identity.canonical, later.canonical])
+                self.assertEqual(receipt["success"], expired_call is None)
+                self.assertEqual(len(calls), 5 if expired_call is None else expired_call + 1)
+                timeouts = [kwargs["timeout"] for _, kwargs in calls]
+                self.assertTrue(
+                    all(
+                        0 < value <= owned.EXPANSION_EXECUTION_SECONDS
+                        for value in timeouts
+                    )
+                )
+                self.assertEqual(timeouts, sorted(timeouts, reverse=True))
+                if expired_call is not None:
+                    self.assertIn("execution deadline", " ".join(receipt["failures"]))
+                    commands = json.loads((root / "receipt/commands.json").read_text())
+                    self.assertEqual(commands[-1]["stdout"], "partial stdout")
+                    self.assertEqual(commands[-1]["stderr"], "partial stderr")
+                    summary = owned.summarize_package_expansion(
+                        plan,
+                        [receipt],
+                        duration_baseline=fixture_baseline,
+                    )
+                    self.assertFalse(summary["observed_success"])
+                if expired_call in (3, 4):
+                    self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
+                if truncated_junit:
+                    self.assertIn("malformed JUnit", " ".join(receipt["failures"]))
+                    self.assertEqual(
+                        owned._junit_tests(
+                            root / "receipt/junit.xml",
+                            identity,
+                        ),
+                        ["p::smoke::fast_case"],
+                    )
+
+    def test_budget_is_shared_and_no_command_starts_after_it_expires(self) -> None:
+        plan = self._plan(lane="package-expansion")
+        current_time = [100.0]
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            mock.patch.object(owned, "_commit", return_value="b" * 40)
+        ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
+            receipt = owned.execute_shard(
+                plan, lane="package-expansion",
+                shard=next(
+                    shard
+                    for shard in owned.SHARDS
+                    if "p::smoke"
+                    in owned.execution_shards(plan, "package-expansion")[
+                        str(shard)
+                    ]
+                ),
+                output=Path(tmp), repo=Path(tmp), runner=run,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(receipt["success"])
+        self.assertTrue(receipt["soft_budget_exceeded"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertIn("execution deadline", " ".join(receipt["failures"]))
+
+    def test_expiry_after_listing_does_not_claim_the_target_executed(self) -> None:
+        plan = self._plan(lane="package-expansion")
+        current_time = [100.0]
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "build":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            current_time[0] += owned.EXPANSION_EXECUTION_SECONDS + 1
+            payload = {"rust-suites": {"p::smoke": {"testcases": {
+                "fast_case": {"ignored": False, "filter-match": {"status": "matches"}},
+                "slow_case": {"ignored": False, "filter-match": {"status": "mismatch"}},
+            }}}}
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+        with tempfile.TemporaryDirectory() as tmp, (
+            mock.patch.object(owned, "_commit", return_value="b" * 40)
+        ), mock.patch.object(owned.time, "monotonic", side_effect=lambda: current_time[0]):
+            receipt = owned.execute_shard(
+                plan, lane="package-expansion",
+                shard=next(
+                    shard
+                    for shard in owned.SHARDS
+                    if "p::smoke"
+                    in owned.execution_shards(plan, "package-expansion")[
+                        str(shard)
+                    ]
+                ),
+                output=Path(tmp), repo=Path(tmp), runner=run,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(receipt["success"])
+        self.assertEqual(receipt["selected_tests"], ["p::smoke::fast_case"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertEqual(receipt["executed_tests"], [])
+
+    def test_shards_are_deterministic_package_qualified_and_cover_all(self) -> None:
+        identities = [
+            owned.Identity("p", "smoke"),
+            owned.Identity("q", "smoke"),
+            owned.Identity("p", "default_gated"),
+        ]
+        first = owned.shard_map(identities)
+        second = owned.shard_map(reversed(identities))
+        self.assertEqual(first, second)
+        self.assertEqual(
+            sorted(identity for rows in first.values() for identity in rows),
+            sorted(identity.canonical for identity in identities),
+        )
+        self.assertNotEqual(
+            owned.shard_for(owned.Identity("p", "smoke")),
+            owned.shard_for(owned.Identity("other-package", "smoke")),
+        )
+
+    def test_duration_balancing_spreads_slow_hash_collisions(self) -> None:
+        slow: list[owned.Identity] = []
+        index = 0
+        while len(slow) < len(owned.SHARDS):
+            identity = owned.Identity("p", f"slow_{index}")
+            if owned.shard_for(identity) == 0:
+                slow.append(identity)
+            index += 1
+        ordinary = [owned.Identity("p", f"ordinary_{n}") for n in range(40)]
+        weights = {
+            identity: 100_000 if identity in slow else 5_000
+            for identity in slow + ordinary
+        }
+        balanced, estimates = owned.duration_shard_map(weights)
+        repeated, repeated_estimates = owned.duration_shard_map(
+            dict(reversed(list(weights.items())))
+        )
+        self.assertEqual((balanced, estimates), (repeated, repeated_estimates))
+        self.assertEqual(
+            sorted(row for rows in balanced.values() for row in rows),
+            sorted(identity.canonical for identity in weights),
+        )
+        self.assertEqual(
+            {
+                next(
+                    shard
+                    for shard, rows in balanced.items()
+                    if identity.canonical in rows
+                )
+                for identity in slow
+            },
+            {str(shard) for shard in owned.SHARDS},
+        )
+        hash_loads = {str(shard): 0 for shard in owned.SHARDS}
+        for identity, milliseconds in weights.items():
+            hash_loads[str(owned.shard_for(identity))] += milliseconds
+        self.assertLess(max(estimates.values()), max(hash_loads.values()))
+
+    def test_unknown_targets_use_the_conservative_default_and_stay_even(self) -> None:
+        identities = [owned.Identity("p", f"unknown_{index}") for index in range(9)]
+        shards, planning = owned.change_owned_shard_plan(
+            identities,
+            duration_baseline(),
+        )
+        self.assertEqual(
+            set(planning["weights_milliseconds"].values()),
+            {owned.DEFAULT_DURATION_MILLISECONDS},
+        )
+        counts = [len(shards[str(shard)]) for shard in owned.SHARDS]
+        self.assertLessEqual(max(counts) - min(counts), 1)
+
+    def test_package_expansion_uses_duration_balancing(self) -> None:
+        slow: list[owned.Identity] = []
+        index = 0
+        while len(slow) < len(owned.SHARDS):
+            identity = owned.Identity("p", f"slow_{index}")
+            if owned.shard_for(identity) == 0:
+                slow.append(identity)
+            index += 1
+        ordinary = [owned.Identity("p", f"ordinary_{n}") for n in range(40)]
+        weights = {
+            identity: 100_000 if identity in slow else 5_000
+            for identity in slow + ordinary
+        }
+        shards, planning = owned.package_expansion_shard_plan(
+            weights,
+            duration_baseline(weights),
+        )
+        hash_loads = {str(shard): 0 for shard in owned.SHARDS}
+        for identity, milliseconds in weights.items():
+            hash_loads[str(owned.shard_for(identity))] += milliseconds
+        self.assertEqual(
+            planning["algorithm"],
+            owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+        )
+        self.assertLess(
+            max(planning["estimated_milliseconds"].values()),
+            max(hash_loads.values()),
+        )
+        self.assertEqual(
+            sorted(row for rows in shards.values() for row in rows),
+            sorted(identity.canonical for identity in weights),
+        )
+
+    def test_package_expansion_preserves_the_trusted_compatibility_envelope(
+        self,
+    ) -> None:
+        plan = self._plan(lane="package-expansion")
+        self.assertEqual(plan["version"], owned.PLAN_VERSION)
+        self.assertEqual(
+            plan["shard_planning"]["package_expansion"],
+            {"algorithm": "sha256-modulo-v1"},
+        )
+        self.assertEqual(
+            plan["shards"]["package_expansion"],
+            owned.shard_map(
+                [owned.Identity.parse(value) for value in plan["package_expansion"]]
+            ),
+        )
+        execution = owned.package_expansion_execution(plan)
+        self.assertEqual(
+            execution["planning"]["algorithm"],
+            owned.PACKAGE_EXPANSION_SHARD_ALGORITHM,
+        )
+        self.assertNotEqual(
+            execution["planning"]["algorithm"],
+            plan["shard_planning"]["package_expansion"]["algorithm"],
+        )
+
+    def test_plan_rejects_duration_assignment_tampering(self) -> None:
+        plan = self._plan()
+        source = next(
+            shard
+            for shard in owned.SHARDS
+            if plan["shards"]["change_owned"][str(shard)]
+        )
+        target = (source + 1) % len(owned.SHARDS)
+        canonical = plan["shards"]["change_owned"][str(source)].pop()
+        plan["shards"]["change_owned"][str(target)].append(canonical)
+        owned.attach_plan_digest(plan)
+        with self.assertRaisesRegex(ValueError, "duration planning"):
+            owned.verify_plan_digest(plan)
+
+    def test_plan_rejects_package_expansion_duration_assignment_tampering(
+        self,
+    ) -> None:
+        plan = self._plan(lane="package-expansion")
+        execution = owned.package_expansion_execution(plan)
+        source = next(
+            shard
+            for shard in owned.SHARDS
+            if execution["shards"][str(shard)]
+        )
+        target = (source + 1) % len(owned.SHARDS)
+        canonical = execution["shards"][str(source)].pop()
+        execution["shards"][str(target)].append(canonical)
+        owned.attach_plan_digest(plan)
+        with self.assertRaisesRegex(
+            ValueError,
+            "package-expansion duration planning",
+        ):
+            owned.verify_plan_digest(plan)
+
+    def test_commands_are_package_scoped_and_apply_only_exact_test_exclusions(self) -> None:
+        config = load_config()
+        p = owned.Identity("p", "smoke")
+        q = owned.Identity("q", "smoke")
+        p_command = owned.target_command(p, config.test_exclusions, list_only=False)
+        q_command = owned.target_command(q, config.test_exclusions, list_only=False)
+        self.assertEqual(p_command[p_command.index("-p") + 1], "p")
+        self.assertEqual(q_command[q_command.index("-p") + 1], "q")
+        self.assertEqual(p_command[p_command.index("--test") + 1], "smoke")
+        self.assertIn("-E", p_command)
+        self.assertIn(
+            "test(/^slow_case$/)",
+            p_command[p_command.index("-E") + 1],
+        )
+        self.assertIn("--locked", p_command)
+        self.assertNotIn("-E", q_command)
+
+        manual = owned.target_command(
+            q,
+            config.test_exclusions,
+            list_only=False,
+            manual_only=True,
+        )
+        self.assertEqual(
+            manual[manual.index("--run-ignored") + 1],
+            "all",
+        )
+
+        gated = owned.target_command(
+            owned.Identity("p", "gated"),
+            config.test_exclusions,
+            list_only=True,
+            required_features=("extra",),
+        )
+        self.assertEqual(
+            gated[gated.index("--features") + 1],
+            "extra",
+        )
+
+    def test_group_command_activates_sorted_feature_union(self) -> None:
+        command = owned.target_group_command(
+            (
+                owned.Identity("p", "alpha"),
+                owned.Identity("p", "beta"),
+            ),
+            {},
+            list_only=False,
+            required_features=("zeta", "alpha", "zeta"),
+        )
+
+        self.assertEqual(
+            command[command.index("--features") + 1],
+            "alpha,zeta",
+        )
+
+    def test_expansion_groups_are_package_scoped_and_bounded(self) -> None:
+        ordinary = (
+            owned.Identity("p", "alpha"),
+            owned.Identity("p", "beta"),
+        )
+        excluded = owned.Identity("p", "filtered")
+        manual = owned.Identity("p", "manual")
+        other = owned.Identity("q", "alpha")
+        plan = self._plan(lane="package-expansion")
+        plan["manual_only_targets"] = [
+            {"identity": manual.canonical, "owner": OWNER}
+        ]
+        plan["test_exclusions"] = [
+            {
+                "identity": f"{excluded.canonical}::slow_case",
+                "owner": OWNER,
+            }
+        ]
+        plan["target_features"].update(
+            {identity.canonical: [] for identity in (*ordinary, other)}
+        )
+        groups = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[
+                identity.canonical
+                for identity in (*ordinary, excluded, manual, other)
+            ],
+        )
+        self.assertEqual(
+            groups,
+            [
+                ordinary,
+                (excluded,),
+                (manual,),
+                (other,),
+            ],
+        )
+        command = owned.target_group_command(
+            ordinary,
+            {},
+            list_only=False,
+            manual_only=False,
+        )
+        self.assertEqual(command.count("--test"), 2)
+        self.assertEqual(
+            [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--test"
+            ],
+            ["alpha", "beta"],
+        )
+
+        many = [owned.Identity("p", f"target_{index:02}") for index in range(80)]
+        plan["target_features"].update(
+            {identity.canonical: [] for identity in many}
+        )
+        baseline = duration_baseline(
+            {identity: 30_000 for identity in many}
+        )
+        shards, planning = owned.package_expansion_shard_plan(many, baseline)
+        selected = max(shards.values(), key=len)
+        plan["target_dispositions"] = [
+            row
+            for row in plan["target_dispositions"]
+            if row.get("kind") != owned.PACKAGE_EXPANSION_EXECUTION_KIND
+        ]
+        plan["target_dispositions"].append(
+            owned.package_expansion_execution_disposition(shards, planning)
+        )
+        chunked = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=selected,
+        )
+        self.assertGreater(len(chunked), 1)
+        self.assertTrue(
+            all(
+                len(group) <= owned.PACKAGE_EXPANSION_GROUP_TARGET_LIMIT
+                for group in chunked
+            )
+        )
+        self.assertTrue(
+            all(
+                sum(
+                    planning["weights_milliseconds"][identity.canonical]
+                    for identity in group
+                )
+                <= owned.PACKAGE_EXPANSION_GROUP_ESTIMATED_MILLISECONDS
+                for group in chunked
+            )
+        )
+        self.assertEqual(
+            sorted(identity.canonical for group in chunked for identity in group),
+            sorted(selected),
+        )
+
+    def test_expansion_chunks_share_one_package_and_exact_feature_set(self) -> None:
+        features = {
+            owned.Identity("p", "plain_a"): [],
+            owned.Identity("p", "ledger_a"): ["ledger"],
+            owned.Identity("p", "plain_b"): [],
+            owned.Identity("p", "ledger_b"): ["ledger"],
+            owned.Identity("p", "traced"): ["ledger", "trace"],
+            owned.Identity("q", "ledger"): ["ledger"],
+        }
+        plan = self._plan(lane="package-expansion")
+        set_package_expansion(
+            plan,
+            list(features),
+            weights={identity: 1_000 for identity in features},
+        )
+        plan["target_features"].update(
+            {identity.canonical: value for identity, value in features.items()}
+        )
+        groups = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[identity.canonical for identity in features],
+        )
+        self.assertEqual(
+            [[identity.target for identity in group] for group in groups],
+            [["plain_a", "plain_b"], ["ledger_a", "ledger_b"], ["traced"], ["ledger"]],
+        )
+        self.assertEqual(groups[3][0].package, "q")
+        for group in groups:
+            wanted = {tuple(features[identity]) for identity in group}
+            self.assertEqual(len(wanted), 1, group)
+
+        ledger = [owned.Identity("p", f"ledger_{index:02}") for index in range(17)]
+        plan = self._plan(lane="package-expansion")
+        set_package_expansion(
+            plan,
+            ledger,
+            weights={identity: 1_000 for identity in ledger},
+        )
+        plan["target_features"].update(
+            {identity.canonical: ["ledger"] for identity in ledger}
+        )
+        chunked = owned.execution_groups(
+            plan,
+            lane="package-expansion",
+            selected=[identity.canonical for identity in ledger],
+        )
+        self.assertEqual(
+            [len(group) for group in chunked],
+            [owned.PACKAGE_EXPANSION_GROUP_TARGET_LIMIT, 1],
+        )
+
+    def test_same_package_deadline_preserves_completed_chunks(self) -> None:
+        first = owned.Identity("p", "a_first")
+        second = owned.Identity("p", "z_second")
+        fillers = [
+            owned.Identity("p", "b_filler"),
+            owned.Identity("p", "c_filler"),
+            owned.Identity("p", "d_filler"),
+        ]
+        identities = [first, *fillers, second]
+        plan = self._plan(lane="package-expansion")
+        fixture_baseline = set_package_expansion(
+            plan,
+            identities,
+            weights={identity: 1_000 for identity in identities},
+        )
+        shard = next(
+            shard
+            for shard in owned.SHARDS
+            if first.canonical
+            in owned.execution_shards(plan, "package-expansion")[str(shard)]
+        )
+        self.assertIn(
+            second.canonical,
+            owned.execution_shards(plan, "package-expansion")[str(shard)],
+        )
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        calls: list[list[str]] = []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "build":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            target = command[command.index("--test") + 1]
+            if command[2] == "list":
+                payload = {
+                    "rust-suites": {
+                        f"p::{target}": {
+                            "testcases": {
+                                "case": {
+                                    "ignored": False,
+                                    "filter-match": {"status": "matches"},
+                                }
+                            }
+                        }
+                    }
+                }
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(payload),
+                    "",
+                )
+            if target == "z_second":
+                raise subprocess.TimeoutExpired(
+                    command,
+                    kwargs.get("timeout", 0),
+                    output="",
+                    stderr="",
+                )
+            junit = Path(os.environ["CARGO_TARGET_DIR"]) / "nextest/ci-full/junit.xml"
+            junit.parent.mkdir(parents=True, exist_ok=True)
+            junit.write_text(
+                '<testsuite><testcase name="case" '
+                'classname="p::a_first"/></testsuite>'
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(
+                os.environ,
+                {"CARGO_TARGET_DIR": str(Path(tmp) / "target")},
+            ),
+            mock.patch.object(owned, "_commit", return_value="b" * 40),
+            mock.patch.object(
+                owned,
+                "PACKAGE_EXPANSION_GROUP_TARGET_LIMIT",
+                1,
+            ),
+        ):
+            receipt = owned.execute_shard(
+                plan,
+                lane="package-expansion",
+                shard=shard,
+                output=Path(tmp) / "receipt",
+                repo=Path(tmp),
+                runner=run,
+                duration_baseline=fixture_baseline,
+            )
+        self.assertFalse(receipt["success"])
+        self.assertEqual(receipt["executed_targets"], [first.canonical])
+        self.assertEqual(receipt["executed_tests"], ["p::a_first::case"])
+        self.assertIn("execution deadline", " ".join(receipt["failures"]))
+        self.assertEqual(
+            [
+                command[command.index("--test") + 1]
+                for command in calls
+                if "--test" in command and command[2] == "run"
+            ],
+            ["a_first", "z_second"],
+        )
+
+    def test_package_batch_preserves_exact_targets_tests_and_missing_results(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        sibling = owned.Identity("p", "sibling")
+        for outcome in ("complete", "missing", "skipped"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                target = root / "target"
+                plan = self._plan(lane="package-expansion")
+                plan["test_exclusions"] = []
+                shard, fixture_baseline = set_colocated_package_expansion(
+                    plan,
+                    [identity, sibling],
+                )
+                owned.attach_plan_digest(plan)
+                calls = []
+
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[1] == "build":
+                        return subprocess.CompletedProcess(command, 0, "", "")
+                    names = [
+                        command[index + 1]
+                        for index, value in enumerate(command)
+                        if value == "--test"
+                    ]
+                    if command[2] == "list":
+                        suites = {}
+                        for name in names:
+                            cases = {
+                                "fast_case": {
+                                    "ignored": False,
+                                    "filter-match": {"status": "matches"},
+                                }
+                            }
+                            suites[f"p::{name}"] = {"testcases": cases}
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            json.dumps({"rust-suites": suites}),
+                            "",
+                        )
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    cases = []
+                    for name in names:
+                        if outcome == "missing" and name == sibling.target:
+                            continue
+                        skipped = (
+                            "<skipped/>"
+                            if outcome == "skipped"
+                            and name == sibling.target
+                            else ""
+                        )
+                        cases.append(
+                            f'<testcase name="fast_case" '
+                            f'classname="p::{name}">{skipped}</testcase>'
+                        )
+                    junit.write_text(
+                        "<testsuite>" + "".join(cases) + "</testsuite>"
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"CARGO_TARGET_DIR": str(target)},
+                    ),
+                    mock.patch.object(
+                        owned,
+                        "_commit",
+                        return_value="b" * 40,
+                    ),
+                ):
+                    receipt = owned.execute_shard(
+                        plan,
+                        lane="package-expansion",
+                        shard=shard,
+                        output=root / "receipt",
+                        repo=root,
+                        runner=run,
+                        duration_baseline=fixture_baseline,
+                    )
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[1].count("--test"), 2)
+                self.assertEqual(calls[2].count("--test"), 2)
+                self.assertEqual(
+                    receipt["selected_targets"],
+                    sorted([identity.canonical, sibling.canonical]),
+                )
+                self.assertEqual(
+                    receipt["success"], outcome == "complete"
+                )
+                if outcome != "complete":
+                    self.assertNotIn(
+                        sibling.canonical,
+                        receipt["executed_targets"],
+                    )
+                    self.assertIn(
+                        (
+                            "skipped rather than executed"
+                            if outcome == "skipped"
+                            else "incomplete"
+                        ),
+                        " ".join(receipt["failures"]),
+                    )
+                else:
+                    self.assertEqual(
+                        receipt["executed_targets"],
+                        receipt["selected_targets"],
+                    )
+                    self.assertEqual(
+                        receipt["executed_tests"],
+                        receipt["selected_tests"],
+                    )
+
+    def _plan(self, *, lane: str = "change-owned") -> dict:
+        lane_key = owned.LANE_KEYS[lane]
+        identity = owned.Identity("p", "smoke")
+        plan = {
+            "version": owned.PLAN_VERSION,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": "b" * 40,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p"],
+            "eligible_targets": [identity.canonical],
+            "target_features": {identity.canonical: []},
+            "change_owned": (
+                [identity.canonical] if lane_key == "change_owned" else []
+            ),
+            "package_expansion": (
+                [identity.canonical] if lane_key == "package_expansion" else []
+            ),
+            "standing_targets": [],
+            "standing_coverage_reuse": [],
+            "manual_only_targets": [],
+            "manual_gate_targets": [],
+            "target_exclusions": [],
+            "test_exclusions": [
+                {"identity": "p::smoke::slow_case", "owner": OWNER}
+            ],
+            **shard_fields(
+                [identity] if lane_key == "change_owned" else [],
+                [identity] if lane_key == "package_expansion" else [],
+            ),
+        }
+        owned.attach_plan_digest(plan)
+        return plan
+
+    def test_listing_rejects_unconfigured_filtering_and_stale_exclusions(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                "p::smoke": {
+                    "testcases": {
+                        "fast_case": {
+                            "ignored": False,
+                            "filter-match": {"status": "matches"},
+                        },
+                        "slow_case": {
+                            "ignored": False,
+                            "filter-match": {"status": "mismatch"},
+                        },
+                    }
+                }
+            }
+        }
+        exclusions = {owned.TestIdentity("p", "smoke", "slow_case"): OWNER}
+        self.assertEqual(
+            owned._listing_tests(listing, identity, exclusions),
+            ["p::smoke::fast_case"],
+        )
+        listing["rust-suites"]["p::smoke"]["testcases"]["hidden_case"] = {
+            "ignored": False,
+            "filter-match": {"status": "mismatch"},
+        }
+        with self.assertRaisesRegex(ValueError, "nonmatching active tests"):
+            owned._listing_tests(listing, identity, exclusions)
+        del listing["rust-suites"]["p::smoke"]["testcases"]["hidden_case"]
+        del listing["rust-suites"]["p::smoke"]["testcases"]["slow_case"]
+        with self.assertRaisesRegex(ValueError, "nonmatching active tests"):
+            owned._listing_tests(listing, identity, exclusions)
+
+    def test_listing_rejects_malformed_filter_match_shape(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                "p::smoke": {
+                    "testcases": {
+                        "fast_case": {
+                            "ignored": False,
+                            "filter-match": "matches",
+                        }
+                    }
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "malformed filter match"):
+            owned._listing_tests(listing, identity, {})
+
+    def test_manual_only_listing_selects_ignored_tests_and_rejects_active_ones(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                "p::smoke": {
+                    "testcases": {
+                        "ignored_case": {
+                            "ignored": True,
+                            "filter-match": {"status": "matches"},
+                        }
+                    }
+                }
+            }
+        }
+        self.assertEqual(
+            owned._listing_tests(
+                listing,
+                identity,
+                {},
+                manual_only=True,
+            ),
+            ["p::smoke::ignored_case"],
+        )
+        listing["rust-suites"]["p::smoke"]["testcases"]["active_case"] = {
+            "ignored": False,
+            "filter-match": {"status": "matches"},
+        }
+        with self.assertRaisesRegex(ValueError, "has active tests"):
+            owned._listing_tests(
+                listing,
+                identity,
+                {},
+                manual_only=True,
+            )
+
+    def test_nonempty_shard_builds_products_once_before_target_commands(self) -> None:
+        plan = self._plan()
+        identity = owned.Identity("p", "smoke")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            output = root / "receipt"
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                self.assertNotIn("timeout", kwargs)
+                calls.append(command)
+                if command[1:3] == ["nextest", "list"]:
+                    payload = {
+                        "rust-suites": {
+                            identity.canonical: {
+                                "testcases": {
+                                    "fast_case": {
+                                        "ignored": False,
+                                        "filter-match": {"status": "matches"},
+                                    },
+                                    "slow_case": {
+                                        "ignored": False,
+                                        "filter-match": {"status": "mismatch"},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    return mock.Mock(
+                        stdout=json.dumps(payload), stderr="", returncode=0
+                    )
+                if command[1:3] == ["nextest", "run"]:
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    junit.write_text(
+                        '<testsuite><testcase name="fast_case"/></testsuite>'
+                    )
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with (
+                mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                mock.patch.object(owned, "_commit", return_value="b" * 40),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=output,
+                    repo=root,
+                    runner=run,
+                )
+            self.assertTrue(receipt["success"], receipt["failures"])
+            self.assertEqual(
+                calls[0],
+                ["cargo", "build", "--workspace", "--lib", "--bins", "--locked"],
+            )
+            self.assertEqual(sum(command[1] == "build" for command in calls), 1)
+            self.assertEqual(receipt["executed_tests"], ["p::smoke::fast_case"])
+            self.assertEqual(
+                set(receipt["sidecars"]),
+                {"commands.json", "timings.json", "test-list.json", "junit.xml"},
+            )
+            self.assertEqual(len(owned.load_receipts(output)), 1)
+
+    def test_manual_only_target_executes_the_complete_ignored_suite(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan()
+        plan["manual_only_targets"] = [
+            {"identity": identity.canonical, "owner": OWNER}
+        ]
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[1:3] == ["nextest", "list"]:
+                    payload = {
+                        "rust-suites": {
+                            identity.canonical: {
+                                "testcases": {
+                                    "ignored_case": {
+                                        "ignored": True,
+                                        "filter-match": {"status": "matches"},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return mock.Mock(
+                        stdout=json.dumps(payload), stderr="", returncode=0
+                    )
+                if command[1:3] == ["nextest", "run"]:
+                    junit = target / "nextest/ci-full/junit.xml"
+                    junit.parent.mkdir(parents=True, exist_ok=True)
+                    junit.write_text(
+                        '<testsuite><testcase name="ignored_case"/></testsuite>'
+                    )
+                return mock.Mock(stdout="", stderr="", returncode=0)
+
+            with (
+                mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}),
+                mock.patch.object(owned, "_commit", return_value="b" * 40),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+
+        self.assertTrue(receipt["success"])
+        self.assertEqual(receipt["selected_tests"], ["p::smoke::ignored_case"])
+        self.assertEqual(receipt["executed_tests"], ["p::smoke::ignored_case"])
+        for command in calls[1:]:
+            self.assertEqual(
+                command[command.index("--run-ignored") + 1],
+                "all",
+            )
+
+    def _manual_gate_receipt(
+        self, testcases: dict[str, bool]
+    ) -> tuple[dict, list[list[str]]]:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan()
+        plan["manual_gate_targets"] = [
+            {
+                "identity": identity.canonical,
+                "manual_gates": ["p_gate"],
+                "reason": GATE_REASON,
+                "tracking_issue": "chelis#1824",
+            }
+        ]
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                self.assertEqual(command[1:3], ["nextest", "list"])
+                payload = {
+                    "rust-suites": {
+                        identity.canonical: {
+                            "testcases": {
+                                name: {
+                                    "ignored": ignored,
+                                    "filter-match": {"status": "matches"},
+                                }
+                                for name, ignored in testcases.items()
+                            }
+                        }
+                    }
+                }
+                return mock.Mock(
+                    stdout=json.dumps(payload), stderr="", returncode=0
+                )
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"CARGO_TARGET_DIR": str(root / "target")}
+                ),
+                mock.patch.object(owned, "_commit", return_value="b" * 40),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+        return receipt, calls
+
+    def test_manual_gate_target_is_listed_with_ignored_tests_and_never_run(
+        self,
+    ) -> None:
+        receipt, calls = self._manual_gate_receipt(
+            {"ignored_case": True, "other_ignored_case": True}
+        )
+        self.assertTrue(receipt["success"], receipt["failures"])
+        self.assertEqual(
+            receipt["manual_gate_tests"],
+            ["p::smoke::ignored_case", "p::smoke::other_ignored_case"],
+        )
+        self.assertEqual(receipt["selected_targets"], ["p::smoke"])
+        self.assertEqual(receipt["executed_targets"], [])
+        self.assertEqual(receipt["selected_tests"], [])
+        self.assertEqual(receipt["executed_tests"], [])
+        self.assertEqual([command[1:3] for command in calls[1:]], [["nextest", "list"]])
+        self.assertEqual(calls[1][calls[1].index("--run-ignored") + 1], "all")
+
+    def test_manual_gate_target_with_an_active_or_no_test_fails_closed(
+        self,
+    ) -> None:
+        for testcases, message in (
+            ({"ignored_case": True, "active_case": False}, "has active tests"),
+            ({}, "no active tests"),
+        ):
+            with self.subTest(testcases=testcases):
+                receipt, calls = self._manual_gate_receipt(testcases)
+                self.assertFalse(receipt["success"])
+                self.assertRegex(" ".join(receipt["failures"]), message)
+                self.assertEqual(receipt["manual_gate_tests"], [])
+                self.assertEqual(receipt["executed_targets"], [])
+                self.assertEqual(
+                    [command[1:3] for command in calls[1:]], [["nextest", "list"]]
+                )
+
+    def test_package_expansion_accepts_an_all_ignored_ordinary_target(
+        self,
+    ) -> None:
+        identity = owned.Identity("p", "smoke")
+        plan = self._plan(lane="package-expansion")
+        plan["test_exclusions"] = []
+        owned.attach_plan_digest(plan)
+        shard = next(
+            shard
+            for shard in owned.SHARDS
+            if identity.canonical
+            in owned.execution_shards(plan, "package-expansion")[str(shard)]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                self.assertEqual(command[1:3], ["nextest", "list"])
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(
+                        {
+                            "rust-suites": {
+                                identity.canonical: {
+                                    "testcases": {
+                                        "ignored_case": {
+                                            "ignored": True,
+                                            "filter-match": {
+                                                "status": "matches",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                    "",
+                )
+
+            with mock.patch.object(
+                owned,
+                "_commit",
+                return_value="b" * 40,
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="package-expansion",
+                    shard=shard,
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                )
+
+            self.assertTrue(receipt["success"])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(receipt["executed_targets"], [identity.canonical])
+            self.assertEqual(receipt["selected_tests"], [])
+            self.assertEqual(receipt["executed_tests"], [])
+            listing = json.loads(
+                (root / "receipt/test-list.json").read_text()
+            )
+            self.assertEqual(
+                listing["not_applicable_targets"],
+                [identity.canonical],
+            )
+
+    def test_package_expansion_isolates_an_ignored_only_target_in_a_batch(
+        self,
+    ) -> None:
+        ignored = owned.Identity("p", "smoke")
+        active = owned.Identity("p", "active")
+        plan = self._plan(lane="package-expansion")
+        plan["test_exclusions"] = []
+        shard, fixture_baseline = set_colocated_package_expansion(
+            plan,
+            [ignored, active],
+        )
+        owned.attach_plan_digest(plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+
+            def run(command, **kwargs):
+                if command[1] == "build":
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if command[2] == "list":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        json.dumps(
+                            {
+                                "rust-suites": {
+                                    ignored.canonical: {
+                                        "testcases": {
+                                            "ignored_case": {
+                                                "ignored": True,
+                                                "filter-match": {
+                                                    "status": "matches",
+                                                },
+                                            }
+                                        }
+                                    },
+                                    active.canonical: {
+                                        "testcases": {
+                                            "active_case": {
+                                                "ignored": False,
+                                                "filter-match": {
+                                                    "status": "matches",
+                                                },
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                        ),
+                        "",
+                    )
+                junit = target / "nextest/ci-full/junit.xml"
+                junit.parent.mkdir(parents=True, exist_ok=True)
+                junit.write_text(
+                    f'<testsuite><testcase name="active_case" '
+                    f'classname="{active.canonical}"/></testsuite>'
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"CARGO_TARGET_DIR": str(target)},
+                ),
+                mock.patch.object(
+                    owned,
+                    "_commit",
+                    return_value="b" * 40,
+                ),
+            ):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="package-expansion",
+                    shard=shard,
+                    output=root / "receipt",
+                    repo=root,
+                    runner=run,
+                    duration_baseline=fixture_baseline,
+                )
+
+            self.assertTrue(receipt["success"], receipt["failures"])
+            self.assertEqual(
+                receipt["executed_targets"],
+                sorted([ignored.canonical, active.canonical]),
+            )
+            self.assertEqual(
+                receipt["selected_tests"],
+                [f"{active.canonical}::active_case"],
+            )
+            self.assertEqual(
+                receipt["executed_tests"],
+                [f"{active.canonical}::active_case"],
+            )
+
+    def test_change_owned_rejects_an_all_ignored_ordinary_target(self) -> None:
+        identity = owned.Identity("p", "smoke")
+        listing = {
+            "rust-suites": {
+                identity.canonical: {
+                    "testcases": {
+                        "ignored_case": {
+                            "ignored": True,
+                            "filter-match": {"status": "matches"},
+                        }
+                    }
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "no active tests"):
+            owned._listing_tests(listing, identity, {})
+
+    def test_product_build_failure_writes_receipt_and_skips_targets(self) -> None:
+        plan = self._plan()
+        identity = owned.Identity("p", "smoke")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "receipt"
+            calls: list[list[str]] = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                raise subprocess.CalledProcessError(
+                    1, command, output="", stderr="build failed"
+                )
+
+            with mock.patch.object(owned, "_commit", return_value="b" * 40):
+                receipt = owned.execute_shard(
+                    plan,
+                    lane="change-owned",
+                    shard=owned.shard_for(identity),
+                    output=output,
+                    repo=root,
+                    runner=run,
+                )
+            self.assertFalse(receipt["success"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], "build")
+            self.assertTrue((output / "receipt.json").is_file())
+
+    def test_candidate_head_mismatch_stops_before_cargo(self) -> None:
+        runner = mock.Mock()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(owned, "_commit", return_value="c" * 40),
+            self.assertRaisesRegex(ValueError, "checked-out HEAD"),
+        ):
+            owned.execute_shard(
+                self._plan(),
+                lane="change-owned",
+                shard=0,
+                output=Path(tmp),
+                runner=runner,
+            )
+        runner.assert_not_called()
+
+    def test_prepare_empty_shard_writes_explicit_receipt_without_a_runner(self) -> None:
+        plan = self._plan()
+        empty_shard = next(
+            shard
+            for shard in owned.SHARDS
+            if not plan["shards"]["change_owned"][str(shard)]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "_commit", return_value="b" * 40
+        ), mock.patch.object(owned, "run_command") as runner:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=empty_shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(
+                github_output.read_text(),
+                "has_targets=false\n",
+            )
+            self.assertIsNotNone(receipt)
+            self.assertTrue(receipt["success"])
+            self.assertEqual(receipt["selected_targets"], [])
+            self.assertEqual(receipt["executed_targets"], [])
+            self.assertEqual(receipt["selected_tests"], [])
+            self.assertEqual(receipt["executed_tests"], [])
+            self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+            runner.assert_not_called()
+
+    def test_prepare_nonempty_shard_defers_to_the_worker(self) -> None:
+        plan = self._plan()
+        shard = owned.shard_for(owned.Identity("p", "smoke"))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            owned, "execute_shard"
+        ) as execute:
+            root = Path(tmp)
+            github_output = root / "github-output"
+            receipt = owned.prepare_shard(
+                plan,
+                lane="change-owned",
+                shard=shard,
+                output=root / "receipt",
+                github_output=github_output,
+                repo=root,
+            )
+            self.assertEqual(github_output.read_text(), "has_targets=true\n")
+            self.assertIsNone(receipt)
+            execute.assert_not_called()
+
+    def test_run_shard_returns_zero_after_captured_failure_receipt(self) -> None:
+        plan = self._plan()
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = Path(tmp) / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(plan))
+            with mock.patch.object(
+                owned,
+                "execute_shard",
+                return_value={"success": False},
+            ):
+                result = owned.main(
+                    [
+                        "run-shard",
+                        "--plan",
+                        str(plan_path),
+                        "--lane",
+                        "change-owned",
+                        "--shard",
+                        "0",
+                        "--output",
+                        str(Path(tmp) / "out"),
+                    ]
+                )
+        self.assertEqual(result, 0)
+
+    def test_prepare_shard_cli_spelling(self) -> None:
+        args = owned.build_parser().parse_args(
+            [
+                "prepare-shard",
+                "--plan",
+                "plan.json",
+                "--lane",
+                "change-owned",
+                "--shard",
+                "2",
+                "--output",
+                "receipt",
+                "--github-output",
+                "github-output",
+            ]
+        )
+        self.assertEqual((args.command, args.lane, args.shard), (
+            "prepare-shard",
+            "change-owned",
+            2,
+        ))
+
+    def test_cli_spellings_match_the_workflow_contract(self) -> None:
+        parser = owned.build_parser()
+        plan = parser.parse_args(
+            [
+                "plan",
+                "--event-name",
+                "push",
+                "--pr-head",
+                "a" * 40,
+                "--before",
+                "b" * 40,
+                "--after",
+                "c" * 40,
+                "--output",
+                "plan.json",
+            ]
+        )
+        self.assertEqual(plan.command, "plan")
+        shard = parser.parse_args(
+            [
+                "run-shard",
+                "--plan",
+                "plan.json",
+                "--lane",
+                "package-expansion",
+                "--shard",
+                "3",
+                "--output",
+                "receipt",
+            ]
+        )
+        self.assertEqual((shard.lane, shard.shard), ("package-expansion", 3))
+        report = parser.parse_args(
+            [
+                "report",
+                "--plan",
+                "plan.json",
+                "--lane",
+                "change-owned",
+                "--receipts-root",
+                "receipts",
+                "--output",
+                "report",
+                "--required",
+            ]
+        )
+        self.assertTrue(report.required)
+
+
+@unittest.skipUnless(os.name == "posix", "hosted expansion uses POSIX process groups")
+class BoundedCommandTests(unittest.TestCase):
+    def test_interruption_cleans_up_the_owned_process_group(self) -> None:
+        process = mock.Mock(pid=4321)
+        process.communicate.side_effect = [KeyboardInterrupt(), ("out", "err")]
+        manager = mock.MagicMock()
+        manager.__enter__.return_value = process
+        with (
+            mock.patch.object(owned.subprocess, "Popen", return_value=manager),
+            mock.patch.object(owned.os, "killpg") as kill,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            owned.run_command(["cargo", "build"], timeout=1, check=True)
+        kill.assert_called_once_with(4321, owned.signal.SIGKILL)
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_real_executor_timeout_writes_a_verifiable_unsuccessful_receipt(self) -> None:
+        plan = ShardingAndExecutionTests()._plan(lane="package-expansion")
+        for stage in ("build", "list", "run"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                # Exercise the production process runner and serializer together,
+                # with an executable stand-in for Cargo instead of a real build.
+                cargo = root / "cargo"
+                cargo.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json,os,pathlib,sys,time\n"
+                    f"if {stage!r} in sys.argv[1:3]:\n"
+                    " print('deadline output', flush=True)\n"
+                    " time.sleep(30)\n"
+                    "if 'list' in sys.argv[1:3]:\n"
+                    " print(json.dumps({'rust-suites': {'p::smoke': {'testcases': {"
+                    "'fast_case': {'ignored': False, 'filter-match': {'status': 'matches'}},"
+                    "'slow_case': {'ignored': False, 'filter-match': {'status': 'mismatch'}}}}}}))\n"
+                )
+                cargo.chmod(0o755)
+                with (
+                    mock.patch.dict(os.environ, {
+                        "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "CARGO_TARGET_DIR": str(root / "target"),
+                    }),
+                    mock.patch.object(owned, "_commit", return_value="b" * 40),
+                    mock.patch.object(owned, "EXPANSION_EXECUTION_SECONDS", 0.5),
+                ):
+                    receipt = owned.execute_shard(
+                        plan, lane="package-expansion",
+                        shard=next(
+                            shard
+                            for shard in owned.SHARDS
+                            if "p::smoke"
+                            in owned.execution_shards(
+                                plan,
+                                "package-expansion",
+                            )[str(shard)]
+                        ),
+                        output=root / "receipt", repo=root,
+                    )
+                self.assertFalse(receipt["success"])
+                self.assertIn("execution deadline", " ".join(receipt["failures"]))
+                self.assertEqual(owned.load_receipts(root / "receipt"), [receipt])
+                commands = json.loads((root / "receipt/commands.json").read_text())
+                self.assertEqual(commands[-1]["returncode"], 124)
+                self.assertEqual(commands[-1]["stdout"], "deadline output\n")
+                self.assertEqual(receipt["executed_tests"], [])
+
+    def test_success_and_nonzero_exit_preserve_command_output(self) -> None:
+        for code in (0, 7):
+            command = [sys.executable, "-c", f"import sys; print('out'); print('err', file=sys.stderr); sys.exit({code})"]
+            kwargs = dict(cwd=Path.cwd(), check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            if code:
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    owned.run_command(command, **kwargs)
+                result = caught.exception
+            else:
+                result = owned.run_command(command, **kwargs)
+            self.assertEqual(result.returncode, code)
+            self.assertEqual(result.stdout, "out\n")
+            self.assertEqual(result.stderr, "err\n")
+
+    def test_timeout_terminates_a_child_that_inherits_output_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "child-survived"
+            child = f"import pathlib,time; time.sleep(1.5); pathlib.Path({str(marker)!r}).write_text('alive')"
+            parent = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                "print('started', flush=True); print('stderr', file=sys.stderr, flush=True); time.sleep(30)"
+            )
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                owned.run_command(
+                    [sys.executable, "-c", parent], cwd=Path(tmp), check=True,
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=0.5,
+                )
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertIn("started", caught.exception.stdout)
+            self.assertIn("stderr", caught.exception.stderr)
+            time.sleep(1.6)
+            self.assertFalse(marker.exists(), "the timed-out command left its child alive")
+
+
+_UNSET = object()
+
+
+class _ExpansionFixture:
+    """A package-expansion selection whose JUnit and baseline a test writes."""
+
+    def __init__(self, *, plan, receipts, duration_baseline, root: Path) -> None:
+        self.plan = plan
+        self.receipts = receipts
+        self.duration_baseline = duration_baseline
+        self.root = root
+        self.junit_documents: dict[int, Path] = {}
+        self.baseline_failures: set[str] = set()
+        self.baseline_observed: set[str] = set()
+
+    def write_junit(
+        self,
+        shard: int,
+        *,
+        failing: list[str] = (),
+        passing: list[str] = (),
+    ) -> Path:
+        """Write one shard's merged JUnit, naming tests of its own targets."""
+        target = self.receipts[shard]["selected_targets"][0]
+        cases = [
+            f'<testcase classname="{target}" name="{name}">'
+            f"<failure message=\"boom\">boom</failure></testcase>"
+            for name in failing
+        ] + [
+            f'<testcase classname="{target}" name="{name}"/>'
+            for name in passing
+        ]
+        document = self.root / f"shard-{shard}.xml"
+        document.write_text(
+            "<testsuites><testsuite>" + "".join(cases) + "</testsuite></testsuites>"
+        )
+        self.junit_documents[shard] = document
+        return document
+
+    def baseline(self) -> owned.FailureBaseline:
+        return owned.FailureBaseline(
+            workflow="heavy-e2e.yml",
+            run_id="12345",
+            run_url="https://example.invalid/runs/12345",
+            head_sha="d" * 40,
+            created_at="2026-09-19T03:31:04Z",
+            observed=frozenset(self.baseline_observed | self.baseline_failures),
+            failed=frozenset(self.baseline_failures),
+        )
+
+    def summarize(self, *, baseline=_UNSET, distance=None) -> dict:
+        resolved = self.baseline() if baseline is _UNSET else baseline
+        return owned.summarize_package_expansion(
+            self.plan,
+            self.receipts,
+            duration_baseline=self.duration_baseline,
+            junit_documents=self.junit_documents,
+            failure_baseline=resolved,
+            ancestor_distance=distance or (lambda repo, ancestor, head: 3),
+        )
+
+
+class ReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plan = {
+            "version": owned.PLAN_VERSION,
+            "mode": "push",
+            "base_sha": "a" * 40,
+            "candidate_sha": "b" * 40,
+            "event_pr_head": None,
+            "config_digest": "c" * 64,
+            "changed_records": [],
+            "path_dispositions": [],
+            "target_dispositions": [],
+            "selected_packages": ["p", "q"],
+            "eligible_targets": ["p::smoke", "q::smoke"],
+            "target_features": {"p::smoke": [], "q::smoke": []},
+            "change_owned": ["p::smoke", "q::smoke"],
+            "package_expansion": [],
+            "standing_targets": ["p::smoke"],
+            "standing_coverage_reuse": ["p::smoke"],
+            "manual_only_targets": [],
+            "manual_gate_targets": [],
+            "target_exclusions": [{"identity": "p::heavy", "owner": OWNER}],
+            "test_exclusions": [
+                {"identity": "p::smoke::slow_case", "owner": OWNER}
+            ],
+            **shard_fields(
+                [owned.Identity("q", "smoke")],
+                [],
+            ),
+        }
+        owned.attach_plan_digest(self.plan)
+
+    def standing_coverage(self) -> dict:
+        coverage = {
+            "version": 1,
+            "candidate_sha": self.plan["candidate_sha"],
+            "config_digest": self.plan["config_digest"],
+            "execution": dict(owned.STANDING_EXECUTION),
+            "selected_targets": ["p::smoke"],
+            "executed_targets": ["p::smoke"],
+            "selected_tests": ["p::smoke::fast_case"],
+            "executed_tests": ["p::smoke::fast_case"],
+            "success": True,
+            "failures": [],
+        }
+        owned.attach_standing_coverage_digest(coverage)
+        return coverage
+
+    def receipts(self, *, surface: str = "change_owned") -> list[dict]:
+        result = []
+        for shard in range(4):
+            selected = owned.execution_shards(
+                self.plan,
+                surface.replace("_", "-"),
+            )[str(shard)]
+            tests = [f"{identity}::fast_case" for identity in selected]
+            receipt = {
+                "version": owned.RECEIPT_VERSION,
+                "lane": surface.replace("_", "-"),
+                "shard": shard,
+                "plan_digest": self.plan["plan_digest"],
+                "selected_targets": selected,
+                "executed_targets": selected,
+                "selected_tests": tests,
+                "executed_tests": tests,
+                "manual_gate_tests": [],
+                "commands_file": "commands.json",
+                "timings_file": "timings.json",
+                "test_list_file": "test-list.json",
+                "junit_file": "junit.xml",
+                "started_at": "2026-09-13T00:00:00Z",
+                "finished_at": "2026-09-13T00:00:01Z",
+                "elapsed_seconds": 1.0,
+                "soft_budget_seconds": (
+                    owned.SOFT_BUDGET_SECONDS
+                    if surface == "package_expansion"
+                    else None
+                ),
+                "soft_budget_exceeded": False,
+                "sidecars": {
+                    "commands.json": "0" * 64,
+                    "timings.json": "1" * 64,
+                    "test-list.json": "2" * 64,
+                    "junit.xml": "3" * 64,
+                },
+                "success": True,
+                "failures": [],
+            }
+            owned.attach_receipt_digest(receipt)
+            result.append(receipt)
+        return result
+
+    def assert_required_fails(self, mutate) -> None:
+        receipts = self.receipts()
+        coverage = self.standing_coverage()
+        mutate(receipts, coverage)
+        with self.assertRaises(ValueError):
+            owned.validate_change_owned_report(self.plan, receipts, coverage)
+
+    def test_required_report_accepts_exact_four_shard_cover(self) -> None:
+        report = owned.validate_change_owned_report(
+            self.plan,
+            self.receipts(),
+            self.standing_coverage(),
+        )
+        self.assertTrue(report["success"])
+        self.assertEqual(report["covered_targets"], sorted(self.plan["change_owned"]))
+        self.assertEqual(len(report["shard_durations"]), len(owned.SHARDS))
+        self.assertEqual(
+            {row["actual_milliseconds"] for row in report["shard_durations"]},
+            {1000},
+        )
+
+    GATE_ROW = {
+        "identity": "q::smoke",
+        "manual_gates": ["q_gate"],
+        "reason": GATE_REASON,
+        "tracking_issue": "chelis#1824",
+    }
+
+    def gate_receipts(self, **fields: object) -> list[dict]:
+        """Receipts whose q::smoke shard listed it as a manual gate."""
+        receipts = self.receipts()
+        for receipt in receipts:
+            if "q::smoke" in receipt["selected_targets"]:
+                receipt.update(
+                    executed_targets=[],
+                    selected_tests=[],
+                    executed_tests=[],
+                    manual_gate_tests=["q::smoke::ignored_case"],
+                )
+                receipt.update(fields)
+                owned.attach_receipt_digest(receipt)
+        return receipts
+
+    def test_required_report_records_a_manual_gate_as_not_executed(self) -> None:
+        self.plan["manual_gate_targets"] = [self.GATE_ROW]
+        owned.attach_plan_digest(self.plan)
+        report = owned.validate_change_owned_report(
+            self.plan,
+            self.gate_receipts(),
+            self.standing_coverage(),
+        )
+        self.assertEqual(report["covered_targets"], ["p::smoke"])
+        self.assertEqual(
+            report["manual_gate_targets"],
+            [
+                {
+                    **self.GATE_ROW,
+                    "status": "manual gate, not executed in PR CI",
+                    "listed_tests": ["q::smoke::ignored_case"],
+                }
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            owned._write_report_files(Path(tmp), report)
+            summary = (Path(tmp) / "summary.md").read_text()
+        self.assertIn("- Covered targets: 1\n", summary)
+        self.assertIn("- Manual gates, not executed in PR CI: 1\n", summary)
+        self.assertIn(
+            "  - `q::smoke`: manual gate, not executed in PR CI. Ignored tests "
+            "listed: 1, run: 0. Run by hand: docs/manual_gates.md `q_gate` "
+            "(chelis#1824)\n",
+            summary,
+        )
+
+    def test_required_report_rejects_a_manual_gate_run_unlisted_or_self_declared(
+        self,
+    ) -> None:
+        coverage = self.standing_coverage()
+        plain_plan = copy.deepcopy(self.plan)
+        self.plan["manual_gate_targets"] = [self.GATE_ROW]
+        owned.attach_plan_digest(self.plan)
+        cases = [
+            (
+                "executed",
+                self.plan,
+                self.gate_receipts(
+                    executed_targets=["q::smoke"],
+                    selected_tests=["q::smoke::ignored_case"],
+                    executed_tests=["q::smoke::ignored_case"],
+                    manual_gate_tests=[],
+                ),
+                "executed target coverage mismatch",
+            ),
+            (
+                "unlisted",
+                self.plan,
+                self.gate_receipts(manual_gate_tests=[]),
+                "manual-gate listing mismatch",
+            ),
+            (
+                "self-declared",
+                plain_plan,
+                self.gate_receipts(),
+                "manual-gate listing mismatch",
+            ),
+        ]
+        for label, plan, receipts, message in cases:
+            with self.subTest(label=label):
+                if plan is plain_plan:
+                    for receipt in receipts:
+                        receipt["plan_digest"] = plain_plan["plan_digest"]
+                        owned.attach_receipt_digest(receipt)
+                with self.assertRaisesRegex(ValueError, message):
+                    owned.validate_change_owned_report(plan, receipts, coverage)
+
+    def test_receipt_manual_gate_tests_are_unexecuted_change_owned_listings(
+        self,
+    ) -> None:
+        receipt = next(
+            row for row in self.gate_receipts() if row["manual_gate_tests"]
+        )
+        owned.verify_receipt_digest(receipt)
+        for label, fields in (
+            ("wrong lane", {"lane": "package-expansion", "soft_budget_seconds": owned.SOFT_BUDGET_SECONDS}),
+            ("unselected target", {"manual_gate_tests": ["p::heavy::case"]}),
+            ("also executed", {"executed_targets": ["q::smoke"]}),
+            ("also selected", {"selected_tests": ["q::smoke::ignored_case"]}),
+        ):
+            with self.subTest(label=label):
+                mutated = {**receipt, **fields}
+                owned.attach_receipt_digest(mutated)
+                with self.assertRaisesRegex(ValueError, "manual_gate_tests"):
+                    owned.verify_receipt_digest(mutated)
+
+    def test_required_report_rejects_missing_digest_duplicate_uncovered_excluded_and_failure(self) -> None:
+        mutations = [
+            lambda rows, coverage: rows.pop(),
+            lambda rows, coverage: rows[0].update(plan_digest="bad"),
+            lambda rows, coverage: rows.append(copy.deepcopy(rows[0])),
+            lambda rows, coverage: next(
+                row for row in rows if row["selected_targets"]
+            ).update(executed_targets=[]),
+            lambda rows, coverage: rows[0]["executed_targets"].append("p::heavy"),
+            lambda rows, coverage: rows[0].update(
+                success=False, failures=["command failed"]
+            ),
+            lambda rows, coverage: rows[0]["executed_tests"].append(
+                "p::smoke::slow_case"
+            ),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assert_required_fails(mutation)
+
+    def test_receipt_digest_mismatch_is_rejected(self) -> None:
+        self.assert_required_fails(
+            lambda rows, coverage: rows[0]["selected_targets"].append(
+                "p::invented"
+            )
+        )
+
+    def test_required_report_rejects_missing_stale_or_incomplete_standing_coverage(self) -> None:
+        with self.assertRaisesRegex(ValueError, "standing coverage"):
+            owned.validate_change_owned_report(self.plan, self.receipts(), None)
+        mutations = (
+            lambda coverage: coverage.update(candidate_sha="d" * 40),
+            lambda coverage: coverage.update(config_digest="d" * 64),
+            lambda coverage: coverage["execution"].update(profile="ci-full"),
+            lambda coverage: coverage.update(executed_targets=[]),
+            lambda coverage: coverage.update(executed_tests=[]),
+            lambda coverage: coverage.update(
+                success=False, failures=["tests failed"]
+            ),
+            lambda coverage: coverage["selected_tests"].append(
+                "p::smoke::missing_result"
+            ),
+        )
+        for mutate in mutations:
+            coverage = self.standing_coverage()
+            mutate(coverage)
+            owned.attach_standing_coverage_digest(coverage)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                owned.validate_change_owned_report(
+                    self.plan,
+                    self.receipts(),
+                    coverage,
+                )
+
+    def test_standing_coverage_digest_rejects_tampering(self) -> None:
+        coverage = self.standing_coverage()
+        coverage["executed_tests"] = []
+        with self.assertRaisesRegex(ValueError, "coverage digest mismatch"):
+            owned.validate_change_owned_report(
+                self.plan,
+                self.receipts(),
+                coverage,
+            )
+
+    @contextlib.contextmanager
+    def expansion_fixture(self):
+        """One informational selection with writable JUnit and a baseline.
+
+        The ancestry probe is injected so a unit test states the relation it
+        means; `AncestorDistanceTests` exercises the real git one.
+        """
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            yield _ExpansionFixture(
+                plan=self.plan,
+                receipts=self.receipts(surface="package_expansion"),
+                duration_baseline=fixture_baseline,
+                root=Path(tmp),
+            )
+
+    def test_informational_summary_records_failures_but_does_not_raise(self) -> None:
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        receipts = self.receipts(surface="package_expansion")
+        receipts[0]["success"] = False
+        receipts[0]["failures"] = ["timeout"]
+        owned.attach_receipt_digest(receipts[0])
+        summary = owned.summarize_package_expansion(
+            self.plan,
+            receipts[:-1],
+            duration_baseline=fixture_baseline,
+        )
+        self.assertFalse(summary["observed_success"])
+        self.assertFalse(summary["success"])
+        self.assertFalse(summary["required"])
+        self.assertTrue(summary["failures"])
+
+    def test_informational_summary_does_not_fault_a_soft_budget_overrun(
+        self,
+    ) -> None:
+        """A shard that ran long but covered everything is not a finding.
+
+        The per-shard weight is a serial longest-processing-time input, while
+        the executor batches a package's targets into one command, so the
+        elapsed time a budget is compared against measures something the
+        estimate never predicted. The budget is now derived as a margin below
+        the deadline, so this fixture is a shard inside that margin: it came
+        close to being cut and still covered its whole selection, which is a
+        measurement and not a defect.
+        """
+        with self.expansion_fixture() as fixture:
+            fixture.receipts[0]["elapsed_seconds"] = (
+                owned.SOFT_BUDGET_SECONDS + 1.0
+            )
+            fixture.receipts[0]["soft_budget_exceeded"] = True
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        self.assertTrue(summary["observed_success"])
+        self.assertEqual(summary["failures"], [])
+        self.assertNotIn("soft budget", json.dumps(summary))
+
+    def test_informational_summary_splits_introduced_from_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::other_case"}
+            fixture.baseline_observed = {
+                "p::default_gated::fast_case",
+                "p::default_gated::other_case",
+            }
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(
+            classification["introduced"],
+            [{"test": "p::default_gated::fast_case", "baseline": "passed"}],
+        )
+        self.assertEqual(classification["inherited"], [])
+        self.assertFalse(summary["observed_success"])
+
+    def test_informational_summary_is_clean_when_every_failure_is_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(
+            classification["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertTrue(summary["observed_success"])
+
+    def test_a_failure_the_baseline_never_ran_is_introduced_and_says_so(
+        self,
+    ) -> None:
+        """An absent baseline verdict is not evidence of prior breakage."""
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = set()
+            fixture.baseline_observed = {"p::other::unrelated_case"}
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(
+            classification["introduced"],
+            [{"test": "p::default_gated::fast_case", "baseline": "absent"}],
+        )
+        self.assertFalse(summary["observed_success"])
+
+    def test_unrun_targets_are_counted_and_never_reported_as_inherited(
+        self,
+    ) -> None:
+        with self.expansion_fixture() as fixture:
+            unreached = list(fixture.receipts[0]["selected_targets"])
+            fixture.receipts[0]["executed_targets"] = []
+            fixture.receipts[0]["executed_tests"] = []
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = [
+                "package-expansion execution deadline exhausted; "
+                "unfinished selected coverage remains unsuccessful"
+            ]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        classification = summary["failure_classification"]
+        self.assertEqual(classification["unrun_targets"], unreached)
+        self.assertEqual(classification["inherited"], [])
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(summary["failures"], [])
+        self.assertTrue(summary["observed_success"])
+
+    def test_a_shard_that_only_failed_tests_needs_no_unrun_row(self) -> None:
+        """The commonest real shape: complete coverage, failing tests.
+
+        Nothing else in this class exercises it, so without this the
+        classified-failure half of the unexplained-shard net can be deleted
+        and the suite stays green.
+        """
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = [
+                f"{fixture.receipts[0]['selected_targets'][0]}: "
+                f"test run failed with 100"
+            ]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+        self.assertEqual(summary["failure_classification"]["unrun_targets"], [])
+        self.assertEqual(
+            summary["failure_classification"]["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertEqual(summary["failures"], [])
+        self.assertTrue(summary["observed_success"])
+
+    def test_the_ancestry_probe_is_asked_baseline_then_base(self) -> None:
+        """Argument order is the whole rule, so bind it rather than stub it."""
+        asked: list[tuple[str, str]] = []
+
+        def record(repo, ancestor, descendant):
+            asked.append((ancestor, descendant))
+            return 1
+
+        with self.expansion_fixture() as fixture:
+            expected_base = fixture.plan["base_sha"]
+            expected_baseline = fixture.baseline().head_sha
+            fixture.summarize(distance=record)
+        self.assertEqual(asked, [(expected_baseline, expected_base)])
+        self.assertNotEqual(expected_baseline, expected_base)
+
+    def test_the_required_lane_keeps_its_coverage_findings(self) -> None:
+        """`classifies_coverage` must not reach the fail-closed lane.
+
+        The informational lane suppresses three findings because it reports
+        the same facts as counts. The change-owned lane has no such counts, so
+        the same switch there would silently accept incomplete coverage.
+        """
+        receipts = self.receipts()
+        executing = next(row for row in receipts if row["selected_targets"])
+        executing["executed_targets"] = []
+        executing["executed_tests"] = []
+        executing["success"] = False
+        executing["failures"] = ["timeout"]
+        owned.attach_receipt_digest(executing)
+        findings = owned._report_findings(self.plan, receipts, "change-owned")
+        self.assertTrue(
+            any("did not succeed" in finding for finding in findings)
+        )
+        self.assertTrue(
+            any(
+                "executed target coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        self.assertTrue(
+            any(
+                "selected test coverage mismatch" in finding
+                for finding in findings
+            )
+        )
+        with self.assertRaises(ValueError):
+            owned.validate_change_owned_report(
+                self.plan,
+                receipts,
+                self.standing_coverage(),
+            )
+
+    def test_a_shard_failure_no_count_explains_is_reported(self) -> None:
+        """The three counts are derived, so an unexplained shard fails loudly."""
+        with self.expansion_fixture() as fixture:
+            fixture.receipts[0]["success"] = False
+            fixture.receipts[0]["failures"] = ["something nobody modelled"]
+            owned.attach_receipt_digest(fixture.receipts[0])
+            summary = fixture.summarize()
+        self.assertFalse(summary["observed_success"])
+        self.assertTrue(
+            any(
+                "no introduced, inherited or unrun row accounts for" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_a_missing_baseline_is_loud_rather_than_clean(self) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            summary = fixture.summarize(baseline=None)
+        self.assertFalse(summary["observed_success"])
+        self.assertIsNone(summary["failure_classification"])
+        self.assertTrue(
+            any(
+                "no usable default-branch failure baseline" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_a_baseline_outside_the_candidate_history_is_refused(self) -> None:
+        """A baseline the base does not contain could absolve the candidate."""
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize(distance=lambda repo, a, b: None)
+        self.assertFalse(summary["observed_success"])
+        self.assertIsNone(summary["failure_classification"])
+        self.assertTrue(
+            any(
+                "is not an ancestor of" in finding
+                for finding in summary["failures"]
+            )
+        )
+
+    def test_summary_markdown_leads_with_the_three_counts(self) -> None:
+        with self.expansion_fixture() as fixture:
+            fixture.write_junit(0, failing=["fast_case"])
+            fixture.baseline_failures = {"p::default_gated::fast_case"}
+            fixture.baseline_observed = {"p::default_gated::fast_case"}
+            summary = fixture.summarize()
+            output = fixture.root / "summary-output"
+            owned._write_report_files(output, summary)
+            rendered = (output / "summary.md").read_text()
+        self.assertIn("- Introduced failures: 0", rendered)
+        self.assertIn("- Inherited failures: 1", rendered)
+        self.assertIn("- Unrun targets: 0", rendered)
+        self.assertIn("commits behind this", rendered)
+        self.assertIn("no soft-budget finding", rendered)
+
+    def test_load_receipts_rejects_missing_or_modified_sidecars(self) -> None:
+        receipt = self.receipts()[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shard = root / "shard"
+            shard.mkdir()
+            for index, name in enumerate(
+                ("commands.json", "timings.json", "test-list.json", "junit.xml")
+            ):
+                content = f"sidecar-{index}".encode()
+                (shard / name).write_bytes(content)
+                receipt["sidecars"][name] = owned.sha256_bytes(content)
+            owned.attach_receipt_digest(receipt)
+            (shard / "receipt.json").write_bytes(owned.canonical_json(receipt))
+            self.assertEqual(len(owned.load_receipts(root)), 1)
+            (shard / "commands.json").write_text("modified")
+            with self.assertRaisesRegex(ValueError, "sidecar digest"):
+                owned.load_receipts(root)
+
+    def test_informational_cli_differences_a_baseline_end_to_end(self) -> None:
+        """The CLI reaches each shard's JUnit through its own sidecar digest."""
+        fixture_baseline = set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        receipts = self.receipts(surface="package_expansion")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(self.plan))
+            receipt_root = root / "receipts"
+            for receipt in receipts:
+                shard = receipt_root / f"shard-{receipt['shard']}"
+                shard.mkdir(parents=True)
+                failing = receipt["selected_targets"]
+                cases = "".join(
+                    f'<testcase classname="{identity}" name="fast_case">'
+                    f"<failure/></testcase>"
+                    for identity in failing
+                )
+                bodies = {
+                    "commands.json": b"[]",
+                    "timings.json": b"{}",
+                    "test-list.json": b"{}",
+                    "junit.xml": (
+                        f"<testsuites><testsuite>{cases}</testsuite>"
+                        f"</testsuites>"
+                    ).encode(),
+                }
+                for name, body in bodies.items():
+                    (shard / name).write_bytes(body)
+                    receipt["sidecars"][name] = owned.sha256_bytes(body)
+                owned.attach_receipt_digest(receipt)
+                (shard / "receipt.json").write_bytes(owned.canonical_json(receipt))
+            baseline_root = root / "baseline"
+            baseline_root.mkdir()
+            (baseline_root / "junit.xml").write_text(
+                '<testsuites><testsuite><testcase '
+                'classname="p::default_gated" name="fast_case">'
+                "<failure/></testcase></testsuite></testsuites>"
+            )
+            (baseline_root / "baseline.json").write_text(
+                json.dumps(
+                    {
+                        "version": owned.FAILURE_BASELINE_VERSION,
+                        "workflow": "heavy-e2e.yml",
+                        "run_id": "77",
+                        "run_url": "https://example.invalid/77",
+                        "head_sha": "d" * 40,
+                        "created_at": "2026-09-19T03:31:04Z",
+                        "documents": ["junit.xml"],
+                    }
+                )
+            )
+            output = root / "report"
+            with mock.patch.object(
+                owned,
+                "_ancestor_distance",
+                lambda repo, ancestor, head: 2,
+            ), mock.patch.object(
+                owned,
+                "load_duration_baseline",
+                lambda: fixture_baseline,
+            ):
+                result = owned.main(
+                    [
+                        "report",
+                        "--plan",
+                        str(plan_path),
+                        "--lane",
+                        "package-expansion",
+                        "--receipts-root",
+                        str(receipt_root),
+                        "--failure-baseline",
+                        str(baseline_root / "baseline.json"),
+                        "--output",
+                        str(output),
+                    ]
+                )
+            report = json.loads((output / "report.json").read_text())
+        self.assertEqual(result, 0)
+        self.assertTrue(report["observed_success"])
+        classification = report["failure_classification"]
+        self.assertEqual(classification["introduced"], [])
+        self.assertEqual(
+            classification["inherited"],
+            ["p::default_gated::fast_case"],
+        )
+        self.assertEqual(classification["baseline"]["run_id"], "77")
+
+    def test_the_fail_closed_lane_takes_no_failure_baseline(self) -> None:
+        """Including the conventional path, which is not a special spelling.
+
+        An argparse default would make exactly one path acceptable in the lane
+        that accepts none, so the informational branch resolves the default
+        and absence stays absence here.
+        """
+        for spelling in (
+            "somewhere/baseline.json",
+            str(owned.DEFAULT_FAILURE_BASELINE),
+        ):
+            with self.subTest(spelling=spelling):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    plan_path = root / "plan.json"
+                    plan_path.write_bytes(owned.canonical_json(self.plan))
+                    with self.assertRaisesRegex(
+                        ValueError, "takes no failure baseline"
+                    ):
+                        owned.main(
+                            [
+                                "report",
+                                "--plan",
+                                str(plan_path),
+                                "--lane",
+                                "change-owned",
+                                "--required",
+                                "--receipts-root",
+                                str(root),
+                                "--failure-baseline",
+                                spelling,
+                                "--output",
+                                str(root / "report"),
+                            ]
+                        )
+
+    def test_the_conventional_baseline_path_is_read_without_a_flag(self) -> None:
+        """The report runs candidate-side, so it must add no argument there."""
+        set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_bytes(owned.canonical_json(self.plan))
+            (root / "receipts").mkdir()
+            result = owned.main(
+                [
+                    "report",
+                    "--plan",
+                    str(plan_path),
+                    "--lane",
+                    "package-expansion",
+                    "--receipts-root",
+                    str(root / "receipts"),
+                    "--output",
+                    str(root / "report"),
+                ]
+            )
+            report = json.loads((root / "report" / "report.json").read_text())
+        self.assertEqual(result, 1)
+        self.assertFalse(report["observed_success"])
+        self.assertTrue(
+            any(
+                str(owned.DEFAULT_FAILURE_BASELINE) in finding
+                for finding in report["failures"]
+            ),
+            report["failures"],
+        )
+
+    def test_informational_cli_records_malformed_receipts_and_fails_run(self) -> None:
+        set_package_expansion(
+            self.plan,
+            [owned.Identity("p", "default_gated")],
+        )
+        owned.attach_plan_digest(self.plan)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            receipt_root = root / "receipts"
+            output = root / "report"
+            receipt_root.mkdir()
+            plan_path.write_bytes(owned.canonical_json(self.plan))
+            (receipt_root / "receipt.json").write_text("{malformed")
+            result = owned.main(
+                [
+                    "report",
+                    "--plan",
+                    str(plan_path),
+                    "--lane",
+                    "package-expansion",
+                    "--receipts-root",
+                    str(receipt_root),
+                    "--output",
+                    str(output),
+                ]
+            )
+            report = json.loads((output / "report.json").read_text())
+        self.assertEqual(result, 1)
+        self.assertFalse(report["success"])
+        self.assertFalse(report["observed_success"])
+        self.assertTrue(report["failures"])
+
+
+class RoutingInventoryReconciliationTests(unittest.TestCase):
+    """Reconcile the routing rules against the tree instead of copying it.
+
+    `AGENTS.md` § Guard Inventories: "A guard list carries a reviewed
+    disposition per row or is regenerated from the source tree. Do not
+    hand-maintain a second copy of tree membership," and "Regeneration may
+    discover rows; it must never assign reviewed semantic authority."
+
+    The `[[path_rule]]` set names workflow files one by one, so it is a
+    second copy of what is in `.github/workflows/`, and nothing reconciled
+    the two. Sixteen workflows had drifted out of it by 2026-09-19, and the
+    first code-bearing pull request to touch one lost the required
+    `Integration Tests (Linux)` context to `unclassified changed path`
+    (chelis#2232, instances chelis#2225 and chelis#2231).
+
+    These tests are the reconciliation. They discover a path the set does
+    not route and fail naming it; they do not invent its row, because which
+    job owns a file is a reviewed judgement and a generated guess would be
+    the "assign reviewed semantic authority" the contract forbids. A
+    directory-wide default was rejected instead: two matching rules
+    classify as `ambiguous_rule`, so a catch-all prefix would break every
+    workflow that carries a specific row.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def classify(self, paths):
+        config = owned.read_config(self.ROOT / ".config/ci-test-targets.toml")
+        classified = []
+        for path in paths:
+            # No workspace package can own any path checked here, so the
+            # empty package list is exact rather than an approximation and
+            # keeps the reconciliation free of `cargo metadata`.
+            self.assertFalse(
+                path.startswith("crates/"),
+                f"{path} may be package-owned; classify it with real metadata",
+            )
+            classified.append(
+                (path, owned.static_path_classification(path, (), config)[0])
+            )
+        return classified
+
+    def assert_all_routed(self, paths, *, what):
+        unrouted = [
+            f"{path} ({classification})"
+            for path, classification in self.classify(sorted(paths))
+            if classification not in {"rule", "package"}
+        ]
+        self.assertEqual(
+            unrouted,
+            [],
+            f"{len(unrouted)} {what} have no routing rule in "
+            ".config/ci-test-targets.toml, so the first code-bearing pull "
+            "request to touch one fails the planner with 'unclassified "
+            "changed path' and the required Integration Tests (Linux) "
+            "context cannot report. Add a reviewed [[path_rule]] for each, "
+            "naming the job that actually validates it; do not route it to "
+            "a job that does not.",
+        )
+
+    def test_every_workflow_file_is_routed(self) -> None:
+        workflows = [
+            str(path.relative_to(self.ROOT))
+            for path in (self.ROOT / ".github/workflows").iterdir()
+            if path.suffix in {".yml", ".yaml"} and path.is_file()
+        ]
+
+        self.assertGreater(len(workflows), 20, "workflow discovery found too few")
+        self.assert_all_routed(workflows, what="workflow files")
+
+    def test_every_control_artifact_the_detector_names_is_routed(self) -> None:
+        """The two lists must agree, and something must check that they do.
+
+        chelis#2225 was a document present in the docs-only detector's
+        executable set and absent from the routing rules. Being in that set
+        means `is_docs_only` refuses it, so without a rule it classifies as
+        `unclassified` rather than `docs`; the detector entry is what turns
+        a missing rule into a failed required context.
+        """
+
+        paths = sorted(detect.EXECUTABLE_DOC_PATHS | detect.DIAGNOSTIC_KIND_PATHS)
+        non_package = [path for path in paths if not path.startswith("crates/")]
+
+        self.assertGreater(len(non_package), 10, "detector discovery found too few")
+        self.assert_all_routed(non_package, what="detector control artifacts")
+
+    def test_the_reconciliation_fails_on_an_unrouted_path(self) -> None:
+        """The check must bite: an unrouted path is not silently accepted."""
+
+        with self.assertRaises(AssertionError) as raised:
+            self.assert_all_routed(
+                [".github/workflows/there-is-no-such-workflow.yml"],
+                what="workflow files",
+            )
+
+        self.assertIn("unclassified", str(raised.exception))
+        self.assertIn("no routing rule", str(raised.exception))
+
+
+def _git_repo(root: Path) -> None:
+    for command in (
+        ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+        ["git", "-C", str(root), "config", "user.email", "t@example.invalid"],
+        ["git", "-C", str(root), "config", "user.name", "T"],
+    ):
+        subprocess.run(command, check=True, capture_output=True)
+
+
+def _git_commit(root: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+        check=True,
+        capture_output=True,
+    )
+
+
+class ChangedPathClassificationTests(unittest.TestCase):
+    """chelis#2250: the planner's refusal, reachable before a push.
+
+    `plan` cannot answer this locally. In `pull_request` mode it requires a
+    two-parent synthetic merge and exits before classifying anything, so a new
+    tracked file passed every local check and failed CI on the first
+    unclassified path.
+    """
+
+    def setUp(self) -> None:
+        self.config = owned.read_config(
+            owned.ROOT / ".config/ci-test-targets.toml"
+        )
+        self.packages = (owned.PackageInfo("chelis-cli", "crates/chelis-cli"),)
+
+    def classify(self, paths):
+        return owned.classify_changed_paths(
+            paths,
+            config=self.config,
+            packages=self.packages,
+        )
+
+    def test_local_retirement_requires_base_membership_and_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _git_repo(root)
+            (root / "retired.json").write_text("{}")
+            _git_commit(root, "base")
+            subprocess.run(["git", "-C", str(root), "tag", "base"], check=True)
+            (root / "retired.json").unlink()
+            paths = ["retired.json", "unknown.json"]
+            self.assertEqual(
+                owned.classify_changed_paths(
+                    paths, repo=root, base="base", config=self.config, packages=()
+                ),
+                [("unknown.json", "unclassified")],
+            )
+            (root / "retired.json").symlink_to(root / "missing-target")
+            self.assertEqual(
+                owned.classify_changed_paths(
+                    paths, repo=root, base="base", config=self.config, packages=()
+                ),
+                [("retired.json", "unclassified"), ("unknown.json", "unclassified")],
+            )
+
+    def test_a_routed_path_and_a_package_path_are_accepted(self) -> None:
+        self.assertEqual(
+            self.classify(
+                [
+                    "scripts/ci_change_owned.py",
+                    "crates/chelis-cli/src/main.rs",
+                    "docs/ci_validation.md",
+                ]
+            ),
+            [],
+        )
+
+    def test_every_refused_path_is_reported_not_only_the_first(self) -> None:
+        """CI stops at the first; locally there is no reason to.
+
+        chelis#2248's repair added one rule for the path CI named and could
+        have left a second file unrouted behind it.
+        """
+        refused = self.classify(
+            ["scripts/zzz_second.py", "scripts/aaa_first.py"]
+        )
+        self.assertEqual(
+            refused,
+            [
+                ("scripts/aaa_first.py", "unclassified"),
+                ("scripts/zzz_second.py", "unclassified"),
+            ],
+        )
+
+    def test_an_ambiguous_path_is_refused_as_well_as_an_unrouted_one(
+        self,
+    ) -> None:
+        """A path two packages claim is as unplannable as one none claims."""
+        overlapping = (
+            owned.PackageInfo("chelis-cli", "crates/shared"),
+            owned.PackageInfo("chelis-surf", "crates/shared"),
+        )
+        refused = owned.classify_changed_paths(
+            ["crates/shared/src/main.rs"],
+            config=self.config,
+            packages=overlapping,
+        )
+        self.assertEqual(
+            refused, [("crates/shared/src/main.rs", "ambiguous_package")]
+        )
+
+    def test_a_rename_classifies_both_sides_as_the_planner_does(self) -> None:
+        """`--name-only` collapses a rename; `diff_at` does not.
+
+        Moving an unrouted file into a package root reads clean if only the
+        destination is classified, while the planner refuses the source. The
+        derivation uses `--find-renames` and keeps both sides for that reason.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "spec").mkdir()
+            (root / "spec" / "thing.json").write_text("{}")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "crates").mkdir()
+            subprocess.run(
+                ["git", "-C", str(root), "mv", "spec/thing.json", "crates/thing.json"],
+                check=True,
+                capture_output=True,
+            )
+            _git_commit(root, "move it")
+            paths = owned.working_tree_changed_paths(root, base="base")
+        self.assertIn("spec/thing.json", paths)
+        self.assertIn("crates/thing.json", paths)
+
+    def test_untracked_work_is_not_in_the_changed_set(self) -> None:
+        """CI never sees it, and nothing can route a scratch file.
+
+        Including it produces a local failure with no hosted counterpart whose
+        printed remedy is to add a junk row to a reviewed manifest.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "tracked.txt").write_text("x")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "tracked.txt").write_text("y")
+            (root / "repro_scratch.txt").write_text("junk")
+            (root / "probe_dir").mkdir()
+            paths = owned.working_tree_changed_paths(root, base="base")
+        self.assertEqual(paths, ["tracked.txt"])
+
+    def test_an_unchanged_tree_derives_an_empty_set(self) -> None:
+        """An empty diff is legitimate locally, unlike for a candidate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "base")
+            subprocess.run(
+                ["git", "-C", str(root), "branch", "base"],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                owned.working_tree_changed_paths(root, base="base"), []
+            )
+
+    def _behind_branch(self, root: Path) -> None:
+        """A `feature` branch forked from `main`, which then moved on.
+
+        After the fork, `main` modifies `shared.txt` and adds `main_new.txt`,
+        neither of which the branch touches. `feature` is checked out with one
+        committed change of its own, `feature.txt`. This is chelis#2480's
+        shape: #2475 landed on `main` after #2473's branch forked.
+        """
+        _git_repo(root)
+        (root / "shared.txt").write_text("fork")
+        (root / "wip.txt").write_text("fork")
+        _git_commit(root, "fork point")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "-c", "feature"],
+            check=True,
+            capture_output=True,
+        )
+        (root / "feature.txt").write_text("branch")
+        _git_commit(root, "branch work")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "main"],
+            check=True,
+            capture_output=True,
+        )
+        (root / "shared.txt").write_text("main moved on")
+        (root / "main_new.txt").write_text("main only")
+        _git_commit(root, "main moves on")
+        subprocess.run(
+            ["git", "-C", str(root), "switch", "--quiet", "feature"],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_a_branch_behind_main_is_not_charged_with_mains_later_paths(
+        self,
+    ) -> None:
+        """chelis#2480: the set is the branch's diff from its merge base.
+
+        Diffing the base tip against HEAD reports every path `main` changed
+        since the fork as the branch's own, so a branch behind `main` went red
+        on a file it never touched. CI diffs a synthetic merge against its
+        first parent, which already contains `main`'s later work.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt"])
+
+    def test_a_behind_branch_keeps_its_uncommitted_and_renamed_work(
+        self,
+    ) -> None:
+        """The merge base replaces the base tip; the working tree stays in.
+
+        Unstaged edits and a rename made on the branch reach the candidate
+        once committed, so they are classified now, both sides of the move
+        included.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            (root / "wip.txt").write_text("uncommitted")
+            subprocess.run(
+                ["git", "-C", str(root), "mv", "feature.txt", "moved.txt"],
+                check=True,
+                capture_output=True,
+            )
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt", "moved.txt", "wip.txt"])
+
+    def test_a_path_both_sides_changed_is_still_the_branchs_change(
+        self,
+    ) -> None:
+        """Only `main`'s later work is dropped, not a path `main` also touched.
+
+        Subtracting `main`'s changed paths would hide the branch's own edit to
+        a file `main` has since edited too; the merge-base diff keeps it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._behind_branch(root)
+            (root / "shared.txt").write_text("branch edit")
+            _git_commit(root, "branch edits shared")
+            paths = owned.working_tree_changed_paths(root, base="main")
+        self.assertEqual(paths, ["feature.txt", "shared.txt"])
+
+    def test_a_retirement_main_repeated_is_judged_at_the_merge_base(
+        self,
+    ) -> None:
+        """The deletion exemption reads the tree the diff was taken from.
+
+        The branch deletes an unrouted file that `main` has also deleted since
+        the fork. The merge-base diff names it, and the synthetic merge CI
+        plans does not. Judging its base membership against `main`'s tip,
+        where it no longer exists, would refuse a retirement CI accepts.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "retired.json").write_text("{}")
+            _git_commit(root, "fork point")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "-c", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "retired.json").unlink()
+            _git_commit(root, "branch retires it")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "main"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "retired.json").unlink()
+            (root / "main_new.json").write_text("{}")
+            _git_commit(root, "main retires it too")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "feature"],
+                check=True,
+                capture_output=True,
+            )
+            paths = owned.working_tree_changed_paths(root, base="main")
+            refused = owned.classify_changed_paths(
+                paths, repo=root, base="main", config=self.config, packages=()
+            )
+        self.assertEqual(paths, ["retired.json"])
+        self.assertEqual(refused, [])
+
+    def test_unrelated_histories_fail_loudly(self) -> None:
+        """No merge base means no branch diff, and no silent fallback to one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "main root")
+            subprocess.run(
+                ["git", "-C", str(root), "switch", "--quiet", "--orphan", "other"],
+                check=True,
+                capture_output=True,
+            )
+            (root / "b.txt").write_text("y")
+            _git_commit(root, "unrelated root")
+            for call in (
+                lambda: owned.working_tree_changed_paths(root, base="main"),
+                lambda: owned.classify_changed_paths(
+                    ["b.txt"],
+                    repo=root,
+                    base="main",
+                    config=self.config,
+                    packages=(),
+                ),
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    call()
+                self.assertIn("no merge base", str(raised.exception))
+
+    def test_a_missing_base_ref_fails_loudly(self) -> None:
+        """A clone without `origin/main` gets a named refusal, not a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _git_repo(root)
+            (root / "a.txt").write_text("x")
+            _git_commit(root, "only commit")
+            with self.assertRaises(ValueError) as raised:
+                owned.working_tree_changed_paths(root, base="origin/main")
+        self.assertIn("origin/main", str(raised.exception))
+        self.assertIn("fetch", str(raised.exception))
+
+    def test_an_empty_change_set_does_not_pay_for_cargo_metadata(self) -> None:
+        with mock.patch.object(
+            owned,
+            "_metadata_in",
+            side_effect=AssertionError("cargo metadata must not run"),
+        ):
+            self.assertEqual(owned.classify_changed_paths([]), [])
+
+    def test_the_local_refusal_is_the_planner_sentence_verbatim(self) -> None:
+        """One spelling, so the local and hosted failures read alike."""
+        for classification in ("unclassified", "ambiguous_rule"):
+            with self.subTest(classification=classification):
+                message = owned.refused_path_message(classification, "a/b.py")
+                self.assertIn("changed path: a/b.py", message)
+        self.assertEqual(
+            owned.refused_path_message("unclassified", "a/b.py"),
+            "unclassified changed path: a/b.py",
+        )
+        self.assertEqual(
+            owned.refused_path_message("ambiguous_rule", "a/b.py"),
+            "ambiguous changed path: a/b.py",
+        )
+
+    def test_the_cli_exits_non_zero_and_names_each_path(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = owned.main(
+                ["classify-paths", "scripts/one_new.py", "scripts/two_new.py"]
+            )
+        printed = stderr.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("unclassified changed path: scripts/one_new.py", printed)
+        self.assertIn("unclassified changed path: scripts/two_new.py", printed)
+
+    def test_the_cli_accepts_a_routed_set(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = owned.main(["classify-paths", "scripts/gate.py"])
+        self.assertEqual(code, 0)
+        self.assertIn("PASS", stdout.getvalue())
+
+
+class JunitOutcomeTests(unittest.TestCase):
+    def outcomes(self, body: str) -> tuple[set[str], set[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            document = Path(tmp) / "junit.xml"
+            document.write_text(
+                f"<testsuites><testsuite>{body}</testsuite></testsuites>"
+            )
+            return owned.junit_case_outcomes(document)
+
+    def test_failure_and_error_both_count_as_failing(self) -> None:
+        observed, failed = self.outcomes(
+            '<testcase classname="p::t" name="a"><failure/></testcase>'
+            '<testcase classname="p::t" name="b"><error/></testcase>'
+            '<testcase classname="p::t" name="c"/>'
+        )
+        self.assertEqual(observed, {"p::t::a", "p::t::b", "p::t::c"})
+        self.assertEqual(failed, {"p::t::a", "p::t::b"})
+
+    def test_a_skipped_case_is_neither_observed_nor_failing(self) -> None:
+        """A skipped baseline case records no verdict to difference against."""
+        observed, failed = self.outcomes(
+            '<testcase classname="p::t" name="a"><skipped/></testcase>'
+        )
+        self.assertEqual(observed, set())
+        self.assertEqual(failed, set())
+
+    def test_a_case_without_an_identity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no identity"):
+            self.outcomes('<testcase name="a"/>')
+
+
+class FailureBaselineLoadingTests(unittest.TestCase):
+    def manifest(self, **overrides) -> dict:
+        document = {
+            "version": owned.FAILURE_BASELINE_VERSION,
+            "workflow": "heavy-e2e.yml",
+            "run_id": "1",
+            "run_url": "https://example.invalid/1",
+            "head_sha": "d" * 40,
+            "created_at": "2026-09-19T03:31:04Z",
+            "documents": ["shard-1/junit.xml"],
+        }
+        document.update(overrides)
+        return document
+
+    def write(
+        self,
+        manifest: dict,
+        root: Path,
+        *,
+        cases: str | None = None,
+    ) -> Path:
+        path = root / "baseline.json"
+        path.write_text(json.dumps(manifest))
+        if cases is not None:
+            document = root / "shard-1" / "junit.xml"
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(
+                f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+            )
+        return path
+
+    def test_a_complete_manifest_loads_its_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self.write(
+                self.manifest(),
+                Path(tmp),
+                cases=(
+                    '<testcase classname="p::t" name="a"><failure/></testcase>'
+                    '<testcase classname="p::t" name="b"/>'
+                ),
+            )
+            baseline = owned.load_failure_baseline(path)
+        self.assertEqual(baseline.failed, frozenset({"p::t::a"}))
+        self.assertEqual(baseline.observed, frozenset({"p::t::a", "p::t::b"}))
+        self.assertEqual(baseline.provenance()["failing_cases"], 1)
+
+    def test_an_unusable_manifest_is_rejected(self) -> None:
+        cases = '<testcase classname="p::t" name="a"/>'
+        mutations = {
+            "keys mismatch": (self.manifest(extra=1), cases),
+            "version must be": (self.manifest(version=99), cases),
+            "must be a commit": (self.manifest(head_sha="nope"), cases),
+            "must be a string": (self.manifest(run_id=""), cases),
+            "documents must be named": (self.manifest(documents=[]), cases),
+            "escapes its root": (
+                self.manifest(documents=["../outside/junit.xml"]),
+                cases,
+            ),
+            "missing failure baseline document": (self.manifest(), None),
+            "recorded no executed test cases": (
+                self.manifest(),
+                '<testcase classname="p::t" name="a"><skipped/></testcase>',
+            ),
+        }
+        for expected, (manifest, body) in mutations.items():
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = self.write(manifest, Path(tmp), cases=body)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        owned.load_failure_baseline(path)
+
+
+class AncestorDistanceTests(unittest.TestCase):
+    """The real git probe behind the injected one the report tests use."""
+
+    def repo(self, root: Path) -> None:
+        for command in (
+            ["git", "init", "--quiet", "--initial-branch=main", str(root)],
+            ["git", "-C", str(root), "config", "user.email", "t@example.invalid"],
+            ["git", "-C", str(root), "config", "user.name", "T"],
+        ):
+            subprocess.run(command, check=True, capture_output=True)
+
+    def commit(self, root: Path, message: str) -> str:
+        (root / message).write_text(message)
+        subprocess.run(
+            ["git", "-C", str(root), "add", "-A"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "--quiet", "-m", message],
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def test_an_ancestor_reports_its_distance_and_a_sibling_reports_none(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.repo(root)
+            first = self.commit(root, "first")
+            second = self.commit(root, "second")
+            self.assertEqual(owned._ancestor_distance(root, first, second), 1)
+            self.assertEqual(owned._ancestor_distance(root, second, second), 0)
+            subprocess.run(
+                ["git", "-C", str(root), "checkout", "--quiet", "-b", "side", first],
+                check=True,
+                capture_output=True,
+            )
+            sibling = self.commit(root, "sibling")
+            self.assertIsNone(owned._ancestor_distance(root, sibling, second))
+
+    def test_a_commit_absent_from_the_clone_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.repo(root)
+            head = self.commit(root, "first")
+            with self.assertRaisesRegex(ValueError, "not present in this clone"):
+                owned._ancestor_distance(root, "e" * 40, head)
+
+
+if __name__ == "__main__":
+    unittest.main()

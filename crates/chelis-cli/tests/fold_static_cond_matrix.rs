@@ -6,15 +6,14 @@
 //! 2^53); this one fires at 2049 (f16) / 257 (bf16). The fixes do not
 //! overlap: #711's checked-i64 folding does not touch the Cast arm.
 //!
-//! All branch-presence checks compare f32 BIT PATTERNS in the emitted C
-//! (111.0 = 0x42de0000, 222.0 = 0x435e0000), never decimal text - a decimal
-//! `111` grep matches the hash constant 0x94D049BB133111EBULL (the exact
-//! false-positive the #711 audit recorded).
+//! Bounding controls use executed effectful host-lane programs, not generated
+//! C text. Their three-row truth table distinguishes exact `<` from `<=`,
+//! swapped operands, f64-rounded integers, wrong condition dataflow, wrong
+//! fail behavior, and loss of either branch. Exact stdout and stderr are the
+//! acceptance oracle.
 //!
-//! Bounding controls: conditions with an effectful branch (`fail`) route
-//! host-lane, do not fold, and the compiled int64 comparison there is exact
-//! (locked below). The Phase 3 int8 row also proves that folding cannot hide
-//! the required checked-overflow trap.
+//! The Phase 3 i8 row also proves that folding cannot hide the required
+//! checked-overflow trap.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -30,12 +29,17 @@ fn c_toolchain_available() -> bool {
     std::process::Command::new("cc")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
+        .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
-/// Build to C; return `(emitted_c, run_stdout, run_stderr, run_ok)`.
-fn build_and_run_c(program: &str, name: &str) -> Result<(String, String, String, bool), String> {
+struct CRun {
+    stdout: String,
+    stderr: String,
+    ok: bool,
+}
+
+fn build_and_run_c(program: &str, name: &str) -> Result<CRun, String> {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
     let out_dir = dir.path().join(format!("{name}-out"));
@@ -56,8 +60,6 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String, String,
     if !built.status.success() {
         return Err(String::from_utf8_lossy(&built.stderr).into_owned());
     }
-    let emitted = std::fs::read_to_string(out_dir.join(format!("{name}.c")))
-        .map_err(|e| format!("read emitted C: {e}"))?;
     let status = common::link_generated(&out_dir, &format!("{name}.c"), name);
     if !status.success() {
         return Err(format!("link failed: {status}"));
@@ -65,12 +67,11 @@ fn build_and_run_c(program: &str, name: &str) -> Result<(String, String, String,
     let run = std::process::Command::new(out_dir.join(name))
         .output()
         .expect("compiled binary should run");
-    Ok((
-        emitted,
-        String::from_utf8_lossy(&run.stdout).into_owned(),
-        String::from_utf8_lossy(&run.stderr).into_owned(),
-        run.status.success(),
-    ))
+    Ok(CRun {
+        stdout: String::from_utf8_lossy(&run.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&run.stderr).into_owned(),
+        ok: run.status.success(),
+    })
 }
 
 fn eval_first_line(program: &str) -> Result<String, String> {
@@ -94,10 +95,227 @@ fn eval_first_line(program: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// f32 bit pattern of the 222.0 branch payload as it appears in emitted
-/// `chelis_fill_scalar` calls (111.0 is 0x42de0000; the broken rows assert on
-/// the DELETED branch's bits, which is 222.0's).
-const BITS_222: &str = "435e0000";
+const I64_EXACT_LOW: u64 = 9007199254740992;
+const I64_EXACT_HIGH: u64 = 9007199254740993;
+const TAKEN_FAIL_STDERR: &str = "i64 invariant violated\n";
+const PRINT_222_STDOUT: &str = "222.0\nout = ()\n";
+const STATIC_PICK_222_STDOUT: &str = "222.0\npick = 222.0\nout = ()\n";
+
+#[derive(Clone, Copy)]
+enum ExpectedHostOutcome {
+    Fail,
+    Print222,
+}
+
+#[derive(Clone, Copy)]
+struct HostTruthCase {
+    name: &'static str,
+    left: u64,
+    right: u64,
+    expected: ExpectedHostOutcome,
+}
+
+const HOST_LT_TRUTH_TABLE: [HostTruthCase; 3] = [
+    HostTruthCase {
+        name: "low_high",
+        left: I64_EXACT_LOW,
+        right: I64_EXACT_HIGH,
+        expected: ExpectedHostOutcome::Fail,
+    },
+    HostTruthCase {
+        name: "equal_equal",
+        left: I64_EXACT_HIGH,
+        right: I64_EXACT_HIGH,
+        expected: ExpectedHostOutcome::Print222,
+    },
+    HostTruthCase {
+        name: "high_low",
+        left: I64_EXACT_HIGH,
+        right: I64_EXACT_LOW,
+        expected: ExpectedHostOutcome::Print222,
+    },
+];
+
+fn effectful_host_program(
+    condition: &str,
+    then_expr: &str,
+    else_expr: &str,
+    case: HostTruthCase,
+) -> String {
+    format!(
+        "def pick(left: i64, right: i64) -> f32 = if {condition} \
+         then {then_expr} else {else_expr}\n\
+         out = print(pick({}i64, {}i64))\n",
+        case.left, case.right
+    )
+}
+
+#[derive(Debug)]
+enum HostTruthError {
+    Setup(String),
+    Mismatch(String),
+}
+
+fn verify_host_truth_table(
+    label: &str,
+    condition: &str,
+    then_expr: &str,
+    else_expr: &str,
+) -> Result<(), HostTruthError> {
+    for case in HOST_LT_TRUTH_TABLE {
+        let program = effectful_host_program(condition, then_expr, else_expr, case);
+        let run = build_and_run_c(&program, &format!("{label}_{}", case.name))
+            .map_err(HostTruthError::Setup)?;
+        match case.expected {
+            ExpectedHostOutcome::Fail => {
+                if run.ok || !run.stdout.is_empty() || run.stderr != TAKEN_FAIL_STDERR {
+                    return Err(HostTruthError::Mismatch(format!(
+                        "{}: expected exact fail, got ok={}, stdout={:?}, stderr={:?}",
+                        case.name, run.ok, run.stdout, run.stderr
+                    )));
+                }
+            }
+            ExpectedHostOutcome::Print222 => {
+                if !run.ok || run.stdout != PRINT_222_STDOUT || !run.stderr.is_empty() {
+                    return Err(HostTruthError::Mismatch(format!(
+                        "{}: expected exact 222.0 output, got ok={}, stdout={:?}, stderr={:?}",
+                        case.name, run.ok, run.stdout, run.stderr
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assert_host_mutation_rejected(label: &str, condition: &str, then_expr: &str, else_expr: &str) {
+    match verify_host_truth_table(label, condition, then_expr, else_expr) {
+        Err(HostTruthError::Mismatch(error)) => {
+            assert!(!error.is_empty(), "mutation mismatch must explain itself");
+        }
+        Err(HostTruthError::Setup(error)) => {
+            panic!("mutation `{label}` did not build and run: {error}")
+        }
+        Ok(()) => panic!("semantic truth table accepted mutation `{label}`"),
+    }
+}
+
+// ===========================================================================
+// Effectful host-lane exact-integer controls
+// ===========================================================================
+
+#[test]
+fn effectful_host_lt_truth_table_is_exact() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    verify_host_truth_table(
+        "fold_fail_truth",
+        "lt(left, right)",
+        "fail(\"i64 invariant violated\")",
+        "222.0",
+    )
+    .unwrap_or_else(|error| panic!("exact host `<` truth table failed: {error:?}"));
+}
+
+#[test]
+fn semantic_controls_reject_lte() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_lte",
+        "or(lt(left, right), eq(left, right))",
+        "fail(\"i64 invariant violated\")",
+        "222.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_swapped_operands() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_swapped",
+        "lt(right, left)",
+        "fail(\"i64 invariant violated\")",
+        "222.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_f64_rounded_comparison() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_f64",
+        "lt(cast(left, f64), cast(right, f64))",
+        "fail(\"i64 invariant violated\")",
+        "222.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_wrong_condition_dataflow() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_dataflow",
+        "lt(left, left)",
+        "fail(\"i64 invariant violated\")",
+        "222.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_wrong_fail_message() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_message",
+        "lt(left, right)",
+        "fail(\"wrong invariant\")",
+        "222.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_wrong_fail_target() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected("fold_fail_mut_target", "lt(left, right)", "111.0", "222.0");
+}
+
+#[test]
+fn semantic_controls_reject_lost_surviving_branch() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_else",
+        "lt(left, right)",
+        "fail(\"i64 invariant violated\")",
+        "111.0",
+    );
+}
+
+#[test]
+fn semantic_controls_reject_markers_hidden_in_dead_nested_branches() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    assert_host_mutation_rejected(
+        "fold_fail_mut_dead_nested",
+        "lt(left, right)",
+        "if lt(left, left) then fail(\"i64 invariant violated\") else 111.0",
+        "if lt(left, left) then 222.0 else 111.0",
+    );
+}
 
 // ===========================================================================
 // chelis#720 - the Cast arm deletes the IEEE-correct branch
@@ -105,9 +323,8 @@ const BITS_222: &str = "435e0000";
 
 /// True f16 rounds cast(2049.0, f16) to 2048, so lt(2048, 2048) is false and
 /// the answer is 222. Before the compiled Phase 3 fix, eval printed 222
-/// (correct) while the
-/// compiled binary prints 111, and 222's bit pattern is ABSENT from the
-/// emitted C - the correct branch was deleted at compile time.
+/// (correct) while the compiled binary printed 111 because the correct branch
+/// was deleted at compile time.
 #[test]
 fn f16_cast_condition_folds_with_f16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(2048.0, f16), cast(2049.0, f16)) \
@@ -120,16 +337,13 @@ fn f16_cast_condition_folds_with_f16_semantics() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_f16").expect("C lane");
-    assert!(ok);
-    assert!(
-        emitted.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
+    let run = build_and_run_c(program, "fold_f16").expect("C lane");
+    assert!(run.ok, "compiled program failed: {}", run.stderr);
+    assert_eq!(
+        run.stdout, STATIC_PICK_222_STDOUT,
+        "the compiled program must take the IEEE f16 branch"
     );
-    assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222.0",
-        "the compiled program must take the IEEE f16 branch; got: {stdout}"
-    );
+    assert_eq!(run.stderr, "");
 }
 
 /// bf16 sibling at threshold 257 (8-bit mantissa).
@@ -141,71 +355,40 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_bf16").expect("C lane");
-    assert!(ok);
-    assert!(
-        emitted.to_lowercase().contains(BITS_222),
-        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
+    let run = build_and_run_c(program, "fold_bf16").expect("C lane");
+    assert!(run.ok, "compiled program failed: {}", run.stderr);
+    assert_eq!(
+        run.stdout, STATIC_PICK_222_STDOUT,
+        "the compiled program must take the IEEE bf16 branch"
     );
-    assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222.0",
-        "the compiled program must take the IEEE bf16 branch; got: {stdout}"
-    );
+    assert_eq!(run.stderr, "");
 }
 
 // ===========================================================================
-// chelis#718 - int8 conditions do NOT fold, but the runtime branch diverges
+// chelis#718 - i8 conditions do NOT fold, but the runtime branch diverges
 // through the int64_t widening (#714). Contract: the overflow must trap.
 // ===========================================================================
 
-/// `add(100i8, 100i8)` overflows int8. Today eval wraps (-56 < 0, prints
+/// `add(100i8, 100i8)` overflows i8. Today eval wraps (-56 < 0, prints
 /// 111) and compiled C widens (200 < 0, prints 222) - opposite branches at
-/// runtime, no deletion (both bit patterns present in the emitted C,
-/// verified when this row was probed). The decided contract (#680/#695)
-/// says the overflow itself must trap in both lanes.
+/// runtime. The decided contract (#680/#695) says the overflow itself must
+/// trap in both lanes.
 #[test]
 fn int8_overflow_condition_traps_in_both_lanes() {
     let program = "def pick() -> f32 = if lt(add(100i8, 100i8), 0i8) \
                    then 111.0 else 222.0\nout = print(pick())\n";
     match eval_first_line(program) {
-        Ok(line) => panic!("eval must trap on the int8 overflow, got: {line}"),
+        Ok(line) => panic!("eval must trap on the i8 overflow, got: {line}"),
         Err(stderr) => assert!(stderr.contains("overflow"), "got: {stderr}"),
     }
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
-    let (_, stdout, stderr, ok) = build_and_run_c(program, "fold_i8").expect("C lane");
+    let run = build_and_run_c(program, "fold_i8").expect("C lane");
     assert!(
-        !ok && stderr.contains("overflow"),
-        "compiled C must trap on the int8 overflow; got ok={ok}, stdout `{stdout}`"
-    );
-}
-
-// ===========================================================================
-// CONTROLS
-// ===========================================================================
-
-/// An effectful branch (`fail`) keeps the def in the host lane: no fold,
-/// both branches present in the emitted C, and the compiled int64 comparison
-/// is EXACT - `lt(2^53, 2^53 + 1)` is true, so the binary must trap with the
-/// fail message. It does. (eval takes the wrong branch on the same program -
-/// that is chelis#680's known f64 comparison bug, asserted nowhere here.)
-#[test]
-fn host_lane_fail_branch_survives_and_c_comparison_is_exact() {
-    if !c_toolchain_available() {
-        eprintln!("skipping: no host C toolchain");
-        return;
-    }
-    let program = "def pick() -> f32 = if lt(9007199254740992i64, 9007199254740993i64) \
-                   then fail(\"int64 invariant violated\") else 222.0\nout = print(pick())\n";
-    let (emitted, _, stderr, ok) = build_and_run_c(program, "fold_fail").expect("C lane");
-    assert!(
-        emitted.contains("int64 invariant violated"),
-        "the fail branch must survive lowering (host lane, no fold)"
-    );
-    assert!(
-        !ok && stderr.contains("int64 invariant violated"),
-        "2^53 < 2^53 + 1 is true in exact integers; the compiled host lane \
-         must take the fail branch. got ok={ok}, stderr: {stderr}"
+        !run.ok && run.stderr.contains("overflow"),
+        "compiled C must trap on the i8 overflow; got ok={}, stdout `{}`",
+        run.ok,
+        run.stdout
     );
 }

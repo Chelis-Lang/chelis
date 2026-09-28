@@ -6,7 +6,7 @@
 //! literal pattern at all, and an integer pattern outside the scrutinee
 //! width's range is rejected under the same range rule §5.3 and §5.6 apply to
 //! a literal bound at that type. Before the fix `pattern_bindings` did nothing
-//! at `pat-lit`, so an `f32` pattern against an `int32` scrutinee scored a
+//! at `pat-lit`, so an `f32` pattern against an `i32` scrutinee scored a
 //! clean 1.0 and produced a silently dead arm.
 //!
 //! Two properties are asserted for every fixture. Each negative rejects with a
@@ -18,7 +18,7 @@
 //! What is claimed is exactly the forms named in the tests below: the four
 //! atom families against a disagreeing primitive, the non-primitive scrutinee
 //! shapes named in `literal_pattern_against_a_non_primitive_scrutinee_rejects`,
-//! the integer range boundaries at `int8`, and the tuple, record, and
+//! the integer range boundaries at `i8`, and the tuple, record, and
 //! constructor nestings. It is not a claim about every dtype pairing or every
 //! pattern shape.
 
@@ -31,7 +31,7 @@ use chelis_types::{check_ir_program, check_typed_program};
 
 fn desugared(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).unwrap_or_else(|e| panic!("surf must parse: {source}\n{e:?}"));
-    desugar_program(&decls)
+    desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn expanded(source: &str) -> Vec<Expr> {
@@ -105,7 +105,7 @@ fn accepts(source: &str, label: &str) {
 // ---------------------------------------------------------------------------
 
 /// REGRESSION TEST. The exact program from chelis#1494: an `f32` literal
-/// pattern against an `int32` scrutinee. `chelis check` scored 1.0 with an
+/// pattern against an `i32` scrutinee. `chelis check` scored 1.0 with an
 /// empty error list and `chelis eval` printed `r = 2.5`, because the `1.5` arm
 /// can never match.
 #[test]
@@ -113,16 +113,16 @@ fn float_pattern_against_an_integer_scrutinee_rejects() {
     let message = sole_pattern_rejection(
         "module ScrutineeSigned\n\
          \n\
-         def g(n: int32) -> int32 = add(1, n)\n\
+         def g(n: i32) -> i32 = add(1, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | 1.5 => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern vs int32 scrutinee",
+        "f32 pattern vs i32 scrutinee",
     );
     assert!(
-        message.contains("floating-point literal pattern `1.5`") && message.contains("`int32`"),
+        message.contains("floating-point literal pattern `1.5`") && message.contains("`i32`"),
         "the diagnostic must name the pattern and the scrutinee dtype, got {message}"
     );
 }
@@ -134,17 +134,17 @@ fn float_pattern_against_an_integer_scrutinee_rejects() {
 #[test]
 fn float_pattern_against_an_inferred_integer_scrutinee_rejects() {
     let message = sole_pattern_rejection(
-        "def g(n: int32) = add(1, n)\n\
+        "def g(n: i32) = add(1, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | 1.5 => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern vs inferred int32 scrutinee",
+        "f32 pattern vs inferred i32 scrutinee",
     );
     assert!(
-        message.contains("`int32`"),
-        "the diagnostic must name the inferred int32 scrutinee, got {message}"
+        message.contains("`i32`"),
+        "the diagnostic must name the inferred i32 scrutinee, got {message}"
     );
 }
 
@@ -169,59 +169,59 @@ fn integer_pattern_against_a_float_scrutinee_rejects() {
     );
 }
 
-/// REGRESSION TEST. A boolean pattern against an `int32` scrutinee.
+/// REGRESSION TEST. A boolean pattern against an `i32` scrutinee.
 #[test]
 fn bool_pattern_against_an_integer_scrutinee_rejects() {
     let message = sole_pattern_rejection(
-        "def g(n: int32) -> int32 = add(1, n)\n\
+        "def g(n: i32) -> i32 = add(1, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | true => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "bool pattern vs int32 scrutinee",
+        "bool pattern vs i32 scrutinee",
     );
     assert!(
-        message.contains("boolean literal pattern `true`") && message.contains("`int32`"),
+        message.contains("boolean literal pattern `true`") && message.contains("`i32`"),
         "the diagnostic must name the pattern and the scrutinee dtype, got {message}"
     );
 }
 
-/// REGRESSION TEST. A string pattern against an `int32` scrutinee.
+/// REGRESSION TEST. A string pattern against an `i32` scrutinee.
 #[test]
 fn string_pattern_against_an_integer_scrutinee_rejects() {
     let message = sole_pattern_rejection(
-        "def g(n: int32) -> int32 = add(1, n)\n\
+        "def g(n: i32) -> i32 = add(1, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | \"x\" => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "string pattern vs int32 scrutinee",
+        "string pattern vs i32 scrutinee",
     );
     assert!(
-        message.contains("string literal pattern") && message.contains("`int32`"),
+        message.contains("string literal pattern") && message.contains("`i32`"),
         "the diagnostic must name the pattern and the scrutinee dtype, got {message}"
     );
 }
 
 /// REGRESSION TEST. An integer pattern outside the scrutinee width's range:
-/// `300` can never equal an `int8` value, whose range is [-128, 127]. The
+/// `300` can never equal an `i8` value, whose range is [-128, 127]. The
 /// families agree, so only the range rule catches this one.
 #[test]
 fn out_of_range_integer_pattern_rejects() {
     let message = sole_pattern_rejection(
-        "def g(n: int8) -> int8 = add(0i8, n)\n\
+        "def g(n: i8) -> i8 = add(0i8, n)\n\
          \n\
-         r: int32 = match g(1i8) with {\n\
+         r: i32 = match g(1i8) with {\n\
          \x20 | 300 => 10\n\
          \x20 | _ => 20\n\
          }\n",
-        "300 pattern vs int8 scrutinee",
+        "300 pattern vs i8 scrutinee",
     );
     assert!(
         message.contains("`300`") && message.contains("[-128, 127]"),
-        "the diagnostic must name the value and the int8 range, got {message}"
+        "the diagnostic must name the value and the i8 range, got {message}"
     );
 }
 
@@ -232,14 +232,14 @@ fn out_of_range_integer_pattern_rejects() {
 fn literal_pattern_against_a_non_primitive_scrutinee_rejects() {
     for (source, label, expected) in [
         (
-            "def g(n: tensor[3, int32]) -> tensor[3, int32] = add(n, n)\n\
+            "def g(n: tensor[3, i32]) -> tensor[3, i32] = add(n, n)\n\
              \n\
              r: f32 = match g(to_tensor([1, 2, 3])) with {\n\
              \x20 | 1 => 1.5\n\
              \x20 | _ => 2.5\n\
              }\n",
             "integer pattern vs tensor scrutinee",
-            "tensor[3, int32]",
+            "tensor[3, i32]",
         ),
         (
             "type Shape =\n\
@@ -254,14 +254,14 @@ fn literal_pattern_against_a_non_primitive_scrutinee_rejects() {
             "Shape",
         ),
         (
-            "def g(n: int32) -> (int32, f32) = (n, 1.0)\n\
+            "def g(n: i32) -> (i32, f32) = (n, 1.0)\n\
              \n\
              r: f32 = match g(1) with {\n\
              \x20 | 1 => 1.5\n\
              \x20 | _ => 2.5\n\
              }\n",
             "integer pattern vs tuple scrutinee",
-            "(int32, f32)",
+            "(i32, f32)",
         ),
     ] {
         let message = sole_pattern_rejection(source, label);
@@ -280,16 +280,16 @@ fn literal_pattern_against_a_non_primitive_scrutinee_rejects() {
 #[test]
 fn float_pattern_nested_in_a_tuple_pattern_rejects() {
     let message = sole_pattern_rejection(
-        "def g(n: int32) -> (int32, f32) = (n, 1.0)\n\
+        "def g(n: i32) -> (i32, f32) = (n, 1.0)\n\
          \n\
          r: f32 = match g(1) with {\n\
          \x20 | (1.5, y) => y\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern nested in a tuple pattern vs int32 component",
+        "f32 pattern nested in a tuple pattern vs i32 component",
     );
     assert!(
-        message.contains("floating-point literal pattern `1.5`") && message.contains("`int32`"),
+        message.contains("floating-point literal pattern `1.5`") && message.contains("`i32`"),
         "the nested diagnostic must name the component dtype, got {message}"
     );
 }
@@ -300,16 +300,16 @@ fn float_pattern_nested_in_a_tuple_pattern_rejects() {
 fn float_pattern_nested_in_a_record_pattern_rejects() {
     let message = sole_pattern_rejection(
         "type Cell =\n\
-         \x20 | Cell { index: int32 }\n\
+         \x20 | Cell { index: i32 }\n\
          \n\
          def read(c: Cell) -> f32 = match c with {\n\
          \x20 | Cell { index: 1.5 } => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern nested in a record pattern vs int32 field",
+        "f32 pattern nested in a record pattern vs i32 field",
     );
     assert!(
-        message.contains("floating-point literal pattern `1.5`") && message.contains("`int32`"),
+        message.contains("floating-point literal pattern `1.5`") && message.contains("`i32`"),
         "the nested diagnostic must name the field dtype, got {message}"
     );
 }
@@ -320,28 +320,28 @@ fn float_pattern_nested_in_a_record_pattern_rejects() {
 fn float_pattern_nested_in_a_constructor_pattern_rejects() {
     let message = sole_pattern_rejection(
         "type Tag =\n\
-         \x20 | Tag(int32)\n\
+         \x20 | Tag(i32)\n\
          \n\
          def read(t: Tag) -> f32 = match t with {\n\
          \x20 | Tag(1.5) => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern nested in a constructor pattern vs int32 argument",
+        "f32 pattern nested in a constructor pattern vs i32 argument",
     );
     assert!(
-        message.contains("floating-point literal pattern `1.5`") && message.contains("`int32`"),
+        message.contains("floating-point literal pattern `1.5`") && message.contains("`i32`"),
         "the nested diagnostic must name the argument dtype, got {message}"
     );
 }
 
 /// REGRESSION TEST. A transparent alias resolves before classification, so an
-/// alias to `int32` rejects the same float pattern its target does. Without
+/// alias to `i32` rejects the same float pattern its target does. Without
 /// alias expansion the scrutinee would read as a nominal type and the
 /// non-primitive arm would fire with the wrong reason.
 #[test]
 fn float_pattern_against_an_alias_of_an_integer_rejects() {
     let message = sole_pattern_rejection(
-        "type Index = int32\n\
+        "type Index = i32\n\
          \n\
          def g(n: Index) -> Index = add(1, n)\n\
          \n\
@@ -349,18 +349,18 @@ fn float_pattern_against_an_alias_of_an_integer_rejects() {
          \x20 | 1.5 => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "f32 pattern vs an alias of int32",
+        "f32 pattern vs an alias of i32",
     );
     assert!(
-        message.contains("`int32`") && !message.contains("primitive scrutinee"),
-        "the alias must resolve to int32 and take the family arm, got {message}"
+        message.contains("`i32`") && !message.contains("primitive scrutinee"),
+        "the alias must resolve to i32 and take the family arm, got {message}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // Positive controls. These are the over-rejection guard: a literal pattern
 // selects no width, so an unsuffixed integer pattern must keep matching every
-// integer scrutinee. Unifying with §5.3's int32 default instead would reject
+// integer scrutinee. Unifying with §5.3's i32 default instead would reject
 // most of this section.
 // ---------------------------------------------------------------------------
 
@@ -372,16 +372,16 @@ fn float_pattern_against_an_alias_of_an_integer_rejects() {
 #[test]
 fn same_family_patterns_accept_at_every_width() {
     for (dtype, suffix, pattern, label) in [
-        ("int8", "i8", "1", "int8 scrutinee"),
-        ("int16", "i16", "1", "int16 scrutinee"),
-        ("int32", "", "1", "int32 scrutinee"),
-        ("int64", "i64", "1", "int64 scrutinee"),
+        ("i8", "i8", "1", "i8 scrutinee"),
+        ("i16", "i16", "1", "i16 scrutinee"),
+        ("i32", "", "1", "i32 scrutinee"),
+        ("i64", "i64", "1", "i64 scrutinee"),
     ] {
         accepts(
             &format!(
                 "def g(n: {dtype}) -> {dtype} = add(0{suffix}, n)\n\
                  \n\
-                 r: int32 = match g(1{suffix}) with {{\n\
+                 r: i32 = match g(1{suffix}) with {{\n\
                  \x20 | {pattern} => 10\n\
                  \x20 | _ => 20\n\
                  }}\n"
@@ -399,7 +399,7 @@ fn same_family_patterns_accept_at_every_width() {
             &format!(
                 "def g(n: {dtype}) -> {dtype} = add(0.0{suffix}, n)\n\
                  \n\
-                 r: int32 = match g(1.0{suffix}) with {{\n\
+                 r: i32 = match g(1.0{suffix}) with {{\n\
                  \x20 | 1.5 => 10\n\
                  \x20 | _ => 20\n\
                  }}\n"
@@ -409,7 +409,7 @@ fn same_family_patterns_accept_at_every_width() {
     }
 }
 
-/// DISPOSITION LOCK. The failure twin of the range rejection: both `int8`
+/// DISPOSITION LOCK. The failure twin of the range rejection: both `i8`
 /// boundaries are in range and must keep type-checking, and one step past
 /// each boundary must reject. This is what pins the comparison to the exact
 /// width rather than to some wider default.
@@ -418,31 +418,31 @@ fn integer_range_boundaries_are_exact() {
     for value in ["127", "-128", "0"] {
         accepts(
             &format!(
-                "def g(n: int8) -> int8 = add(0i8, n)\n\
+                "def g(n: i8) -> i8 = add(0i8, n)\n\
                  \n\
-                 r: int32 = match g(1i8) with {{\n\
+                 r: i32 = match g(1i8) with {{\n\
                  \x20 | {value} => 10\n\
                  \x20 | _ => 20\n\
                  }}\n"
             ),
-            &format!("in-range int8 pattern {value}"),
+            &format!("in-range i8 pattern {value}"),
         );
     }
     for value in ["128", "-129"] {
         let message = sole_pattern_rejection(
             &format!(
-                "def g(n: int8) -> int8 = add(0i8, n)\n\
+                "def g(n: i8) -> i8 = add(0i8, n)\n\
                  \n\
-                 r: int32 = match g(1i8) with {{\n\
+                 r: i32 = match g(1i8) with {{\n\
                  \x20 | {value} => 10\n\
                  \x20 | _ => 20\n\
                  }}\n"
             ),
-            &format!("out-of-range int8 pattern {value}"),
+            &format!("out-of-range i8 pattern {value}"),
         );
         assert!(
             message.contains("[-128, 127]"),
-            "the range rejection must name the int8 range, got {message}"
+            "the range rejection must name the i8 range, got {message}"
         );
     }
 }
@@ -455,7 +455,7 @@ fn bool_and_string_patterns_accept_their_own_scrutinee() {
     accepts(
         "def g(b: bool) -> bool = b\n\
          \n\
-         r: int32 = match g(true) with {\n\
+         r: i32 = match g(true) with {\n\
          \x20 | true => 10\n\
          \x20 | false => 20\n\
          }\n",
@@ -464,7 +464,7 @@ fn bool_and_string_patterns_accept_their_own_scrutinee() {
     accepts(
         "def g(s: string) -> string = s\n\
          \n\
-         r: int32 = match g(\"a\") with {\n\
+         r: i32 = match g(\"a\") with {\n\
          \x20 | \"a\" => 10\n\
          \x20 | _ => 20\n\
          }\n",
@@ -479,50 +479,50 @@ fn bool_and_string_patterns_accept_their_own_scrutinee() {
 #[test]
 fn same_family_patterns_accept_when_nested() {
     accepts(
-        "def g(n: int32) -> (int32, f32) = (n, 1.0)\n\
+        "def g(n: i32) -> (i32, f32) = (n, 1.0)\n\
          \n\
          r: f32 = match g(1) with {\n\
          \x20 | (1, y) => y\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "int pattern nested in a tuple pattern vs int32 component",
+        "int pattern nested in a tuple pattern vs i32 component",
     );
     accepts(
         "type Cell =\n\
-         \x20 | Cell { index: int32 }\n\
+         \x20 | Cell { index: i32 }\n\
          \n\
          def read(c: Cell) -> f32 = match c with {\n\
          \x20 | Cell { index: 1 } => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "int pattern nested in a record pattern vs int32 field",
+        "int pattern nested in a record pattern vs i32 field",
     );
     accepts(
         "type Tag =\n\
-         \x20 | Tag(int32)\n\
+         \x20 | Tag(i32)\n\
          \n\
          def read(t: Tag) -> f32 = match t with {\n\
          \x20 | Tag(1) => 1.5\n\
          \x20 | _ => 2.5\n\
          }\n",
-        "int pattern nested in a constructor pattern vs int32 argument",
+        "int pattern nested in a constructor pattern vs i32 argument",
     );
 }
 
-/// DISPOSITION LOCK. A transparent alias of `int32` accepts an integer
+/// DISPOSITION LOCK. A transparent alias of `i32` accepts an integer
 /// pattern, the positive twin of the alias rejection above.
 #[test]
 fn same_family_pattern_accepts_against_an_alias() {
     accepts(
-        "type Index = int32\n\
+        "type Index = i32\n\
          \n\
          def g(n: Index) -> Index = add(1, n)\n\
          \n\
-         r: int32 = match g(2) with {\n\
+         r: i32 = match g(2) with {\n\
          \x20 | 1 => 10\n\
          \x20 | _ => 20\n\
          }\n",
-        "int pattern vs an alias of int32",
+        "int pattern vs an alias of i32",
     );
 }
 
@@ -545,20 +545,20 @@ fn non_literal_patterns_are_untouched() {
         "constructor patterns over an ADT scrutinee",
     );
     accepts(
-        "def g(n: tensor[3, int32]) -> tensor[3, int32] = add(n, n)\n\
+        "def g(n: tensor[3, i32]) -> tensor[3, i32] = add(n, n)\n\
          \n\
-         r: tensor[3, int32] = match g(to_tensor([1, 2, 3])) with {\n\
+         r: tensor[3, i32] = match g(to_tensor([1, 2, 3])) with {\n\
          \x20 | x => x\n\
          }\n",
         "variable pattern over a tensor scrutinee",
     );
     accepts(
-        "def g(n: int32) -> int32 = add(1, n)\n\
+        "def g(n: i32) -> i32 = add(1, n)\n\
          \n\
-         r: int32 = match g(2) with {\n\
+         r: i32 = match g(2) with {\n\
          \x20 | q @ x => q\n\
          }\n",
-        "as-pattern over an int32 scrutinee",
+        "as-pattern over an i32 scrutinee",
     );
 }
 
@@ -574,8 +574,8 @@ fn the_family_diagnostic_names_every_scrutinee_dtype_uniformly() {
     for (scrutinee, sample, pattern, dtype) in [
         ("bool", "true", "1", "bool"),
         ("string", "\"a\"", "1", "string"),
-        ("int32", "2", "1.5", "int32"),
-        ("int8", "1i8", "1.5", "int8"),
+        ("i32", "2", "1.5", "i32"),
+        ("i8", "1i8", "1.5", "i8"),
         ("f32", "2.0", "1", "f32"),
         ("f64", "2.0f64", "1", "f64"),
         ("bf16", "2.0bf16", "1", "bf16"),
@@ -585,7 +585,7 @@ fn the_family_diagnostic_names_every_scrutinee_dtype_uniformly() {
             &format!(
                 "def g(v: {scrutinee}) -> {scrutinee} = v\n\
                  \n\
-                 r: int32 = match g({sample}) with {{\n\
+                 r: i32 = match g({sample}) with {{\n\
                  \x20 | {pattern} => 10\n\
                  \x20 | _ => 20\n\
                  }}\n"
@@ -607,7 +607,7 @@ fn the_family_diagnostic_names_every_scrutinee_dtype_uniformly() {
 #[test]
 fn a_failed_scrutinee_does_not_cascade_a_pattern_rejection() {
     let diagnostics = agreed_diagnostics(
-        "def g(n: int32) -> int32 = add(1.0, n)\n\
+        "def g(n: i32) -> i32 = add(1.0, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | 1 => 1.5\n\
@@ -632,7 +632,7 @@ fn a_failed_scrutinee_does_not_cascade_a_pattern_rejection() {
 #[test]
 fn the_rejection_carries_its_kind_and_a_suggestion() {
     let Err(result) = check_ir_program(&expanded(
-        "def g(n: int32) -> int32 = add(1, n)\n\
+        "def g(n: i32) -> i32 = add(1, n)\n\
          \n\
          r: f32 = match g(2) with {\n\
          \x20 | 1.5 => 1.5\n\

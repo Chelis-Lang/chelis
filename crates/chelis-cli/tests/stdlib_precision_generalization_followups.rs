@@ -31,7 +31,7 @@
 //!
 //! Coverage matrix (printed by run_coverage_matrix at the end):
 //!
-//! | op                          | f32 | f64 | bf16 | f16 | int8 | int16 | int32 | int64 |
+//! | op                          | f32 | f64 | bf16 | f16 | i8 | i16 | i32 | i64 |
 //! | --------------------------- | --- | --- | ---- | --- | ---- | ----- | ----- | ----- |
 //! | linear.forward              |  Y  |  Y  |  Y   |  Y  |   N  |   N   |   N   |   N   |
 //! | embedding.forward (table p) |  Y  |  Y  |  Y   |  Y  |   Y  |   Y   |   Y   |   Y   |
@@ -65,9 +65,7 @@ use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
 
-const ARITHMETIC_DTYPES: &[&str] = &[
-    "f32", "f64", "bf16", "f16", "int8", "int16", "int32", "int64",
-];
+const ARITHMETIC_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16", "i8", "i16", "i32", "i64"];
 const FLOAT_DTYPES: &[&str] = &["f32", "f64", "bf16", "f16"];
 
 fn write_file(path: &Path, contents: &str) {
@@ -154,22 +152,18 @@ fn expect_one_active_float_error(json: &Value, dtype: &str, label: &str) {
 
 /// School.Nn.Linear.forward shape: matmul + add + expand. Accepts every
 /// FLOAT dtype (integer matmul is rejected per spec sec 5.7.2).
-/// Note: the test replicas use single-letter dim names (a, b, c)
-/// because the desugar treats only single-letter and explicit-
-/// quantifier names as d-vars; multi-letter names (batch, in_dim, ...)
-/// become d-name (concrete) inside a sig-only declaration. The
-/// production linear.ch sigs use single-letter dim names for the same
-/// reason; precision generalization works orthogonally via the shared
-/// p tvar in the sig's t-fn.
+/// The replicas list the single-letter dimension variables and precision
+/// variable explicitly. Multi-letter axis names remain concrete `d-name`
+/// values unless the signature lists them too.
 #[test]
 fn linear_forward_accepts_all_float_dtypes() {
     for dtype in FLOAT_DTYPES {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("linear.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+            r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {{
-  bias = insert(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -193,7 +187,7 @@ def call(x: &tensor[2, 3, {dtype}], w: &tensor[3, 4, {dtype}], bias_in: &tensor[
 // pass.
 
 /// School.Nn.Embedding.forward shape: gather. The table precision is a
-/// tvar; the ids dtype is fixed at int64. Accepts every active dtype
+/// tvar; the ids dtype is fixed at i64. Accepts every active dtype
 /// for the table element precision.
 #[test]
 fn embedding_forward_accepts_all_arithmetic_dtypes_for_table() {
@@ -201,9 +195,9 @@ fn embedding_forward_accepts_all_arithmetic_dtypes_for_table() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("embedding.ch");
         let src = format!(
-            r#"sig forward: &tensor[a, b, int64] -> &tensor[c, d, p] -> tensor[a, b, d, p]
-def forward[a, b, c, d, p](ids, table) = gather(table, ids, 0)
-def call(ids: &tensor[1, 2, int64], table: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, table)
+            r#"sig forward[a, b, c, d, p]: &tensor[a, b, i64] -> &tensor[c, d, p] -> tensor[a, b, d, p]
+def forward(ids, table) = gather(table, ids, 0)
+def call(ids: &tensor[1, 2, i64], table: &tensor[4, 3, {dtype}]) -> tensor[1, 2, 3, {dtype}] = forward(ids, table)
 "#
         );
         write_file(&path, &src);
@@ -221,7 +215,7 @@ fn attention_sdpa_accepts_all_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("attn.ch");
         let src = format!(
-            r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+            r#"sig sdpa[p: Float]: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {{
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -243,7 +237,7 @@ def call(q: &tensor[4, 4, {dtype}], k: &tensor[4, 4, {dtype}], v: &tensor[4, 4, 
     }
 }
 
-/// School.Loss.Metrics.accuracy shape: sort returns int64 indices for any
+/// School.Loss.Metrics.accuracy shape: sort returns i64 indices for any
 /// input precision, so accuracy admits every active arithmetic dtype
 /// as the logits precision.
 #[test]
@@ -252,12 +246,12 @@ fn metrics_accuracy_accepts_all_arithmetic_dtypes_for_logits() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("acc.ch");
         let src = format!(
-            r#"sig row_argmax: &tensor[piece, classes, p] -> int64
-def row_argmax[piece, classes, p](row: &tensor[piece, classes, p]) -> int64 = {{
-  pair = sort(row, cast(1, int32))
-  cast(0, int64)
+            r#"sig row_argmax[piece, classes, p]: &tensor[piece, classes, p] -> i64
+def row_argmax(row: &tensor[piece, classes, p]) -> i64 = {{
+  pair = sort(row, cast(1, i32))
+  cast(0, i64)
 }}
-def call(xs: &tensor[1, 3, {dtype}]) -> int64 = row_argmax(xs)
+def call(xs: &tensor[1, 3, {dtype}]) -> i64 = row_argmax(xs)
 "#
         );
         write_file(&path, &src);
@@ -282,7 +276,7 @@ fn optim_tensor_ops_accept_all_arithmetic_dtypes() {
             let dir = tempdir().expect("tempdir");
             let path = dir.path().join("optim_op.ch");
             let src = format!(
-                "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = {op}(lhs, rhs)\n\
+                "def tensor_op[n, p: Numeric](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = {op}(lhs, rhs)\n\
                  def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
             );
             write_file(&path, &src);
@@ -300,7 +294,7 @@ fn optim_tensor_div_accepts_float_rejects_integer_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("optim_div.ch");
         let src = format!(
-            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)\n\
+            "def tensor_op[n, p: Float](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = div(lhs, rhs)\n\
              def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
         );
         write_file(&path, &src);
@@ -321,7 +315,7 @@ fn optim_tensor_trunc_div_accepts_integer_rejects_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("optim_trunc_div.ch");
         let src = format!(
-            "def tensor_op[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = trunc_div(lhs, rhs)\n\
+            "def tensor_op[n, p: Int](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = trunc_div(lhs, rhs)\n\
              def call(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = tensor_op(xs, xs)\n"
         );
         write_file(&path, &src);
@@ -342,7 +336,7 @@ fn test_assert_close_tensor_accepts_exactly_active_float_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
-            r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
+            r#"sig assert_close_tensor[n, p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! {{ Test }}
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, {dtype}), "label")
 "#
@@ -362,7 +356,7 @@ def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {
 /// parameter. A literal callee-name check cannot satisfy this contract.
 #[test]
 fn test_assert_close_tensor_aliases_reject_every_non_float_dtype() {
-    for dtype in ["int8", "int16", "int32", "int64", "bool"] {
+    for dtype in ["i8", "i16", "i32", "i64", "bool"] {
         for (route, declarations) in [
             (
                 "top-level alias",
@@ -422,9 +416,9 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
-            r#"sig assert_shape: &tensor[..r, p] -> List[int64] -> string -> unit ! {{ Test }}
+            r#"sig assert_shape[r, p]: &tensor[..r, p] -> List[i64] -> string -> unit ! {{ Test }}
 def assert_shape(t, expected_shape, label) = ()
-def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, [cast(3, int64)], "label")
+def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, [cast(3, i64)], "label")
 "#
         );
         write_file(&path, &src);
@@ -446,9 +440,9 @@ fn linear_forward_rejects_mismatched_input_weight_precision() {
     let path = dir.path().join("linear_mix.ch");
     write_file(
         &path,
-        r#"sig forward: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
+        r#"sig forward[a, b, c, p: Float]: &tensor[a, b, p] -> &tensor[b, c, p] -> &tensor[c, p] -> tensor[a, c, p]
 def forward(x, w, b) = {
-  bias = insert(b, 0, shape(x, cast(0, int32)))
+  bias = insert(b, 0, shape(x, cast(0, i32)))
   wx = matmul(x, w)
   out = add(wx, bias)
   _ = drop(bias)
@@ -462,7 +456,7 @@ def bad(x: &tensor[2, 3, f32], w: &tensor[3, 4, bf16], b: &tensor[4, f32]) -> te
     expect_any_error(&json, "linear.forward mismatched input/weight precision");
 }
 
-/// Embedding's forward sig pins ids to int64; passing a non-int64 ids
+/// Embedding's forward sig pins ids to i64; passing a non-i64 ids
 /// tensor must fail at the call site.
 #[test]
 fn embedding_forward_rejects_non_int64_ids() {
@@ -470,13 +464,13 @@ fn embedding_forward_rejects_non_int64_ids() {
     let path = dir.path().join("embedding_neg.ch");
     write_file(
         &path,
-        r#"sig forward: &tensor[batch, seq, int64] -> &tensor[vocab, hidden, p] -> tensor[batch, seq, hidden, p]
-def forward[batch, seq, vocab, hidden, p](ids, table) = gather(table, ids, 0)
-def bad(ids: &tensor[1, 2, int32], table: &tensor[4, 3, f32]) -> tensor[1, 2, 3, f32] = forward(ids, table)
+        r#"sig forward[batch, seq, vocab, hidden, p]: &tensor[batch, seq, i64] -> &tensor[vocab, hidden, p] -> tensor[batch, seq, hidden, p]
+def forward(ids, table) = gather(table, ids, 0)
+def bad(ids: &tensor[1, 2, i32], table: &tensor[4, 3, f32]) -> tensor[1, 2, 3, f32] = forward(ids, table)
 "#,
     );
     let json = run_check(&path);
-    expect_any_error(&json, "embedding.forward non-int64 ids");
+    expect_any_error(&json, "embedding.forward non-i64 ids");
 }
 
 /// Attention sdpa pins the four input tensors to the same precision
@@ -487,7 +481,7 @@ fn attention_sdpa_rejects_mismatched_qk_precision() {
     let path = dir.path().join("attn_neg.ch");
     write_file(
         &path,
-        r#"sig sdpa: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
+        r#"sig sdpa[p: Float]: &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> &tensor[4, 4, p] -> tensor[4, 4, p]
 def sdpa(q, k, v, scale) = {
   kt = permute(k, 1, 0)
   scores = matmul(q, kt)
@@ -515,7 +509,7 @@ fn optim_tensor_add_rejects_mismatched_lhs_rhs_precision() {
     let path = dir.path().join("optim_add_neg.ch");
     write_file(
         &path,
-        r#"def tensor_add[n, p](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
+        r#"def tensor_add[n, p: Numeric](lhs: &tensor[n, p], rhs: &tensor[n, p]) -> tensor[n, p] = add(lhs, rhs)
 def bad(xs: &tensor[3, f32], ys: &tensor[3, bf16]) -> tensor[3, f32] = tensor_add(xs, ys)
 "#,
     );
@@ -531,7 +525,7 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     let path = dir.path().join("assert_close_neg.ch");
     write_file(
         &path,
-        r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
+        r#"sig assert_close_tensor[n, p: Float]: &tensor[n, p] -> &tensor[n, p] -> p -> string -> unit ! { Test }
 def assert_close_tensor(actual, expected, tolerance, label) = test_assert_close_tensor(actual, expected, tolerance, label)
 def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,
@@ -561,11 +555,11 @@ def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } 
 /// each fixture for every non-f32 arithmetic dtype.
 #[test]
 fn f32_pinned_ops_reject_non_f32_at_sig_level() {
-    let non_f32 = ["f64", "bf16", "f16", "int8", "int16", "int32", "int64"];
+    let non_f32 = ["f64", "bf16", "f16", "i8", "i16", "i32", "i64"];
     let fixtures: &[(&str, &str)] = &[
         (
             "silu.forward",
-            "sig forward: &tensor[n, f32] -> tensor[n, f32]\n\
+            "sig forward[n]: &tensor[n, f32] -> tensor[n, f32]\n\
              def forward(x) = x\n\
              def bad(xs: &tensor[3, {dtype}]) -> tensor[3, {dtype}] = forward(xs)\n",
         ),

@@ -100,7 +100,7 @@ fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
         "forward_value",
         "dp",
         "(def {} use_base (var {} base))\n\n\
-         (def {} base (lit {type: (t-prim {} int32)} 7))\n",
+         (def {} base (lit {type: (t-prim {} i32)} 7))\n",
         "UnboundVariable",
     );
     assert_failed_report(
@@ -114,24 +114,24 @@ fn check_rejects_forward_values_on_deep_and_surf_surfaces() {
         "later_external_input",
         "ch",
         "module ExternalCli\n\
-         def capture() -> int32 = x\n\
-         x = (x : int32)\n",
+         def capture() -> i32 = x\n\
+         x = (x : i32)\n",
         "UnboundVariable",
     );
     assert_failed_report(
         "later_declared_external_input",
         "ch",
         "module DeclaredExternalCli\n\
-         def capture() -> int32 = x\n\
-         x: int32 = x\n",
+         def capture() -> i32 = x\n\
+         x: i32 = x\n",
         "UnboundVariable",
     );
     assert_failed_report(
         "later_declared_value",
         "ch",
         "module DeclaredValueCli\n\
-         def capture() -> int32 = value\n\
-         value: int32 = 7\n",
+         def capture() -> i32 = value\n\
+         value: i32 = 7\n",
         "UnboundVariable",
     );
 }
@@ -141,7 +141,7 @@ fn check_accepts_backward_values_module_helpers_and_external_inputs() {
     assert_clean_report(
         "backward_value",
         "dp",
-        "(def {} base (lit {type: (t-prim {} int32)} 7))\n\n\
+        "(def {} base (lit {type: (t-prim {} i32)} 7))\n\n\
          (def {} use_base (var {} base))\n",
     );
     assert_clean_report(
@@ -168,7 +168,7 @@ fn check_rejects_missing_local_forward_and_cycle_controls_honestly() {
         "dp",
         "(def {} local_forward\n\
            (let {}\n\
-             (bind {} x (var {} y) y (lit {type: (t-prim {} int32)} 1))\n\
+             (bind {} x (var {} y) y (lit {type: (t-prim {} i32)} 1))\n\
              (var {} x)))\n",
         "UnboundVariable",
     );
@@ -187,7 +187,7 @@ fn eval_and_build_reject_forward_values_before_execution_or_lowering() {
     let path = directory.path().join("forward_value.ch");
     write_file(
         &path,
-        "def capture() -> List[int64] = later\n\
+        "def capture() -> List[i64] = later\n\
          later = [1i64, 2i64]\n",
     );
     let eval = Command::cargo_bin("chelis")
@@ -228,30 +228,30 @@ fn check_eval_and_build_reject_higher_order_lambda_cycles() {
         (
             "returned_lambda_annotated",
             "module ReturnedLambdaAnnotatedCli\n\n\
-             result: int32 = (make_reader())(1)\n\n\
-             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
-             def read_result(n: int32) -> int32 = add(n, result)\n",
+             result: i32 = (make_reader())(1)\n\n\
+             def make_reader() = fn (x: i32) -> read_result(x)\n\n\
+             def read_result(n: i32) -> i32 = add(n, result)\n",
         ),
         (
             "returned_lambda_unannotated",
             "module ReturnedLambdaInferredCli\n\n\
              result = (make_reader())(1)\n\n\
-             def make_reader() = fn (x: int32) -> read_result(x)\n\n\
-             def read_result(n: int32) -> int32 = add(n, result)\n",
+             def make_reader() = fn (x: i32) -> read_result(x)\n\n\
+             def read_result(n: i32) -> i32 = add(n, result)\n",
         ),
         (
             "stored_lambda_annotated",
             "module StoredLambdaAnnotatedCli\n\n\
-             stored = fn (x: int32) -> read_result(x)\n\n\
-             result: int32 = stored(1)\n\n\
-             def read_result(n: int32) -> int32 = add(n, result)\n",
+             stored = fn (x: i32) -> read_result(x)\n\n\
+             result: i32 = stored(1)\n\n\
+             def read_result(n: i32) -> i32 = add(n, result)\n",
         ),
         (
             "stored_lambda_unannotated",
             "module StoredLambdaInferredCli\n\n\
-             stored = fn (x: int32) -> read_result(x)\n\n\
+             stored = fn (x: i32) -> read_result(x)\n\n\
              result = stored(1)\n\n\
-             def read_result(n: int32) -> int32 = add(n, result)\n",
+             def read_result(n: i32) -> i32 = add(n, result)\n",
         ),
     ] {
         assert_check_eval_build_cycle(name, source);
@@ -265,14 +265,14 @@ fn eval_and_build_reject_a_later_external_input_before_lowering() {
         (
             "later_ascribed_external_input",
             "module ExternalCli\n\
-             def capture() -> int32 = x\n\
-             x = (x : int32)\n",
+             def capture() -> i32 = x\n\
+             x = (x : i32)\n",
         ),
         (
             "later_declared_external_input",
             "module DeclaredExternalCli\n\
-             def capture() -> int32 = x\n\
-             x: int32 = x\n",
+             def capture() -> i32 = x\n\
+             x: i32 = x\n",
         ),
     ] {
         let path = directory.path().join(format!("{name}.ch"));
@@ -318,50 +318,50 @@ fn check_accepts_a_backward_value_read_across_a_hoisted_module_function() {
         "interleaved_backward_declared",
         "ch",
         "module InterleavedBackwardDeclared\n\n\
-         def anchor() -> int32 = 1\n\n\
-         carried: int32 = 7\n\n\
-         def reader() -> int32 = carried\n",
+         def anchor() -> i32 = 1\n\n\
+         carried: i32 = 7\n\n\
+         def reader() -> i32 = carried\n",
     );
     assert_clean_report(
         "interleaved_backward_unannotated",
         "ch",
         "module InterleavedBackwardUnannotated\n\n\
-         def anchor() -> int32 = 1\n\n\
+         def anchor() -> i32 = 1\n\n\
          carried = 7\n\n\
-         def reader() -> int32 = carried\n",
+         def reader() -> i32 = carried\n",
     );
     assert_clean_report(
         "interleaved_backward_computed",
         "ch",
         "module InterleavedBackwardComputed\n\n\
-         def seed() -> int32 = 3\n\n\
-         def anchor() -> int32 = 1\n\n\
+         def seed() -> i32 = 3\n\n\
+         def anchor() -> i32 = 1\n\n\
          carried = seed()\n\n\
-         def reader() -> int32 = carried\n",
+         def reader() -> i32 = carried\n",
     );
     assert_clean_report(
         "interleaved_backward_through_helper",
         "ch",
         "module InterleavedBackwardHelper\n\n\
-         def caller() -> int32 = helper()\n\n\
+         def caller() -> i32 = helper()\n\n\
          carried = 5\n\n\
-         def helper() -> int32 = carried\n",
+         def helper() -> i32 = carried\n",
     );
     assert_failed_report(
         "interleaved_forward_declared",
         "ch",
         "module InterleavedForwardDeclared\n\n\
-         def anchor() -> int32 = 1\n\n\
-         def reader() -> int32 = carried\n\n\
-         carried: int32 = 7\n",
+         def anchor() -> i32 = 1\n\n\
+         def reader() -> i32 = carried\n\n\
+         carried: i32 = 7\n",
         "UnboundVariable",
     );
     assert_failed_report(
         "interleaved_forward_unannotated",
         "ch",
         "module InterleavedForwardUnannotated\n\n\
-         def anchor() -> int32 = 1\n\n\
-         def reader() -> int32 = carried\n\n\
+         def anchor() -> i32 = 1\n\n\
+         def reader() -> i32 = carried\n\n\
          carried = 7\n",
         "UnboundVariable",
     );
@@ -376,23 +376,23 @@ fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
     assert_only_cycle_report(
         "mirror_escape_signed",
         "module MirrorEscape\n\n\
-         def anchor() -> int32 = 1\n\n\
+         def anchor() -> i32 = 1\n\n\
          carried = wrap(f)\n\n\
          def wrap(g) = g\n\n\
-         def f(n: int32) -> int32 = if (n <= 0) then 0 else carried((n - 1))\n",
+         def f(n: i32) -> i32 = if (n <= 0) then 0 else carried((n - 1))\n",
     );
     assert_only_cycle_report(
         "mirror_escape_lambda",
         "module PickEscape\n\n\
-         def anchor() -> int32 = 1\n\n\
-         carried = pick(fn (x: int32) -> f(x))\n\n\
+         def anchor() -> i32 = 1\n\n\
+         carried = pick(fn (x: i32) -> f(x))\n\n\
          def pick(g) = 5\n\n\
-         def f(n: int32) -> int32 = add(n, carried)\n",
+         def f(n: i32) -> i32 = add(n, carried)\n",
     );
     assert_only_cycle_report(
         "mirror_escape_defsig_less",
         "module WrapEscape\n\n\
-         def anchor() -> int32 = 1\n\n\
+         def anchor() -> i32 = 1\n\n\
          carried = wrap(g)\n\n\
          def wrap(h) = h\n\n\
          def g(n) = if (n <= 0) then 0 else carried((n - 1))\n",
@@ -403,9 +403,9 @@ fn a_value_that_names_a_function_reading_it_back_is_a_recorded_stall() {
 /// hoist floor, where the mirror edge never reached it.
 const READER_FIRST_PARTIAL_HEADER: &str = "module PartialHeaderReaderFirst\n\n\
      r: f32 = f(2)\n\n\
-     v: int32 = 1\n\n\
-     def anchor() -> int32 = 1\n\n\
-     def f(n: int32) = add(v, n)\n";
+     v: i32 = 1\n\n\
+     def anchor() -> i32 = 1\n\n\
+     def f(n: i32) = add(v, n)\n";
 
 /// A partial header must not be instantiated before its body narrows it
 /// (chelis#1486 / [04-INF-5]): the reader's mismatched ascription must reject
@@ -415,17 +415,17 @@ const READER_FIRST_PARTIAL_HEADER: &str = "module PartialHeaderReaderFirst\n\n\
 ///
 /// The first row is a disposition lock and was green before this change. The
 /// second is a regression test: the reader-first layout scored 1.0 and
-/// compiled a `f32` binding out of an `int32` body.
+/// compiled a `f32` binding out of an `i32` body.
 #[test]
 fn check_rejects_a_mismatched_read_of_a_partial_header_deferred_by_a_barrier() {
     assert_failed_report(
         "partial_header",
         "ch",
         "module PartialHeader\n\n\
-         def anchor() -> int32 = 1\n\n\
+         def anchor() -> i32 = 1\n\n\
          r: f32 = f(2)\n\n\
-         v: int32 = 1\n\n\
-         def f(n: int32) = add(v, n)\n",
+         v: i32 = 1\n\n\
+         def f(n: i32) = add(v, n)\n",
         "TypeMismatch",
     );
     assert_failed_report(
@@ -483,16 +483,16 @@ fn check_accepts_a_stamped_backward_value_read_by_a_recursive_component() {
         "scc_straddle_stamped_wrapped",
         "ch",
         "module SccStraddleStampedWrapped\n\n\
-         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = 7\n\n\
-         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n",
     );
     assert_clean_report(
         "scc_straddle_stamped_bare",
         "ch",
-        "def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+        "def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = 7\n\n\
-         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n",
     );
     // The forward control must still reject with the reader inside the
     // component, or the acceptance above proves nothing about ordering.
@@ -500,8 +500,8 @@ fn check_accepts_a_stamped_backward_value_read_by_a_recursive_component() {
         "scc_straddle_forward",
         "ch",
         "module SccStraddleForward\n\n\
-         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
-         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n\n\
+         def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n\n\
          carried = 7\n",
         "UnboundVariable",
     );
@@ -516,17 +516,17 @@ fn check_accepts_a_header_less_value_read_by_a_recursive_component() {
         "scc_straddle_computed_wrapped",
         "ch",
         "module SccStraddleComputedWrapped\n\n\
-         def seed() -> int32 = 3\n\n\
-         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+         def seed() -> i32 = 3\n\n\
+         def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = seed()\n\n\
-         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n",
     );
     assert_clean_report(
         "scc_straddle_computed_bare",
         "ch",
-        "def seed() -> int32 = 3\n\n\
-         def ping(n: int32) -> int32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
+        "def seed() -> i32 = 3\n\n\
+         def ping(n: i32) -> i32 = if (n <= 0) then 0 else pong((n - 1))\n\n\
          carried = seed()\n\n\
-         def pong(n: int32) -> int32 = if (n <= 0) then carried else ping((n - 1))\n",
+         def pong(n: i32) -> i32 = if (n <= 0) then carried else ping((n - 1))\n",
     );
 }

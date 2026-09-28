@@ -20,6 +20,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::LowerError, "lower_error"),
         (DiagnosticKind::ReefError, "reef_error"),
         (DiagnosticKind::EvalError, "eval_error"),
+        (DiagnosticKind::NumericTrap, "numeric_trap"),
         (DiagnosticKind::Cancelled, "cancelled"),
         (DiagnosticKind::GradError, "grad_error"),
         (DiagnosticKind::ValidationError, "validation_error"),
@@ -50,6 +51,7 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::UseAfterConsume, "UseAfterConsume"),
         (DiagnosticKind::UnconsumedLinear, "UnconsumedLinear"),
         (DiagnosticKind::InvalidBorrow, "InvalidBorrow"),
+        (DiagnosticKind::KeyReuse, "KeyReuse"),
         (DiagnosticKind::CycleDetected, "CycleDetected"),
         (
             DiagnosticKind::UnsupportedTensorPrecision,
@@ -67,6 +69,9 @@ fn diagnostic_kind_wire_spellings_are_closed_and_stable() {
         (DiagnosticKind::InvalidHandler, "InvalidHandler"),
         (DiagnosticKind::BuildTargetMismatch, "BuildTargetMismatch"),
         (DiagnosticKind::TypeTotality, "TypeTotality"),
+        (DiagnosticKind::DirectoryWalkError, "directory_walk_error"),
+        (DiagnosticKind::EmptyCorpus, "empty_corpus"),
+        (DiagnosticKind::EmptyTestSelection, "empty_test_selection"),
     ];
     assert_eq!(DiagnosticKind::ALL, expected.map(|(kind, _)| kind));
 
@@ -111,6 +116,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::LowerError
             | DiagnosticKind::ReefError
             | DiagnosticKind::EvalError
+            | DiagnosticKind::NumericTrap
             | DiagnosticKind::Cancelled
             | DiagnosticKind::GradError
             | DiagnosticKind::ValidationError
@@ -134,6 +140,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::UseAfterConsume
             | DiagnosticKind::UnconsumedLinear
             | DiagnosticKind::InvalidBorrow
+            | DiagnosticKind::KeyReuse
             | DiagnosticKind::CycleDetected
             | DiagnosticKind::UnsupportedTensorPrecision
             | DiagnosticKind::DuplicateDefinition
@@ -147,7 +154,10 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
             | DiagnosticKind::UnhandledEffect
             | DiagnosticKind::InvalidHandler
             | DiagnosticKind::BuildTargetMismatch
-            | DiagnosticKind::TypeTotality => "general",
+            | DiagnosticKind::TypeTotality
+            | DiagnosticKind::DirectoryWalkError
+            | DiagnosticKind::EmptyCorpus
+            | DiagnosticKind::EmptyTestSelection => "general",
         }
     }
 
@@ -158,10 +168,7 @@ fn diagnostic_kind_consumer_match_is_a_compile_time_ratchet() {
 
 #[test]
 fn effect_kind_canonical_symbols_round_trip() {
-    let expected = [
-        (EffectKind::Random, "random"),
-        (EffectKind::Resource, "resource"),
-    ];
+    let expected = [(EffectKind::Resource, "resource")];
     assert_eq!(EffectKind::ALL, expected.map(|(kind, _)| kind));
 
     for (kind, symbol) in expected {
@@ -198,6 +205,20 @@ fn effect_kind_missing_malformed_and_unknown_are_distinct_errors() {
 }
 
 #[test]
+fn effect_kind_random_is_a_retired_spelling_that_points_at_keys() {
+    // The `random` handler kind was retired with the counter stream (#2413):
+    // randomness flows through explicit key values, so `random` decodes as
+    // the typed retired spelling, which names the key operations.
+    let error = EffectKind::decode(EffectKindInput::Symbol("random")).expect_err("retired kind");
+    assert_eq!(error, EffectKindDecodeError::RetiredRandom);
+    let text = error.to_string();
+    assert!(
+        text.contains("`random` is retired") && text.contains("key_from_seed"),
+        "{text}"
+    );
+}
+
+#[test]
 fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
     let decoded: Result<EffectKind, EffectKindDecodeError<'_>> =
         EffectKind::decode(EffectKindInput::Symbol("not-a-kind"));
@@ -211,7 +232,6 @@ fn effect_kind_decoder_never_returns_option_or_a_default_kind() {
 fn effect_kind_consumer_match_is_a_compile_time_ratchet() {
     fn semantic_decision(kind: EffectKind) -> &'static str {
         match kind {
-            EffectKind::Random => "seed scope",
             EffectKind::Resource => "device scope",
         }
     }
@@ -233,6 +253,7 @@ fn representation_variants_have_current_widths_and_payload_status() {
         (Repr::TwosComplement32, 4, false),
         (Repr::TwosComplement64, 8, false),
         (Repr::Bool8, 1, false),
+        (Repr::Word64, 8, false),
     ];
     assert_eq!(Repr::ALL, expected.map(|(repr, ..)| repr));
 
@@ -250,6 +271,11 @@ fn equal_width_representations_keep_distinct_identities() {
     );
     assert_ne!(Repr::Ieee754Binary32, Repr::TwosComplement32);
     assert_ne!(Repr::Bool8, Repr::TwosComplement8);
+    assert_eq!(
+        Repr::Word64.byte_width(),
+        Repr::TwosComplement64.byte_width()
+    );
+    assert_ne!(Repr::Word64, Repr::TwosComplement64);
 }
 
 #[test]
@@ -265,6 +291,7 @@ fn representation_consumer_match_is_a_compile_time_ratchet() {
             Repr::TwosComplement32 => "twos-complement-32",
             Repr::TwosComplement64 => "twos-complement-64",
             Repr::Bool8 => "bool8",
+            Repr::Word64 => "word64",
         }
     }
 
@@ -348,6 +375,14 @@ fn runtime_dtype_ids_names_macros_representations_and_widths_round_trip() {
             Repr::TwosComplement16,
             2,
         ),
+        (
+            RuntimeDType::Key,
+            9,
+            "key",
+            "CHELIS_DTYPE_KEY",
+            Repr::Word64,
+            8,
+        ),
     ];
     assert_eq!(RuntimeDType::ALL, expected.map(|(dtype, ..)| dtype));
 
@@ -406,6 +441,7 @@ fn runtime_dtype_consumer_match_is_a_compile_time_ratchet() {
             RuntimeDType::F16 => "u16-f16",
             RuntimeDType::I8 => "i8",
             RuntimeDType::I16 => "i16",
+            RuntimeDType::Key => "u64-key",
         }
     }
 

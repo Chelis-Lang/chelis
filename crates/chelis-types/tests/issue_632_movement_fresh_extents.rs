@@ -5,7 +5,7 @@
 //! The pass-through was an annotation-level lie (`stride(&x, 2i64, 2i64)` on
 //! `tensor[batch, 4, f32]` stamped `batch` on an axis whose true extent
 //! is `ceil(batch/2)`) and falsely tripped the §4.4.1 return-dim rigidity
-//! rule on `sig f: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2i64)`
+//! rule on `sig f[n, u]: tensor[n, f32] -> tensor[u, f32]` over `stride(x, 2i64)`
 //! (the pass-through unified `u := n`). The identity cases — stride step
 //! 1, zero pad — MUST keep passing the symbol through (the
 //! `issue_513_symbolic_axis_adjoints` contract), mirroring the IR-side
@@ -16,7 +16,7 @@
 //! Spec: `spec/04-type-system.md` §4.7 (identity-only symbolic
 //! pass-through note), `spec/05-risc-primitives.md` §2.4.1.
 
-use chelis_deep::ast::{Atom, List};
+use chelis_deep::ast::Atom;
 use chelis_deep::{Expr, printer::print_canonical};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
@@ -25,7 +25,7 @@ use chelis_types::check_ir_program;
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -48,20 +48,16 @@ fn expect_clean(src: &str, what: &str) -> Vec<Expr> {
     }
 }
 
-fn list_tag(list: &List) -> Option<&str> {
-    // Decode-once: the spelling comes from the decoded tag, never a raw
-    // element-0 string.
-    list.tag().map(|tag| tag.as_str())
-}
-
 fn var_name(expr: &Expr) -> Option<&str> {
-    let Expr::List(list, _) = expr else {
+    // Decode-once: the spelling comes from the decoded tag, never a raw
+    // head string.
+    let Expr::Node(node, _) = expr else {
         return None;
     };
-    if list_tag(list) != Some("var") {
+    if node.tag().as_str() != "var" {
         return None;
     }
-    match list.elements.get(2) {
+    match node.children_slice().first() {
         Some(Expr::Atom(Atom::Name(name), _)) => Some(name.as_str()),
         _ => None,
     }
@@ -72,17 +68,20 @@ fn var_name(expr: &Expr) -> Option<&str> {
 /// `(t-tensor {} (d-name {} *) (d-lit {} 2) (t-prim {} f32))`.
 fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
     fn walk(expr: &Expr, builtin: &str) -> Option<String> {
-        let Expr::List(list, _) = expr else {
-            return None;
+        let children = match expr {
+            Expr::Node(node, _) => {
+                if node.tag().as_str() == "app"
+                    && node.children_slice().first().and_then(var_name) == Some(builtin)
+                    && let Some(ty) = node.meta().ty().map(|ty| ty.expression())
+                {
+                    return Some(print_canonical(std::slice::from_ref(ty)));
+                }
+                node.children_slice()
+            }
+            Expr::BareList(elements, _) => elements.as_slice(),
+            _ => return None,
         };
-        if list_tag(list) == Some("app")
-            && list.elements.get(2).and_then(var_name) == Some(builtin)
-            && let Some(Expr::Map(meta, _)) = list.elements.get(1)
-            && let Some((_, ty)) = meta.entries.iter().find(|(key, _)| key == "type")
-        {
-            return Some(print_canonical(std::slice::from_ref(ty)));
-        }
-        list.elements.iter().find_map(|kid| walk(kid, builtin))
+        children.iter().find_map(|kid| walk(kid, builtin))
     }
     exprs.iter().find_map(|expr| walk(expr, builtin))
 }
@@ -146,8 +145,8 @@ fn issue632_sig_symbol_stride_no_false_rigidity_rejection() {
     expect_clean(
         r#"
 module Repro.SigStride
-sig f: tensor[n, f32] -> tensor[u, f32]
-def f(x) = stride(x, cast(2, int64))
+sig f[n, u]: tensor[n, f32] -> tensor[u, f32]
+def f(x) = stride(x, cast(2, i64))
 "#,
         "sig-symbol direct-return stride",
     );

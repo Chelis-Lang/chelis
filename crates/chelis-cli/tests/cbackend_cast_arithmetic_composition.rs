@@ -32,96 +32,14 @@
 //!   * `add(t, cast(s, f64))` mixing f64 native + cast-from-f32
 //!   * `cast(add(t, t), f64)` arithmetic-then-cast (widening at end)
 
+mod common;
+
 use assert_cmd::Command;
+use common::authored_c_symbol;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
-
-fn target_debug_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe failed");
-    exe.parent()
-        .and_then(Path::parent)
-        .map(PathBuf::from)
-        .expect("could not resolve target/debug dir from current_exe")
-}
-
-fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
-    if canonical.exists() {
-        return Ok(());
-    }
-    let deps_dir = canonical
-        .parent()
-        .expect("canonical lib path has no parent")
-        .join("deps");
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(&deps_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("libchelis_runtime-") && name.ends_with(".a") {
-            let meta = entry.metadata()?;
-            let mtime = meta.modified()?;
-            match &newest {
-                Some((cur, _)) if *cur >= mtime => {}
-                _ => newest = Some((mtime, entry.path())),
-            }
-        }
-    }
-    let Some((_, hashed)) = newest else {
-        return Err(std::io::Error::other(format!(
-            "no libchelis_runtime-*.a found in {}",
-            deps_dir.display()
-        )));
-    };
-    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = canonical.with_extension(format!(
-        "a.tmp.{}.{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    fs::copy(&hashed, &tmp)?;
-    fs::rename(&tmp, canonical)?;
-    Ok(())
-}
-
-#[test]
-fn runtime_archive_materialization_is_safe_within_one_process() {
-    let source_root = target_debug_dir();
-    let source_deps = source_root.join("deps");
-    let source = fs::read_dir(&source_deps)
-        .expect("read source deps")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                name.starts_with("libchelis_runtime-") && name.ends_with(".a")
-            })
-        })
-        .expect("hashed runtime archive");
-
-    let sandbox = tempdir().expect("runtime materialization sandbox");
-    let deps = sandbox.path().join("deps");
-    fs::create_dir(&deps).expect("create sandbox deps");
-    fs::copy(&source, deps.join(source.file_name().unwrap())).expect("seed hashed archive");
-    let canonical = sandbox.path().join("libchelis_runtime.a");
-
-    std::thread::scope(|scope| {
-        let mut threads = Vec::new();
-        for _ in 0..16 {
-            threads.push(scope.spawn(|| ensure_runtime_static_lib(&canonical)));
-        }
-        for thread in threads {
-            thread.join().expect("materialization thread").unwrap();
-        }
-    });
-
-    assert!(
-        canonical.is_file(),
-        "canonical runtime archive was not created"
-    );
-}
 
 fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
@@ -147,8 +65,7 @@ fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
 }
 
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let runtime = build_dir.join("libchelis_runtime.a");
 
     let bin = build_dir.join("test_bin");
     let compile = StdCommand::new("gcc")
@@ -161,7 +78,7 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> Stri
             main_c.to_str().unwrap(),
             "-o",
             bin.to_str().unwrap(),
-            canonical.to_str().unwrap(),
+            runtime.to_str().unwrap(),
             "-lm",
             "-lpthread",
             "-ldl",
@@ -215,11 +132,13 @@ fn cbackend_add_of_two_casts_f64_from_f32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -227,7 +146,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -261,11 +180,13 @@ fn cbackend_mul_of_two_casts_f64_from_f32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -273,7 +194,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -307,11 +228,13 @@ fn cbackend_cast_after_add_widens_to_f64() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
@@ -319,7 +242,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -352,11 +275,13 @@ fn cbackend_mul_cast_with_native_f64() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y);
+extern chelis_tensor* {composed}(chelis_tensor* x, chelis_tensor* y);
+static chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y) {{ (void)y; chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     float in_x[3] = {{2.0f, 3.0f, 4.0f}};
@@ -367,7 +292,7 @@ int main(void) {{
     chelis_tensor* ty = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_F64, in_y, (int64_t)sizeof(in_y));
 
-    chelis_tensor* out = composed(tx, ty);
+    chelis_tensor* out = {composed}(tx, ty);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -387,13 +312,13 @@ int main(void) {{
     );
 }
 
-/// `add(cast(t, f64), cast(t, f64))` for int32 source.  The int32
+/// `add(cast(t, f64), cast(t, f64))` for i32 source.  The i32
 /// values widen to f64 first, then the f64 add runs.  Validates
-/// the int32 -> f64 cast plus the f64 add dispatch chain.
+/// the i32 -> f64 cast plus the f64 add dispatch chain.
 #[test]
 fn cbackend_add_of_two_casts_f64_from_int32() {
     let build = chelis_build_c(
-        "def composed(x: tensor[3, int32]) -> tensor[3, f64] = {\n  \
+        "def composed(x: tensor[3, i32]) -> tensor[3, f64] = {\n  \
          a = cast(x, f64)\n  \
          b = cast(x, f64)\n  \
          add(a, b)\n\
@@ -402,11 +327,13 @@ fn cbackend_add_of_two_casts_f64_from_int32() {
     );
     let kernel_c = build.path().join("composed.c");
     let main_c = build.path().join("main.c");
+    let composed = authored_c_symbol("composed");
     fs::write(
         &main_c,
         format!(
             r#"{HARNESS_INCLUDES}
-extern chelis_tensor* composed(chelis_tensor* x);
+extern chelis_tensor* {composed}(chelis_tensor* x);
+static chelis_tensor* composed(chelis_tensor* x) {{ chelis_tensor_retain(x); return x; }}
 
 int main(void) {{
     int32_t in_data[3] = {{7, 11, 13}};
@@ -414,7 +341,7 @@ int main(void) {{
     chelis_tensor* t = chelis_tensor_entry_borrow(
         1, in_shape, CHELIS_DTYPE_I32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(t);
+    chelis_tensor* out = {composed}(t);
     if (harness_dtype(out) != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", harness_dtype(out)); return 1; }}
     double* d = (const double*)harness_data(out);
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
@@ -429,6 +356,6 @@ int main(void) {{
     let trimmed = stdout.trim();
     assert_eq!(
         trimmed, "14 22 26",
-        "expected 2*int32 widened to f64; got stdout={trimmed:?}"
+        "expected 2*i32 widened to f64; got stdout={trimmed:?}"
     );
 }

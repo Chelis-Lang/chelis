@@ -400,9 +400,7 @@ fn check_surf_expr(
         | surf::Expr::Annotate(target, _, _) => {
             check_surf_expr(ctx, source, target, catalog, module, out);
         }
-        surf::Expr::Binary(_, lhs, rhs, _)
-        | surf::Expr::WithSeed(lhs, rhs, _)
-        | surf::Expr::WithDevice(lhs, rhs, _) => {
+        surf::Expr::Binary(_, lhs, rhs, _) | surf::Expr::WithDevice(lhs, rhs, _) => {
             check_surf_expr(ctx, source, lhs, catalog, module, out);
             check_surf_expr(ctx, source, rhs, catalog, module, out);
         }
@@ -513,7 +511,7 @@ fn collect_deep_decls_catalog(expr: &deep::Expr, module: Option<String>, out: &m
                 // a module-less @opaque is a checker declaration error
                 // and would collapse distinct module-less files under
                 // the shared `None` key. See the Surf collector.
-                if meta_bool(expr, "opaque")
+                if is_opaque(expr)
                     && let Some(module) = module.as_deref()
                 {
                     out.insert_opaque(name, module);
@@ -708,17 +706,9 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn deep_node_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
+fn deep_node_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
     match expr {
         deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
-        deep::Expr::List(list, _) => {
-            let tag = list.tag()?;
-            let meta = match list.elements.get(1)? {
-                deep::Expr::Map(meta, _) => meta,
-                _ => return None,
-            };
-            Some((tag, meta, list.elements.get(2..)?))
-        }
         _ => None,
     }
 }
@@ -730,30 +720,23 @@ fn sym_str(expr: &deep::Expr) -> Option<&str> {
     }
 }
 
-fn meta_bool(expr: &deep::Expr, key: &str) -> bool {
-    deep_node_parts(expr).is_some_and(|(_, map, _)| {
-        map.entries.iter().any(|(entry_key, value)| {
-            entry_key == key && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
-        })
-    })
+fn is_opaque(expr: &deep::Expr) -> bool {
+    deep_node_parts(expr).is_some_and(|(_, metadata, _)| metadata.opaque().is_some())
 }
 
 fn type_name_from_meta(expr: &deep::Expr) -> Option<&str> {
     let (_, meta, _) = deep_node_parts(expr)?;
-    let value = meta
-        .entries
-        .iter()
-        .find_map(|(key, value)| (key == "type").then_some(value))?;
+    let value = meta.ty().map(|ty| ty.expression())?;
     type_name_from_type_expr(value)
 }
 
 fn type_name_from_meta_expr(expr: &deep::Expr) -> Option<&str> {
     match expr {
-        deep::Expr::Node(..) | deep::Expr::List(..) => type_name_from_meta(expr),
+        deep::Expr::Node(..) => type_name_from_meta(expr),
         deep::Expr::MetaExpr(meta, _) => meta
-            .entries
-            .iter()
-            .find_map(|(key, value)| (key == "type").then_some(value))
+            .metadata
+            .ty()
+            .map(|ty| ty.expression())
             .and_then(type_name_from_type_expr),
         _ => None,
     }

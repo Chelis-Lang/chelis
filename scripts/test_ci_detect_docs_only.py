@@ -47,15 +47,6 @@ class IsDocPathTests(unittest.TestCase):
         # mdBook theme asset) is prose-adjacent; the Docs job still runs.
         self.assertTrue(m.is_doc_path("docs/book/theme/custom.css"))
 
-    def test_openspec_changes_prefix_is_doc(self):
-        self.assertTrue(
-            m.is_doc_path("openspec/changes/add-thing/proposal.md")
-        )
-        # `openspec new change` always writes this non-Markdown metadata
-        # file; without the prefix rule it alone forces the full matrix.
-        self.assertTrue(
-            m.is_doc_path("openspec/changes/add-thing/.openspec.yaml")
-        )
 
     def test_code_paths_are_not_doc(self):
         for p in (
@@ -66,8 +57,9 @@ class IsDocPathTests(unittest.TestCase):
             "packages/chelis-std/tests/foo.ch",
             "docsignore",  # sibling, not under docs/
             "readme.md.rs",  # .rs wins; not a doc
-            "openspec/config.yaml",  # tool config, not one change
-            "openspec/changesets/x.yaml",  # sibling, not under changes/
+            "openspec/config.yaml",
+            "openspec/store.lock.yaml",
+            "openspec/changes/add-thing/.openspec.yaml",
         ):
             self.assertFalse(m.is_doc_path(p), p)
 
@@ -110,38 +102,11 @@ class IsDocsOnlyTests(unittest.TestCase):
             "spec/design/spec_provenance.md",
             "spec/design/remediation_roadmap.md",
             "docs/investigations/remediation_status_2026_08_04.md",
+            "docs/manual_gates.md",
         ):
             with self.subTest(oracle_doc=oracle_doc):
                 self.assertFalse(m.is_docs_only([oracle_doc]))
                 self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
-
-
-class RejectionAuthorityChangeTests(unittest.TestCase):
-    def test_manifest_and_validator_changes_require_live_validation(self):
-        for path in (
-            "spec/design/loud_unsupported_issue_manifest.json",
-            "scripts/validate_rejection_issue_manifest.py",
-            "scripts/check_rejection_authority_boundary.py",
-            "scripts/test_check_rejection_authority_boundary.py",
-            "scripts/generate_rejection_registries.py",
-            "scripts/capacity_census_liveness.py",
-            "scripts/ci_detect_docs_only.py",
-            "crates/chelis-types/src/rejection_registry_generated.rs",
-            "crates/chelis-types/src/unsupported.rs",
-            "crates/chelis-types/src/lib.rs",
-            ".github/workflows/ci.yml",
-        ):
-            self.assertTrue(m.rejection_authority_changed([path]), path)
-
-    def test_unrelated_paths_do_not_require_live_validation(self):
-        self.assertFalse(
-            m.rejection_authority_changed(
-                ["README.md", "crates/chelis-ir/src/lower.rs"]
-            )
-        )
-
-    def test_empty_change_set_fails_safe(self):
-        self.assertTrue(m.rejection_authority_changed([]))
 
 
 class DiagnosticKindChangeTests(unittest.TestCase):
@@ -172,6 +137,42 @@ class DiagnosticKindChangeTests(unittest.TestCase):
         self.assertTrue(m.diagnostic_kind_changed([]))
 
 
+class CiContractChangeTests(unittest.TestCase):
+    def test_workflow_scripts_and_policy_docs_trigger_preflight(self):
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/actions/free-disk-space/action.yml",
+            ".config/ci-test-targets.toml",
+            "agent-skills/redteam-exec/SKILL.md",
+            "scripts/gate.py",
+            "scripts/ci_change_owned.py",
+            "scripts/test_ci_candidate_lifecycle.py",
+            "scripts/changelog.py",
+            "scripts/phase3_test_change_report.py",
+            "scripts/phase4b_change_report.py",
+            "scripts/test_pr_workflow_routing.py",
+            "scripts/test_change_owned_workflow.py",
+            "scripts/test_hosted_validation.py",
+            "scripts/test_gate.py",
+            "AGENTS.md",
+            "docs/ci_validation.md",
+            "docs/guard_changes_for_pr_authors.md",
+            "spec/design/guard_artifact_proposal_assessment.md",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(m.ci_contract_changed([path]))
+
+    def test_unrelated_code_and_prose_do_not_trigger_preflight(self):
+        self.assertFalse(
+            m.ci_contract_changed(
+                ["README.md", "crates/chelis-ir/src/lower.rs"]
+            )
+        )
+
+    def test_empty_change_set_fails_safe(self):
+        self.assertTrue(m.ci_contract_changed([]))
+
+
 class EmitTests(unittest.TestCase):
     def test_emit_writes_github_output_and_stdout(self):
         with tempfile.TemporaryDirectory() as d:
@@ -181,13 +182,13 @@ class EmitTests(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    m._emit(True, False, False)
+                    m._emit(True, False, True)
                 self.assertEqual(
                     buf.getvalue().splitlines(),
                     [
                         "docs_only=true",
-                        "rejection_authority_changed=false",
                         "diagnostic_kind_changed=false",
+                        "ci_contract_changed=true",
                     ],
                 )
                 with open(out_path, encoding="utf-8") as fh:
@@ -195,8 +196,8 @@ class EmitTests(unittest.TestCase):
                         fh.read().splitlines(),
                         [
                             "docs_only=true",
-                            "rejection_authority_changed=false",
                             "diagnostic_kind_changed=false",
+                            "ci_contract_changed=true",
                         ],
                     )
             finally:
@@ -210,13 +211,13 @@ class EmitTests(unittest.TestCase):
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                m._emit(False, True, True)
+                m._emit(False, True, False)
             self.assertEqual(
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=false",
-                    "rejection_authority_changed=true",
                     "diagnostic_kind_changed=true",
+                    "ci_contract_changed=false",
                 ],
             )
         finally:
@@ -238,8 +239,8 @@ class MainTests(unittest.TestCase):
                 buf.getvalue().splitlines(),
                 [
                     "docs_only=true",
-                    "rejection_authority_changed=false",
                     "diagnostic_kind_changed=false",
+                    "ci_contract_changed=false",
                 ],
             )
         finally:

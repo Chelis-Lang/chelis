@@ -1,12 +1,12 @@
-//! [05-OP-33]'s checked-arithmetic contract, exercised at the *int64* ceiling.
+//! [05-OP-33]'s checked-arithmetic contract, exercised at the *i64* ceiling.
 //!
 //! The atom requires that "shape products, byte counts, offsets, output
 //! extents, and allocation sizes use checked arithmetic" and that "an
 //! unrepresentable count, extent, offset, or allocation size traps `Overflow`
 //! before allocation or element access", with `split` taking "nonnegative
-//! int64 sizes whose checked sum equals the selected extent".
+//! i64 sizes whose checked sum equals the selected extent".
 //!
-//! Representable means representable in the canonical int64 extent domain
+//! Representable means representable in the canonical i64 extent domain
 //! ([05-DIM-2]), not "fits this host's `usize`". Those two ceilings differ by
 //! the whole `[i64::MAX + 1, u64::MAX]` band on a 64-bit host, and they differ
 //! in the other direction on a 32-bit one, so every negative case below sits
@@ -47,10 +47,10 @@ use std::process::Command;
 const CHILD_ENV: &str = "CHELIS_OP33_INT64_EXTENT_CHILD";
 
 /// Above `i64::MAX` (9_223_372_036_854_775_807) and below `u64::MAX`: the exact
-/// band a `usize` fold accepts and an int64 fold rejects. 4e9 * 4e9 = 1.6e19.
+/// band a `usize` fold accepts and an i64 fold rejects. 4e9 * 4e9 = 1.6e19.
 const BAND_EXTENT: i64 = 4_000_000_000;
 
-/// 2^31 * 2^31 = 2^62, a legal int64 count whose f32 byte size (2^64) is not.
+/// 2^31 * 2^31 = 2^62, a legal i64 count whose f32 byte size (2^64) is not.
 const BUFFER_BAND_EXTENT: i64 = 1 << 31;
 
 unsafe fn tensor(shape: &[i64], dtype: u8) -> *mut chelis_tensor {
@@ -89,7 +89,7 @@ unsafe fn declared_carrier(shape: &[i64]) -> DeclaredCarrier {
         .iter()
         .copied()
         .try_fold(1_i64, i64::checked_mul)
-        .expect("fixture element count fits int64");
+        .expect("fixture element count fits i64");
     let data = vec![0.0_f32; 8].into_boxed_slice();
     let pointer: *const std::ffi::c_void = if size == 0 {
         std::ptr::null()
@@ -101,7 +101,7 @@ unsafe fn declared_carrier(shape: &[i64]) -> DeclaredCarrier {
         shape.as_ptr(),
         CHELIS_DTYPE_F32,
         pointer,
-        size.checked_mul(4).expect("fixture capacity fits int64"),
+        size.checked_mul(4).expect("fixture capacity fits i64"),
     );
     DeclaredCarrier {
         _data: data,
@@ -133,13 +133,13 @@ fn run_case(case: &str) -> ! {
     unsafe {
         match case {
             // Reduction count 4e9 * 4e9 = 1.6e19: inside the band.
-            "einsum-reduction-at-int64-ceiling" => {
+            "einsum-reduction-at-i64-ceiling" => {
                 let lhs = tensor(&[BAND_EXTENT, 0], CHELIS_DTYPE_F32);
                 let rhs = tensor(&[BAND_EXTENT, 0], CHELIS_DTYPE_F32);
                 einsum("az,cw->zw", lhs, rhs);
             }
             // Output extents 4e9 x 4e9: the same band on the output leg.
-            "einsum-output-at-int64-ceiling" => {
+            "einsum-output-at-i64-ceiling" => {
                 let lhs = tensor(&[BAND_EXTENT, 0], CHELIS_DTYPE_F32);
                 let rhs = tensor(&[BAND_EXTENT, 0], CHELIS_DTYPE_F32);
                 einsum("az,cw->ac", lhs, rhs);
@@ -151,7 +151,7 @@ fn run_case(case: &str) -> ! {
                 let rhs = tensor(&[5_000_000_000, 0], CHELIS_DTYPE_F32);
                 einsum("az,cw->zw", lhs, rhs);
             }
-            // Reduction count 2^62 is a legal int64 extent product; the f32
+            // Reduction count 2^62 is a legal i64 extent product; the f32
             // accumulation buffer it names is 2^64 bytes and is not.
             "einsum-reduction-buffer-byte-size" => {
                 let lhs = declared_carrier(&[BUFFER_BAND_EXTENT, 1]);
@@ -159,7 +159,7 @@ fn run_case(case: &str) -> ! {
                 einsum("az,cw->zw", lhs.tensor, rhs.tensor);
             }
             // i64::MAX + 1 through the size list.
-            "split-size-sum-at-int64-ceiling" => {
+            "split-size-sum-at-i64-ceiling" => {
                 let input = tensor(&[i64::MAX, 0], CHELIS_DTYPE_F32);
                 chelis_tensor_split(input, 0, int_size_list(&[i64::MAX, 1]));
             }
@@ -174,7 +174,7 @@ fn run_case(case: &str) -> ! {
                 chelis_tensor_split(input, 0, int_size_list(&[-1, 5]));
             }
             // i64::MAX + 1 as a concatenated output extent.
-            "concat-output-extent-at-int64-ceiling" => {
+            "concat-output-extent-at-i64-ceiling" => {
                 let first = tensor(&[i64::MAX, 0], CHELIS_DTYPE_F32);
                 let second = tensor(&[1, 0], CHELIS_DTYPE_F32);
                 let parts = [
@@ -186,17 +186,29 @@ fn run_case(case: &str) -> ! {
                     0,
                 );
             }
+            "concat-output-stride-at-i64-ceiling" => {
+                let first = tensor(&[0, 1 << 61, 2], CHELIS_DTYPE_F32);
+                let second = tensor(&[0, 1 << 61, 2], CHELIS_DTYPE_F32);
+                let parts = [
+                    chelis_value_take_tensor(first),
+                    chelis_value_take_tensor(second),
+                ];
+                chelis_tensor_concat(
+                    chelis_list_from_values(parts.as_ptr(), parts.len() as i64),
+                    1,
+                );
+            }
             // A zero extent does not make an unrepresentable canonical stride
             // legal: axis 0's stride is the exact product of the following
-            // extents, and i64::MAX * i64::MAX is not an int64.
+            // extents, and i64::MAX * i64::MAX is not an i64.
             "alloc-unrepresentable-canonical-stride" => {
                 tensor(&[0, i64::MAX, i64::MAX], CHELIS_DTYPE_F32);
             }
             // No zero extent, so the product really is unrepresentable.
-            "alloc-extent-product-at-int64-ceiling" => {
+            "alloc-extent-product-at-i64-ceiling" => {
                 tensor(&[i64::MAX, 2], CHELIS_DTYPE_F32);
             }
-            other => panic!("unknown int64-extent-domain case: {other}"),
+            other => panic!("unknown i64-extent-domain case: {other}"),
         }
     }
     panic!("case `{case}` returned instead of trapping")
@@ -206,44 +218,48 @@ fn run_case(case: &str) -> ! {
 /// future edit cannot satisfy the matrix by trapping for a different reason.
 const NEGATIVE_MATRIX: &[(&str, &str)] = &[
     (
-        "einsum-reduction-at-int64-ceiling",
-        "Overflow: einsum reduction extent product exceeds int64",
+        "einsum-reduction-at-i64-ceiling",
+        "Overflow: einsum reduction extent product exceeds i64",
     ),
     (
-        "einsum-output-at-int64-ceiling",
-        "Overflow: einsum output extent product exceeds int64",
+        "einsum-output-at-i64-ceiling",
+        "Overflow: einsum output extent product exceeds i64",
     ),
     (
         "einsum-reduction-above-host-ceiling",
-        "Overflow: einsum reduction extent product exceeds int64",
+        "Overflow: einsum reduction extent product exceeds i64",
     ),
     (
         "einsum-reduction-buffer-byte-size",
-        "Overflow: einsum reduction buffer byte size exceeds int64",
+        "Overflow: einsum reduction buffer byte size exceeds i64",
     ),
     (
-        "split-size-sum-at-int64-ceiling",
-        "Overflow: split size sum exceeds int64",
+        "split-size-sum-at-i64-ceiling",
+        "Overflow: split size sum exceeds i64",
     ),
     (
         "split-negative-size-compensating",
-        "Domain: split expects nonnegative int64 sizes, got -1",
+        "Domain: split expects nonnegative i64 sizes, got -1",
     ),
     (
         "split-negative-size-leading",
-        "Domain: split expects nonnegative int64 sizes, got -1",
+        "Domain: split expects nonnegative i64 sizes, got -1",
     ),
     (
-        "concat-output-extent-at-int64-ceiling",
-        "Overflow: concat output extent exceeds int64",
+        "concat-output-extent-at-i64-ceiling",
+        "numeric trap: overflow in concat at i64",
+    ),
+    (
+        "concat-output-stride-at-i64-ceiling",
+        "numeric trap: overflow in concat at i64",
     ),
     (
         "alloc-unrepresentable-canonical-stride",
-        "Overflow: chelis_alloc stride product exceeds int64",
+        "Overflow: chelis_alloc stride product exceeds i64",
     ),
     (
-        "alloc-extent-product-at-int64-ceiling",
-        "Overflow: chelis_alloc extent product exceeds int64",
+        "alloc-extent-product-at-i64-ceiling",
+        "Overflow: chelis_alloc extent product exceeds i64",
     ),
 ];
 
@@ -274,7 +290,7 @@ fn derived_products_and_sums_trap_at_the_int64_extent_ceiling() {
     }
     assert!(
         failures.is_empty(),
-        "{}/{} int64 extent-ceiling cases failed:\n{}",
+        "{}/{} i64 extent-ceiling cases failed:\n{}",
         failures.len(),
         NEGATIVE_MATRIX.len(),
         failures.join("\n")
@@ -313,7 +329,7 @@ fn zero_extent_acceptance_does_not_depend_on_axis_order() {
         // output label sits on the zero axis, so the reduction extents are the
         // two `BAND_EXTENT` axes of each operand plus one zero; their product
         // is zero, but a left-to-right fold reaches `BAND_EXTENT` squared
-        // first, which is not an int64. Only the zero's position differs
+        // first, which is not an i64. Only the zero's position differs
         // between the two cases.
         for (equation_shape, equation) in [
             ([BAND_EXTENT, 0, BAND_EXTENT], "abc,def->b"),
@@ -380,7 +396,7 @@ fn legal_products_sums_and_zero_extents_still_execute_exactly() {
         let last = chelis_tensor_borrow_value(chelis_list_index(parts, 2));
         assert_eq!(read_f32(last), [40.0]);
 
-        // concat: extents that sum inside int64, including a zero-extent part.
+        // concat: extents that sum inside i64, including a zero-extent part.
         let empty_part = tensor(&[0, 2], CHELIS_DTYPE_F32);
         let filled_part = tensor(&[2, 2], CHELIS_DTYPE_F32);
         write_f32(filled_part, &[1.0_f32, 2.0, 3.0, 4.0]);

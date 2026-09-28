@@ -28,16 +28,10 @@ fn collect_span_ids_one(expr: &Expr, acc: &mut Vec<String>) {
         acc.push(id.to_string());
     }
     match expr {
-        Expr::List(list, _) => {
-            for child in &list.elements {
-                collect_span_ids_one(child, acc);
-            }
-        }
         Expr::Node(node, _) => {
             // Recurse into metadata values
-            for (_, v) in &node.meta().entries {
-                collect_span_ids_one(v, acc);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| collect_span_ids_one(value, acc));
             // Recurse into children
             for child in node.children_slice() {
                 collect_span_ids_one(child, acc);
@@ -132,12 +126,10 @@ fn span_id_returns_none_for_empty_meta() {
 }
 
 #[test]
-fn span_id_returns_none_when_span_value_is_not_a_string() {
-    // The accessor only returns Some for string-literal span values. A
-    // non-string `span` value is a shape error the caller handles
-    // separately; the accessor reports None to keep its contract narrow.
-    let exprs = parse_str("(def {span: 42} c (lit {} 0))").expect("parse failed");
-    assert_eq!(exprs[0].span_id(), None);
+fn non_string_span_cannot_enter_an_annotation_carrier() {
+    assert!(parse_str("(def {span: 42} c (lit {} 0))").is_err());
+    let raw = serde_json::json!({"entries": [["span", Expr::Atom(chelis_deep::Atom::Int(42), chelis_deep::Span::new(0, 0))]]});
+    assert!(serde_json::from_value::<chelis_deep::Metadata>(raw).is_err());
 }
 
 #[test]

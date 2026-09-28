@@ -84,6 +84,52 @@ lock and chelis#468 must go in. See
 [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md) §5 (lands
 with chelis#571) for the source-crate side.
 
+### 3.1 Document versions and recoverable replacement
+
+The manifest and lockfile formats have independent schema versions. New manifests use schema 3. New locks use schema 1.
+
+A missing schema identifies legacy schema 0. A schema-specific wire parser owns each current document shape.
+
+`chelis reef upgrade` is the only document migration command. It can report changes or apply ordered registered steps.
+
+One package-root `.reef-write.lock` serializes manifest, lockfile, and package archive replacement. This lock is separate from the registry lock.
+
+Each document replacement is atomic by itself. The manifest replacement occurs before the lock replacement.
+
+A process stop can leave a current manifest and an older supported lock. All readers accept this state.
+
+A later upgrade completes the lock step. The design does not claim a transaction across both files.
+
+Versioned JSON Schema artifacts provide editor support. They do not replace typed Reef parsing or artifact validation.
+
+### 3.2 Exact lock preference
+
+Reef parses package and lock identities before filesystem or registry use. Package versions are complete Semantic Versions without build metadata.
+
+A valid `reef.lock` is the preferred exact graph for build, check, eval, schema, and prepared-graph paths.
+
+Reef verifies the root identity, direct requirements, source kinds, canonical paths, origins, and hashes before lock reuse.
+
+A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
+
+A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+
+If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
+
+A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+
+Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
+
+Manifest schema 3 owns optional descriptive metadata and declared package files. These values do not change resolver or source-provider behavior.
+
+Declared README and license files enter source archives through bounded, no-follow snapshots. They do not enter lock, index, or shell formats.
+
+Reef treats the local registry as an append-only cache of verified package pairs. It does not roll back a complete entry after a late failure.
+
+A final update gets the project lock before the registry lock. It keeps both locks through package, index, and lock replacement.
+
+Reef replaces `reef.lock` last. Thus, a new lock never names an incomplete registry entry.
+
 ## 4. Store consolidation
 
 Chelis state is currently scattered and inconsistent:
@@ -123,6 +169,15 @@ cold-start and routing layer reef structurally cannot be. New monorepo member
 
 - `chelisup install <ver>` — download the host-platform release tarball from
   `Chelis-Lang/chelis/releases/v<ver>` into `~/.chelis/toolchains/<ver>/`.
+  Before placing it, chelisup runs the unpacked `chelis runtime export` and
+  refuses the release unless its `lib/` and `include/` runtime files are the
+  bytes that export reports from a sealed build of `<ver>` (chelis#1354).
+  Releases up to 0.18.11 predate the export and install unchecked, with a
+  warning. A refused release newer than the running chelisup may use a format
+  that chelisup does not know, so the refusal says how to get the latest
+  chelisup. When the operating system refuses to execute the release's
+  `chelis`, the error says so, without that advice; a dynamic loader that
+  rejects it is reported as a failed export, with the loader's message.
 - `chelisup default <ver>` — set the recorded default the shim falls back to.
 - `chelisup show` / `list-installed` / `which` — status.
 - `chelisup update` — self-update the installer.
@@ -218,6 +273,10 @@ built in the glibc-2.31 container job so the first binary a bare machine runs
 loads on the oldest supported glibc, #330) and `chelisup.sh` itself, making the
 canonical bootstrap URL
 `https://github.com/Chelis-Lang/chelis/releases/latest/download/chelisup.sh`.
+For the same reason `chelisup install` takes that job's
+`chelis-v<ver>-linux-x86_64-glibc2.31.tar.gz` on Linux, for every release from
+0.7.24 on; the `linux-x86_64` tarball needs the glibc of the runner that built it,
+and a glibc older than 2.31 runs neither build (chelis#2686).
 **Private-repo caveat:** until chelis releases are public the public release URL
 does not serve asset bytes (a plain `curl` gets a `404`), so the bootstrap needs
 an authenticated [`gh`](https://cli.github.com). The checkout-free equivalent of
@@ -343,6 +402,21 @@ case §5.4 decided: it runs from a current chelis (it may itself install the
 pinned toolchain), so a clone-and-`setup` does the right thing without the user
 reaching for `+<ver>`. WS-C also lands §5.4's unknown-subcommand hint in chelis.
 
+### 7.1 Shell-scaffolding synchronization
+
+`chelis reef conform sync` is the adjacent shell-maintenance verb. It refreshes
+the managed document regions and materializes the pinned toolchain's embedded
+skills while preserving shell-owned prose outside those regions. The shell may
+declare skill additions with `[conform] local_skills` and embedded-skill
+removals with `[conform] excluded_skills`. Exclusions are exact names from the
+pinned shared set; sync and audit reject unknown names and restore a skill when
+its exclusion is removed. Within a retained shared skill, the trailing
+`shell-local` block can add shell guidance and use a nested
+`shell-local:exclude` span of comment-wrapped exact heading selectors to remove
+irrelevant upstream sections; removing a selector restores the current section.
+The full shell contract remains
+[`shell_repo_contract.md`](shell_repo_contract.md) §8.
+
 ## 8. Roadmap & sequencing
 
 ```
@@ -384,6 +458,12 @@ build" walkthrough:
 
 ## 10. Cross-references
 
+The [installed artifact callable gate](../../docs/investigations/installed_artifact_canary.md)
+checks staged Linux x86-64/macOS arm64 packages through the actual installer and
+shim before publication. Its bounded ABI observations do not replace compiler,
+numerical or downstream package acceptance. Candidate archive-root conversion is
+explicit and preserves member payloads; published containers remain unchanged.
+
 - [`reef_distribution.md`](reef_distribution.md) — reef package delivery (Items
   6-9 shipped; Item 11 is binary distribution, WS-A).
 - [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md) — the
@@ -397,9 +477,10 @@ build" walkthrough:
 
 ## 11. Out of scope
 
-Inherited from `reef_distribution.md` §Out of scope: semver / version-range
-resolution, a public registry server (Item 10), cryptographic artifact signing
+Inherited from `reef_distribution.md` §Out of scope: a public registry server (Item 10), multiple providers, cryptographic artifact signing
 (trust-stack Item 5), and bit-reproducible cross-machine artifact comparison.
 Additionally: garbage-collection / uninstall of the three stores — all of
 `~/.chelis/{toolchains,reef,src}` currently grow unbounded — is deferred to a
 later hygiene workstream.
+
+Workspaces, features, development dependencies, publication controls, and general archive patterns remain deferred.

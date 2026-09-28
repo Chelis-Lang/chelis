@@ -72,13 +72,21 @@ fn extract_kernel_string(mm_source: &str, var_name: &str) -> Option<String> {
 #[test]
 fn s4_metal_canonical_span_id_emitted_host_side_and_in_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.neg".into()));
+    let n = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.neg".into()),
+    );
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "s4_metal_canonical");
@@ -120,8 +128,15 @@ fn s4_metal_canonical_span_id_emitted_host_side_and_in_kernel() {
 #[test]
 fn s4_metal_merged_spans_emitted_lex_sorted_after_canonical() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), Some("op.x".into()));
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op.b".into(), "op.a".into(), "op.c".into()];
@@ -179,8 +194,21 @@ fn s4_metal_merged_spans_emitted_lex_sorted_after_canonical() {
 #[test]
 fn s4_metal_merged_spans_dedup_against_canonical() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let neg_id = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), Some("op.dup".into()));
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let neg_id = dag.add_node(
+        decl,
+        RiscOp::Neg,
+        vec![a],
+        vec_f32(4),
+        Some("op.dup".into()),
+    );
     {
         let node = dag.node_mut(neg_id).unwrap();
         node.merged_spans = vec!["op.dup".into(), "op.other".into()];
@@ -215,8 +243,15 @@ fn s4_metal_merged_spans_dedup_against_canonical() {
 #[test]
 fn s4_metal_no_spans_emits_no_comment_block() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "s4_metal_nospan");
@@ -238,13 +273,16 @@ fn s4_metal_oracle_richer_combinations_grep() {
     // M6 manual gate) — this structural oracle runs in default CI on
     // every platform.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let n1 = dag.add_node(
+        decl,
         RiscOp::Load { name: "in".into() },
         vec![],
         vec_f32(4),
         Some("n1.canonical".into()),
     );
     let n2 = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![n1],
         vec_f32(4),
@@ -254,13 +292,14 @@ fn s4_metal_oracle_richer_combinations_grep() {
         let node = dag.node_mut(n2).unwrap();
         node.merged_spans = vec!["n2.m1".into(), "n2.m2".into()];
     }
-    let n3 = dag.add_node(RiscOp::Exp, vec![n2], vec_f32(4), None);
+    let n3 = dag.add_node(decl, RiscOp::Exp, vec![n2], vec_f32(4), None);
     {
         let node = dag.node_mut(n3).unwrap();
         node.merged_spans = vec!["n3.m1".into(), "n3.m2".into()];
     }
-    let n4 = dag.add_node(RiscOp::Log, vec![n3], vec_f32(4), None);
+    let n4 = dag.add_node(decl, RiscOp::Log, vec![n3], vec_f32(4), None);
     let n5 = dag.add_node(
+        decl,
         RiscOp::Sin,
         vec![n4],
         vec_f32(4),
@@ -350,13 +389,15 @@ fn s4_metal_oracle_richer_combinations_grep() {
 #[test]
 fn s4_metal_forbidden_newline_in_span_is_escaped_at_emit() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op\nint INJECTED_METAL_CODE = 42;".into()),
     );
-    let n = dag.add_node(RiscOp::Neg, vec![a], vec_f32(4), None);
+    let n = dag.add_node(decl, RiscOp::Neg, vec![a], vec_f32(4), None);
     dag.add_root(n);
 
     let result = codegen_metal(&dag, "s4_metal_forbidden_newline");
@@ -380,13 +421,16 @@ fn s4_metal_forbidden_newline_in_per_node_kernel_string_is_escaped() {
     // metallib compile sees a comment-safe identifier (and so the host
     // .mm source itself remains parseable).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("op.load".into()),
     );
     let n = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![a],
         vec_f32(4),
@@ -417,13 +461,16 @@ fn s4_metal_forbidden_newline_in_per_node_kernel_string_is_escaped() {
 #[test]
 fn s4_metal_clean_span_emitted_verbatim_audit_invariant() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         vec_f32(4),
         Some("eq1.σ_body".into()),
     );
     let n = dag.add_node(
+        decl,
         RiscOp::Neg,
         vec![a],
         vec_f32(4),

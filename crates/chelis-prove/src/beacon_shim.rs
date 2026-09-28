@@ -52,6 +52,8 @@ use crate::discharge::{
 };
 use crate::tier_b::TierBResult;
 
+mod relaxation;
+
 /// The schema version of the request the shim emits. Beacon pins against this.
 const REQUEST_SCHEMA_VERSION: u32 = 2;
 
@@ -91,6 +93,8 @@ pub enum BeaconOracleMode {
     VerifiedDefaultArbBox,
     /// Emit `oracle: "zonotope_verified"`.
     VerifiedZonotope,
+    /// Directed-rounded scalar relaxation over real arithmetic (`relax`).
+    ReluLinear,
 }
 
 impl BeaconOracleMode {
@@ -98,6 +102,7 @@ impl BeaconOracleMode {
         match self {
             Self::VerifiedDefaultArbBox => serde_json::Value::Null,
             Self::VerifiedZonotope => serde_json::json!("zonotope_verified"),
+            Self::ReluLinear => serde_json::json!("relu_linear"),
         }
     }
 }
@@ -286,12 +291,21 @@ impl BeaconShim {
     fn run_beacon(&self, request_bytes: &[u8], timeout_ms: u64) -> SubprocessOutcome {
         // The temp file (if any) must outlive the child, so it is bound here.
         let mut command = Command::new(&self.binary);
-        command.arg("dispatch");
+        command.arg(if self.oracle_mode == BeaconOracleMode::ReluLinear {
+            "relax"
+        } else {
+            "dispatch"
+        });
 
         // Auto-fall-back to the temp-file transport for a request too large to
         // write to a stdin pipe without risking a full-buffer deadlock (the
         // red-team HIGH). The decision is made ONCE here, off the request size.
-        let transport = self.effective_transport(request_bytes.len());
+        let transport = if self.oracle_mode == BeaconOracleMode::ReluLinear {
+            // Beacon's relax CLI accepts a request path, not dispatch's `-` stdin form.
+            RequestTransport::TempFile
+        } else {
+            self.effective_transport(request_bytes.len())
+        };
 
         let _tempfile_guard = match transport {
             RequestTransport::Stdin => {
@@ -320,8 +334,25 @@ impl BeaconShim {
                 Some(file)
             }
         };
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
+        // A split tree can exceed a pipe's capacity. File-backed capture lets
+        // the child finish while we enforce its deadline without blocking on
+        // either output stream.
+        let captures = (|| -> std::io::Result<_> {
+            let stdout = tempfile::NamedTempFile::new()?;
+            let stderr = tempfile::NamedTempFile::new()?;
+            command.stdout(Stdio::from(stdout.reopen()?));
+            command.stderr(Stdio::from(stderr.reopen()?));
+            Ok((stdout, stderr))
+        })();
+        let (stdout_capture, stderr_capture) = match captures {
+            Ok(files) => files,
+            Err(err) => {
+                return SubprocessOutcome::Failed {
+                    reason: format!("could not create beacon output captures: {err}"),
+                    stderr: String::new(),
+                };
+            }
+        };
 
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -358,7 +389,9 @@ impl BeaconShim {
         match child.wait_timeout(timeout) {
             Ok(Some(status)) => {
                 // Exited within the budget; collect its output.
-                let output = match child.wait_with_output() {
+                let output = match std::fs::read(stdout_capture.path()).and_then(|stdout| {
+                    std::fs::read(stderr_capture.path()).map(|stderr| (stdout, stderr))
+                }) {
                     Ok(output) => output,
                     Err(err) => {
                         return SubprocessOutcome::Failed {
@@ -367,12 +400,12 @@ impl BeaconShim {
                         };
                     }
                 };
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let stdout = String::from_utf8_lossy(&output.0).into_owned();
+                let stderr = String::from_utf8_lossy(&output.1).into_owned();
                 if status.success() {
                     SubprocessOutcome::Exited { stdout, stderr }
                 } else {
-                    SubprocessOutcome::Failed {
+                    SubprocessOutcome::Rejected {
                         reason: format!(
                             "beacon exited with nonzero status {}",
                             status
@@ -380,6 +413,7 @@ impl BeaconShim {
                                 .map_or_else(|| "signal".to_string(), |c| c.to_string())
                         ),
                         stderr,
+                        stdout,
                     }
                 }
             }
@@ -409,6 +443,12 @@ enum SubprocessOutcome {
     /// The binary exited successfully; carries its stdout (the `CheckReport`
     /// JSON) and stderr.
     Exited { stdout: String, stderr: String },
+    /// Structured stdout is retained on a nonzero exit, without trusting a proof.
+    Rejected {
+        reason: String,
+        stdout: String,
+        stderr: String,
+    },
     /// The binary was hard-killed at the timeout. Fail-closed.
     TimedOut,
     /// Spawn failure, nonzero exit, or an IO error. Fail-closed; carries a
@@ -461,10 +501,18 @@ impl DischargeEngine for BeaconShim {
     fn fitness(&self, goal: &Goal) -> bool {
         // Beacon's native form is the box/range goal; the shim claims exactly
         // that shape and nothing else.
-        matches!(goal.shape, GoalShape::BoxRange { .. })
+        match self.oracle_mode {
+            BeaconOracleMode::ReluLinear => {
+                matches!(goal.shape, GoalShape::ScalarUpperBound { .. })
+            }
+            _ => matches!(goal.shape, GoalShape::BoxRange { .. }),
+        }
     }
 
     fn discharge(&self, goal: &Goal, timeout_ms: u64) -> Discharge {
+        if self.oracle_mode == BeaconOracleMode::ReluLinear {
+            return self.discharge_scalar_upper(goal, timeout_ms);
+        }
         let GoalShape::BoxRange { inputs, output } = &goal.shape else {
             // fitness() gates this; a non-fitting goal handed here anyway must
             // not fabricate a proof.
@@ -525,6 +573,14 @@ impl DischargeEngine for BeaconShim {
 
         match self.run_beacon(&request_bytes, timeout_ms) {
             SubprocessOutcome::Exited { stdout, stderr } => map_report(&stdout, &stderr),
+            SubprocessOutcome::Rejected {
+                reason,
+                stdout,
+                stderr,
+            } => untrusted_error(
+                &reason,
+                serde_json::json!({"engine":"beacon","error":reason,"stdout":stdout,"stderr":stderr}),
+            ),
             SubprocessOutcome::TimedOut => untrusted_error(
                 "beacon timeout",
                 serde_json::json!({ "engine": "beacon", "error": "timeout" }),

@@ -5,11 +5,10 @@
 
 mod support;
 use chelis_ir::dag::{
-    Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
+    ComparisonKind, Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -41,6 +40,13 @@ fn vec_i64(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
         precision: Prim::Int64,
+    }
+}
+
+fn vec_of(n: usize, precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision,
     }
 }
 
@@ -88,64 +94,6 @@ fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
 }
 
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-hip tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
-}
-
 fn host_entry_source<'a>(source: &'a str, func_name: &str) -> &'a str {
     source
         .split(&format!("void {func_name}_device("))
@@ -159,33 +107,22 @@ fn hip_runtime_header() -> String {
 }
 
 #[test]
-fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
+fn hip_runtime_header_uses_only_the_checked_device_owner_and_official_sdk() {
     let header = hip_runtime_header();
-    assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
-    assert!(header.contains("CHELIS_GPU_MAX_DIM"));
-    for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
+    assert!(header.contains("#include \"chelis_device_owner.h\""));
+    assert!(header.contains("#include <hipblas/hipblas.h>"));
+    for forbidden in [
+        "CHELIS_GPU_MAX_DIM",
+        "chelis_gpu_dtype_size",
+        "chelis_gpu_alloc",
+        "hipblasDatatype_t",
+        "__has_include",
+        "case CHELIS_DTYPE_F64:",
+        "case CHELIS_DTYPE_BOOL:",
+    ] {
         assert!(
-            !header.contains(removed),
-            "HIP runtime header still depends on removed host symbol `{removed}`"
-        );
-    }
-
-    // chelis#1360: this used to assert the header CONTAINED
-    // `case CHELIS_DTYPE_F64:` / `case CHELIS_DTYPE_BOOL:`, which pinned a
-    // second copy of the width table in place. The copy is how the defect
-    // happened - chelis#1308 narrowed bool to one byte here while the
-    // emitter went on dispatching four-byte kernels - so the assertion is
-    // inverted: the header must delegate to the runtime's one authority and
-    // must not restate the per-dtype widths at all.
-    assert!(
-        header.contains("return (size_t)chelis_dtype_size((chelis_dtype)dtype);"),
-        "chelis_gpu_dtype_size must delegate to the runtime width authority"
-    );
-    for restated in ["case CHELIS_DTYPE_F64:", "case CHELIS_DTYPE_BOOL:"] {
-        assert!(
-            !header.contains(restated),
-            "HIP runtime header restates the dtype width table (`{restated}`); \
-             delegate to chelis_dtype_size instead (chelis#1360)"
+            !header.contains(forbidden),
+            "retained legacy metadata/SDK path {forbidden}"
         );
     }
 }
@@ -193,19 +130,22 @@ fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     dag
 }
@@ -235,14 +175,22 @@ fn s1_runtime_passes_wavefront_size_macro_to_hiprtc() {
 /// Build a DAG with a Load input
 fn dag_with_load() -> Dag {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![x, c], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![x, c], vec_f32(4), None);
     dag.add_root(out);
     dag
 }
@@ -305,7 +253,9 @@ fn s2_kernel_strings_escape_embedded_quotes() {
 #[test]
 fn s2_neg_const_only_dag_only_fill_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 0.0),
         vec![],
         scalar_f32(),
@@ -339,19 +289,22 @@ fn s3_all_elementwise_ops_emit_kernels() {
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(op.clone(), vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, op.clone(), vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let result = codegen_hip(&dag, &format!("test_{name}")).unwrap();
         assert!(
@@ -364,13 +317,33 @@ fn s3_all_elementwise_ops_emit_kernels() {
 #[test]
 fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
-    let sub = dag.add_node(RiscOp::Sub, vec![a, b], vec_f32(4), None);
-    let max = dag.add_node(RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
-    let min = dag.add_node(RiscOp::MinElem, vec![a, b], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let sub = dag.add_node(decl, RiscOp::Sub, vec![a, b], vec_f32(4), None);
+    let max = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
+    let min = dag.add_node(decl, RiscOp::MinElem, vec![a, b], vec_f32(4), None);
     let adjoint = dag.add_node(
+        decl,
         RiscOp::ExtremaAdjoint {
             kind: ExtremaKind::Max,
             operand: ExtremaOperand::Left,
@@ -396,17 +369,316 @@ fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
     }
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
     assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(
+        source.contains(
+            "out[i] = isnan(a[idx_a] - b[idx_b]) ? __int_as_float(0x7fc00000) : a[idx_a] - b[idx_b];"
+        ),
+        "f32 subtraction must canonicalize NaNs: {source}"
+    );
     assert!(!source.contains("fmaxf(av, bv)"), "{source}");
     assert!(!source.contains("fminf(av, bv)"), "{source}");
 }
 
 #[test]
+fn direct_and_fused_wide_float_subtraction_emit_canonical_nan_finalization() {
+    for (precision, suffix, canonical) in [
+        (Prim::F32, "f32", "__int_as_float(0x7fc00000)"),
+        (
+            Prim::F64,
+            "f64",
+            "__longlong_as_double(0x7ff8000000000000LL)",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut direct = Dag::new();
+        let direct_decl = direct.declare("test");
+        let a = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = direct.add_node(direct_decl, RiscOp::Sub, vec![a, b], ty.clone(), None);
+        direct.add_root(out);
+        let source = codegen_hip(&direct, &format!("canonical_sub_{suffix}"))
+            .expect("wide direct subtraction must codegen")
+            .c_source;
+        assert!(source.contains(&format!("? {canonical} :")), "{source}");
+
+        let mut fused = Dag::new();
+        let fused_decl = fused.declare("test");
+        let a = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let c = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "c".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let difference = fused.add_node(fused_decl, RiscOp::Sub, vec![a, b], ty.clone(), None);
+        let result = fused.add_node(fused_decl, RiscOp::MinElem, vec![difference, c], ty, None);
+        fused.add_root(result);
+        let fused = fuse(&fused);
+        let source = codegen_hip(&fused, &format!("canonical_fused_sub_{suffix}"))
+            .expect("wide fused subtraction must codegen")
+            .c_source;
+        assert!(
+            source.contains(&format!("? {canonical} :")),
+            "fused {suffix} subtraction must canonicalize each arithmetic step: {source}"
+        );
+    }
+}
+
+#[test]
+fn direct_checked_signed_sub_emits_exact_always_on_trap_channel() {
+    for (precision, suffix, minimum, maximum) in [
+        (Prim::Int8, "i8", "(-127 - 1)", "127"),
+        (Prim::Int16, "i16", "(-32767 - 1)", "32767"),
+        (Prim::Int32, "i32", "(-2147483647 - 1)", "2147483647"),
+        (
+            Prim::Int64,
+            "i64",
+            "(-9223372036854775807LL - 1LL)",
+            "9223372036854775807LL",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = dag.add_node(decl, RiscOp::Sub, vec![a, b], ty, None);
+        dag.add_root(out);
+
+        let source = codegen_hip(&dag, &format!("direct_checked_sub_{suffix}"))
+            .expect("every signed width must reach the checked HIP subtraction kernel")
+            .c_source;
+        assert!(source.contains(&format!("kernel_sub_{suffix}")), "{source}");
+        assert!(source.contains(minimum), "{source}");
+        assert!(source.contains(maximum), "{source}");
+        assert!(
+            source.contains("chelis_record_numeric_failure((unsigned long long)i);"),
+            "{source}"
+        );
+        assert!(
+            source.contains("chelis_numeric_failure_flag")
+                && source.contains("chelis_numeric_failure_index"),
+            "{source}"
+        );
+        assert!(
+            source.contains(&format!(
+                "chelis_numeric_trap(\"numeric trap: overflow in sub at {}\")",
+                precision.name()
+            )),
+            "{source}"
+        );
+        assert!(
+            source.contains("hipModuleGetGlobal")
+                && source.contains("hipMemcpyHtoD")
+                && source.contains("hipMemcpyDtoH"),
+            "the trap record must cross the device boundary: {source}"
+        );
+        assert!(
+            !source.contains("a[idx_a] + -b[idx_b]"),
+            "direct subtraction must not reconstruct add+neg: {source}"
+        );
+    }
+
+    let source = codegen_hip(&dag_add_consts(), "ordinary_add")
+        .expect("ordinary add remains supported")
+        .c_source;
+    assert!(
+        !source.contains("numeric trap: overflow in sub at"),
+        "non-trapping arithmetic must not acquire the sub trap boundary: {source}"
+    );
+}
+
+#[test]
+fn direct_narrow_float_arithmetic_emits_f32_compute_and_raw_selection() {
+    for (precision, suffix, decode, encode) in [
+        (Prim::F16, "f16", "chelis_f16_to_f32", "chelis_f32_to_f16"),
+        (
+            Prim::Bf16,
+            "bf16",
+            "chelis_bf16_to_f32",
+            "chelis_f32_to_bf16",
+        ),
+    ] {
+        let ty = vec_of(4, precision);
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let g = dag.add_node(
+            decl,
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let sub = dag.add_node(decl, RiscOp::Sub, vec![a, b], ty.clone(), None);
+        let max = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let min = dag.add_node(decl, RiscOp::MinElem, vec![a, b], ty.clone(), None);
+        let adjoint = dag.add_node(
+            decl,
+            RiscOp::ExtremaAdjoint {
+                kind: ExtremaKind::Max,
+                operand: ExtremaOperand::Left,
+            },
+            vec![a, b, g],
+            ty,
+            None,
+        );
+        for root in [sub, max, min, adjoint] {
+            dag.add_root(root);
+        }
+
+        let source = codegen_hip(&dag, &format!("direct_narrow_{suffix}"))
+            .expect("f16/bf16 direct arithmetic must reach exact HIP kernels")
+            .c_source;
+        for kernel in [
+            format!("kernel_sub_{suffix}"),
+            format!("kernel_max_elem_{suffix}"),
+            format!("kernel_min_elem_{suffix}"),
+            format!("kernel_max_adjoint_left_{suffix}"),
+        ] {
+            assert!(source.contains(&kernel), "missing {kernel}: {source}");
+        }
+        assert!(source.contains("const chelis_u16 *a"), "{source}");
+        assert!(source.contains(decode), "{source}");
+        assert!(source.contains(encode), "{source}");
+        assert!(
+            source.contains("out[i] = select_left ? a[idx_a] : b[idx_b];"),
+            "extrema must copy a selected stored operand: {source}"
+        );
+        assert!(
+            source.contains("out[i] = select_left ? g[idx_g] : (chelis_u16)0;"),
+            "adjoints must copy stored cotangent bits or exact positive zero: {source}"
+        );
+
+        let mut fused_dag = Dag::new();
+        let fused_dag_decl = fused_dag.declare("test");
+        let x = fused_dag.add_node(
+            fused_dag_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let y = fused_dag.add_node(
+            fused_dag_decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let z = fused_dag.add_node(
+            fused_dag_decl,
+            RiscOp::Load { name: "z".into() },
+            vec![],
+            vec_of(4, precision),
+            None,
+        );
+        let difference = fused_dag.add_node(
+            fused_dag_decl,
+            RiscOp::Sub,
+            vec![x, y],
+            vec_of(4, precision),
+            None,
+        );
+        let result = fused_dag.add_node(
+            fused_dag_decl,
+            RiscOp::MinElem,
+            vec![difference, z],
+            vec_of(4, precision),
+            None,
+        );
+        fused_dag.add_root(result);
+        let fused_dag = fuse(&fused_dag);
+        assert!(
+            fused_dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
+            "the test must exercise the admitted fused path"
+        );
+        let fused_source = codegen_hip(&fused_dag, &format!("fused_narrow_{suffix}"))
+            .expect("fused f16/bf16 sub+min must reach exact HIP codegen")
+            .c_source;
+        assert!(fused_source.contains(decode), "{fused_source}");
+        assert!(fused_source.contains(encode), "{fused_source}");
+        assert!(
+            fused_source.contains("chelis_u16 v0") && fused_source.contains("chelis_u16 v1"),
+            "every fused step must finalize back to narrow storage: {fused_source}"
+        );
+    }
+}
+
+#[test]
 fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
-    let relu = dag.add_node(RiscOp::Relu, vec![x], vec_f32(4), None);
-    let adjoint = dag.add_node(RiscOp::ReluAdjoint, vec![x, g], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let g = dag.add_node(
+        decl,
+        RiscOp::Load { name: "g".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let relu = dag.add_node(decl, RiscOp::Relu, vec![x], vec_f32(4), None);
+    let adjoint = dag.add_node(decl, RiscOp::ReluAdjoint, vec![x, g], vec_f32(4), None);
     dag.add_root(relu);
     dag.add_root(adjoint);
 
@@ -424,20 +696,20 @@ fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
     );
     assert!(!source.contains("fmax"), "{source}");
     assert!(
-        source.contains("int64_t chelis_output_shape_0[1] = { 4 };")
-            && source.contains("int64_t chelis_output_shape_1[1] = { 4 };")
+        source.contains("chelis_device_metadata chelis_output_shape_0[1] = { 4 };")
+            && source.contains("chelis_device_metadata chelis_output_shape_1[1] = { 4 };")
             && source
                 .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
             && source
                 .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
-        "host output shapes must match chelis_alloc's int64_t ABI: {source}"
+        "host output shapes must use the generated i64 metadata alias: {source}"
     );
     assert!(
         !source.contains("(int64_t[])"),
         "host shape ownership must stay in the classified input/output preamble: {source}"
     );
     assert!(
-        source.contains("chelis_gpu_alloc(1, (int[]){ 4 }, CHELIS_DTYPE_F32)"),
+        source.contains("chelis_device_tensor_alloc(slot_plan0)"),
         "device shape arrays must retain the GPU runtime's int ABI: {source}"
     );
 
@@ -450,10 +722,23 @@ fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
             precision,
         };
         let mut narrow = Dag::new();
-        let x = narrow.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let g = narrow.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
-        let relu = narrow.add_node(RiscOp::Relu, vec![x], ty.clone(), None);
-        let adjoint = narrow.add_node(RiscOp::ReluAdjoint, vec![x, g], ty, None);
+        let narrow_decl = narrow.declare("test");
+        let x = narrow.add_node(
+            narrow_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let g = narrow.add_node(
+            narrow_decl,
+            RiscOp::Load { name: "g".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let relu = narrow.add_node(narrow_decl, RiscOp::Relu, vec![x], ty.clone(), None);
+        let adjoint = narrow.add_node(narrow_decl, RiscOp::ReluAdjoint, vec![x, g], ty, None);
         narrow.add_root(relu);
         narrow.add_root(adjoint);
         let source = codegen_hip(&narrow, &format!("relu_{suffix}"))
@@ -484,11 +769,30 @@ fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
             precision,
         };
         let mut dag = Dag::new();
-        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
-        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
-        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
-        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
-        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        let decl = dag.declare("test");
+        let a = dag.add_node(
+            decl,
+            RiscOp::Load { name: "a".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let b = dag.add_node(
+            decl,
+            RiscOp::Load { name: "b".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let c = dag.add_node(
+            decl,
+            RiscOp::Load { name: "c".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let maximum = dag.add_node(decl, RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(decl, RiscOp::MinElem, vec![maximum, c], ty, None);
         dag.add_root(minimum);
 
         let fused = fuse(&dag);
@@ -525,34 +829,73 @@ fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
 fn s3_floor_trunc_div_emit_typed_int_kernels() {
     // trunc_div (int): native `/`, integer-suffixed kernel name.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    let c = dag.add_node(RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let c = dag.add_node(decl, RiscOp::TruncDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
     let trunc_src = codegen_hip(&dag, "test_trunc_div").unwrap().c_source;
     assert!(
         trunc_src.contains("kernel_trunc_div_i32"),
-        "trunc_div(int32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
+        "trunc_div(i32) must emit a dtype-suffixed kernel; got:\n{trunc_src}"
     );
 
     // floor_div (int): sign-correction kernel (contains the remainder
     // modulo and the `-= 1` adjustment).
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
-    let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_i32(4),
+        None,
+    );
+    let c = dag.add_node(decl, RiscOp::FloorDiv, vec![a, b], vec_i32(4), None);
     dag.add_root(c);
     let floor_src = codegen_hip(&dag, "test_floor_div").unwrap().c_source;
     assert!(
         floor_src.contains("kernel_floor_div_i32") && floor_src.contains("q -= 1"),
-        "floor_div(int32) must emit a sign-corrected kernel; got:\n{floor_src}"
+        "floor_div(i32) must emit a sign-corrected kernel; got:\n{floor_src}"
     );
 
     // floor_div (float): `floorf(a / b)`.
     let mut dag = Dag::new();
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
-    let c = dag.add_node(RiscOp::FloorDiv, vec![a, b], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let a = dag.add_node(
+        decl,
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        decl,
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let c = dag.add_node(decl, RiscOp::FloorDiv, vec![a, b], vec_f32(4), None);
     dag.add_root(c);
     let floor_f_src = codegen_hip(&dag, "test_floor_div_f").unwrap().c_source;
     assert!(
@@ -572,13 +915,15 @@ fn s3_all_unary_ops_emit_kernels() {
     ];
     for (op, name) in &ops_and_names {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(op.clone(), vec![a], scalar_f32(), None);
+        let c = dag.add_node(decl, op.clone(), vec![a], scalar_f32(), None);
         dag.add_root(c);
         let result = codegen_hip(&dag, &format!("test_{name}")).unwrap();
         assert!(
@@ -595,13 +940,16 @@ fn s3_all_unary_ops_emit_kernels() {
 #[test]
 fn s4_sum_reduction_emits_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let s = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -621,13 +969,21 @@ fn s4_sum_reduction_emits_kernel() {
 #[test]
 fn s4_max_reduce_emits_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let m = dag.add_node(RiscOp::MaxReduce { axis: 0 }, vec![x], vec_f32(4), None);
+    let m = dag.add_node(
+        decl,
+        RiscOp::MaxReduce { axis: 0 },
+        vec![x],
+        vec_f32(4),
+        None,
+    );
     dag.add_root(m);
     let result = codegen_hip(&dag, "test_max_reduce").unwrap();
     assert!(
@@ -641,15 +997,18 @@ fn s4_max_reduce_emits_kernel() {
 // ===========================================================================
 
 #[test]
-fn s5_reshape_no_kernel_launch() {
+fn s5_reshape_materializes_logical_order() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let r = dag.add_node(
+        decl,
         RiscOp::Reshape {
             new_shape: vec![chelis_ir::dag::RtDim::Lit(6)],
         },
@@ -659,23 +1018,27 @@ fn s5_reshape_no_kernel_launch() {
     );
     dag.add_root(r);
     let result = codegen_hip(&dag, "test_reshape").unwrap();
-    // Reshape itself must not add a kernel launch
+    assert!(result.c_source.contains("kernel_reshape_CHELIS_DTYPE_F32"));
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
-        "Reshape must use alloc_view (metadata-only), not a kernel"
+        result
+            .c_source
+            .contains("chelis_device_tensor_alloc(slot_plan1)")
     );
 }
 
 #[test]
 fn s5_permute_no_kernel_launch() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![x],
         mat_f32(3, 2),
@@ -684,7 +1047,7 @@ fn s5_permute_no_kernel_launch() {
     dag.add_root(p);
     let result = codegen_hip(&dag, "test_permute").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "Permute must use alloc_view (metadata-only)"
     );
 }
@@ -692,13 +1055,16 @@ fn s5_permute_no_kernel_launch() {
 #[test]
 fn s5_expand_no_kernel_launch() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(3).precision, 1.0),
         vec![],
         vec_f32(3),
         None,
     );
     let e = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -710,7 +1076,7 @@ fn s5_expand_no_kernel_launch() {
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_expand").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "Expand must use alloc_view (metadata-only)"
     );
 }
@@ -718,7 +1084,9 @@ fn s5_expand_no_kernel_launch() {
 #[test]
 fn s5_input_axis_expand_reads_witness_metadata() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let value = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "value".into(),
         },
@@ -731,6 +1099,7 @@ fn s5_input_axis_expand_reads_witness_metadata() {
         precision: Prim::F32,
     };
     let witness = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "witness".into(),
         },
@@ -739,6 +1108,7 @@ fn s5_input_axis_expand_reads_witness_metadata() {
         None,
     );
     let expanded = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::InputAxis {
@@ -754,50 +1124,96 @@ fn s5_input_axis_expand_reads_witness_metadata() {
 
     let result = codegen_hip(&dag, "test_input_axis_expand").unwrap();
     assert!(
-        result.c_source.contains("inputs[1]->shape[0]"),
+        result.c_source.contains("input_view_1->shape[0]"),
         "InputAxis extent must be sourced from the witness metadata: {}",
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "InputAxis expand remains a metadata-only view"
     );
 }
 
 #[test]
 fn s5_realize_materializes_with_kernel_not_view() {
-    let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
-    let s = dag.add_node(
-        RiscOp::Stride {
-            strides: vec![chelis_ir::dag::RtDim::Lit(2)],
-        },
-        vec![x],
-        vec_f32(3),
-        None,
-    );
-    let r = dag.add_node(RiscOp::Realize, vec![s], vec_f32(3), None);
-    dag.add_root(r);
+    for (precision, dtype_macro, width) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 4),
+        (Prim::F16, "CHELIS_DTYPE_F16", 2),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 2),
+    ] {
+        let input_ty = TensorType {
+            dims: vec![DimInfo::Lit(6)],
+            precision,
+        };
+        let output_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            input_ty,
+            None,
+        );
+        let s = dag.add_node(
+            decl,
+            RiscOp::Stride {
+                strides: vec![chelis_ir::dag::RtDim::Lit(2)],
+            },
+            vec![x],
+            output_ty.clone(),
+            None,
+        );
+        let r = dag.add_node(decl, RiscOp::Realize, vec![s], output_ty, None);
+        dag.add_root(r);
 
-    let result = codegen_hip(&dag, "test_realize").unwrap();
-    assert!(
-        result.c_source.contains("kernel_cast"),
-        "Realize must materialize through a copy-style kernel launch"
-    );
-    assert!(
-        !result.c_source.contains(
-            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
-        ),
-        "Realize must not lower to a metadata-only view"
-    );
+        let result = codegen_hip(&dag, &format!("test_realize_{}", precision.name())).unwrap();
+        let kernel = format!("kernel_realize_{dtype_macro}");
+        assert!(
+            result.c_source.contains(&format!("void {kernel}(\\n"))
+                && result.c_source.contains("const unsigned char *a"),
+            "Realize must materialize through a raw-byte kernel: {}",
+            result.c_source
+        );
+        assert!(
+            result.c_source.contains(&format!(
+                "for (chelis_device_metadata byte = 0; byte < {width}; ++byte)"
+            )),
+            "Realize must preserve the dtype's stored byte width: {}",
+            result.c_source
+        );
+        assert!(
+            result
+                .c_source
+                .contains(&format!("chelis_launch_kernel(mod_{kernel}, \"{kernel}\"")),
+            "Realize must launch the copy kernel: {}",
+            result.c_source
+        );
+        assert!(
+            !result
+                .c_source
+                .contains("chelis_device_tensor_borrow(plan_t2, d_t1->data"),
+            "Realize must not lower to a metadata-only view"
+        );
+    }
 }
 
 #[test]
 fn s5_copy_materializes_and_drop_emits_no_kernel_or_wrapper() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
-    let copy = dag.add_node(RiscOp::Copy, vec![x], vec_f32(6), None);
-    dag.add_node(RiscOp::Drop, vec![x], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
+    let copy = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(6), None);
+    dag.add_node(decl, RiscOp::Drop, vec![x], vec_f32(6), None);
     dag.add_root(copy);
 
     let result = codegen_hip(&dag, "test_copy_drop").unwrap();
@@ -840,26 +1256,30 @@ fn s6_grid_block_in_launch() {
 #[test]
 fn s7_topo_order_preserved() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     let d = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 3.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let e = dag.add_node(RiscOp::Mul, vec![c, d], scalar_f32(), None);
+    let e = dag.add_node(decl, RiscOp::Mul, vec![c, d], scalar_f32(), None);
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_topo").unwrap();
     let src = &result.c_source;
@@ -891,9 +1311,22 @@ fn s8_output_labels_root() {
 #[test]
 fn s8_duplicate_load_single_slot() {
     let mut dag = Dag::new();
-    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let x2 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Add, vec![x1, x2], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x1 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let x2 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Add, vec![x1, x2], vec_f32(4), None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_dup_load").unwrap();
     assert_eq!(
@@ -904,38 +1337,30 @@ fn s8_duplicate_load_single_slot() {
 }
 
 // ===========================================================================
-// S9: cmplt over a bool result is rejected, not emitted at the operand width
+// S9: legacy cmplt uses the exact Bool8 comparison family
 // ===========================================================================
 
-/// chelis#1360. This test used to assert the opposite: that the `cmplt` kernel
-/// "must produce float `1.0f`/`0.0f`, not integer bool". That was correct
-/// while the HIP runtime stored a bool tensor as a four-byte binary32 payload,
-/// and `chelis_gpu_dtype_size(CHELIS_DTYPE_BOOL)` returned 4 to match.
-///
-/// chelis#1308 replaced that payload with the tagged carrier's one-byte
-/// `Repr::Bool8`. The kernel side did not follow, so the assertion above went
-/// on holding - `1.0f` and `0.0f` were still in the emitted source - while the
-/// emitted program wrote `N * 4` bytes into an `N * 1` byte `hipMalloc` and
-/// read back the low bytes of the float stream. Both halves of the assertion
-/// were true and the program was corrupt, which is why the test is now the
-/// rejection rather than the spelling.
 #[test]
-fn s9_cmplt_bool_result_is_rejected() {
+fn s9_cmplt_bool_result_uses_one_byte_output() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
     let c = dag.add_node(
-        RiscOp::CmpLt,
+        decl,
+        RiscOp::Compare(ComparisonKind::CmpLt),
         vec![a, b],
         TensorType {
             dims: vec![],
@@ -944,17 +1369,10 @@ fn s9_cmplt_bool_result_is_rejected() {
         None,
     );
     dag.add_root(c);
-    let error = match codegen_hip(&dag, "test_cmplt") {
-        Err(error) => error,
-        Ok(_) => panic!(
-            "a bool result is one byte and the cmplt template writes at the \
-             operand width; emitting it overruns the allocation (chelis#1360)"
-        ),
-    };
-    assert!(
-        format!("{error:?}").contains("bool"),
-        "the rejection must name the offending dtype; got: {error:?}"
-    );
+    let source = codegen_hip(&dag, "test_cmplt").unwrap().c_source;
+    assert!(source.contains("unsigned char *out"), "{source}");
+    assert!(source.contains("out[i] = (unsigned char)("), "{source}");
+    assert!(!source.contains("float *out"), "{source}");
 }
 
 // ===========================================================================
@@ -984,16 +1402,29 @@ fn s10_device_helpers_present() {
 }
 
 // ===========================================================================
-// S11: Kernel JIT uses static caching
+// S11: Kernel modules belong to the invocation's device context
 // ===========================================================================
 
 #[test]
-fn s11_static_module_caching() {
+fn s11_modules_are_created_and_released_in_the_invocation_context() {
     let dag = dag_add_consts();
     let result = codegen_hip(&dag, "test_cache").unwrap();
     assert!(
-        result.c_source.contains("static hipModule_t"),
-        "Kernel modules must be cached with 'static hipModule_t'"
+        !result.c_source.contains("static hipModule_t"),
+        "An unqualified static module cannot be reused across device contexts"
+    );
+    assert_eq!(
+        result.c_source.matches(" = chelis_compile_kernel(").count(),
+        result.c_source.matches("hipModuleUnload(").count(),
+        "Every invocation-owned module must be released"
+    );
+    let source = &result.c_source;
+    assert!(
+        source
+            .find("CHELIS_HIP_CHECK(hipDeviceSynchronize());")
+            .unwrap()
+            < source.find("hipModuleUnload(").unwrap(),
+        "empty escapes also need kernel completion before module/slot teardown"
     );
 }
 
@@ -1040,11 +1471,15 @@ fn s12_transfers_present() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer").unwrap();
     assert!(
-        result.c_source.contains("chelis_host_to_device"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_from_host"),
         "Input transfer (host→device) must be present"
     );
     assert!(
-        result.c_source.contains("chelis_device_to_host"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_to_host"),
         "Output transfer (device→host) must be present"
     );
 }
@@ -1054,25 +1489,45 @@ fn s12_transfer_order() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer_order").unwrap();
     let src = &result.c_source;
-    let h2d_pos = src.find("chelis_host_to_device").expect("h2d present");
-    let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
+    let h2d_pos = src
+        .find("chelis_device_tensor_copy_from_host")
+        .expect("h2d present");
+    let d2h_pos = src
+        .find("chelis_device_tensor_copy_to_host")
+        .expect("d2h present");
     assert!(
         h2d_pos < d2h_pos,
-        "host_to_device must come before device_to_host"
+        "Input transfer must precede output transfer"
     );
 }
 
 #[test]
 fn s12_duplicate_load_transfers_once() {
     let mut dag = Dag::new();
-    let x0 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let x1 = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let out = dag.add_node(RiscOp::Add, vec![x0, x1], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x0 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let x1 = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let out = dag.add_node(decl, RiscOp::Add, vec![x0, x1], vec_f32(4), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "test_dup_transfer_once").unwrap();
     assert_eq!(
-        result.c_source.matches("chelis_host_to_device").count(),
+        result
+            .c_source
+            .matches("chelis_device_tensor_copy_from_host")
+            .count(),
         1,
         "Repeated loads of the same input should share one host→device transfer"
     );
@@ -1095,11 +1550,13 @@ fn s12_peak_estimate_reported() {
 #[test]
 fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let symbolic = TensorType {
         dims: vec![DimInfo::Named("batch".into(), None)],
         precision: Prim::F32,
     };
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         symbolic.clone(),
@@ -1124,40 +1581,48 @@ fn s12_symbolic_peak_memory_reports_formula_without_fake_estimate() {
 #[test]
 fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let symbolic = TensorType {
         dims: vec![DimInfo::Named("batch".into(), None)],
         precision: Prim::F32,
     };
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         symbolic.clone(),
         None,
     );
     let y = dag.add_node(
+        decl,
         RiscOp::Load { name: "y".into() },
         vec![],
         symbolic.clone(),
         None,
     );
     let z = dag.add_node(
+        decl,
         RiscOp::Load { name: "z".into() },
         vec![],
         symbolic.clone(),
         None,
     );
-    let xy = dag.add_node(RiscOp::Add, vec![x, y], symbolic.clone(), None);
-    let xyz = dag.add_node(RiscOp::Add, vec![xy, z], symbolic, None);
+    let xy = dag.add_node(decl, RiscOp::Add, vec![x, y], symbolic.clone(), None);
+    let xyz = dag.add_node(decl, RiscOp::Add, vec![xy, z], symbolic, None);
     dag.add_root(xyz);
 
     let result = codegen_hip(&dag, "test_symbolic_repeats").unwrap();
-    assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
     assert!(
-        result.c_source.contains("inputs[1]->shape[0] != batch"),
+        result
+            .c_source
+            .contains("chelis_device_metadata batch = input_view_0->shape[0];")
+    );
+    assert!(
+        result.c_source.contains("input_view_1->shape[0] != batch"),
         "second occurrence must be checked against the canonical binding"
     );
     assert!(
-        result.c_source.contains("inputs[2]->shape[0] != batch"),
+        result.c_source.contains("input_view_2->shape[0] != batch"),
         "third occurrence must also be checked against the canonical binding"
     );
 }
@@ -1165,44 +1630,49 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
 #[test]
 fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(8).precision, 1.0),
         vec![],
         vec_f32(8),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(8).precision, 2.0),
         vec![],
         vec_f32(8),
         None,
     );
-    let _wide = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(8), None);
+    let _wide = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(8), None);
     let small = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 3.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let out = dag.add_node(RiscOp::Neg, vec![small], vec_f32(4), None);
+    let out = dag.add_node(decl, RiscOp::Neg, vec![small], vec_f32(4), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "test_logical_size").unwrap();
     let src = &result.c_source;
 
     assert!(
-        src.contains("int fill_size = d_t"),
+        src.contains("chelis_device_metadata fill_size = d_t"),
         "Slot-backed fill kernels must iterate over logical size"
     );
     assert!(
         !src.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with("int fill_size =") && trimmed.contains("->storage_size;")
+            trimmed.starts_with("chelis_device_metadata fill_size =")
+                && trimmed.contains("->byte_capacity")
         }),
         "Fill kernels must not iterate over slot capacity"
     );
     assert!(
-        src.contains("_size = d_t") && src.contains("->size;"),
+        src.contains("_size = d_t") && src.contains("->count;"),
         "Elementwise outputs must use logical size even when backed by a reused slot"
     );
 }
@@ -1214,36 +1684,47 @@ fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
 #[test]
 fn s13_cleanup_frees_intermediates() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 1.0),
         vec![],
         scalar_f32(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(scalar_f32().precision, 2.0),
         vec![],
         scalar_f32(),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
     dag.add_root(c);
     let result = codegen_hip(&dag, "test_cleanup").unwrap();
     // a (t0) and b (t1) are intermediates, so both their wrappers and slot owners are freed.
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t0)"),
         "Intermediate wrapper t0 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t1)"),
         "Intermediate wrapper t1 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)"),
         "Intermediate slot 0 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot1)"),
         "Intermediate slot 1 must be freed"
     );
 }
@@ -1254,13 +1735,21 @@ fn s13_outputs_not_freed() {
     let result = codegen_hip(&dag, "test_no_free_output").unwrap();
     // The output wrapper is freed after the host copy, and the backing slot is freed once at the end.
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t2)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t2)"),
         "Output wrapper must be freed after the output transfer"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)")
-            || result.c_source.contains("chelis_gpu_free(chelis_slot1)")
-            || result.c_source.contains("chelis_gpu_free(chelis_slot2)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)")
+            || result
+                .c_source
+                .contains("chelis_device_tensor_release(chelis_slot1)")
+            || result
+                .c_source
+                .contains("chelis_device_tensor_release(chelis_slot2)"),
         "At least one backing slot must be freed during cleanup"
     );
 }
@@ -1270,11 +1759,15 @@ fn s13_input_copies_are_freed() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_free_input_copy").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t0)"),
         "The per-node load wrapper must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)"),
         "The unique input device slot must be freed"
     );
 }
@@ -1282,34 +1775,42 @@ fn s13_input_copies_are_freed() {
 #[test]
 fn s13_views_use_view_free() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![x],
         mat_f32(3, 2),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 2).precision, 2.0),
         vec![],
         mat_f32(3, 2),
         None,
     );
-    let out = dag.add_node(RiscOp::Add, vec![p, c], mat_f32(3, 2), None);
+    let out = dag.add_node(decl, RiscOp::Add, vec![p, c], mat_f32(3, 2), None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_view_free").unwrap();
     // Permute (t1) is a view — must use chelis_gpu_free_view, NOT chelis_gpu_free
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t1)"),
         "View (permute) must use chelis_gpu_free_view, not chelis_gpu_free"
     );
     assert!(
-        !result.c_source.contains("chelis_gpu_free(d_t1)"),
+        !result
+            .c_source
+            .contains("chelis_device_tensor_release(d_t1)"),
         "View (permute) must NOT use chelis_gpu_free (would double-free device memory)"
     );
 }
@@ -1331,7 +1832,9 @@ fn s14_generated_hip_source_compiles_when_hipcc_available() {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    support::stage_device_runtime(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     let main_cpp = r#"
 #include "chelis_runtime.h"
@@ -1350,8 +1853,8 @@ int main(void) {
         .arg("-O2")
         .arg(tmp.path().join("main.cpp"))
         .arg(tmp.path().join("model.cpp"))
-        .arg(format!("-L{}", tmp.path().display()))
-        .arg("-lchelis_runtime")
+        .arg(tmp.path().join("chelis_device_owner.cpp"))
+        .arg(&staged.archive)
         .arg("-lpthread")
         .arg("-ldl")
         .arg("-lhiprtc")
@@ -1374,13 +1877,16 @@ int main(void) {
 #[test]
 fn s15_segmented_reduction_strategy_names_track_axis_size() {
     let mut tiny = Dag::new();
+    let tiny_decl = tiny.declare("test");
     let x_tiny = tiny.add_node(
+        tiny_decl,
         RiscOp::synth_const(mat_f32(3, 8).precision, 1.0),
         vec![],
         mat_f32(3, 8),
         None,
     );
     let sum_tiny = tiny.add_node(
+        tiny_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1397,13 +1903,16 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     );
 
     let mut small = Dag::new();
+    let small_decl = small.declare("test");
     let x_small = small.add_node(
+        small_decl,
         RiscOp::synth_const(mat_f32(3, 16).precision, 1.0),
         vec![],
         mat_f32(3, 16),
         None,
     );
     let sum_small = small.add_node(
+        small_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1420,13 +1929,16 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
     );
 
     let mut large = Dag::new();
+    let large_decl = large.declare("test");
     let x_large = large.add_node(
+        large_decl,
         RiscOp::synth_const(mat_f32(3, 128).precision, 1.0),
         vec![],
         mat_f32(3, 128),
         None,
     );
     let sum_large = large.add_node(
+        large_decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1452,13 +1964,16 @@ fn s15_segmented_reduction_strategy_names_track_axis_size() {
 #[test]
 fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(1024).precision, 1.0),
         vec![],
         vec_f32(1024),
         None,
     );
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 0,
             accumulator: chelis_types::types::Prim::F32,
@@ -1484,19 +1999,23 @@ fn s15_scalar_reduction_uses_staged_kernels_and_estimate() {
 #[test]
 fn s15_matmul_emits_hipblas_and_link_flag() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
         vec![],
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -1506,6 +2025,7 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -1514,8 +2034,9 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1540,7 +2061,9 @@ fn s15_matmul_emits_hipblas_and_link_flag() {
 #[test]
 fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let table = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "table".into(),
         },
@@ -1549,6 +2072,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -1557,6 +2081,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Gather { axis: 0 },
         vec![table, indices],
         mat_f32(3, 4),
@@ -1571,8 +2096,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     assert!(
         result
             .c_source
-            .contains("chelis_gpu_dtype_size(dst->dtype)")
-            || hip_runtime_header().contains("chelis_gpu_dtype_size")
+            .contains("chelis_device_tensor_copy_from_host(")
     );
     assert!(
         !result
@@ -1584,7 +2108,9 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
 #[test]
 fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let target = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "target".into(),
         },
@@ -1593,6 +2119,7 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
         None,
     );
     let indices = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "indices".into(),
         },
@@ -1601,6 +2128,7 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
         None,
     );
     let updates = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "updates".into(),
         },
@@ -1609,6 +2137,7 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
         mat_f32(3, 2),
@@ -1622,29 +2151,42 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     assert!(
         result
             .c_source
-            .contains("atomicAdd(&out[dst], updates[i]);")
+            .contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);")
     );
-    assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(result.c_source.contains("kernel_materialize_"));
+    assert!(!result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(
+        result
+            .c_source
+            .contains("chelis_metadata_plan_strides(sparse_geometry")
+    );
+    assert!(
+        !result.c_source.contains("_after = ("),
+        "sparse suffixes must project checked geometry"
+    );
 }
 
 #[test]
 fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = tensor4_f32(2, 3, 4, 5);
     let b_ty = tensor4_f32(2, 3, 5, 6);
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(a_ty.precision, 1.0),
         vec![],
         a_ty.clone(),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(b_ty.precision, 1.0),
         vec![],
         b_ty.clone(),
         None,
     );
-    let out = chelis_ir::tier2::lower_matmul(&mut dag, a, b, &a_ty, &b_ty, None);
+    let out = chelis_ir::tier2::lower_matmul(decl.into(), &mut dag, a, b, &a_ty, &b_ty, None);
     dag.add_root(out);
     let result = codegen_hip(&dag, "test_hipblas_batched_matmul").unwrap();
 
@@ -1655,8 +2197,8 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
         "eligible rank-4 batched matmul should lower to the hipBLAS strided-batched helper"
     );
     assert!(
-        result.c_source.contains(", 20LL, 30LL, 24LL);"),
-        "strided-batched helper call should pass concrete row-major per-batch strides"
+        result.c_source.contains("->strides[1]"),
+        "strided-batched helper must project canonical per-matrix strides"
     );
     assert!(
         !result
@@ -1677,6 +2219,7 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
 #[test]
 fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![
             DimInfo::Named("batch".into(), None),
@@ -1701,9 +2244,10 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
         ],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
             m: chelis_ir::dag::DimExpr::Concrete(4),
@@ -1725,14 +2269,15 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
         "symbolic batch with concrete matrix dimensions should use strided-batched hipBLAS"
     );
     assert!(
-        result.c_source.contains(", batch, 20LL, 30LL, 24LL);"),
-        "runtime symbolic batch count should be passed with concrete matrix strides"
+        result.c_source.contains("_batch_count = d_t") && result.c_source.contains("->strides[0]"),
+        "runtime batch count and matrix strides must project admitted metadata"
     );
 }
 
 #[test]
 fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a_ty = TensorType {
         dims: vec![
             DimInfo::Named("batch".into(), None),
@@ -1757,9 +2302,10 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
         ],
         precision: Prim::F32,
     };
-    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
-    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
+    let a = dag.add_node(decl, RiscOp::Load { name: "a".into() }, vec![], a_ty, None);
+    let b = dag.add_node(decl, RiscOp::Load { name: "b".into() }, vec![], b_ty, None);
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![chelis_ir::dag::DimExpr::Sym("batch".into())],
             m: chelis_ir::dag::DimExpr::Sym("m".into()),
@@ -1793,15 +2339,18 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
 }
 
 #[test]
-fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
+fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let base_a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(4, 5).precision, 1.0),
         vec![],
         mat_f32(4, 5),
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(3),
@@ -1811,12 +2360,14 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(tensor3_f32(3, 5, 6).precision, 1.0),
         vec![],
         tensor3_f32(3, 5, 6),
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::BlasMatmul {
             batch_dims: vec![chelis_ir::dag::DimExpr::Concrete(3)],
             m: chelis_ir::dag::DimExpr::Concrete(4),
@@ -1832,41 +2383,44 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
     let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback").unwrap();
 
     assert!(
-        result
-            .c_source
-            .contains("chelis_hipblas_sgemm_batched_row_major"),
-        "non-contiguous leading batch layout should preserve the helper-loop fallback"
+        result.c_source.contains("kernel_realize_"),
+        "non-contiguous leading batch layout must be materialized into planned storage"
     );
     assert!(
-        !result
+        result
             .c_source
             .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
-        "non-contiguous leading batch layout must not call strided-batched hipBLAS"
+        "the materialized canonical batch layout may call strided-batched hipBLAS"
     );
 }
 
 #[test]
 fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let base_a = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 2).precision, 1.0),
         vec![],
         mat_f32(3, 2),
         None,
     );
     let a = dag.add_node(
+        decl,
         RiscOp::Permute { axes: vec![1, 0] },
         vec![base_a],
         mat_f32(2, 3),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
     let ea = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 2,
             size: chelis_ir::dag::RtDim::Lit(4),
@@ -1876,6 +2430,7 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         None,
     );
     let eb = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: chelis_ir::dag::RtDim::Lit(2),
@@ -1884,8 +2439,9 @@ fn s15_noncontiguous_matmul_falls_back_to_generic_reduction() {
         tensor3_f32(2, 3, 4),
         None,
     );
-    let mul = dag.add_node(RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
+    let mul = dag.add_node(decl, RiscOp::Mul, vec![ea, eb], tensor3_f32(2, 3, 4), None);
     let sum = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -1915,13 +2471,13 @@ fn s15_device_entrypoint_is_emitted_for_direct_gpu_execution() {
     assert!(
         result
             .c_source
-            .contains("extern \"C\" void test_device_entry_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out)"),
+            .contains("extern \"C\" void test_device_entry_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out)"),
         "HIP codegen must emit the device-native ABI entrypoint for Python direct execution"
     );
     assert!(
         result
             .c_source
-            .contains("outputs[0] = chelis_gpu_clone(d_t"),
+            .contains("outputs[0] = chelis_device_tensor_clone(o_t"),
         "device-native outputs must be surfaced as owned GPU tensors"
     );
 }
@@ -1936,20 +2492,23 @@ fn sf1_fused_elem_single_kernel_launch() {
     // The fused chain should produce exactly 1 kernel launch for the fused ops
     // (plus 2 fill launches for the constants).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -1974,20 +2533,23 @@ fn sf1_fused_elem_single_kernel_launch() {
 fn sf2_fused_kernel_chained_computation() {
     // The generated fused kernel source should contain chained register operations.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -2015,20 +2577,23 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
     // Between the fused kernel alloc and its launch, there should be no extra
     // chelis_gpu_alloc calls (the intermediate is computed in registers).
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 1.0),
         vec![],
         vec_f32(4),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(vec_f32(4).precision, 2.0),
         vec![],
         vec_f32(4),
         None,
     );
-    let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-    let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
+    let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+    let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
     dag.add_root(d);
 
     let fused = fuse(&dag);
@@ -2037,7 +2602,7 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
 
     // Without fusion: 2 const allocs + add alloc + neg alloc = 4 allocs.
     // With fusion: 2 const allocs + 1 fused output alloc = 3 allocs.
-    let alloc_count = host_src.matches("chelis_gpu_alloc(").count();
+    let alloc_count = host_src.matches("chelis_device_tensor_alloc(").count();
     assert_eq!(
         alloc_count, 3,
         "Fused chain should have 3 GPU allocs (2 const + 1 fused output), got {alloc_count}"
@@ -2053,21 +2618,25 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
     // add(x, const) → neg → sum should fuse: add→neg becomes FusedElem,
     // then the FusedElem feeds sum as sole consumer → inlined into reduction.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let summed = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2112,21 +2681,25 @@ fn sfr1_fused_elem_into_reduction_no_intermediate_alloc() {
 #[test]
 fn sfr2_fused_elem_into_max_reduce() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     let maxed = dag.add_node(
+        decl,
         RiscOp::MaxReduce { axis: 1 },
         vec![negated],
         vec_f32(3),
@@ -2158,22 +2731,26 @@ fn sfr2_fused_elem_into_max_reduce() {
 fn sfr3_multi_consumer_fused_elem_not_inlined() {
     // If the FusedElem has multiple consumers, it must be materialized.
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         mat_f32(3, 4),
         None,
     );
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(mat_f32(3, 4).precision, 1.0),
         vec![],
         mat_f32(3, 4),
         None,
     );
-    let added = dag.add_node(RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![added], mat_f32(3, 4), None);
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, c], mat_f32(3, 4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![added], mat_f32(3, 4), None);
     // Two consumers of the fused chain output:
     let summed = dag.add_node(
+        decl,
         RiscOp::Sum {
             axis: 1,
             accumulator: chelis_types::types::Prim::F32,
@@ -2204,11 +2781,24 @@ fn sfr3_multi_consumer_fused_elem_not_inlined() {
 #[test]
 fn sfr4_realize_blocks_fused_kernel_emission() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-    let added = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
-    let realized = dag.add_node(RiscOp::Realize, vec![added], vec_f32(4), None);
-    let negated = dag.add_node(RiscOp::Neg, vec![realized], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let y = dag.add_node(
+        decl,
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let added = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
+    let realized = dag.add_node(decl, RiscOp::Realize, vec![added], vec_f32(4), None);
+    let negated = dag.add_node(decl, RiscOp::Neg, vec![realized], vec_f32(4), None);
     dag.add_root(negated);
 
     let fused = fuse(&dag);
@@ -2235,8 +2825,16 @@ fn sfr4_realize_blocks_fused_kernel_emission() {
 #[test]
 fn s8a_pad_emits_kernel_and_launch_not_view() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(4),
+        None,
+    );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F32,
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
@@ -2268,8 +2866,16 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
 #[test]
 fn s8a_shrink_emits_kernel_and_launch_not_view() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_f32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
@@ -2294,7 +2900,9 @@ fn s8a_shrink_emits_kernel_and_launch_not_view() {
 #[test]
 fn s8a_pad_f64_uses_dtype_suffix() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -2304,6 +2912,7 @@ fn s8a_pad_f64_uses_dtype_suffix() {
         None,
     );
     let p = dag.add_node(
+        decl,
         RiscOp::zero_pad(
             Prim::F64,
             vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(1))],
@@ -2332,8 +2941,16 @@ fn s8a_pad_f64_uses_dtype_suffix() {
 #[test]
 fn s8a_shrink_i32_uses_dtype_suffix() {
     let mut dag = Dag::new();
-    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i32(6), None);
+    let decl = dag.declare("test");
+    let x = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vec_i32(6),
+        None,
+    );
     let s = dag.add_node(
+        decl,
         RiscOp::Shrink {
             bounds: vec![(chelis_ir::dag::RtDim::Lit(1), chelis_ir::dag::RtDim::Lit(5))],
         },
@@ -2369,7 +2986,7 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
 /// `spec/05-risc-primitives.md` section 2.4.1 sends a symbolic operand extent
 /// other than 1 to "that claim's runtime extent guard", and
 /// `spec/04-type-system.md` section 4.7 places it at entry and renders it
-/// `numeric trap: domain in load at int64` when the operand is an input
+/// `numeric trap: domain in load at i64` when the operand is an input
 /// tensor's axis.
 ///
 /// The `<op>` is `load`, not `expand`, by section 4.7's operand-class rule.
@@ -2381,7 +2998,9 @@ fn s8a_shrink_i32_uses_dtype_suffix() {
 #[test]
 fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         TensorType {
@@ -2391,6 +3010,7 @@ fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
         None,
     );
     let out = dag.add_node(
+        decl,
         RiscOp::Expand {
             axis: 0,
             size: RtDim::Lit(3),
@@ -2411,7 +3031,7 @@ fn s2b_unit_extent_claim_is_guarded_in_the_hip_host_prologue() {
         "the prologue compares the operand's axis against the claimed 1:\n{host}"
     );
     assert!(
-        host.contains("numeric trap: domain in load at int64"),
+        host.contains("numeric trap: domain in load at i64"),
         "and renders [04-NUM-9] rather than this lane's legacy abort:\n{host}"
     );
     assert!(

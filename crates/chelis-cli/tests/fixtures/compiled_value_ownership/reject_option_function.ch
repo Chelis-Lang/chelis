@@ -1,3 +1,3 @@
-def identity(item: int8) -> int8 = item
-value: Option[int8 -> int8] = Some(identity)
+def identity(item: i8) -> i8 = item
+value: Option[i8 -> i8] = Some(identity)
 out = "unreachable"

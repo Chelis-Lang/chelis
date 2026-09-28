@@ -41,7 +41,7 @@ use chelis_types::{BUILTIN_NAMES, check_ir_program};
 fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = parse_str(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -272,7 +272,7 @@ fn inline_annotated_def_reports_exactly_one_error() {
 fn builtin_named_param_called_in_body_is_accepted() {
     let called = surf_to_deep(
         "module ParamCall\n\
-         def apply(round_to: (f64 -> int64 -> f64), x: f64) -> f64 = round_to(x, cast(0, int64))\n",
+         def apply(round_to: (f64 -> i64 -> f64), x: f64) -> f64 = round_to(x, cast(0, i64))\n",
     );
     let called_result = check_ir_program(&called);
     assert!(
@@ -312,14 +312,14 @@ fn builtin_named_non_callable_local_still_rejects_as_a_type_error() {
         "module NonCallable\n\
          def f(x: f64) -> f64 = {\n\
            round_to = x\n\
-           round_to(x, cast(0, int64))\n\
+           round_to(x, cast(0, i64))\n\
          }\n",
     );
     let err = check_ir_program(&deep).expect_err("a scalar local is not callable");
     assert!(
         err.errors.iter().any(|error| {
             matches!(error.kind, CheckErrorKind::TypeMismatch)
-                && error.message.contains("f64 vs (f64, int64)")
+                && error.message.contains("f64 vs (f64, i64)")
         }) && err
             .errors
             .iter()

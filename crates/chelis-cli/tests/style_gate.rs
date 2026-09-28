@@ -131,8 +131,8 @@ fn check_bypass_reports_offsets_in_the_authored_noncanonical_source() {
     let path = dir.path().join("authored_offsets.ch");
     let source = concat!(
         "def broken(\n",
-        "  x: int32,\n",
-        ") -> int32 =\n",
+        "  x: i32,\n",
+        ") -> i32 =\n",
         "  missing(x,)\n",
     );
     fs::write(&path, source).unwrap();

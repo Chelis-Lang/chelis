@@ -1,64 +1,43 @@
 //! Structural adapter from canonical Deep metadata to the closed effect-kind
 //! vocabulary.
 
-use chelis_vocab::{EffectKind, EffectKindDecodeError, EffectKindInput};
+use chelis_vocab::{EffectKind, EffectKindDecodeError};
 
-use crate::{Atom, Expr, List};
+use crate::Metadata;
 
-/// Decode the `effect:` metadata of a canonical `handle-effect` list.
+/// Decode the `effect:` metadata of a canonical `handle-effect` node.
 ///
-/// Shape errors are deliberately distinct from unknown symbols.  Every
-/// semantic consumer calls this adapter before dispatch, so no stage can
-/// invent a missing or malformed effect kind.
-pub fn decode_effect_kind(list: &List) -> Result<EffectKind, EffectKindDecodeError<'_>> {
-    let Some(Expr::Map(metadata, _)) = list.elements.get(1) else {
-        return EffectKind::decode(EffectKindInput::Missing);
-    };
-
-    let mut effect_values = metadata
-        .entries
-        .iter()
-        .filter_map(|(key, value)| (key == "effect").then_some(value));
-    let Some(value) = effect_values.next() else {
-        return EffectKind::decode(EffectKindInput::Missing);
-    };
-    if effect_values.next().is_some() {
-        return EffectKind::decode(EffectKindInput::Malformed);
-    }
-    match value {
-        Expr::Atom(Atom::Name(symbol), _) => EffectKind::decode(EffectKindInput::Symbol(symbol)),
-        _ => EffectKind::decode(EffectKindInput::Malformed),
-    }
+/// Payload construction rules out malformed and unknown kinds. Absence is
+/// still an explicit error; consumers cannot invent a default effect.
+pub fn decode_effect_kind(metadata: &Metadata) -> Result<EffectKind, EffectKindDecodeError<'_>> {
+    metadata
+        .effect()
+        .map(|v| *v.value())
+        .ok_or(EffectKindDecodeError::Missing)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Expr;
     use crate::parser::parse_str;
 
-    fn list(source: &str) -> List {
+    fn metadata(source: &str) -> Metadata {
         let expr = parse_str(source)
             .expect("parse Deep")
             .into_iter()
             .next()
             .expect("one expression");
         match expr {
-            Expr::Node(node, span) => node.to_list(span),
-            Expr::List(list, _) => list,
-            other => panic!("expected Node or List, got {:?}", other),
+            Expr::Node(node, _) => node.meta().clone(),
+            other => panic!("expected Node, got {:?}", other),
         }
     }
 
     #[test]
     fn decodes_each_known_kind() {
         assert_eq!(
-            decode_effect_kind(&list(
-                "(handle-effect {effect: random} (lit {} 1) (lit {} 2))"
-            )),
-            Ok(EffectKind::Random)
-        );
-        assert_eq!(
-            decode_effect_kind(&list(
+            decode_effect_kind(&metadata(
                 "(handle-effect {effect: resource} (lit {} 1) (lit {} 2))"
             )),
             Ok(EffectKind::Resource)
@@ -68,24 +47,24 @@ mod tests {
     #[test]
     fn missing_malformed_duplicate_and_unknown_metadata_are_loud() {
         assert_eq!(
-            decode_effect_kind(&list("(handle-effect {} (lit {} 1) (lit {} 2))")),
+            decode_effect_kind(&metadata("(handle-effect {} (lit {} 1) (lit {} 2))")),
             Err(EffectKindDecodeError::Missing)
         );
-        assert_eq!(
-            decode_effect_kind(&list("(handle-effect {effect: 1} (lit {} 1) (lit {} 2))")),
-            Err(EffectKindDecodeError::Malformed)
-        );
-        assert_eq!(
-            decode_effect_kind(&list(
-                "(handle-effect {effect: random, effect: resource} (lit {} 1) (lit {} 2))"
-            )),
-            Err(EffectKindDecodeError::Malformed)
-        );
-        assert_eq!(
-            decode_effect_kind(&list(
-                "(handle-effect {effect: teleport} (lit {} 1) (lit {} 2))"
-            )),
-            Err(EffectKindDecodeError::Unknown { symbol: "teleport" })
-        );
+        for metadata in [
+            "effect: 1",
+            "effect: resource, effect: resource",
+            "effect: teleport",
+            // The `random` handler kind was retired with the counter stream
+            // (#2413); Deep naming it is a typed retired-spelling rejection.
+            "effect: random",
+        ] {
+            let source = format!("(handle-effect {{{metadata}}} (lit {{}} 1) (lit {{}} 2))");
+            assert!(
+                parse_str(&source)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("effect")
+            );
+        }
     }
 }

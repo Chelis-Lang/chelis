@@ -3,7 +3,8 @@
 //! Walks top-down, consulting `child_stamp_role` at each child to decide
 //! whether a list decodes as a Node, BareList, or UnknownForm.
 
-use crate::ast::{Atom, Expr, MetaMap};
+use crate::Metadata;
+use crate::ast::{Atom, Expr};
 use crate::node::Node;
 use crate::raw::{RawAtom, RawExpr};
 use crate::role::{
@@ -39,6 +40,7 @@ pub enum FormClass {
     ListWithoutTagSymbol,
     MetadataMap,
     MetadataAnnotatedForm,
+    ExtensionData,
 }
 
 impl FormClass {
@@ -53,6 +55,7 @@ impl FormClass {
             Self::EmptyList => "an empty list",
             Self::ListWithoutTagSymbol => "a list without a tag symbol",
             Self::MetadataMap => "a metadata map",
+            Self::ExtensionData => "opaque extension data",
             Self::MetadataAnnotatedForm => "a metadata-annotated form",
         }
     }
@@ -68,6 +71,7 @@ impl FormClass {
             RawExpr::List(elements, _) if elements.is_empty() => Self::EmptyList,
             RawExpr::List(..) => Self::ListWithoutTagSymbol,
             RawExpr::Map(..) => Self::MetadataMap,
+            RawExpr::ExtensionData(_) => Self::ExtensionData,
             RawExpr::MetaExpr { .. } => Self::MetadataAnnotatedForm,
         }
     }
@@ -177,11 +181,25 @@ impl std::fmt::Display for StampError {
 
 impl std::error::Error for StampError {}
 
+fn extension_at_program_slot(data: crate::ExtensionData) -> StampError {
+    StampError {
+        span: data.span(),
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(
+            crate::annotations::invalid(
+                "extension",
+                data.span(),
+                "program syntax, not opaque extension data",
+            ),
+        )),
+    }
+}
+
 /// Convert raw parser output to typed AST using role-directed stamping.
 ///
 /// Top-level expressions are treated as Module children (bypass expecting
 /// declarations).
 pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_as_bypass_declaration(raw)?);
@@ -195,6 +213,7 @@ pub fn stamp_to_typed(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> 
 /// This is the entry point for `parse_str` which handles arbitrary Deep
 /// fragments, not just programs.
 pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_bare(raw)?);
@@ -211,6 +230,7 @@ pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampEr
 /// ingress rejection it is inside a `(def ...)`, not an `Atom::Name` the
 /// consumer has to re-diagnose.
 pub fn stamp_runtime_exprs(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_runtime_expr(raw)?);
@@ -228,6 +248,7 @@ pub fn stamp_as_tagged(
     raw_exprs: Vec<RawExpr>,
     expected: DeepTag,
 ) -> Result<Vec<Expr>, StampError> {
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         out.push(stamp_as_bypass_tag(raw, expected)?);
@@ -260,6 +281,20 @@ pub fn stamp_deep_file(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError>
             span: Span::new(0, 0),
         });
     }
+    // Root-role rejection owns its diagnostic before inspecting annotations.
+    for raw in &raw_exprs {
+        if !top_level_tag(raw)
+            .is_some_and(|tag| tag == DeepTag::Module || crate::role::is_declaration_tag(tag))
+        {
+            return Err(StampError {
+                kind: StampErrorKind::RequiresDeclaration {
+                    form: FormIdentity::of(raw),
+                },
+                span: raw.span(),
+            });
+        }
+    }
+    validate_metadata_raw(&raw_exprs)?;
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         if top_level_tag(&raw) == Some(DeepTag::Module) {
@@ -313,12 +348,13 @@ fn stamp_in_role(
 /// A bare identifier here is the `spec/03-deep-syntax.md` [03-ROLE-2]
 /// ingress rejection: a name is not an expression, and the diagnostic
 /// names the `(var {} ...)` spelling that is one.
-fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
+pub(crate) fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(RawAtom::Symbol(name), span) => Err(StampError {
             kind: StampErrorKind::NameAtExprSlot { name },
             span,
         }),
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -348,6 +384,7 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 /// the broader `Type` role and admit rank spreads ([04-ADT-4]).
 pub(crate) fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -438,8 +475,9 @@ fn stamp_type_in_role(raw: RawExpr, expected: TypeSyntaxRole) -> Result<Expr, St
 
 // ── Syntax/Binder/Selector → Node (if vocabulary head) or BareList ───
 
-fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
+pub(crate) fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => stamp_bare_list(elements, span),
         RawExpr::Map(entries, span) => stamp_map(entries, span),
@@ -484,6 +522,7 @@ fn stamp_bare_list(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampErro
 
 fn stamp_effect_handler(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -587,6 +626,7 @@ fn stamp_form_expecting(raw: RawExpr) -> Result<Expr, StampError> {
             kind: StampErrorKind::NameAtExprSlot { name },
             span,
         }),
+        RawExpr::ExtensionData(data) => Err(extension_at_program_slot(data)),
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {
             if elements.is_empty() {
@@ -709,12 +749,11 @@ fn convert_atom(raw: RawAtom) -> Atom {
     }
 }
 
-fn convert_meta_map(entries: Vec<(String, RawExpr)>) -> Result<MetaMap, StampError> {
-    let mut out = Vec::with_capacity(entries.len());
-    for (key, value) in entries {
-        out.push((key, stamp_bare(value)?));
-    }
-    Ok(MetaMap { entries: out })
+fn convert_meta_map(entries: Vec<(String, RawExpr)>) -> Result<Metadata, StampError> {
+    crate::annotations_codec::decode_entries(entries).map_err(|error| StampError {
+        span: error.span,
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(error)),
+    })
 }
 
 fn stamp_map(entries: Vec<(String, RawExpr)>, span: Span) -> Result<Expr, StampError> {
@@ -730,7 +769,7 @@ fn stamp_meta_expr(
     let converted_expr = stamp_bare(expr)?;
     Ok(Expr::MetaExpr(
         crate::ast::MetaExpr {
-            entries: converted_entries.entries,
+            metadata: converted_entries,
             expr: Box::new(converted_expr),
         },
         span,
@@ -790,6 +829,13 @@ fn build_unknown_form(
         children,
         span,
     })))
+}
+
+fn validate_metadata_raw(raw: &[RawExpr]) -> Result<(), StampError> {
+    crate::metadata::validate_raw(raw).map_err(|error| StampError {
+        span: error.span,
+        kind: StampErrorKind::NodeError(crate::node::NodeError::Metadata(error)),
+    })
 }
 
 #[cfg(test)]
@@ -886,6 +932,22 @@ mod tests {
         )];
         let result = stamp_to_typed(input);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn defsig_binder_list_is_structural_and_type_stays_in_the_last_slot() {
+        let binders = RawExpr::List(vec![raw_sym("a")], sp());
+        let tvar = RawExpr::List(vec![raw_sym("t-var"), empty_map(), raw_sym("a")], sp());
+        let input = vec![RawExpr::List(
+            vec![raw_sym("defsig"), empty_map(), raw_sym("f"), binders, tvar],
+            sp(),
+        )];
+        let result = stamp_to_typed(input).expect("explicit defsig binder list stamps");
+        let Expr::Node(node, _) = &result[0] else {
+            panic!("defsig stamps as a node");
+        };
+        assert!(matches!(node.children_slice()[1], Expr::BareList(..)));
+        assert!(matches!(node.children_slice()[2], Expr::Node(..)));
     }
 
     #[test]

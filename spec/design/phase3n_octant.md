@@ -106,7 +106,7 @@ Ship a reef package `octant` that can:
   `chelis_octant_design.md §4.5`, which is the actual audit-trail semantics
   — provenance presence alone is insufficient.
 - **Type overlay rendering:** tests that named tensor dimensions appear as
-  subscripts, that `Random`/`IO` effects produce the correct markers, and
+  subscripts, that `key` parameters and `IO` effects produce the correct markers, and
   that `grad(f, wrt=x)` renders as `\frac{\partial f}{\partial x}`.
 - **Provenance completeness:** a fuzz-style test that generates ten varied
   expressions from the in-scope grammar, lowers each, and asserts that no
@@ -199,7 +199,7 @@ Extend Octant with finance-notation lowering and the interactive notebook:
    (Euler-Maruyama vs Milstein), time grid, and noise generation strategy.
 2. LLM-assisted lowering of Monte Carlo expectations
    (`\mathbb{E}[f(S_T)]`) through `Shoals.Pricing`, including variance
-   reduction choice and `Random` effect handling.
+   reduction choice and random key threading.
 3. LLM-assisted lowering of calibration objectives through `Nautilus.Optim`.
 4. Yield curve / day count lowering through `Shoals.Curves` and `Std.Time`.
 5. Greek rendering pattern matches in `Octant.Render`:

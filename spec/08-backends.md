@@ -18,6 +18,20 @@ The backend strategy is intentionally sequential:
 
 The project does **not** plan multiple competing native code generators in Phase 0.
 
+### 1.1 Evaluation output and failure
+
+`chelis eval` preserves output produced before an evaluation failure in source
+order. In text mode it writes those transcript lines to stdout before reporting
+the failure on stderr and exiting nonzero. It does not publish result roots for
+the failed evaluation. Effects following the failure do not execute.
+
+With `--json`, stdout is reserved for the successful result document, including
+its transcript. On failure stdout is empty; preceding transcript lines are
+written to stderr before the diagnostic. Both ordinary and package-context
+evaluation obey the same channel rules. Compiler API evaluation errors retain
+the preceding transcript separately from diagnostics so embedders can choose
+their own output sink without rerunning the program.
+
 ## 2. Phase 0: C Backend
 
 The C backend is the reference implementation.
@@ -32,6 +46,56 @@ trap rules, and [04-NUM-11]'s exactness guarantee - and where a lane and those a
 disagree, the lane has the bug. The C backend is the oracle because it is the most
 complete conforming lane, not because conformance is defined as agreeing with it.
 
+C compilation derives identifiers from source filenames without treating filesystem
+spelling as C syntax. Distinct filename stems SHALL have distinct generated module
+symbols, including a stem that literally spells another stem's escaped symbol.
+The generated header and source SHALL use the same symbol. Default artifact filenames
+retain the source stem; an explicit output filename does not change the module symbol.
+Each authored C function export, except source-level `main`, SHALL use the
+compiler-reserved `chelis_fn_` prefix followed by the lowercase hexadecimal UTF-8 bytes
+of its Chelis name. Source-level `main` uses the module-qualified `<module>__main`
+symbol so a downstream C driver can retain its own `main`; Reef/package qualification
+does not erase that exception when the decoded source binding is exactly `main`. An
+ordinary authored identifier ending in `__main` is not source-level `main` and uses the
+universal mapping. For an unqualified source identity exactly equal to `main`, the
+symbol SHALL be the exact generated program identity followed by `__main`; accepting
+an arbitrary suffix-shaped symbol is not conforming.
+
+The generated header begins with exact artifact version, lowercase-hex UTF-8 program
+identity, and lowercase source SHA-256 metadata. Each declaration is preceded by an
+exact `chelis-declaration` record carrying lowercase-hex UTF-8 source identity,
+canonical C symbol, canonical declaration, and canonical SHA-256 definition
+commitment; the commitment covers the exact source function-definition bytes and the
+translation unit's canonical source-local preprocessing-directive sequence. The
+following declaration bytes SHALL
+equal the decoded declaration exactly, including multiline formatting. The generated
+source begins with the matching version and program identity. Every public definition
+is enclosed by exact `chelis-export-begin` / `chelis-export-end` comment records; the
+begin record carries `authored` or `direct`, then the same lowercase-hex UTF-8 source
+identity, symbol, declaration, and definition commitment. Validators SHALL parse the C
+translation unit structurally, not with substring or line-layout heuristics, and bind
+each block to exactly one enclosed function definition. Its declarator and structural
+signature SHALL match the record, it SHALL have external linkage, and its exact AST
+definition byte range plus source-local preprocessing context SHALL hash to the
+recorded commitment. Whitespace, comments,
+multiline formatting, and comment-separated storage specifiers are interpreted by
+that structural parse.
+
+The declaration records and source export blocks SHALL be exactly bijective in program
+identity, source identity, canonical symbol, declaration, external linkage, and exact
+definition commitment. The header's source digest additionally binds the complete source
+bytes, but resealing that digest SHALL preserve and revalidate the compiler-emitted
+per-definition commitments rather than deriving new commitments from arbitrary changed
+source. Thus partial headers, unmarked additions, reformatted or type-changed
+definitions, and reassociated metadata or bodies SHALL fail before native execution.
+Generated source SHALL NOT use direct or indirect preprocessor aliases to reassociate
+a public definition. Every externally linked function definition except the generated
+process entry `main` SHALL be registered by exactly one public export block.
+Translation-unit-private `static` helpers remain outside the public blocks and valid.
+Downstream C code SHALL call declarations from the generated header, and tooling SHALL
+consume the generated associations rather than reconstructing symbols from Chelis
+source spellings.
+
 Current design points:
 
 - emit loops for elementwise, reduction, and movement operations
@@ -39,15 +103,73 @@ Current design points:
 - pattern-match BLAS-friendly subgraphs such as matrix multiplication
 - manage temporary buffers with explicit lifetime-aware memory planning
 - ship `chelis_runtime.h` plus a Rust static runtime library alongside generated code
-- preserve `with seed(...)` for generated host code with a handler-scoped RNG state;
-  direct DAG random operations use their baked seed, while host fallback functions can
-  draw from the active handler when stdlib/user calls contain nested `uniform_like`
 - tuple-returning host exports use the stable runtime tuple ABI:
   generated headers surface `chelis_tuple*`, drivers construct tuples with
   `chelis_tuple_from_values(...)`, and typed extraction goes through the
   `chelis_tuple_get_*` helpers documented in `chelis_runtime.h`
 
 This backend is the correctness oracle for future GPU and interoperability backends.
+
+Generated code holds no random state: every draw reads the key it is given
+([05-RNG-1]), so reentrant and concurrent public invocations share nothing
+random. A scalar `key` parameter or result of a host entry crosses the C ABI
+as the published carrier `typedef struct { uint64_t bits; } chelis_key;`,
+whose `bits` are the key's 64 bits ([05-RNG-2]), and
+`chelis_key chelis_key_from_seed(int64_t seed)` returns [05-OP-69]'s key, and
+`chelis_string chelis_string_from_key(chelis_key key)` returns its printed form
+([05-OBS-2]), which a compiled program prints for a key root. A key tensor
+at a host entry crosses as a `chelis_tensor` of runtime dtype `key` (id 9).
+An entry on the four-argument public tensor ABI carries every input and result
+as a `chelis_tensor`, a scalar as a rank-0 tensor, so its key inputs and key
+results are `chelis_tensor`s of runtime dtype `key`, rank 0 for a scalar key.
+Every key tensor crossing an entry is subject to [04-NUM-11]'s entry dtype
+check. A key is never a bare integer at the boundary. DLPack exchange (spec/11 §1.3) and NumPy conversion refuse a key
+tensor with a typed rejection, because no numeric interchange dtype describes
+a key; Python passes keys through spec/10 §3.2's execution values.
+Private context transport does not change authored public
+function declarations or the four-argument public tensor ABI.
+
+### 2.1 Runtime artifact identity
+
+A compiler build carries its runtime: the static archive and public runtime
+headers produced by the runtime compilation unit that the same build links. The
+CLI and the Python extension SHALL stage, link and export only those carried
+bytes. They SHALL NOT select a runtime archive by searching directories or by
+file name, modification time, enumeration order, location relative to the
+executable, or environment variable. A set `CHELIS_RUNTIME_DIR` SHALL be rejected
+before staging; it is neither honored nor ignored.
+
+The carried archive SHALL be the static-library output of the same runtime
+compilation that produced the Rust library the consumer links. A compilation
+that emits linkable output and cannot locate that archive SHALL fail. A
+compilation that emits no linkable output MAY carry an inert placeholder, and
+staging and export SHALL refuse it. A sealed distribution build SHALL carry no
+build path.
+
+Staging SHALL replace each staged file atomically, verify the written archive
+against the carried SHA-256 digest before publishing it, and write
+`chelis_runtime.receipt.json` last, recording that digest, the header digests and
+the build mode; a staging without a receipt is incomplete. The receipt records
+staging only; it makes no claim about linking or
+execution. `chelis build` SHALL name the staged archive and its digest on stdout.
+Link commands that Chelis prints or runs SHALL name the staged archive by path,
+never through a library search.
+
+A development build SHALL refuse to stage when the runtime's declared source
+inputs changed after it was built. The declared inputs are the manifest, any
+build script, and every file under `src/` and `include/` of the runtime crate and
+of each workspace crate it depends on, and the workspace lockfile; files whose
+names begin with `.` are not inputs. The runtime compilation SHALL record a
+digest for each declared input; a changed or missing recorded file, or an
+unrecorded file in those roots, fails staging with its path. A development build
+whose runtime was compiled without its declared inputs SHALL refuse to stage. A
+sealed distribution build is declared when it is built and reads no source
+checkout. An unavailable checkout SHALL NOT select sealed mode.
+
+A distribution that ships a runtime archive or headers beside a compiler SHALL
+take them from that compiler's runtime export and SHALL verify the archive
+against the export's digest. The carried runtime adds no C callable and does not
+change callable metadata `abi_version: 2` (spec/11 §1.4).
 
 ## 3. Phase 1: HIP Backend
 
@@ -220,11 +342,11 @@ language work.
 
 The first shipped effect surface interacts with backend selection in two explicit ways:
 
-- `chelis build --target c` rejects resource regions such as
-  `with device("gpu:0") { ... }`
+- `chelis build --target c` admits only exact `with device("cpu") { ... }`
+  host regions; every other device designator, including `cpu:<label>`, is
+  rejected before artifact emission as specified by
+  `spec/04-type-system.md` [04-EFF-2]
 - `chelis build --target hip` rejects incompatible non-GPU resource regions
-- `chelis build` for either target currently rejects lowered `dropout`; seeded dropout
-  is implemented on the evaluator path, not yet on emitted C/HIP code
 
 ## 4. Phase M: Metal Backend (macOS GPU peer)
 
@@ -421,8 +543,8 @@ cargo test -p chelis-backend-metal --test codegen_adversarial
 - MPS integration for f32 and f16 matmul is the wrapper-helper plan from
   WS-M1; `chelis_metal_runtime.h` exposes the helpers under the ARC
   ownership model pinned in `spec/04-type-system.md` §1.1.3 ("Metal runtime
-  header: ARC vs MRC and MPS wrapper ownership model"). bf16, int8, int16,
-  int32, and int64 matmul (where admitted by §5.7.2) routes through the
+  header: ARC vs MRC and MPS wrapper ownership model"). bf16, i8, i16,
+  i32, and i64 matmul (where admitted by §5.7.2) routes through the
   parameterized 16x16 tiled MSL kernel rather than MPS.
 - Async dispatch deferred; M-phase uses `waitUntilCompleted` for synchronous launches
 - `peak_device_bytes_formula` semantically reports peak system RAM for tensor

@@ -28,7 +28,7 @@
 //! and the existing tide amenability surface stays stable (RFC D-PRED).
 
 use chelis_deep::DeepTag;
-use chelis_deep::{Atom, Expr};
+use chelis_deep::{Atom, Expr, ExprCarrier};
 
 /// Amenability of a predicate to SMT reasoning. Mirrors the existing
 /// `SmtAmenability` vocabulary (`chelis-prove`); the canonical metadata
@@ -131,32 +131,58 @@ pub enum PredGrammarError {
 
 /// The decoded tag of a list node, if it is a stamped 3-tuple node.
 fn tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::List(list, _) => list.tag(),
-        Expr::Node(node, _) => Some(node.tag()),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 /// The children of a 3-tuple node `(tag {meta} children...)`, skipping
 /// the tag and the metadata map at index 1.
 fn children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 
 /// If `expr` is `(var {} name)`, return `name`.
 fn var_name(expr: &Expr) -> Option<&str> {
-    if tag(expr) == Some(DeepTag::Var) {
-        let kids = children(expr);
-        if let Some(Expr::Atom(Atom::Name(s), _)) = kids.first() {
-            return Some(s.as_str());
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, [Expr::Atom(Atom::Name(name), _)]) => {
+            Some(name.as_str())
         }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
-    None
+}
+
+/// Preserve the legacy free-variable reader's first-child interpretation
+/// without letting malformed `var` nodes become binders or callable names.
+fn free_var_name(expr: &Expr) -> Option<&str> {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, [Expr::Atom(Atom::Name(name), _), ..]) => {
+            Some(name.as_str())
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
+    }
 }
 
 /// If `expr` is an application `(app {} callee args...)`, return
@@ -201,25 +227,22 @@ fn fn_parts(fn_node: &Expr) -> Option<(String, &Expr)> {
 }
 
 /// The name of the single binder in the `params` node. The binder may be
-/// a bare symbol, a `(var {} name)`, or a typed-param list whose head is
-/// the name symbol.
+/// a bare symbol, an exact `(var {} name)`, or an exact annotated
+/// parameter pair whose first element is the name symbol and whose
+/// second element is its metadata map (a structural `Expr::BareList`).
+/// An unknown form's head is syntax, not a binder.
 fn binder_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Atom(Atom::Name(s), _) => Some(s.clone()),
-        _ => {
-            if let Some(name) = var_name(expr) {
-                return Some(name.to_string());
-            }
-            if let Expr::List(list, _) = expr
-                && list.tag().is_none()
-                && let Some(Expr::Atom(Atom::Name(s), _)) = list.elements.first()
-            {
-                // typed-param list `(name {type: ...})`; a stamped
-                // vocabulary head (var/params/...) is never a binder name.
-                return Some(s.clone());
-            }
-            None
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(s)) => Some(s.clone()),
+        ExprCarrier::DecodedNode(_, _, _) => var_name(expr).map(str::to_string),
+        ExprCarrier::StructuralList([Expr::Atom(Atom::Name(name), _), Expr::Map(_, _)]) => {
+            Some(name.clone())
         }
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -243,7 +266,7 @@ pub fn predicate_free_vars(fn_node: &Expr) -> Vec<String> {
 fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     // A bare `var` in a value position is a free reference (the binder
     // or an in-module constant). The caller validates scoping.
-    if let Some(name) = var_name(expr) {
+    if let Some(name) = free_var_name(expr) {
         if name != binder && !out.iter().any(|n| n == name) {
             out.push(name.to_string());
         }
@@ -254,7 +277,7 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
     // variable). Recurse into the arguments only. (When the callee is
     // not a bare var, fall through and recurse over everything.)
     if let Some((callee, args)) = as_app(expr)
-        && var_name(callee).is_some()
+        && free_var_name(callee).is_some()
     {
         for arg in args {
             collect_free_vars(arg, binder, out);
@@ -270,15 +293,19 @@ fn collect_free_vars(expr: &Expr, binder: &str, out: &mut Vec<String>) {
         }
         return;
     }
-    if let Expr::List(list, _) = expr {
-        // Skip the tag and metadata map; recurse into children only.
-        for child in list.elements.iter().skip(2) {
-            collect_free_vars(child, binder, out);
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => {
+            for child in children {
+                collect_free_vars(child, binder, out);
+            }
         }
-    } else if let Expr::Node(node, _) = expr {
-        for child in node.children_slice() {
-            collect_free_vars(child, binder, out);
-        }
+        // An unknown form is outside the predicate grammar, which
+        // `predicate_in_grammar` reports; its children are not read.
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {}
     }
 }
 
@@ -309,31 +336,27 @@ pub fn predicate_in_grammar(fn_node: &Expr) -> Result<(), PredGrammarError> {
 }
 
 fn check_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
-    match expr {
+    match expr.carrier() {
         // Literals: bare atoms and `(lit {type} value)`.
-        Expr::Atom(_, _) => Ok(()),
-        Expr::Map(_, _) | Expr::MetaExpr(_, _) => {
+        ExprCarrier::Atom(_) => Ok(()),
+        ExprCarrier::MetadataMap(_) | ExprCarrier::MetadataExpression(_) => {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
-        Expr::List(_, _) => check_list_in_grammar(expr),
-        // Bridge: reconstruct List so tag/children accessors work unchanged (#908)
-        Expr::Node(node, span) => {
-            let bridged = Expr::List(node.to_list(*span), *span);
-            check_list_in_grammar(&bridged)
-        }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+        ExprCarrier::DecodedNode(_, _, _) => check_decoded_in_grammar(expr),
+        ExprCarrier::StructuralList(_) | ExprCarrier::UndecodableHead(_, _, _) => {
             Err(PredGrammarError::DisallowedNode(node_desc(expr)))
         }
     }
 }
 
-fn check_list_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
+fn check_decoded_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
     let t = tag(expr).ok_or_else(|| PredGrammarError::DisallowedNode(node_desc(expr)))?;
     match t {
         DeepTag::Lit => Ok(()),
         // The binder reference and in-module constant references both
         // surface as bare `var` nodes; scoping is the caller's job.
-        DeepTag::Var => Ok(()),
+        DeepTag::Var if var_name(expr).is_some() => Ok(()),
+        DeepTag::Var => Err(PredGrammarError::DisallowedNode(node_desc(expr))),
         // Field projection on the binder (or nested records).
         DeepTag::Access => {
             let kids = children(expr);
@@ -384,18 +407,17 @@ fn check_app_in_grammar(expr: &Expr) -> Result<(), PredGrammarError> {
 }
 
 fn node_desc(expr: &Expr) -> String {
-    match expr {
-        Expr::Atom(Atom::Name(s), _) => format!("symbol `{s}`"),
-        Expr::Atom(_, _) => "literal".to_string(),
-        Expr::Map(_, _) => "map".to_string(),
-        Expr::MetaExpr(_, _) => "meta-expr".to_string(),
-        Expr::List(_, _) => match tag(expr) {
-            Some(t) => format!("`{}` node", t.as_str()),
-            None => "malformed list".to_string(),
-        },
-        Expr::Node(node, _) => format!("`{}` node", node.tag().as_str()),
-        Expr::BareList(_, _) => "bare list".to_string(),
-        Expr::UnknownForm(_) => "unknown form".to_string(),
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(s)) => format!("symbol `{s}`"),
+        ExprCarrier::Atom(_) => "literal".to_string(),
+        ExprCarrier::MetadataMap(_) => "map".to_string(),
+        ExprCarrier::MetadataExpression(_) => "meta-expr".to_string(),
+        ExprCarrier::DecodedNode(tag, _, _) => format!("`{}` node", tag.as_str()),
+        ExprCarrier::StructuralList(_) => "bare list".to_string(),
+        // chelis#731 / [04-TOT-3]: preserve the undecodable head so the
+        // checker diagnostic names the malformed tag instead of collapsing
+        // every future form into one generic grammar error.
+        ExprCarrier::UndecodableHead(head, _, _) => format!("unknown form `{head}`"),
     }
 }
 

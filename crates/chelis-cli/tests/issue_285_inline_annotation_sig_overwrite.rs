@@ -136,7 +136,7 @@ fn transpose_lie_with_inline_return_is_rejected() {
 fn return_contract_drop_with_inline_param_is_rejected() {
     let json = check_json(
         "sig h: &tensor[batch, seq, f32] -> tensor[batch, seq, f32]\n\
-         def h(x: &tensor[batch, seq, f32]) = sum(x, cast(0, int32))\n",
+         def h(x: &tensor[batch, seq, f32]) = sum(x, cast(0, i32))\n",
     );
     assert_body_sig_rejected(&json, "return drop (sig + inline param, no ret_ty)");
 }
@@ -147,7 +147,7 @@ fn return_contract_drop_with_inline_param_is_rejected() {
 #[test]
 fn rigid_dim_lie_with_inline_return_is_rejected() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> &tensor[m, f32] -> tensor[n, f32]\n\
+        "sig f[n, m]: &tensor[n, f32] -> &tensor[m, f32] -> tensor[n, f32]\n\
          def f(x, y) -> tensor[n, f32] = y\n",
     );
     assert_body_sig_rejected(&json, "rigid-dim lie (sig + inline return)");
@@ -263,7 +263,7 @@ fn no_explicit_sig_keeps_synthesized_defsig() {
 #[test]
 fn explicit_eff_less_sig_preserves_def_empty_effect_bound() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
+        "sig f[n]: &tensor[n, f32] -> unit\n\
          def f(x) -> unit ! {} = print(x)\n",
     );
     assert_effect_rejected(&json, "def !{} effect bound under eff-less sig");
@@ -276,7 +276,7 @@ fn explicit_eff_less_sig_preserves_def_empty_effect_bound() {
 #[test]
 fn explicit_eff_less_sig_preserves_bare_def_empty_effect_bound() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
+        "sig f[n]: &tensor[n, f32] -> unit\n\
          def f(x) ! {} = print(x)\n",
     );
     assert_effect_rejected(&json, "bare def !{} effect bound under eff-less sig");
@@ -289,7 +289,7 @@ fn explicit_eff_less_sig_preserves_bare_def_empty_effect_bound() {
 #[test]
 fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
     let json = check_json(
-        "sig f: &tensor[n, f32] -> unit\n\
+        "sig f[n]: &tensor[n, f32] -> unit\n\
          def f(x) -> unit ! { IO } = print(x)\n",
     );
     assert_clean(&json, "honest def !{IO} under eff-less sig");
@@ -300,7 +300,7 @@ fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
 /// inherited bound is distinguishable from a general effect-check regression.
 #[test]
 fn effect_lie_inline_only_no_sig_control_still_rejected() {
-    let json = check_json("def f(x: &tensor[n, f32]) -> unit ! {} = print(x)\n");
+    let json = check_json("def f[n](x: &tensor[n, f32]) -> unit ! {} = print(x)\n");
     assert_effect_rejected(&json, "effect lie control (no inline sig)");
 }
 
@@ -319,7 +319,7 @@ fn untyped_nullary_effect_clause_synthesizes_its_contract() {
 #[test]
 fn eff_less_sig_inherits_def_effect_metadata_into_single_defsig() {
     let deep = deep_text(
-        "sig f: &tensor[n, f32] -> unit\n\
+        "sig f[n]: &tensor[n, f32] -> unit\n\
          def f(x) -> unit ! {} = print(x)\n",
     );
     let defsig_count = deep.matches("(defsig").count();

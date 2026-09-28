@@ -17,9 +17,10 @@
 //! Gated on the `chelis-prove` optional dependency (the obligation /
 //! generation machinery lives there).
 
-use chelis_deep::DeepTag;
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
+use chelis_deep::ast::{Atom, Expr, Metadata};
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_surf::ast::{Decl, Param, TypeExpr};
 use chelis_types::types::Prim;
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
@@ -33,13 +34,40 @@ use super::{PropertyOutcome, PropertyRunOptions, PropertyStatus, PropertyTier};
 
 /// Does this property have at least one binder whose type is an
 /// invariant-carrying opaque type? If so, the injection path owns it.
-pub(super) fn property_has_opaque_invariant_binder(decls: &[Decl], params: &[Param]) -> bool {
-    let exprs = chelis_surf::desugar::desugar_program(decls);
+pub(super) fn property_has_opaque_invariant_binder(
+    decls: &[Decl],
+    property_path: &[usize],
+    params: &[Param],
+) -> Result<bool, String> {
+    validate_property_path(decls, property_path)?;
+    let exprs = chelis_surf::desugar::desugar_program(decls).map_err(|error| error.to_string())?;
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
-    params.iter().any(|p| {
+    Ok(params.iter().any(|p| {
         matches!(&p.ty, Some(TypeExpr::Named(name, _))
             if invariants.iter().any(|inv| &inv.type_name == name))
-    })
+    }))
+}
+
+fn validate_property_path(decls: &[Decl], property_path: &[usize]) -> Result<(), String> {
+    let Some((&selected_index, nested_path)) = property_path.split_first() else {
+        return Err("property declaration path is empty".to_string());
+    };
+    let Some(decl) = decls.get(selected_index) else {
+        return Err(format!(
+            "property declaration path index {selected_index} is out of bounds"
+        ));
+    };
+    if nested_path.is_empty() {
+        if matches!(decl, Decl::Property { .. }) {
+            return Ok(());
+        }
+        return Err("property declaration path does not select a property".to_string());
+    }
+
+    let Decl::Module { decls, .. } = decl else {
+        return Err("property declaration path descends through a non-module".to_string());
+    };
+    validate_property_path(decls, nested_path)
 }
 
 /// Run a user property that has an invariant-carrying opaque binder
@@ -55,7 +83,20 @@ pub(super) fn prove_with_injection(
     let seed = options.injection_seed();
     let samples_needed = options.samples;
 
-    let exprs = chelis_surf::desugar::desugar_program(decls);
+    let exprs = match chelis_surf::desugar::desugar_program(decls) {
+        Ok(exprs) => exprs,
+        Err(error) => {
+            return outcome(
+                property_name,
+                PropertyStatus::Error,
+                0,
+                seed,
+                None,
+                Some(format!("injection desugar failed: {error}")),
+                Vec::new(),
+            );
+        }
+    };
     let invariants = crate::opaque::collect_opaque_invariants(&exprs);
     let consts = resolve_constants(&exprs, &invariants);
     let module_source = chelis_deep::printer::print_canonical(&exprs);
@@ -83,11 +124,55 @@ pub(super) fn prove_with_injection(
     }
 
     // The desugared property body + preconditions (Deep).
-    let body_deep = chelis_surf::desugar::desugar_expr_only(body);
-    let pre_deep: Vec<Expr> = preconditions
+    let bound_names = params
         .iter()
-        .map(chelis_surf::desugar::desugar_expr_only)
-        .collect();
+        .map(|parameter| parameter.name.clone())
+        .collect::<Vec<_>>();
+    let body_deep =
+        match chelis_surf::desugar::desugar_expr_in_program_scope(decls, body, &bound_names) {
+            Ok(body) => body,
+            Err(error) => {
+                return outcome(
+                    property_name,
+                    PropertyStatus::Error,
+                    0,
+                    seed,
+                    None,
+                    Some(format!("property body desugar failed: {error}")),
+                    Vec::new(),
+                );
+            }
+        };
+    let pre_deep: Vec<Expr> = match preconditions
+        .iter()
+        .map(|precondition| {
+            chelis_surf::desugar::desugar_expr_in_program_scope(decls, precondition, &bound_names)
+        })
+        .collect::<Result<_, _>>()
+    {
+        Ok(preconditions) => preconditions,
+        Err(error) => {
+            return outcome(
+                property_name,
+                PropertyStatus::Error,
+                0,
+                seed,
+                None,
+                Some(format!("property precondition desugar failed: {error}")),
+                Vec::new(),
+            );
+        }
+    };
+
+    // The probe is declared in the module that defines the first opaque
+    // binder's type, since the sampled binder values construct that type.
+    let home_type = binders
+        .iter()
+        .find_map(|binder| match binder {
+            Binder::Opaque { inv, .. } => Some(inv.type_name.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     let mut rng = crate::opaque::GenRng::new(seed);
     let mut accepted = 0usize;
@@ -175,7 +260,7 @@ pub(super) fn prove_with_injection(
         // Precondition filter (composed with the injected invariant by the
         // generator already restricting opaque binders).
         if !pre_deep.is_empty() {
-            match eval_bool_in_module(&exprs, &invariants, &bindings, &conjoin(&pre_deep)) {
+            match eval_bool_in_module(&exprs, &home_type, &bindings, &conjoin(&pre_deep)) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => return outcome_error(property_name, seed, e),
@@ -183,7 +268,7 @@ pub(super) fn prove_with_injection(
         }
 
         accepted += 1;
-        match eval_bool_in_module(&exprs, &invariants, &bindings, &body_deep) {
+        match eval_bool_in_module(&exprs, &home_type, &bindings, &body_deep) {
             Ok(true) => {}
             Ok(false) => {
                 let cx = counterexample(&bindings);
@@ -301,19 +386,24 @@ fn injection_assumptions(
     samples: usize,
     seed: u64,
 ) -> Vec<AssumptionRecord> {
+    // A reef-linked program carries linker-format names; the record names
+    // the source spellings so a package property's assumption matches the
+    // same property's assumption as a bare file (chelis#2416).
+    let property_name = chelis_types::demangle_ident(property_name);
     binders
         .iter()
         .filter_map(|binder| match binder {
-            Binder::Opaque { name, inv } => Some(
+            Binder::Opaque { name, inv } => Some({
+                let type_name = chelis_types::demangle_ident(&inv.type_name);
                 AssumptionRecord::new(
-                    format!("invariant:{}:binder:{name}", inv.type_name),
+                    format!("invariant:{type_name}:binder:{name}"),
                     Some(AssumptionDischarge::new(
                         DischargeMethod::Fuzz,
                         serde_json::json!({
                             "status": "validated",
                             "property": property_name,
                             "binder": name,
-                            "source_type": inv.type_name,
+                            "source_type": type_name,
                             "samples": samples,
                             "seed": seed,
                             "tolerance": FUZZ_TOLERANCE,
@@ -326,7 +416,7 @@ fn injection_assumptions(
                         "seed": seed,
                     }))),
                 )
-                .with_source(inv.type_name.clone(), format!("binder:{name}"))
+                .with_source(type_name.clone(), format!("binder:{name}"))
                 // WI-8: stamp the prover-side discharge tier on the
                 // binder-matched (injected) assumption. The injection path is
                 // the fuzz sampler discharging the invariant of an opaque
@@ -334,9 +424,9 @@ fn injection_assumptions(
                 .with_discharge_tier(DischargeTier::new(
                     DischargeMethod::Fuzz.engine(),
                     DischargeMethod::Fuzz,
-                    Some(format!("invariant:{}:binder:{name}", inv.type_name)),
-                )),
-            ),
+                    Some(format!("invariant:{type_name}:binder:{name}")),
+                ))
+            }),
             _ => None,
         })
         .collect()
@@ -364,7 +454,9 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
             }
         }
         TypeExpr::Tensor(dims, precision, _)
-            if Prim::parse_name(precision).is_some_and(|prim| prim.is_valid_tensor_precision()) =>
+            // A sampled key tensor would be a key literal (spec/04 §1.1), so
+            // only the data element dtypes are sampled.
+            if Prim::parse_name(precision).is_some_and(|prim| prim.is_data_element_dtype()) =>
         {
             let lit: Option<Vec<usize>> = dims
                 .iter()
@@ -376,7 +468,7 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
             lit.map(|dims| Binder::Tensor {
                 name: p.name.clone(),
                 dims,
-                precision: precision.clone(),
+                precision: precision.to_string(),
             })
         }
         _ => None,
@@ -384,17 +476,17 @@ fn classify_binder(p: &Param, invariants: &[crate::opaque::OpaqueInvariant]) -> 
 }
 
 /// Evaluate a boolean Deep expr with the given binder value bindings,
-/// inside the defining module (so opaque construction/access is legal),
-/// with the invariant metadata stripped (so a `sum`-bearing invariant does
-/// not block IR lowering of the bound module).
+/// inside the module that defines `home_type` (so constructing and
+/// inspecting the binder's opaque values is legal), with the invariant
+/// metadata stripped (so a `sum`-bearing invariant does not block IR lowering
+/// of the bound module).
 fn eval_bool_in_module(
     exprs: &[Expr],
-    invariants: &[crate::opaque::OpaqueInvariant],
+    home_type: &str,
     bindings: &[(String, Expr, serde_json::Value)],
     body: &Expr,
 ) -> Result<bool, String> {
     use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
-    let probe = "__chelis_prop_probe";
     // Bind all binders via a let-chain around the body.
     let mut wrapped = body.clone();
     for (name, value, _) in bindings.iter().rev() {
@@ -403,16 +495,8 @@ fn eval_bool_in_module(
             vec![node("bind", vec![sym(name), value.clone()]), wrapped],
         );
     }
-    let probe_def = node("def", vec![sym(probe), wrapped]);
-    // Inject into the module that defines the first opaque type (any will
-    // do; binders are constructed via that module's ctors). If there are
-    // none, append at top level.
-    let type_name = invariants
-        .first()
-        .map(|i| i.type_name.as_str())
-        .unwrap_or("");
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
-    let program = inject_into_module(&stripped, type_name, probe_def);
+    let (program, probe) = inject_probe_into_defining_module(&stripped, home_type, wrapped);
     let source = chelis_deep::printer::print_canonical(&program);
     let result = chelis_compiler_api::compiler::eval_selected(
         EvalRequest {
@@ -420,7 +504,7 @@ fn eval_bool_in_module(
             source,
             bindings: Default::default(),
         },
-        &[probe.to_string()],
+        &[probe],
     )
     .map_err(|e| {
         e.errors
@@ -433,7 +517,7 @@ fn eval_bool_in_module(
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
             ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data.element_as_f64_lossy(0) != 0.0)
+                Ok(value.data.element_f64_lossy(0) != 0.0)
             }
             other => Err(format!("property evaluated to non-bool: {other:?}")),
         },
@@ -477,7 +561,7 @@ fn resolve_constants(
                 && value.shape.is_empty()
                 && value.data.len() == 1
             {
-                env.insert(name.clone(), value.data.element_as_f64_lossy(0));
+                env.insert(name.clone(), value.data.element_f64_lossy(0));
                 break;
             }
         }
@@ -565,24 +649,22 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
-    let mut elements = vec![sym(tag), Expr::Map(MetaMap::default(), span0())];
-    elements.extend(kids);
-    Expr::List(List { elements }, span0())
+    Expr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::default(),
+        kids,
+        span0(),
+    )
 }
 fn var_node(name: &str) -> Expr {
     node("var", vec![sym(name)])
 }
 fn typed_lit(prim: &str, value: Expr) -> Expr {
-    let mut entries = MetaMap::default();
-    entries
-        .entries
-        .push(("type".to_string(), node("t-prim", vec![sym(prim)])));
-    Expr::List(
-        List {
-            elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
-        },
-        span0(),
-    )
+    let mut entries = Metadata::default();
+    entries.replace(M::Type(
+        TypeSyntax::try_new(node("t-prim", vec![sym(prim)])).expect("primitive type"),
+    ));
+    Expr::node(DeepTag::Lit, entries, vec![value], span0())
 }
 fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
     debug_assert_eq!(value.prim().name(), prim);
@@ -599,19 +681,27 @@ fn bool_lit(v: bool) -> Expr {
 }
 
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn child0_sym(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(l, _) if l.elements.len() >= 3 => match &l.elements[2] {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => match children.first()? {
             Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
             _ => None,
         },
-        _ => None,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -619,10 +709,15 @@ fn module_defines(expr: &Expr, type_name: &str) -> bool {
     if list_tag(expr) == Some(DeepTag::Deftype) && child0_sym(expr) == Some(type_name) {
         return true;
     }
-    if let Expr::List(l, _) = expr {
-        return l.elements.iter().any(|c| module_defines(c, type_name));
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children
+            .iter()
+            .any(|child| module_defines(child, type_name)),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::MetadataExpression(_) => false,
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => false,
     }
-    false
 }
 
 fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
@@ -632,11 +727,16 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
             && (type_name.is_empty() || module_defines(expr, type_name))
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.push(def.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -648,26 +748,59 @@ fn inject_into_module(exprs: &[Expr], type_name: &str, def: Expr) -> Vec<Expr> {
     out
 }
 
+/// Declare `body` as a probe `def` inside the module that defines
+/// `type_name`, returning the program and the probe's binding name.
+///
+/// Module identity has two spellings, and the checker attributes a
+/// declaration to a module through whichever one the program uses
+/// (`chelis_types` `module_key_for_item`). A lexical program nests the
+/// defining module's declarations in a `module` wrapper, so the probe joins
+/// that wrapper. A reef-linked program has no wrappers: every declaration
+/// carries its module in its linker-format name, so the probe takes the
+/// linker-format name of the type's own module (chelis#2416). Deriving the
+/// probe's name from the type's name keeps the two attributions equal by
+/// construction.
+fn inject_probe_into_defining_module(
+    exprs: &[Expr],
+    type_name: &str,
+    body: Expr,
+) -> (Vec<Expr>, String) {
+    match chelis_types::linked_binding_in_module_of(type_name, "chelis_prop_probe") {
+        Some(probe) => {
+            let mut program = exprs.to_vec();
+            program.push(node("def", vec![sym(&probe), body]));
+            (program, probe)
+        }
+        None => {
+            let probe = "__chelis_prop_probe".to_string();
+            let def = node("def", vec![sym(&probe), body]);
+            (inject_into_module(exprs, type_name, def), probe)
+        }
+    }
+}
+
 fn inject_first_module(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     inject_into_module(exprs, "", def)
 }
 
 fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
-        Expr::List(list, span) => {
-            let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if (list.tag() == Some(DeepTag::Deftype))
-                && let Some(Expr::Map(map, mspan)) = elements.get(1)
-            {
-                let kept: Vec<(String, Expr)> = map
-                    .entries
-                    .iter()
-                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
-                    .cloned()
-                    .collect();
-                elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
+        Expr::Node(node, span) => {
+            let mut metadata = node.meta().clone();
+            if node.tag() == DeepTag::Deftype {
+                metadata.remove(K::Invariant);
+                metadata.remove(K::InvariantAmenability);
             }
-            Expr::List(List { elements }, *span)
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_meta)
+                .collect();
+            Expr::node(node.tag(), metadata, children, *span)
+        }
+        // A structural list is walked as the untagged list it replaced was.
+        Expr::BareList(elements, span) => {
+            Expr::BareList(elements.iter().map(strip_invariant_meta).collect(), *span)
         }
         other => other.clone(),
     }
@@ -676,6 +809,110 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parsed_module_property(
+        source: &str,
+        property_name: &str,
+    ) -> (Vec<Decl>, Vec<usize>, Vec<Param>) {
+        let parsed =
+            chelis_surf::parser::parse_str(source).expect("parse injection routing fixture");
+        let module_decls = parsed
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Module { decls, .. } => Some(decls.clone()),
+                _ => None,
+            })
+            .expect("fixture has a module");
+        let (property_index, params) = module_decls
+            .iter()
+            .enumerate()
+            .find_map(|decl| match decl {
+                (index, Decl::Property { name, params, .. }) if name == property_name => {
+                    Some((index, params.clone()))
+                }
+                _ => None,
+            })
+            .expect("fixture has the requested property");
+        (module_decls, vec![property_index], params)
+    }
+
+    #[test]
+    fn valid_plain_scalar_property_is_checked_without_selecting_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@property nested_grad forall(x: f32):
+  (grad(grad(fn (xx: f32) -> xx * xx, wrt=xx), wrt=xx)(x) >= 0.0)
+",
+            "nested_grad",
+        );
+
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(false),
+            "a valid property without an opaque binder is not injection-owned"
+        );
+    }
+
+    #[test]
+    fn opaque_invariant_binder_still_selects_injection() {
+        let (decls, property_path, params) = parsed_module_property(
+            "module M
+@opaque
+@invariant(p) p.value >= 0.0
+type Probability =
+  | Probability { value: f32 }
+@property bounded forall(p: Probability):
+  (p.value >= 0.0)
+",
+            "bounded",
+        );
+
+        assert_eq!(
+            property_has_opaque_invariant_binder(&decls, &property_path, &params),
+            Ok(true),
+            "an invariant-carrying opaque binder must remain injection-owned"
+        );
+    }
+
+    #[test]
+    fn module_search_does_not_recurse_into_unknown_forms() {
+        let span = span0();
+        let deftype = node("deftype", vec![sym("Token"), Expr::BareList(vec![], span)]);
+        assert!(module_defines(&deftype, "Token"));
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "future-wrapper".into(),
+            meta: Metadata::default(),
+            children: vec![deftype],
+            span,
+        }));
+
+        assert!(!module_defines(&unknown, "Token"));
+    }
+
+    #[test]
+    fn injection_does_not_discover_types_through_metadata_wrapper() {
+        let span = span0();
+        let wrapped = Expr::MetaExpr(
+            chelis_deep::MetaExpr {
+                metadata: Metadata::default(),
+                expr: Box::new(node(
+                    "deftype",
+                    vec![sym("Token"), Expr::BareList(vec![], span)],
+                )),
+            },
+            span,
+        );
+        let module = node("module", vec![sym("M"), wrapped]);
+        let marker = sym("marker");
+
+        let injected = inject_into_module(&[module], "Token", marker.clone());
+        assert_eq!(
+            injected.len(),
+            2,
+            "metadata wrappers had no type-discovery authority before this slice"
+        );
+        assert_eq!(injected[1], marker);
+    }
 
     #[test]
     fn injection_attempt_cap_is_finite_and_honors_override() {
@@ -746,7 +983,7 @@ mod tests {
     #[test]
     fn injected_int64_scalar_sample_is_not_widened_through_f64() {
         let mut rng = crate::opaque::GenRng::new(9);
-        let value = sample_scalar("int64", &mut rng);
+        let value = sample_scalar("i64", &mut rng);
 
         assert_eq!(value.prim(), chelis_types::types::Prim::Int64);
         assert!(value.as_i64_exact().is_some());

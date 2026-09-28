@@ -33,7 +33,7 @@ Coral does NOT compete with Polars/DuckDB query optimization (predicate pushdown
 -- Internally: Dict[String, Column]
 
 type Column =
-  | IntCol(tensor[n, int64])
+  | IntCol(tensor[n, i64])
   | FloatCol(tensor[n, f32])
   | StringCol(List[String])
   | BoolCol(tensor[n, bool])
@@ -87,16 +87,16 @@ def empty(schema: Dict[String, ColumnType]) -> Frame
 
 ```chelis
 -- Type-safe column extraction
-def get_float_col(df: Frame, name: String) -> tensor[n, f32]
-def get_int_col(df: Frame, name: String) -> tensor[n, int64]
+def get_float_col[n](df: Frame, name: String) -> tensor[n, f32]
+def get_int_col[n](df: Frame, name: String) -> tensor[n, i64]
 def get_string_col(df: Frame, name: String) -> List[String]
-def get_bool_col(df: Frame, name: String) -> tensor[n, bool]
+def get_bool_col[n](df: Frame, name: String) -> tensor[n, bool]
 
 -- Column names and types
 def columns(df: Frame) -> List[String]
 def column_type(df: Frame, name: String) -> ColumnType
-def nrows(df: Frame) -> int64
-def ncols(df: Frame) -> int64
+def nrows(df: Frame) -> i64
+def ncols(df: Frame) -> i64
 ```
 
 **Row selection and filtering:**
@@ -104,15 +104,15 @@ def ncols(df: Frame) -> int64
 ```chelis
 -- Boolean mask filtering: df[mask]
 -- Under the hood: gather on every column using the indices where mask is true
-def filter(df: Frame, mask: tensor[n, bool]) -> Frame
+def filter[n](df: Frame, mask: tensor[n, bool]) -> Frame
 
 -- Convenience: filter with a predicate on a float column
 def filter_float(df: Frame, col_name: String, pred: f32 -> bool) -> Frame
 
 -- Head/tail/slice
-def head(df: Frame, k: int64) -> Frame
-def tail(df: Frame, k: int64) -> Frame
-def slice(df: Frame, start: int64, end: int64) -> Frame
+def head(df: Frame, k: i64) -> Frame
+def tail(df: Frame, k: i64) -> Frame
+def slice(df: Frame, start: i64, end: i64) -> Frame
 ```
 
 The key operation is `filter`. Under the hood:
@@ -158,11 +158,11 @@ def drop_column(df: Frame, name: String) -> Frame
 
 ```chelis
 -- Per-column NaN operations on float columns
-def is_nan(col: tensor[n, f32]) -> tensor[n, bool]
-def fill_nan(col: tensor[n, f32], value: f32) -> tensor[n, f32]
+def is_nan[n](col: tensor[n, f32]) -> tensor[n, bool]
+def fill_nan[n](col: tensor[n, f32], value: f32) -> tensor[n, f32]
 def drop_nan(df: Frame, col_name: String) -> Frame     -- drops rows where col is NaN
-def any_nan(col: tensor[n, f32]) -> bool
-def count_nan(col: tensor[n, f32]) -> int64
+def any_nan[n](col: tensor[n, f32]) -> bool
+def count_nan[n](col: tensor[n, f32]) -> i64
 ```
 
 **Concatenation:**
@@ -263,14 +263,14 @@ These are structural transformations that rearrange data without computation. Im
 
 ```chelis
 -- Rolling window operations on float columns
-def rolling_mean(col: tensor[n, f32], window: int64) -> tensor[n, f32]
-def rolling_sum(col: tensor[n, f32], window: int64) -> tensor[n, f32]
-def rolling_std(col: tensor[n, f32], window: int64) -> tensor[n, f32]
-def rolling_min(col: tensor[n, f32], window: int64) -> tensor[n, f32]
-def rolling_max(col: tensor[n, f32], window: int64) -> tensor[n, f32]
+def rolling_mean[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_sum[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_std[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_min[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
+def rolling_max[n](col: tensor[n, f32], window: i64) -> tensor[n, f32]
 
 -- Exponentially weighted moving average
-def ewm(col: tensor[n, f32], alpha: f32) -> tensor[n, f32]
+def ewm[n](col: tensor[n, f32], alpha: f32) -> tensor[n, f32]
 ```
 
 **Implementation:**
@@ -455,11 +455,11 @@ Chelis doesn't have algebraic data types (ADTs) with pattern matching on variant
 -- A Frame stores each column type in a separate dict
 type Frame = {
   float_cols: Dict[String, tensor[n, f32]],
-  int_cols: Dict[String, tensor[n, int64]],
+  int_cols: Dict[String, tensor[n, i64]],
   string_cols: Dict[String, List[String]],
   bool_cols: Dict[String, tensor[n, bool]],
   col_order: List[String],     -- preserves insertion order
-  nrows: int64
+  nrows: i64
 }
 ```
 
@@ -467,16 +467,16 @@ This is the pragmatic approach. Column access dispatches on which dict the name 
 
 **Option C: Chelis-level ADT if supported.**
 
-Check whether v0.1.7 supports `type Column = IntCol(tensor[n, int64]) | FloatCol(tensor[n, f32]) | ...` with pattern matching. If yes, use it. If not, use Option B.
+Check whether v0.1.7 supports `type Column = IntCol(tensor[n, i64]) | FloatCol(tensor[n, f32]) | ...` with pattern matching. If yes, use it. If not, use Option B.
 
 **Decision: verify at implementation start.** Write a 5-line probe program with a sum type and pattern match. If it compiles on v0.1.7, use Option C. Otherwise, Option B. Document the choice.
 
 ### Filter Implementation
 
 ```chelis
-def filter(df: Frame, mask: tensor[n, bool]) -> Frame = {
+def filter[n](df: Frame, mask: tensor[n, bool]) -> Frame = {
   -- Convert boolean mask to indices
-  indices = where_indices(mask)    -- tensor[k, int64] where k = count(mask == true)
+  indices = where_indices(mask)    -- tensor[k, i64] where k = count(mask == true)
 
   -- Gather each tensor column
   new_float_cols = map_dict(df.float_cols, fn(name, col) ->
@@ -506,7 +506,7 @@ def group_by(df: Frame, key_col: String) -> GroupedFrame = {
   key = get_col(df, key_col)               -- could be any type
   perm = argsort(key, 0)                    -- sort indices
   sorted_df = reindex_all(df, perm)         -- gather all columns by perm
-  boundaries = detect_group_boundaries(sorted_df, key_col)  -- List[int64]
+  boundaries = detect_group_boundaries(sorted_df, key_col)  -- List[i64]
   GroupedFrame(sorted_df, boundaries, key_col)
 }
 
@@ -526,7 +526,7 @@ def agg_sum(gf: GroupedFrame, col: String) -> Frame = {
 ### Rolling Window Implementation
 
 ```chelis
-def rolling_sum(col: tensor[n, f32], window: int64) -> tensor[n, f32] = {
+def rolling_sum[n](col: tensor[n, f32], window: i64) -> tensor[n, f32] = {
   cs = cumsum(col, 0)
   -- result[i] = cs[i] - cs[i - window]  for i >= window
   -- result[i] = NaN                       for i < window
@@ -537,7 +537,7 @@ def rolling_sum(col: tensor[n, f32], window: int64) -> tensor[n, f32] = {
   where(mask, result, nan_tensor(n))
 }
 
-def rolling_mean(col: tensor[n, f32], window: int64) -> tensor[n, f32] =
+def rolling_mean[n](col: tensor[n, f32], window: i64) -> tensor[n, f32] =
   div(rolling_sum(col, window), cast(window, f32))
 ```
 
@@ -718,7 +718,7 @@ No upstream blockers for Phase A. Everything Coral needs for the core DataFrame,
 |---|---|---|
 | **Chelis may lack sum type / pattern matching for Column representation** | Forces the parallel-dicts approach (Option B), which is less elegant | Probe at implementation start. Either approach works. |
 | **Dict operations may be slow for column access** | Every column access is a dict lookup by string key | Acceptable for the frame sizes ML targets. Profile later if needed. |
-| **`gather` on boolean tensors may not work in v0.1.7** | Filter implementation depends on gathering bool columns | Test immediately. If broken, cast bool→int64→gather→int64→bool. |
+| **`gather` on boolean tensors may not work in v0.1.7** | Filter implementation depends on gathering bool columns | Test immediately. If broken, cast bool→i64→gather→i64→bool. |
 | **Parquet integration requires upstream runtime change** | Phase B is blocked until chelis ships parquet2 | Phase A is complete without Parquet. CSV/JSON cover the immediate need. |
 | **GroupBy segmented operations may need a primitive not in v0.1.7** | Segmented sum/mean may not compose cleanly from existing ops | Fall back to fold over group boundaries (slower but correct). |
 | **String column operations are limited** | No regex, no str.contains, no str.split beyond basic List ops | Document as a known limitation. Not the performance-critical path. |
@@ -734,7 +734,7 @@ No upstream blockers for Phase A. Everything Coral needs for the core DataFrame,
 
 3. **Can Chelis `Dict` hold values of different types?** `Dict[String, Column]` where Column is a sum type — does this unify? If not, the parallel-dicts approach is the only option.
 
-4. **What does `where_indices(mask)` look like in Chelis?** The filter implementation needs "indices where mask is true." Is there a builtin, or do we build it from `cumsum(cast(mask, int64))` + `gather`?
+4. **What does `where_indices(mask)` look like in Chelis?** The filter implementation needs "indices where mask is true." Is there a builtin, or do we build it from `cumsum(cast(mask, i64))` + `gather`?
 
 5. **How does `Std.Io.Csv` represent parsed data?** Does it return `List[List[String]]` (rows of cells), or something typed? The CSV→Frame bridge layer depends on the answer.
 

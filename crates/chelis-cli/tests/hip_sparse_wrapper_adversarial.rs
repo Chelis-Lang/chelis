@@ -84,12 +84,12 @@ fn try_build_to_hip(source: &str, name: &str) -> (bool, Option<String>, Option<S
 
 #[test]
 fn hip_gather_behind_let_block_binding_emits_kernel_gather_i64() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = {\n\
                   rows = gather(table, indices, 0)\n\
                   rows\n\
                   }\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = my_g(table, indices)\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_gather_let_binding");
     assert!(
@@ -131,10 +131,10 @@ fn hip_gather_behind_let_block_binding_emits_kernel_gather_i64() {
 
 #[test]
 fn hip_gather_followed_by_add_in_wrapper_still_emits_kernel_gather_i64() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   add(gather(table, indices, 0), zero)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64], \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64], \
                   zero: tensor[64, 128, f32]) -> tensor[64, 128, f32] = \
                   my_g(table, indices, zero)\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_gather_then_add");
@@ -162,13 +162,13 @@ fn hip_gather_followed_by_add_in_wrapper_still_emits_kernel_gather_i64() {
 
 #[test]
 fn hip_gather_three_level_nested_wrapper_emits_kernel_gather_i64() {
-    let source = "def inner_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def inner_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def mid_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def mid_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = inner_g(table, indices)\n\
-                  def outer_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def outer_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = mid_g(table, indices)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = outer_g(table, indices)\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_gather_3level_nested");
     assert!(
@@ -186,8 +186,8 @@ fn hip_gather_three_level_nested_wrapper_emits_kernel_gather_i64() {
 // =========================================================================
 // Adversarial 4: indices are a derived expression at the callsite.
 //
-// Pass `cast(raw_indices, int64)` as the wrapper's indices argument.
-// The wrapper itself takes a direct `tensor[64, int64]` parameter, but
+// Pass `cast(raw_indices, i64)` as the wrapper's indices argument.
+// The wrapper itself takes a direct `tensor[64, i64]` parameter, but
 // the CALLSITE constructs the value via a Cast.
 //
 // FINDING (W7): the HIP build LOUDLY REJECTS this with a structured
@@ -211,10 +211,10 @@ fn hip_gather_three_level_nested_wrapper_emits_kernel_gather_i64() {
 
 #[test]
 fn hip_gather_wrapper_with_cast_callsite_indices_loud_failure_or_kernel() {
-    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, int64]) \
+    let source = "def my_g(table: tensor[1000, 128, f32], indices: tensor[64, i64]) \
                   -> tensor[64, 128, f32] = gather(table, indices, 0)\n\
-                  def f(table: tensor[1000, 128, f32], indices: tensor[64, int32]) \
-                  -> tensor[64, 128, f32] = my_g(table, cast(indices, int64))\n";
+                  def f(table: tensor[1000, 128, f32], indices: tensor[64, i32]) \
+                  -> tensor[64, 128, f32] = my_g(table, cast(indices, i64))\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_gather_cast_indices");
     if !ok {
         // Loud failure path — the contract is satisfied. (We don't
@@ -241,12 +241,12 @@ fn hip_gather_wrapper_with_cast_callsite_indices_loud_failure_or_kernel() {
 
 #[test]
 fn hip_scatter_replace_behind_let_block_emits_kernel_scatter_replace_i32() {
-    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def my_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = {\n\
                   out = scatter_replace(table, indices, updates, 0)\n\
                   out\n\
                   }\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   my_sr(table, indices, updates)\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_scatter_replace_let_block");
@@ -268,16 +268,16 @@ fn hip_scatter_replace_behind_let_block_emits_kernel_scatter_replace_i32() {
 
 #[test]
 fn hip_scatter_replace_three_level_nested_emits_kernel_scatter_replace_i32() {
-    let source = "def inner_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+    let source = "def inner_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   scatter_replace(table, indices, updates, 0)\n\
-                  def mid_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def mid_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   inner_sr(table, indices, updates)\n\
-                  def outer_sr(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def outer_sr(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   mid_sr(table, indices, updates)\n\
-                  def f(table: tensor[3, 2, f32], indices: tensor[4, int32], \
+                  def f(table: tensor[3, 2, f32], indices: tensor[4, i32], \
                   updates: tensor[4, 2, f32]) -> tensor[3, 2, f32] = \
                   outer_sr(table, indices, updates)\n";
     let (ok, hip_src, c_src) = try_build_to_hip(source, "hip_scatter_replace_3level");

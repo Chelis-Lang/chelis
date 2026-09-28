@@ -10,8 +10,8 @@
 //! rejection.
 //!
 //! Prerequisites (this workstation): a populated local reef registry
-//! (`~/.chelis/reef`) containing `chelis-std 0.4.0`, `uv`, `py/.venv`, and a
-//! built `libchelis_runtime.a` discoverable via `CHELIS_RUNTIME_DIR`. No
+//! (`~/.chelis/reef`) containing `chelis-std 0.4.0`, `uv`, `py/.venv`, a C
+//! toolchain, and `DYLD_LIBRARY_PATH` set to the Python lib directory. No
 //! installed toolchain or `CHELIS_TOOLCHAIN` is involved: the bindings embed
 //! the DEV compiler in-process, and the temp project pins the workspace
 //! version (see `CHELIS_ORACLE_COMPILER_PIN` below); the registry is the only
@@ -21,10 +21,9 @@
 //! takes tens of seconds):
 //!
 //! ```sh
-//! # bindings installed into py/.venv, runtime staticlib on CHELIS_RUNTIME_DIR
-//! cargo build -p chelis-runtime --target-dir target/agents/<name>
-//! export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"
+//! # bindings installed into py/.venv; the extension carries its runtime
 //! export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+//! unset CHELIS_RUNTIME_DIR
 //! cargo test -p chelis-python --test manual_reef_context -- --ignored
 //! ```
 //!
@@ -37,11 +36,13 @@
 //! "All reef-context acceptance checks passed."
 //!
 //! NOTE (Shoals — chelis#825): the plan's original acceptance imported
-//! `Shoals.Pricing` (Black-Scholes → 10.4506). On this branch the post-0.16.1
-//! compiler tightened the `with seed(...)` int64 rule, which the published
-//! Shoals 0.23.1 dependency graph (built for the `=0.16.1` toolchain) trips
-//! during library-context compilation — reproducible with the branch's own CLI
-//! (`chelis eval --file`), independent of these bindings. Tracked as chelis#825
+//! `Shoals.Pricing` (Black-Scholes → 10.4506). The post-0.16.1 compiler
+//! tightened the `with seed(...)` i64 rule, and the explicit-key switch
+//! (chelis#2413) retired `with seed` altogether (a typed parse error); the
+//! published Shoals 0.23.1 dependency graph (built for the `=0.16.1`
+//! toolchain) uses that surface and fails library-context compilation —
+//! reproducible with the branch's own CLI (`chelis eval --file`), independent
+//! of these bindings. Tracked as chelis#825
 //! (the ecosystem-drift canary checks Shoals `main`, not the published 0.23.1
 //! artifact). The acceptance therefore uses `chelis-std` + a sibling module,
 //! which is dev-compiler-clean and exercises the identical resolution
@@ -52,7 +53,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-#[ignore = "manual acceptance gate (#816): needs the 0.16.1 toolchain + reef registry, uv, and CHELIS_RUNTIME_DIR (libchelis_runtime.a); builds a temp reef project (tens of seconds)"]
+#[ignore = "manual acceptance gate (#816): needs a populated local reef registry, uv, py/.venv, the Python lib directory, and a C toolchain; builds a temp reef project (tens of seconds)"]
 fn reef_context_manual_acceptance_oracle() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let python = repo_root.join("py/.venv/bin/python");

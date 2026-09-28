@@ -13,6 +13,7 @@
 //! - a non-current `WireDag` is REJECTED at the producer boundary, not silently
 //!   hashed (the negative twin for the cross-process consume gate).
 
+use chelis_compiler_api::schema::numbers::NonnegativeExtent;
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{
@@ -58,6 +59,43 @@ fn expected_sha256_hex(bytes: &[u8]) -> String {
 // ===========================================================================
 // Positive: a real source produces a populated, name-addressed goal.
 // ===========================================================================
+
+#[test]
+fn result_claim_dependencies_remain_outside_the_scalar_proof_envelope() {
+    use chelis_compiler_api::schema::{WireExtentWitnessSite, WireRtAxis};
+    let mut dag = single_op_dag(WireRiscOp::Load { name: "x".into() });
+    let mut witness = dag.nodes[0].clone();
+    witness.id = 1;
+    witness.op = WireRiscOp::ExtentWitness {
+        site: WireExtentWitnessSite::Caller,
+        parameter: "x".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+        requirements: vec![],
+        claims: vec![],
+    };
+    witness.inputs = vec![0];
+    witness.output_type = WireTensorType {
+        dims: vec![],
+        precision: "int64".into(),
+    };
+    dag.nodes.push(witness.clone());
+    witness.id = 2;
+    witness.shape_deps = vec![1];
+    let WireRiscOp::ExtentWitness { site, .. } = &mut witness.op else {
+        unreachable!()
+    };
+    *site = WireExtentWitnessSite::ResultClaim {
+        claim: "n".into(),
+        axis: WireRtAxis::Lit { value: 0 },
+    };
+    dag.nodes.push(witness);
+    dag.roots = vec![2];
+    dag.validate_wire_contract()
+        .expect("current transport admits the exact discrete obligation");
+    let error = scalar_root_closure(&dag, 2)
+        .expect_err("a discrete obligation has no float proof encoding");
+    assert!(error.contains("no shape dependencies"), "{error}");
+}
 
 #[test]
 fn real_source_yields_box_range_goal_with_populated_handle() {
@@ -112,11 +150,11 @@ fn real_source_yields_box_range_goal_with_populated_handle() {
     // The root index is NAME-resolved: it is the `out` root of the parsed
     // DAG, not a positional guess. `out` indexes a real root.
     assert!(
-        (root_index as usize) < parsed.nodes.len(),
+        usize::try_from(root_index).unwrap() < parsed.nodes.len(),
         "root index addresses a node in the DAG"
     );
     assert!(
-        parsed.roots.contains(&(root_index as usize)),
+        parsed.roots.contains(&root_index),
         "the resolved index is one of the DAG's roots"
     );
 }
@@ -246,14 +284,22 @@ fn lowering_is_deterministic_within_run() {
 fn future_version_wire_dag() -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION + 1,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
+            declaration: 0,
+            activation: None,
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op: WireRiscOp::Load {
                 name: "x".to_string(),
             },
             inputs: vec![],
             output_type: WireTensorType {
-                dims: vec![WireDimInfo::Lit { size: 1 }],
+                dims: vec![WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(1).unwrap(),
+                }],
                 precision: "f32".to_string(),
             },
         }],
@@ -264,7 +310,7 @@ fn future_version_wire_dag() -> WireDag {
 #[test]
 fn non_current_wire_dag_is_rejected_at_the_producer_boundary() {
     let mut named_roots = BTreeMap::new();
-    named_roots.insert("out".to_string(), 0usize);
+    named_roots.insert("out".to_string(), 0_u64);
     let err = box_range_goal_from_wire_dag(
         &future_version_wire_dag(),
         &named_roots,
@@ -283,17 +329,25 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     // The positive twin of the boundary check: a supported-version DAG is
     // hashed and produces a populated goal.
     let mut named_roots = BTreeMap::new();
-    named_roots.insert("out".to_string(), 0usize);
+    named_roots.insert("out".to_string(), 0_u64);
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![WireDagNode {
+            declaration: 0,
+            activation: None,
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op: WireRiscOp::Load {
                 name: "x".to_string(),
             },
             inputs: vec![],
             output_type: WireTensorType {
-                dims: vec![WireDimInfo::Lit { size: 1 }],
+                dims: vec![WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(1).unwrap(),
+                }],
                 precision: "f32".to_string(),
             },
         }],
@@ -311,24 +365,105 @@ fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
 }
 
 #[test]
-fn invalid_exact_v6_count_is_rejected_without_panicking() {
-    let mut named_roots = BTreeMap::new();
-    named_roots.insert("out".to_string(), 1usize);
+fn named_output_references_must_select_nodes_in_the_enclosed_dag() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
         nodes: vec![
             WireDagNode {
+                declaration: 0,
+                activation: None,
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+                id: 0,
+                op: WireRiscOp::Load { name: "x".into() },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "f32".into(),
+                },
+            },
+            WireDagNode {
+                declaration: 0,
+                activation: None,
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
+                id: 1,
+                op: WireRiscOp::Copy,
+                inputs: vec![0],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "f32".into(),
+                },
+            },
+        ],
+        roots: vec![1],
+    };
+    let extract = |named| {
+        box_range_goal_from_wire_dag(
+            &dag,
+            &named,
+            input_box(&[("x", -1.0, 1.0)]),
+            output_range("out", -1.0, 1.0),
+        )
+    };
+    for valid in [0_u64, 1] {
+        assert_eq!(
+            extract(BTreeMap::from([("out".into(), valid)]))
+                .unwrap()
+                .goal
+                .ir
+                .root_index(),
+            Some(valid)
+        );
+    }
+    for invalid in [2, u64::MAX] {
+        let error = extract(BTreeMap::from([("out".into(), invalid)]))
+            .expect_err("out-of-bounds reference");
+        assert!(error.to_string().contains("owning WireDag"), "{error}");
+        let error = extract(BTreeMap::from([
+            ("out".into(), 1),
+            ("unused".into(), invalid),
+        ]))
+        .expect_err("every named reference belongs to this DAG");
+        assert!(error.to_string().contains("unused"), "{error}");
+    }
+}
+
+#[test]
+fn invalid_exact_v6_count_is_rejected_without_panicking() {
+    let mut named_roots = BTreeMap::new();
+    named_roots.insert("out".to_string(), 1_u64);
+    let dag = WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        declarations: vec!["entry".to_owned()],
+        nodes: vec![
+            WireDagNode {
+                declaration: 0,
+                activation: None,
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 0,
                 op: WireRiscOp::Load {
                     name: "x".to_string(),
                 },
                 inputs: vec![],
                 output_type: WireTensorType {
-                    dims: vec![WireDimInfo::Lit { size: 4 }],
+                    dims: vec![WireDimInfo::Lit {
+                        size: NonnegativeExtent::new(4).unwrap(),
+                    }],
                     precision: "f32".to_string(),
                 },
             },
             WireDagNode {
+                declaration: 0,
+                activation: None,
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 1,
                 op: WireRiscOp::Count { axes: vec![0] },
                 inputs: vec![0],
@@ -350,6 +485,11 @@ fn invalid_exact_v6_count_is_rejected_without_panicking() {
     assert!(
         matches!(err, GraphExtractError::WireContractRejected(_)),
         "expected a typed wire-contract rejection, got {err:?}"
+    );
+    assert!(
+        err.to_string()
+            .contains("input dtype must be bool, found f32"),
+        "the interchange dtype must validate before the intended Count rejection: {err}"
     );
 }
 
@@ -415,36 +555,71 @@ fn unlowerable_source_surfaces_a_lower_failure() {
 }
 
 // ===========================================================================
-// Non-finite float guard (the critical silent-corruption fix).
-//
-// serde_json serializes a non-finite f64 (NaN / +inf / -inf) as `null`,
-// which would (a) produce a self-consistent hash over bytes a consumer
-// cannot parse back as a WireDag, and (b) collapse +inf / -inf / NaN to one
-// hash. The producer must REJECT such a DAG at the boundary, before hashing.
+// BoxRange retains finite-only proof support independently of the exact wire
+// codec's ability to transport every stored nonfinite bit pattern.
 // ===========================================================================
 
-/// A single-node exact-version `WireDag` v6 carrying `op`, rooted at node 0, output `out`.
+/// A graph with the operands and output dtype required by the tested operation.
 fn single_op_dag(op: WireRiscOp) -> WireDag {
+    let precision = match &op {
+        WireRiscOp::Const { value } => value.prim(),
+        WireRiscOp::ConstTensor { data } => data.prim(),
+        WireRiscOp::Pad { fill, .. } => fill.prim(),
+        _ => chelis_types::types::Prim::F32,
+    };
+    let size = match &op {
+        WireRiscOp::ConstTensor { data } => i64::try_from(data.len()).unwrap(),
+        _ => 1,
+    };
+    let output_type = WireTensorType {
+        dims: vec![WireDimInfo::Lit {
+            size: NonnegativeExtent::new(size).unwrap(),
+        }],
+        precision: precision.interchange_name().into(),
+    };
+    let mut nodes = Vec::new();
+    let inputs = if matches!(op, WireRiscOp::Pad { .. }) {
+        nodes.push(WireDagNode {
+            declaration: 0,
+            activation: None,
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
+            id: 0,
+            op: WireRiscOp::Load { name: "x".into() },
+            inputs: vec![],
+            output_type: output_type.clone(),
+        });
+        vec![0]
+    } else {
+        vec![]
+    };
+    let root = u64::try_from(nodes.len()).unwrap();
+    nodes.push(WireDagNode {
+        declaration: 0,
+        activation: None,
+        shape_deps: vec![],
+        span_id: None,
+        merged_spans: vec![],
+        id: root,
+        op,
+        inputs,
+        output_type,
+    });
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
-        nodes: vec![WireDagNode {
-            id: 0,
-            op,
-            inputs: vec![],
-            output_type: WireTensorType {
-                dims: vec![WireDimInfo::Lit { size: 1 }],
-                precision: "f32".to_string(),
-            },
-        }],
-        roots: vec![0],
+        declarations: vec!["entry".to_owned()],
+        nodes,
+        roots: vec![root],
     }
 }
 
 fn extract_single_op(op: WireRiscOp) -> Result<ExtractedGoal, GraphExtractError> {
     let mut named_roots = BTreeMap::new();
-    named_roots.insert("out".to_string(), 0usize);
+    let dag = single_op_dag(op);
+    named_roots.insert("out".to_string(), dag.roots[0]);
     box_range_goal_from_wire_dag(
-        &single_op_dag(op),
+        &dag,
         &named_roots,
         input_box(&[("x", -1.0, 1.0)]),
         output_range("out", 0.0, 1.0),
@@ -515,14 +690,16 @@ fn finite_extreme_const_from_real_source_still_passes_and_hashes() {
 
 #[test]
 fn each_non_finite_const_variant_is_rejected() {
-    // +inf, -inf, and NaN would all serialize to the same `null` (the
-    // collision). Each must be rejected so the collision is never reachable.
+    // The wire admits all three classes exactly; BoxRange rejects them.
     for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-        let err = extract_single_op(WireRiscOp::Const {
+        let op = WireRiscOp::Const {
             value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, value)
                 .expect("float finalize is total"),
-        })
-        .expect_err("a non-finite Const must be rejected");
+        };
+        let bytes = serde_json::to_vec(&single_op_dag(op.clone())).unwrap();
+        let decoded: WireDag = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+        let err = extract_single_op(op).expect_err("a non-finite Const must be rejected");
         match err {
             GraphExtractError::NonFiniteValue { node, field } => {
                 assert_eq!(node, 0);
@@ -534,38 +711,20 @@ fn each_non_finite_const_variant_is_rejected() {
 }
 
 #[test]
-fn every_f64_bearing_op_field_is_guarded() {
-    // EXHAUSTIVE over the f64-bearing WireRiscOp variants: each f64 field,
-    // when non-finite, must be rejected and must NAME the offending field.
-    // This is the systemic lock -- if a new op adds an f64 field, the
-    // production match (no wildcard) stops compiling AND this list must grow.
+fn every_embedded_numeric_field_is_guarded() {
+    // Keep the private finite-proof guard exhaustive; the public boundary
+    // rejects invalid Random parameters earlier in WireDag admission.
     let cases: Vec<(WireRiscOp, &str)> = vec![
         (
-            WireRiscOp::UniformLike {
-                low: f64::NAN,
-                high: 1.0,
-                seed: 0,
-            },
-            "low",
-        ),
-        (
-            WireRiscOp::UniformLike {
-                low: 0.0,
-                high: f64::INFINITY,
-                seed: 0,
-            },
-            "high",
-        ),
-        (
-            WireRiscOp::Dropout {
-                rate: f64::NEG_INFINITY,
-                seed: 0,
-            },
-            "rate",
-        ),
-        (
             WireRiscOp::Pad {
-                padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
+                padding: vec![(
+                    WireRtDim::Lit {
+                        value: NonnegativeExtent::new(0).unwrap(),
+                    },
+                    WireRtDim::Lit {
+                        value: NonnegativeExtent::new(0).unwrap(),
+                    },
+                )],
                 fill: chelis_types::scalar_from_f64(
                     "test",
                     chelis_types::types::Prim::F32,
@@ -586,22 +745,26 @@ fn every_f64_bearing_op_field_is_guarded() {
             },
             "value",
         ),
+        (
+            WireRiscOp::ConstTensor {
+                data: serde_json::from_value(
+                    serde_json::json!({"dtype":"f32","bits":["3f800000","7fc00001"]}),
+                )
+                .unwrap(),
+            },
+            "data",
+        ),
     ];
 
-    // Pin the count so a future f64 field cannot silently shrink this list.
-    assert_eq!(
-        cases.len(),
-        5,
-        "5 f64-bearing op fields: UniformLike.low, UniformLike.high, \
-         Dropout.rate, Pad.fill, Const.value. Update this test AND the \
-         production guard if a new op carries an f64."
-    );
+    // Pin the field set so an existing payload cannot silently disappear.
+    assert_eq!(cases.len(), 3, "Pad.fill, Const.value and ConstTensor.data");
 
     for (op, expected_field) in cases {
-        let err = extract_single_op(op).expect_err("a non-finite op field must be rejected");
+        let dag = single_op_dag(op.clone());
+        let err = check_finite_floats(&dag).expect_err("private finite-proof guard");
         match err {
             GraphExtractError::NonFiniteValue { node, field } => {
-                assert_eq!(node, 0);
+                assert_eq!(node, dag.nodes.len() - 1);
                 assert_eq!(
                     field, expected_field,
                     "the rejection must name the offending field"
@@ -609,29 +772,41 @@ fn every_f64_bearing_op_field_is_guarded() {
             }
             other => panic!("expected NonFiniteValue naming `{expected_field}`, got {other:?}"),
         }
+        let error = extract_single_op(op.clone()).expect_err("public proof boundary");
+        assert!(
+            matches!(error, GraphExtractError::NonFiniteValue { .. }),
+            "{error}"
+        );
     }
 }
 
 #[test]
-fn finite_f64_bearing_ops_pass_the_finite_guard() {
+fn finite_numeric_payloads_pass_the_proof_boundary() {
     // The positive twin: the same op variants with FINITE floats pass the
     // guard (they are rejected later only if some other check fails, but the
     // finite guard itself must not reject them).
     let finite_ops = [
-        WireRiscOp::UniformLike {
-            low: -1.0,
-            high: 1.0,
-            seed: 0,
-        },
-        WireRiscOp::Dropout { rate: 0.5, seed: 0 },
         WireRiscOp::Pad {
-            padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
+            padding: vec![(
+                WireRtDim::Lit {
+                    value: NonnegativeExtent::new(0).unwrap(),
+                },
+                WireRtDim::Lit {
+                    value: NonnegativeExtent::new(0).unwrap(),
+                },
+            )],
             fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, 0.0)
                 .expect("finite f32"),
         },
         WireRiscOp::Const {
             value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)
                 .expect("finite f64"),
+        },
+        WireRiscOp::ConstTensor {
+            data: serde_json::from_value(
+                serde_json::json!({"dtype":"int64","values":[9007199254740993_i64]}),
+            )
+            .unwrap(),
         },
     ];
     for op in finite_ops {
@@ -752,11 +927,11 @@ fn entry_scoped_extraction_prunes_the_unrelated_fn_and_yields_a_populated_goal()
         .validate_schema_version()
         .expect("the produced artifact is a supported version");
     assert!(
-        (root_index as usize) < parsed.nodes.len(),
+        usize::try_from(root_index).unwrap() < parsed.nodes.len(),
         "the root index addresses a node in the DAG"
     );
     assert!(
-        parsed.roots.contains(&(root_index as usize)),
+        parsed.roots.contains(&root_index),
         "the resolved index is one of the DAG's roots"
     );
 }
@@ -818,7 +993,7 @@ fn tensor_entry_is_a_wire_dag_root_for_issue_506_positive_control() {
         "the tensor entry should produce exactly one root"
     );
     assert!(
-        parsed.roots.contains(&(root_index as usize)),
+        parsed.roots.contains(&root_index),
         "the name-resolved root index must address the WireDag root list"
     );
 }

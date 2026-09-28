@@ -14,6 +14,7 @@ crate-type = ["staticlib", "rlib"]
 ownership-ledger = ["dep:chelis-unord"]
 
 [dependencies]
+chelis-abi.workspace = true
 chelis-unord = { workspace = true, optional = true }
 chelis-vocab.workspace = true
 # chelis#732 Phase 2: exact f16/bf16 widening and correctly rounded
@@ -24,6 +25,11 @@ half = { workspace = true }
 libc.workspace = true
 memmap2 = "0.9"
 num-bigint = "0.4"
+
+[build-dependencies]
+# build.rs records a SHA-256 of each declared source input, which development
+# compilers check before staging this runtime (spec/08-backends.md §2.1).
+sha2 = "0.10"
 
 [dev-dependencies]
 # Test-only: the byte-equality lock against the reference renderer

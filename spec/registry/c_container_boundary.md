@@ -8,6 +8,10 @@ identity; row order is not semantic and no ordinal is part of any identity.
 
 | callable | exact C signature |
 |---|---|
+| length-aware string construction | `chelis_string chelis_string_from_utf8(const uint8_t *value, int64_t len)` |
+| character code | `int64_t chelis_char_code(chelis_string value)` |
+| character from code | `chelis_string chelis_char_from_code(int64_t value)` |
+| string print | `void chelis_print_string(chelis_string value)` |
 | string length | `int64_t chelis_string_len(chelis_string value)` |
 | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
 | list length | `int64_t chelis_list_len(const chelis_list *list)` |

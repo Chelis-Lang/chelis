@@ -1,9 +1,14 @@
 #![forbid(unsafe_code)]
 
 pub(crate) mod cache_envelope;
+pub mod check_report;
+#[cfg(feature = "compilation-trace")]
+pub mod compilation_trace;
 pub mod compiler;
 pub mod context;
 pub mod decode;
+#[cfg(feature = "emission-observer")]
+pub mod emission_observer;
 pub mod fragment;
 pub mod layered;
 pub mod library_cache;
@@ -11,15 +16,20 @@ pub mod pipeline;
 pub mod prune;
 pub(crate) mod runtime;
 pub mod schema;
+mod source_wire;
 pub mod stdlib_cache;
 pub mod target_capability;
+mod transcript_capture;
+pub use transcript_capture::{
+    TranscriptCapture, TranscriptCaptureGuard, install_transcript_capture,
+};
 
 #[cfg(test)]
 mod source_arch;
 
 /// Re-export of reef package-root discovery so callers (e.g. the Python
 /// bindings' `compile_and_load` auto-discovery) can resolve the enclosing
-/// reef project without depending on `chelis-reef` directly. See issue #816.
+/// reef project through the compiler API. See issue #816.
 pub use chelis_reef::{find_package_root_for_dir, find_package_root_for_input};
 /// Cooperative cancellation for long-running evaluation (chelis#914).
 /// Install a token on the thread that will run the eval, hand a clone to
@@ -37,8 +47,9 @@ pub use compiler::{
 };
 pub use compiler::{add_function, replace_function_body};
 pub use context::{
-    CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, compile_reef_context,
-    load_or_compile_for_package, load_or_compile_with_local_registry_fallback,
+    CacheError, CacheIdentity, CompiledContext, ContextHash, ContextLoadPath, HandoffDigest,
+    compile_reef_context, compile_reef_context_for_entries, load_or_compile_for_package,
+    load_or_compile_with_local_registry_fallback,
 };
 /// Experimental decode chokepoint for opaque-type invariant revalidation
 /// (RFC `opaque_invariants_rfc.md` D-DECODE). No production codec consumes

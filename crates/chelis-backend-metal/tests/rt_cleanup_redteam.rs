@@ -28,13 +28,16 @@ fn vec_prec(n: usize, prec: Prim) -> TensorType {
 
 fn build_const_root_dag(prec: Prim, value: f64) -> Dag {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let c = dag.add_node(
+        decl,
         RiscOp::synth_const(prec, value),
         vec![],
         vec_prec(4, prec),
         None,
     );
     let stored = dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![c],
         vec_prec(4, prec),
@@ -146,7 +149,11 @@ fn rt_metal_host_sizeof_and_const_fill_agree_on_host_safe_types() {
             sz, expect_sizeof,
             "{prec:?}: host_sizeof_expr returned `{sz}`, expected `{expect_sizeof}`"
         );
-        let body = dtype::host_const_fill_body(prec, 1.0, "buf_0", 4);
+        let body = dtype::host_const_fill_body(
+            chelis_types::dtype_semantics::scalar_from_f64("test", prec, 1.0).unwrap(),
+            "buf_0",
+            4,
+        );
         assert!(
             body.contains(expect_ptr),
             "{prec:?}: host_const_fill_body must use `{expect_ptr}` host-safe pointer cast; got: {body}"
@@ -175,7 +182,11 @@ fn rt_metal_const_f16_bf16_pathological_values_emit_correct_bit_pattern() {
         (Prim::Bf16, bf16_min, 0x0080_u16),
     ];
     for (prec, value, expected_bits) in cases {
-        let body = dtype::host_const_fill_body(prec, value, "buf", 4);
+        let body = dtype::host_const_fill_body(
+            chelis_types::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
+            "buf",
+            4,
+        );
         let needle = format!("0x{expected_bits:04X}u");
         assert!(
             body.contains(&needle),
@@ -192,7 +203,11 @@ fn rt_metal_const_f16_bf16_pathological_values_emit_correct_bit_pattern() {
 /// `{value:?}f` shape (byte-for-byte unchanged).
 #[test]
 fn rt_metal_emit_const_f32_nan_does_not_emit_invalid_c_literal_nanf() {
-    let body = dtype::host_const_fill_body(Prim::F32, f64::NAN, "buf", 4);
+    let body = dtype::host_const_fill_body(
+        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NAN).unwrap(),
+        "buf",
+        4,
+    );
     assert!(
         !body.contains("NaNf"),
         "F32 NaN must not emit the invalid C literal `NaNf`; got: {body}"
@@ -205,7 +220,11 @@ fn rt_metal_emit_const_f32_nan_does_not_emit_invalid_c_literal_nanf() {
 
 #[test]
 fn rt_metal_emit_const_f32_infinity_does_not_emit_invalid_c_literal_inff() {
-    let body = dtype::host_const_fill_body(Prim::F32, f64::INFINITY, "buf", 4);
+    let body = dtype::host_const_fill_body(
+        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::INFINITY).unwrap(),
+        "buf",
+        4,
+    );
     assert!(
         !body.contains("inff"),
         "F32 +inf must not emit the invalid C literal `inff`; got: {body}"
@@ -221,7 +240,12 @@ fn rt_metal_emit_const_f32_infinity_does_not_emit_invalid_c_literal_inff() {
 /// gets re-introduced via `{value:?}f` formatting.
 #[test]
 fn rt_metal_emit_const_f32_negative_infinity_emits_negated_infinity_macro() {
-    let body = dtype::host_const_fill_body(Prim::F32, f64::NEG_INFINITY, "buf", 4);
+    let body = dtype::host_const_fill_body(
+        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, f64::NEG_INFINITY)
+            .unwrap(),
+        "buf",
+        4,
+    );
     assert!(
         !body.contains("inff"),
         "F32 -inf must not emit the invalid C literal `-inff`; got: {body}"
@@ -250,7 +274,11 @@ fn rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal() {
         (Prim::Bf16, f64::NEG_INFINITY, 0xFF80),
     ];
     for (prec, value, expected_bits) in cases {
-        let body = dtype::host_const_fill_body(prec, value, "buf", 4);
+        let body = dtype::host_const_fill_body(
+            chelis_types::dtype_semantics::scalar_from_f64("test", prec, value).unwrap(),
+            "buf",
+            4,
+        );
         let needle = format!("0x{expected_bits:04X}u");
         assert!(
             body.contains(&needle),
@@ -266,7 +294,11 @@ fn rt_metal_emit_const_f16_bf16_nan_inf_emit_well_formed_integer_literal() {
 /// Finite values keep the byte-for-byte shape of the pre-fix emission.
 #[test]
 fn rt_metal_emit_const_f32_finite_value_keeps_typed_float_literal_form() {
-    let body = dtype::host_const_fill_body(Prim::F32, 2.5, "buf", 4);
+    let body = dtype::host_const_fill_body(
+        chelis_types::dtype_semantics::scalar_from_f64("test", Prim::F32, 2.5).unwrap(),
+        "buf",
+        4,
+    );
     assert!(
         body.contains("p[i] = 2.5f"),
         "F32 finite value must keep the `{{value:?}}f` form: got: {body}"

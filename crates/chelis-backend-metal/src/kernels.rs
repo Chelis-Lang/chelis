@@ -126,13 +126,39 @@ pub fn msl_type(prec: Prim) -> &'static str {
     dtype::msl_type(prec)
 }
 
+/// [05-OP-46] integer abs never passes through an MSL float intrinsic.
+/// MIN is tested before negation so even i64 cannot overflow. All failures
+/// have the same trap: the host consumes the status after the command ends.
+pub fn integer_abs_body(precision: Prim) -> String {
+    let minimum = match precision {
+        Prim::Int8 => "(-127 - 1)",
+        Prim::Int16 => "(-32767 - 1)",
+        Prim::Int32 => "(-2147483647 - 1)",
+        Prim::Int64 => "(-9223372036854775807L - 1L)",
+        _ => panic!("integer abs requires a signed integer dtype"),
+    };
+    let ty = dtype::msl_type(precision);
+    format!(
+        "    {ty} value = a[tid];
+    if (value == ({ty}){minimum}) {{
+        atomic_fetch_or_explicit(numeric_status, 1u, memory_order_relaxed);
+        out[tid] = ({ty})0;
+        return;
+    }}
+    out[tid] = value < ({ty})0 ? ({ty})-value : value;"
+    )
+}
+
 /// MSL spelling for a unary math intrinsic.
 ///
 /// Note: MSL's default `exp`/`log`/`sqrt`/`sin` are fast-math variants. M6
 /// will widen the Metal-specific f32 tolerance for transcendental-heavy
 /// kernels, and switch individual call sites to `precise::exp` etc. when
 /// numerical agreement requires it.
-pub fn unary_func(op: &chelis_ir::dag::RiscOp) -> Option<&'static str> {
+pub fn unary_func(op: &chelis_ir::dag::RiscOp, precision: Prim) -> Option<&'static str> {
+    if !precision.is_float() {
+        return None;
+    }
     use chelis_ir::dag::RiscOp;
     match op {
         RiscOp::Neg => Some("-"),
@@ -474,6 +500,207 @@ pub fn reduce_full_kernel(kernel_name: &str, kind: ReduceKind) -> String {
 /// identically. Pad/shrink encode `src_shape`, `out_shape`, and the
 /// per-axis offset vector as fixed-size arrays in the MSL uniform block.
 pub const MOVEMENT_MAX_DIM: usize = 8;
+
+/// Dedicated [05-OP-29] Count kernel.
+///
+/// The input is read as the exact one-byte `Bool8` carrier chelis#1308
+/// landed (`metal_elem_size(Bool) == 1`), spelled `uchar` rather than MSL
+/// `bool`: a `bool` load normalizes every nonzero byte to `true`, which would
+/// silently count a noncanonical byte instead of reporting it. The runtime's
+/// `chelis_tensor_end_write` already rejects such a byte at the host write
+/// boundary, so status code 1 is a backstop for a producer that bypasses the
+/// runtime, never the primary check. Each output thread enumerates leaves in
+/// original row-major order and evaluates the canonical adjacent-pair tree
+/// with a fixed-depth explicit stack. Status codes match the host emitter:
+/// 1 is a non-boolean payload, 2 is checked-i64 overflow, 3 is the stack
+/// hardware limit, and 4 is an invalid storage index.
+pub fn count_kernel(
+    kernel_name: &str,
+    axes: &[usize],
+    input_rank: usize,
+    bool_prec: Prim,
+) -> String {
+    assert_eq!(
+        bool_prec,
+        Prim::Bool,
+        "the Count kernel reads the Bool8 carrier and nothing else"
+    );
+    let bool_ty = "uchar";
+    let max_dim = MOVEMENT_MAX_DIM;
+    let mut selected = [0; MOVEMENT_MAX_DIM];
+    for &axis in axes {
+        selected[axis] = 1;
+    }
+    let selected_literal = selected
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        r#"#include <metal_stdlib>
+using namespace metal;
+
+struct ChelisCountDims {{
+    uint input_shape[{max_dim}];
+    uint input_strides[{max_dim}];
+    uint output_shape[{max_dim}];
+    uint input_ndim;
+    uint input_size;
+    uint output_ndim;
+    uint output_size;
+    ulong count_n;
+}};
+
+constant int __count_selected[{max_dim}] = {{ {selected_literal} }};
+
+static inline void chelis_count_record_error(device atomic_int* count_error, int code) {{
+    int expected = 0;
+    atomic_compare_exchange_weak_explicit(
+        count_error, &expected, code, memory_order_relaxed, memory_order_relaxed);
+}}
+
+static inline void chelis_count_flat_to_indices(
+    uint flat, constant uint* shape, uint ndim, thread uint* out) {{
+    for (uint axis = ndim; axis-- > 0; ) {{
+        out[axis] = flat % shape[axis];
+        flat /= shape[axis];
+    }}
+}}
+
+kernel void {kernel_name}(
+    device const {bool_ty}* input [[buffer(0)]],
+    device long* output [[buffer(1)]],
+    device atomic_int* count_error [[buffer(2)]],
+    constant ChelisCountDims& dims [[buffer(3)]],
+    uint out_flat [[thread_position_in_grid]]) {{
+    if (out_flat >= dims.output_size) return;
+    if (dims.input_ndim != {input_rank} || dims.input_ndim > {max_dim}) {{
+        chelis_count_record_error(count_error, 4);
+        return;
+    }}
+
+    uint __count_output_indices[{max_dim}] = {{ 0 }};
+    uint __count_full_indices[{max_dim}] = {{ 0 }};
+    chelis_count_flat_to_indices(
+        out_flat, dims.output_shape, dims.output_ndim, __count_output_indices);
+    uint __count_output_axis = 0;
+    for (uint __count_axis = 0; __count_axis < dims.input_ndim; ++__count_axis) {{
+        if (!__count_selected[__count_axis]) {{
+            __count_full_indices[__count_axis] =
+                __count_output_indices[__count_output_axis++];
+        }}
+    }}
+
+    array<long, 64> __count_frame_start;
+    array<long, 64> __count_frame_len;
+    array<uchar, 64> __count_frame_state;
+    array<long, 64> __count_frame_left;
+    int __count_sp = 0;
+    __count_frame_start[0] = 0;
+    __count_frame_len[0] = (long)dims.count_n;
+    __count_frame_state[0] = 0;
+    long __count_value = 0;
+    bool __count_have_value = false;
+
+    while (__count_sp >= 0) {{
+        if (__count_have_value) {{
+            if (__count_frame_state[__count_sp] == 1) {{
+                __count_frame_left[__count_sp] = __count_value;
+                __count_frame_state[__count_sp] = 2;
+                long __count_len = __count_frame_len[__count_sp];
+                ulong __count_split = 1;
+                while ((__count_split << 1) < (ulong)__count_len) __count_split <<= 1;
+                if (__count_sp == 63) {{
+                    chelis_count_record_error(count_error, 3);
+                    return;
+                }}
+                long __count_start = __count_frame_start[__count_sp];
+                ++__count_sp;
+                __count_frame_start[__count_sp] = __count_start + (long)__count_split;
+                __count_frame_len[__count_sp] = __count_len - (long)__count_split;
+                __count_frame_state[__count_sp] = 0;
+                __count_have_value = false;
+                continue;
+            }}
+            if (__count_frame_state[__count_sp] == 2) {{
+                long __count_right = __count_value;
+                if (__count_frame_left[__count_sp] >
+                    0x7fffffffffffffffL - __count_right) {{
+                    chelis_count_record_error(count_error, 2);
+                    return;
+                }}
+                __count_value = __count_frame_left[__count_sp] + __count_right;
+                --__count_sp;
+                continue;
+            }}
+            chelis_count_record_error(count_error, 3);
+            return;
+        }}
+
+        long __count_len = __count_frame_len[__count_sp];
+        if (__count_len == 0) {{
+            __count_value = 0;
+            --__count_sp;
+            __count_have_value = true;
+            continue;
+        }}
+        if (__count_len == 1) {{
+            long __count_leaf = __count_frame_start[__count_sp];
+            long __count_rem = __count_leaf;
+            for (int __count_axis = (int)dims.input_ndim - 1;
+                 __count_axis >= 0; --__count_axis) {{
+                if (__count_selected[__count_axis]) {{
+                    uint __count_extent = dims.input_shape[__count_axis];
+                    if (__count_extent == 0) {{
+                        chelis_count_record_error(count_error, 4);
+                        return;
+                    }}
+                    __count_full_indices[__count_axis] =
+                        (uint)(__count_rem % (long)__count_extent);
+                    __count_rem /= (long)__count_extent;
+                }}
+            }}
+            long __count_offset = 0;
+            for (uint __count_axis = 0; __count_axis < dims.input_ndim;
+                 ++__count_axis) {{
+                __count_offset += (long)__count_full_indices[__count_axis] *
+                    (long)dims.input_strides[__count_axis];
+            }}
+            if (__count_offset < 0 || (ulong)__count_offset >= dims.input_size) {{
+                chelis_count_record_error(count_error, 4);
+                return;
+            }}
+            {bool_ty} __count_bit = input[__count_offset];
+            if (__count_bit != ({bool_ty})0 && __count_bit != ({bool_ty})1) {{
+                chelis_count_record_error(count_error, 1);
+                return;
+            }}
+            __count_value = (__count_bit == ({bool_ty})1) ? 1 : 0;
+            --__count_sp;
+            __count_have_value = true;
+            continue;
+        }}
+
+        ulong __count_split = 1;
+        while ((__count_split << 1) < (ulong)__count_len) __count_split <<= 1;
+        __count_frame_state[__count_sp] = 1;
+        if (__count_sp == 63) {{
+            chelis_count_record_error(count_error, 3);
+            return;
+        }}
+        long __count_start = __count_frame_start[__count_sp];
+        ++__count_sp;
+        __count_frame_start[__count_sp] = __count_start;
+        __count_frame_len[__count_sp] = (long)__count_split;
+        __count_frame_state[__count_sp] = 0;
+    }}
+
+    output[out_flat] = __count_value;
+}}
+"#
+    )
+}
 
 /// Emit the shared MSL `ChelisMovementDims` uniform struct + the
 /// contiguous-stride / flat-index helpers used by the pad and shrink

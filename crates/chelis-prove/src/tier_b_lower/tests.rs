@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 fn inferred_sigs(exprs: &[Expr]) -> BTreeMap<String, Type> {
@@ -57,6 +57,168 @@ fn flagship_guarded_option_lowers_to_smt_property() {
     let s = format!("{:?}", lowered.property.postcondition);
     assert!(s.contains("Ite"), "expected case-of-ctor ite, got {s}");
     assert_eq!(lowered.property.variables.len(), 1);
+}
+
+#[test]
+fn guarded_opaque_field_rewrite_reads_a_decoded_access_node() {
+    let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
+        .into_iter()
+        .next()
+        .expect("fixture has one opaque invariant");
+    let mut opaque_params = UnordMap::new();
+    opaque_params.insert("p".to_string(), invariant);
+
+    let span = chelis_deep::Span::new(0, 0);
+    let successor = Expr::node(
+        DeepTag::Access,
+        Default::default(),
+        vec![
+            Expr::node(
+                DeepTag::Var,
+                Default::default(),
+                vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                span,
+            ),
+            Expr::Atom(Atom::Name("value".to_string()), span),
+        ],
+        span,
+    );
+    assert_eq!(
+        var_name(&rewrite_opaque_field_access(&successor, &opaque_params)),
+        Some("p.value")
+    );
+
+    let untouched = rewrite_opaque_field_access(&successor, &UnordMap::new());
+    assert_eq!(tag(&untouched), Some(DeepTag::Access));
+    assert_eq!(
+        children(&untouched).first().and_then(var_name),
+        Some("p"),
+        "the guarded arm must not rewrite a non-opaque parameter"
+    );
+}
+
+#[test]
+fn unknown_forms_expose_no_tier_b_children_or_param() {
+    let span = chelis_deep::Span::new(0, 0);
+    let child = Expr::Atom(Atom::Name("child".into()), span);
+    let structural = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("param".into()), span),
+            Expr::Map(Default::default(), span),
+        ],
+        span,
+    );
+    let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "param".into(),
+        meta: Default::default(),
+        children: vec![child],
+        span,
+    }));
+
+    assert_eq!(inline_param_name(&structural), Some("param"));
+    assert_eq!(inline_param_name(&unknown), None);
+    assert!(children(&unknown).is_empty());
+}
+
+#[test]
+fn producer_lookup_keeps_a_malformed_structural_inline_param() {
+    let span = chelis_deep::Span::new(0, 0);
+    let malformed_param = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("x".into()), span),
+            Expr::Atom(Atom::Int(0), span),
+        ],
+        span,
+    );
+    let params = Expr::node(
+        DeepTag::Params,
+        Default::default(),
+        vec![malformed_param],
+        span,
+    );
+    let function = Expr::node(
+        DeepTag::Fn,
+        Default::default(),
+        vec![
+            params,
+            Expr::node(
+                DeepTag::Lit,
+                Default::default(),
+                vec![Expr::Atom(Atom::Int(1), span)],
+                span,
+            ),
+        ],
+        span,
+    );
+    let def = Expr::node(
+        DeepTag::Def,
+        Default::default(),
+        vec![Expr::Atom(Atom::Name("make".into()), span), function],
+        span,
+    );
+    let module = Expr::node(
+        DeepTag::Module,
+        Default::default(),
+        vec![Expr::Atom(Atom::Name("M".into()), span), def],
+        span,
+    );
+
+    let expressions = [module];
+    let producer = lookup_producer(&expressions, "make").expect("producer remains discoverable");
+    assert_eq!(producer.params, ["x"]);
+}
+
+#[test]
+fn opaque_field_rewrite_does_not_cross_unclaimed_wrappers() {
+    let invariant = collect_opaque_invariants(&deep_of(GUARDED_OPTION))
+        .into_iter()
+        .next()
+        .expect("fixture has one opaque invariant");
+    let opaque_params = UnordMap::from([("p".to_string(), invariant)]);
+    let span = chelis_deep::Span::new(0, 0);
+    let access = Expr::node(
+        DeepTag::Access,
+        Default::default(),
+        vec![
+            Expr::node(
+                DeepTag::Var,
+                Default::default(),
+                vec![Expr::Atom(Atom::Name("p".into()), span)],
+                span,
+            ),
+            Expr::Atom(Atom::Name("value".into()), span),
+        ],
+        span,
+    );
+    let metadata_wrapper = Expr::MetaExpr(
+        chelis_deep::MetaExpr {
+            metadata: Default::default(),
+            expr: Box::new(access.clone()),
+        },
+        span,
+    );
+    let unknown_wrapper = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+        head: "future-wrapper".into(),
+        meta: Default::default(),
+        children: vec![access.clone()],
+        span,
+    }));
+
+    assert_eq!(
+        rewrite_opaque_field_access(&metadata_wrapper, &opaque_params),
+        metadata_wrapper
+    );
+    assert_eq!(
+        rewrite_opaque_field_access(&unknown_wrapper, &opaque_params),
+        unknown_wrapper
+    );
+
+    let structural = Expr::BareList(vec![access], span);
+    let rewritten = rewrite_opaque_field_access(&structural, &opaque_params);
+    let Expr::BareList(elements, _) = rewritten else {
+        panic!("structural list carrier is preserved")
+    };
+    assert_eq!(elements.first().and_then(var_name), Some("p.value"));
 }
 
 #[cfg(feature = "smt")]
@@ -324,9 +486,9 @@ export (mk_counter)
 @opaque
 @invariant(c) c.n >= 0
 type Counter =
-  | Counter { n: int32 }
+  | Counter { n: i32 }
 lo = 0
-def mk_counter(x: int32) -> Option[Counter] =
+def mk_counter(x: i32) -> Option[Counter] =
   if x >= lo then Some(Counter { n: x }) else None
 ";
     let exprs = deep_of(surf);
@@ -341,7 +503,7 @@ def mk_counter(x: int32) -> Option[Counter] =
     let inv = &invs[0];
     let pparams = vec![(
         producer_first_param_name(&exprs, "mk_counter"),
-        ProducerParamType::Scalar("int32".to_string()),
+        ProducerParamType::Scalar("i32".to_string()),
     )];
     let mut consts = crate::opaque::ConstEnv::new();
     consts.insert("lo".to_string(), 0.0);
@@ -364,8 +526,8 @@ fn producer_first_param_name(exprs: &[Expr], producer: &str) -> String {
 
 /// F3 (review 4): the int-width -> SmtSort::Int decision must be single
 /// source across ALL sites (field `scalar_sort`, producer-param sort, the
-/// constant recognizer). An int8/int16 opaque field + int8/int16 producer
-/// param + an int8/int16 constant used in BOTH the guard AND the invariant
+/// constant recognizer). An i8/i16 opaque field + i8/i16 producer
+/// param + an i8/i16 constant used in BOTH the guard AND the invariant
 /// must lower CONSISTENTLY (every int operand is `SmtSort::Int` / `IntLit`)
 /// and prove at Tier B -- not mix IntLit-const against a Real-sorted field
 /// var (which would route to Tier C, the regression the unification missed).
@@ -374,9 +536,9 @@ fn producer_first_param_name(exprs: &[Expr], producer: &str) -> String {
 fn f3_int_width_field_param_const_lowers_consistently_at_tier_b() {
     use crate::tier_b::{TierBResult, solve_property};
     // Loop over EVERY integer width. The bound `0` is cast to the field
-    // width so the module type-checks (integer literals default to int32, so
-    // a bare `0` against an int8 field is a precision mismatch).
-    for width in ["int8", "int16", "int32", "int64"] {
+    // width so the module type-checks (integer literals default to i32, so
+    // a bare `0` against an i8 field is a precision mismatch).
+    for width in ["i8", "i16", "i32", "i64"] {
         let surf = format!(
             "module M
 export (mk_counter)
@@ -439,7 +601,7 @@ def mk_counter(x: {width}) -> Option[Counter] =
 #[test]
 fn f4_producer_body_int_field_comparison_lowers_consistently() {
     use crate::tier_b::{TierBResult, solve_property};
-    // An int32 field whose invariant compares it against a module constant
+    // An i32 field whose invariant compares it against a module constant
     // `lo`. The GUARDED Option producer constructs the value only when
     // `x >= lo`, so the obligation lowers through the case-of-known-ctor
     // reduction -> apply_invariant -> lower_pred_bool, the F4 path, and
@@ -449,9 +611,9 @@ export (mk)
 @opaque
 @invariant(c) c.n >= lo
 type Counter =
-  | Counter { n: int32 }
+  | Counter { n: i32 }
 lo = 0
-def mk(x: int32) -> Option[Counter] =
+def mk(x: i32) -> Option[Counter] =
   if x >= lo then Some(Counter { n: x }) else None
 ";
     let exprs = deep_of(surf);
@@ -466,7 +628,7 @@ def mk(x: int32) -> Option[Counter] =
     let inv = &invs[0];
     let pparams = vec![(
         producer_first_param_name(&exprs, "mk"),
-        ProducerParamType::Scalar("int32".to_string()),
+        ProducerParamType::Scalar("i32".to_string()),
     )];
     let mut consts = crate::opaque::ConstEnv::new();
     consts.insert("lo".to_string(), 0.0);
@@ -554,7 +716,7 @@ fn cr2_4_int_typed_constant_inlines_as_integer_literal_not_f32() {
     // declared literal type in the module.
     let surf = "module M
 n = 3
-def n_fn() -> int32 = 7
+def n_fn() -> i32 = 7
 m = 3.0
 ";
     let exprs = deep_of(surf);
@@ -573,11 +735,11 @@ m = 3.0
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "n").as_deref(),
-        Some("int32"),
-        "n is declared int32"
+        Some("i32"),
+        "n is declared i32"
     );
 
-    // Zero-arg int constant fn `def n_fn() -> int32 = 7`.
+    // Zero-arg int constant fn `def n_fn() -> i32 = 7`.
     let fn_node = super::const_lit_node(&exprs, "n_fn", 7.0);
     let fn_value = super::children(&fn_node)
         .first()
@@ -585,7 +747,7 @@ m = 3.0
         .expect("lit value");
     assert!(
         matches!(fn_value, Expr::Atom(Atom::Int(7), _)),
-        "int-typed `def n_fn() -> int32 = 7` inlines as Atom::Int(7), got {fn_value:?}"
+        "int-typed `def n_fn() -> i32 = 7` inlines as Atom::Int(7), got {fn_value:?}"
     );
 
     // Float constant `m = 3.0` still inlines as an f32 literal (CR-8).
@@ -658,9 +820,9 @@ export (mk_counter)
 @opaque
 @invariant(c) c.n >= lo
 type Counter =
-  | Counter { n: int32 }
+  | Counter { n: i32 }
 lo = 0
-def mk_counter(x: int32) -> Option[Counter] =
+def mk_counter(x: i32) -> Option[Counter] =
   if x >= lo then Some(Counter { n: x }) else None
 ";
 
@@ -677,7 +839,7 @@ fn lower_int_const_obligation(surf: &str) -> LoweredObligation {
     let inv = &invs[0];
     let pparams = vec![(
         producer_first_param_name(&exprs, "mk_counter"),
-        ProducerParamType::Scalar("int32".to_string()),
+        ProducerParamType::Scalar("i32".to_string()),
     )];
     let mut consts = crate::opaque::ConstEnv::new();
     consts.insert("lo".to_string(), 0.0);
@@ -721,33 +883,33 @@ fn u2_int_constant_in_invariant_proves_without_sort_mismatch() {
 #[test]
 fn u2_const_declared_int_type_covers_int8_and_int16() {
     // The declared-type reader must recognize EVERY integer width, not just
-    // int32/int64. int8/int16 constants used in a guard or invariant must
+    // i32/i64. i8/i16 constants used in a guard or invariant must
     // lower to SmtSort::Int, not be silently retyped to Real.
     let surf = "module M
-def a() -> int8 = 1
-def b() -> int16 = 2
-def c() -> int32 = 3
-def d() -> int64 = 4
+def a() -> i8 = 1
+def b() -> i16 = 2
+def c() -> i32 = 3
+def d() -> i64 = 4
 def e() -> f32 = 5.0
 ";
     let exprs = deep_of(surf);
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "a").as_deref(),
-        Some("int8"),
-        "int8 is recognized as an integer constant type"
+        Some("i8"),
+        "i8 is recognized as an integer constant type"
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "b").as_deref(),
-        Some("int16"),
-        "int16 is recognized as an integer constant type"
+        Some("i16"),
+        "i16 is recognized as an integer constant type"
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "c").as_deref(),
-        Some("int32")
+        Some("i32")
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "d").as_deref(),
-        Some("int64")
+        Some("i64")
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "e"),
@@ -755,7 +917,7 @@ def e() -> f32 = 5.0
         "an f32 constant is not an integer type"
     );
 
-    // int8/int16 inline as integer literals.
+    // i8/i16 inline as integer literals.
     let a_node = super::const_lit_node(&exprs, "a", 1.0);
     let a_val = super::children(&a_node)
         .first()
@@ -763,7 +925,7 @@ def e() -> f32 = 5.0
         .expect("lit value");
     assert!(
         matches!(a_val, Expr::Atom(Atom::Int(1), _)),
-        "int8 `a = 1` inlines as Atom::Int(1), got {a_val:?}"
+        "i8 `a = 1` inlines as Atom::Int(1), got {a_val:?}"
     );
     let b_node = super::const_lit_node(&exprs, "b", 2.0);
     let b_val = super::children(&b_node)
@@ -772,7 +934,7 @@ def e() -> f32 = 5.0
         .expect("lit value");
     assert!(
         matches!(b_val, Expr::Atom(Atom::Int(2), _)),
-        "int16 `b = 2` inlines as Atom::Int(2), got {b_val:?}"
+        "i16 `b = 2` inlines as Atom::Int(2), got {b_val:?}"
     );
 }
 
@@ -785,19 +947,19 @@ fn u2_constant_body_referencing_another_constant_keeps_int_type() {
     // `base`'s declared int type. The original reader returned None here and
     // the constant lost its int type.
     let surf = "module M
-def base() -> int32 = 7
+def base() -> i32 = 7
 typed_alias = base
-def fn_alias() -> int32 = base
+def fn_alias() -> i32 = base
 ";
     let exprs = deep_of(surf);
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "typed_alias").as_deref(),
-        Some("int32"),
-        "an untyped value binding `typed_alias = base` follows the chain to int32"
+        Some("i32"),
+        "an untyped value binding `typed_alias = base` follows the chain to i32"
     );
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "fn_alias").as_deref(),
-        Some("int32"),
+        Some("i32"),
         "a typed alias resolves its declared int type"
     );
     // An f32 alias chain must NOT become integer-typed.
@@ -819,7 +981,7 @@ fn f5_long_alias_chain_keeps_int_width_and_cycles_terminate() {
     // resolve its declared int width -- a 6-hop chain that the depth bound
     // would have silently dropped to None (Real), mis-sorting the constant.
     let surf = "module M
-def base() -> int64 = 7
+def base() -> i64 = 7
 a5 = base
 a4 = a5
 a3 = a4
@@ -830,8 +992,8 @@ a0 = a1
     let exprs = deep_of(surf);
     assert_eq!(
         crate::opaque::const_declared_int_type(&exprs, "a0").as_deref(),
-        Some("int64"),
-        "a 6-hop int alias chain keeps its declared int64 width"
+        Some("i64"),
+        "a 6-hop int alias chain keeps its declared i64 width"
     );
 
     // A cyclic alias chain must TERMINATE (cycle detection), not loop or

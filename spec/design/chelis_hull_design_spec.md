@@ -46,36 +46,36 @@ type Expr =
   | ESqrt(Expr)
   | ESin(Expr)
   | ECast(Expr, Type)               -- Deep `(cast {} expr target-type)`; target is a full type
-  | ESum(Expr, Dim)
-  | EGather(Expr, Expr, int64)
+  | ESum(Expr, i64)             -- positional axis; i64 is model storage, Deep uses i32
+  | EGather(Expr, Expr, i64)
   | EScatter(Expr, Expr, Expr, ScatterMode)
   | EMatmul(Expr, Expr)
   | EWhere(Expr, Expr, Expr)
-  | EConcat(List[Expr], int64)
+  | EConcat(List[Expr], i64)
   | EReshape(Expr, List[Dim])      -- Deep `(app {} (var {} reshape) tensor shape-list)`
-  | EPermute(Expr, List[int64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain int32; this int64 encoding disagrees and needs reconciling when hull is built.
-  | EExpand(Expr, int64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (int64 here; spec/05 [05-DIM-1] classifies rank indices as int32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
-  | ECumsum(Expr, int64)
-  | ESort(Expr, int64)
+  | EPermute(Expr, List[i64])    -- Deep `(app {} (var {} permute) tensor axis0 axis1 ...)`; full permutation. NOTE: spec/05 [05-DIM-1] (2026-08-03) classifies permutation entries as axis-domain i32; this i64 encoding disagrees and needs reconciling when hull is built.
+  | EExpand(Expr, i64, Dim)      -- Deep `(app {} (var {} expand) tensor axis size)`; the shipped `expand` is a (tensor, axis, size) triop, not a shape-list op. `axis` is a position index (i64 here; spec/05 [05-DIM-1] classifies rank indices as i32 — same reconciliation as EPermute); `size` is the new dimension (`Dim`: literal size is `DLit`, symbolic-dim-name size is `DName`)
+  | ECumsum(Expr, i64)
+  | ESort(Expr, i64)
   | EGrad(Expr)
-  | EVmap(Expr, int64)
-  -- Effect-handling forms. The shipped Deep grammar has NO `with-seed` /
-  -- `with-handler` tags; the real form is `(handle-effect {effect: name} arg body)`
-  -- (spec/03-deep-syntax.md §2.3, "Phase 2a effect handler block"). EWithSeed is
-  -- retained as the calculus name for the Random-discharging special case.
-  -- BOTH are OUTSIDE the v0.1.0 supported fragment: the parser may build them, but
-  -- `type_check` returns `None` for them in v0.1.0 (effect handling lands in a later
+  | EVmap(Expr, i64)
+  -- Effect-handling form. The shipped Deep grammar has NO `with-handler` tag; the
+  -- real form is `(handle-effect {effect: name} arg body)` (spec/03-deep-syntax.md
+  -- §2.3), whose one effect kind is `resource`. Random draws take an explicit `key`
+  -- argument as ordinary builtin applications, so there is no seed handler form
+  -- (spec/design/randomness_explicit_keys.md).
+  -- It is OUTSIDE the v0.1.0 supported fragment: the parser may build it, but
+  -- `type_check` returns `None` for it in v0.1.0 (effect handling lands in a later
   -- phase). See §3 "v0.1.0 supported fragment".
-  | EWithSeed(int64, Expr)              -- discharges Random; v0.1.0: parsed, not checked
   | EHandleEffect(Effect, Expr, Expr)   -- `(handle-effect {effect: name} arg body)`; v0.1.0: parsed, not checked
   | EMatch(Expr, List[MatchArm])
   | ETuple(List[Expr])
-  | ETupleGet(Expr, int64)
+  | ETupleGet(Expr, i64)
   | EConstruct(String, List[Expr])
 
 -- Literals
 type Literal =
-  | LInt(int64)
+  | LInt(i64)
   | LFloat(f32)
   | LBool(bool)
   | LString(String)
@@ -101,14 +101,13 @@ type ElemType = EF32 | EInt64 | EBool
 -- Dimensions
 type Dim =
   | DName(String)           -- named dimension: batch, hidden, etc.
-  | DLit(int64)             -- literal dimension: 3, 784, etc.
+  | DLit(i64)             -- literal dimension: 3, 784, etc.
   | DVar(String)            -- dimension variable (for polymorphism)
 
 -- Effects -- mirror the shipped `Effect` enum at
--- crates/chelis-types/src/types.rs (Random, Accum, Io, Test, Resource(String)).
+-- crates/chelis-types/src/types.rs (Accum, Io, Test, Resource(String)).
 -- The stub must track the real taxonomy, not an invented one.
 type Effect =
-  | Random
   | Accum
   | Io
   | Test
@@ -224,14 +223,14 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     ESqrt(e1) -> check_unary_tensor_op(ctx, e1)
     ESin(e1) -> check_unary_tensor_op(ctx, e1)
 
-    -- T-Sum (LaCaDiLE Section 3, Figure 4)
-    -- Reduces one dimension from the tensor type
-    ESum(e1, dim) -> {
+    -- T-Sum: remove exactly one position, not every equal dimension.
+    ESum(e1, axis) -> {
       (t1, effs) = type_check(ctx, e1)?
       match t1 {
         TTensor(dims, elem) ->
-          if member(dim, dims)
-            then Some((TTensor(remove(dims, dim), elem), effs))
+          k = if axis < 0 then length(dims) + axis else axis
+          if is_int32(axis) and 0 <= k and k < length(dims) and numeric(elem)
+            then Some((TTensor(remove_at(dims, k), elem), effs))
             else None
         _ -> None
       }
@@ -240,7 +239,7 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- T-Gather (LaCaDiLE Section 3)
     -- gather(input, indices, axis) -> output
     -- input: tensor[..., n, ..., T]
-    -- indices: tensor[..., k, ..., int64]
+    -- indices: tensor[..., k, ..., i64]
     -- output: tensor[..., k, ..., T]  (n replaced by k at axis position)
     EGather(input, indices, axis) -> {
       (t_in, effs1) = type_check(ctx, input)?
@@ -283,8 +282,8 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
     -- Mirrors the shipped checker's `infer_reshape_app`
     -- (`crates/chelis-types/src/infer.rs`, dispatched from the `reshape` builtin).
     -- reshape(e, new_dims): e must be a tensor; new_dims is a value-level shape list.
-    -- The shape list elements are int64 (the shipped path unifies the list against
-    -- List[Int64]; an int32 shape element is a PrecisionMismatch there). The output
+    -- The shape list elements are i64 (the shipped path unifies the list against
+    -- List[Int64]; an i32 shape element is a PrecisionMismatch there). The output
     -- element type is INVARIANT (precision is copied unchanged from the input). The
     -- output dims are rebuilt element-by-element from new_dims (lit/cast -> DLit, a
     -- shape(input, k) reference -> the input's dim at axis k, otherwise DVar/wildcard).
@@ -321,25 +320,16 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
       }
     }
 
-    -- T-Expand -- expand(e, axis, size)
-    -- Mirrors the shipped checker's `check_expand_signature`
-    -- (`crates/chelis-types/src/infer.rs`, dispatched from the `expand` builtin).
-    -- e must be a tensor. axis must be non-negative (else the shipped DimensionMismatch
-    -- "expand requires non-negative axis"); a literal size must be > 0 (else the shipped
-    -- DimensionMismatch "expand requires positive size"); a symbolic-dim-name size
-    -- becomes DName. The shipped checker selects SAME-rank broadcast (replace dims[axis]
-    -- with size, requires axis < rank) vs INSERT-rank (insert size at axis, output rank =
-    -- input rank + 1) using the *expected* result type. Hull synthesizes bottom-up with no
-    -- expected type, so it canonically produces the SAME-rank replace form (requires
-    -- axis < rank); the INSERT-rank reading is a documented v0.1.0 narrowing (not
-    -- bottom-up disambiguable). Element type is INVARIANT (precision must equal the
-    -- input). Effects pass through. (The from-1 broadcast restriction is not a type-level
-    -- guard.)
+    -- T-Expand: spec/04 section 4.7.2, spec/05 section 2.4.1.
+    -- Same-rank replacement of one unit axis; insertion is a distinct operation.
+    -- A symbolic operand extent needs the concrete unit-extent guard at evaluation.
     EExpand(e, axis, size) -> {
       (t, effs) = type_check(ctx, e)?
       match t {
         TTensor(dims, elem) ->
-          if axis < 0 or (is_literal(size) and dim_lit(size) <= 0) then None
+          if not is_int32(axis) or axis < 0 or axis >= length(dims) then None
+          else if is_literal(dims[axis]) and dim_lit(dims[axis]) != 1 then None
+          else if not (is_named(size) or (is_literal(size) and dim_lit(size) >= 0)) then None
           else Some((TTensor(replace_at(dims, axis, size), elem), effs))
         _ -> None
       }
@@ -364,15 +354,6 @@ def type_check(ctx: Ctx, e: Expr) -> Option[(Type, EffectRow)] =
         }
         _ -> None
       }
-    }
-
-    -- T-WithSeed (LaCaDiLE Section 3) -- discharges Random from e's effects.
-    -- OUT of the v0.1.0 supported fragment (§3.1): in v0.1.0 this arm is `EWithSeed(_, _)
-    -- -> None`. The rule below is the calculus-level semantics that lands once effect
-    -- handling is frozen (a later version). Same for the EHandleEffect arm.
-    EWithSeed(seed, body) -> {
-      (t_body, effs) = type_check(ctx, body)?
-      Some((t_body, remove_effect(effs, Random)))
     }
 
     -- T-Tuple
@@ -485,7 +466,7 @@ duplicate indices). Hull v0.1.0 tracks exactly this differentiable set as the AD
 core.
 
 Out of the v0.1.0 fragment (parsed by the Deep parser, but `type_check` returns `None`):
-`EWithSeed` and `EHandleEffect` (effect handling is a later phase); the zero-adjoint /
+`EHandleEffect` (effect handling is a later phase); the zero-adjoint /
 fail-closed ops `EConcat`, `EWhere`, `ECumsum`, `ESort`, `EScatter`, and `EVmap`
 (enumerated with their structural reasons above); `EConstruct` / `PConstruct` (no
 declaration layer, deferred to v0.2.0, above); and any construct whose checking depends on
@@ -593,11 +574,6 @@ def step(e: Expr) -> Option[Expr] =
     -- nested lists of scalars, and operations compute element-by-element.
     -- This is intentionally slow - correctness, not performance.
 
-    -- with-seed: when the body is a value, strip the handler
-    EWithSeed(_, v) -> if is_value(v) then Some(v) else {
-      step(v) |> map(fn(vp) -> EWithSeed(_, vp))
-    }
-
     -- Tuple: step the first non-value element
     ETuple(es) -> step_in_list(es) |> map(fn(esp) -> ETuple(esp))
 
@@ -621,7 +597,7 @@ def step_binary(e1: Expr, e2: Expr, rebuild: Expr -> Expr -> Expr) -> Option[Exp
 
 
 -- Multi-step evaluation to a value (or stuck)
-def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
+def eval_to_value(e: Expr, max_steps: i64) -> (Expr, i64) = {
   if max_steps <= 0 then (e, 0)
   else match step(e) {
     Some(ep) -> eval_to_value(ep, max_steps - 1)
@@ -633,6 +609,153 @@ def eval_to_value(e: Expr, max_steps: int64) -> (Expr, int64) = {
 The evaluator is intentionally simple and slow. Tensors are nested lists of scalars. Operations are element-by-element loops. This is the reference semantics - what programs MEAN - not a practical execution engine. The real compiler's evaluator and code generators must agree with this reference on every well-typed program.
 
 ### 4.1 Pinned evaluator decisions for v0.1.0
+
+**Independent directional reference (2026-09-09; implementation pending).**
+Add a separate Hull numerical kernel over the existing locally nameless `Term`
+and an explicit environment of primal/direction pairs. Its first profile admits
+f32 scalar/tensor values, bound references, strict lets, add, multiply, positional
+sum and same-rank unit-axis expand. A let alias models numerical sharing; it
+does not model an owner allocation. This kernel does not evaluate `TGrad`, call
+Chelis's AD implementation or LaCaDiLE's generated reverse evaluator, or change
+the ordinary reference evaluator/checker/generator fragment.
+
+Each successful result contains the complete primal and directional f32 buffers
+and their ordered shape. Validate every supplied pair's equal shape, nonnegative
+extents, exact bounded cardinality and finite elements before use, including
+unused environment entries. Constants have zero direction. Add acts on both
+components; multiplication uses `(x*y, dx*y + x*dy)` with both consumer ports.
+Sum and expand apply their existing validated coordinate operation to each
+component. Lets extend both environments together, respecting de Bruijn scope.
+Invalid references, shapes or buffers, unsupported terms, nonfinite numerical
+results and exhausted traversal depth must be distinct non-success outcomes.
+The caller still bounds total work/memory; this is not a hardened service.
+
+This is a finite-f32 execution of the formal directional rules, not the
+derivative of a rounded machine function or an IEEE/real agreement theorem.
+Acceptance tests use bounded exactly representable examples: identity, constants,
+`x*x+x`, two independent inputs, unused inputs, sharing and nested/shadowed lets,
+coordinate-distinct rectangular and repeated axes, empty/singleton sum and
+inner/middle expand. Check primals against ordinary Hull value evaluation and
+directions against hand calculations. Mutation tests must detect a missing
+multiplication port, zero direction and wrong axis/coordinate mapping. Run the
+package build and complete suite; existing campaign obligations remain intact.
+Compiler-gradient comparison, dtype/bit transport, fixed randomness, Resource,
+ownership checking, arbitrary calls/control flow and exact integers are separate
+integration obligations, not completed or silently skipped by this first kernel.
+
+**Independent fixed-path reference (2026-09-10; implementation obligation).**
+Extend the separate directional reference, not the ordinary checker or evaluator,
+with a bounded interpreter of Hull's named `Expr` source. Reuse the existing
+validated f32 buffer operations. Admit the pure directional fragment above,
+strict named lets, keys derived from literal seeds (`key_from_seed`, `split_key`,
+`split_keys`, `fold_in`), fixed literal f32 dropout rates and
+literal Resource handlers. The initial environment contains named complete
+primal/direction pairs; reject duplicate names and validate even unused pairs.
+Ordinary lexical shadowing of tensor variables is supported. Builtin shadowing,
+arbitrary calls, runtime rates/seeds, rate differentiation, general control flow,
+other handlers and `EGrad` execution are explicitly outside this profile, not
+compiler rejections. The calling harness must retain and validate source dtype
+and syntax information before any lossy ordinary `Expr` parsing; an `LFloat`
+alone cannot establish that the original source declared f32.
+
+The reference derives each draw's key and mask itself, from the source.
+Implement [05-RNG-1]'s and [05-RNG-2]'s exact modulo-2^64 word operations without invoking a compiler
+random primitive, consulting a candidate trace or transporting words through
+floating values. A signed i64 may carry the exact word bits; checked arithmetic
+must not accidentally replace modular arithmetic. Convert the high 53 bits to
+their exact unit value before the single f32 arithmetic-width rounding. Apply
+[05-OP-37]'s strict comparison and finalized subtraction then division, including
+positive zero on dropped primal and direction coordinates. This is pathwise
+directional propagation through the selected mask, not differentiation of the
+rounded machine function or of the sampling distribution.
+
+Evaluate operands and strict lets in source order, including unused results.
+Check each dropout's shape and finite rate in [0,1) before its draw. Every
+successful forward call, including empty tensors and zero rates, consumes its key.
+Record the actual key, rate and ordered shape.
+Resource checks use the language's device/target compatibility rule, not a model
+of physical allocation. Record successful checks in order, before their bodies.
+The reference differentiates the source forward and has no replay opcode; a native
+backward pass must reproduce the saved forward mask from the forward key.
+
+Return the ordered executed event prefix with both success and failure. Distinguish malformed input, unsupported syntax,
+nonfinite numerical results, traversal exhaustion and semantic guard failure.
+A failed guard does not manufacture a successful event or run the continuation.
+A failure inside a handler exposes the state at that instruction, before pending
+normal exits; this is a prefix observation, not a claim about recovery, exception
+unwinding or C's abort cleanup. The caller bounds total work and memory separately.
+
+The owning acceptance suite combines independent full-word RNG vectors and
+f32 threshold controls with derived keys, a subsequent real draw, dead/empty/
+zero-rate draws, nonunit directions and multiple input ports. Require positive
+and negative Resource targets, invalid rate before entry and failure after a
+prior draw, malformed unused inputs, shadowing, nonfinite results and exhaustion.
+Equal numeric outputs with different effect traces must remain distinguishable.
+Check pure programs against the unchanged directional reference. Source pairing,
+full candidate observations, exact-eligibility classification and the generated
+AD campaign remain separate integration obligations; this kernel alone accepts
+no compiler certificate and discharges no logical ownership theorem. Preserve
+the existing ordinary campaigns, released host pin and full package gates.
+
+**Broadcast-coordinate repair (Hull #20, 2026-09-09; acceptance pending).**
+The `EExpand`/`TExpand` model implements the same-rank unit-axis rule above.
+For concrete `TData`, validate nonnegative extents, exact buffer cardinality,
+an in-range i32-compatible axis, operand extent 1 and nonnegative new size.
+Preserve all other axes. For each row-major output coordinate, read the input
+at the same coordinates except that the selected coordinate is zero. Repeating
+the entire flat buffer is correct only for an outer axis, not in general.
+Size zero yields an empty buffer with the requested shape; singleton expansion
+is identity. Axis equal to rank is not an insertion fallback. A malformed
+operand or failed unit-extent claim has no successful reference reduction.
+
+`type_check` rejects known nonunit extents and negative literal sizes, while
+retaining symbolic names and operand effects. Concrete evaluation enforces
+the unit-extent obligation for symbolic input shapes. The generator's operand
+has literal extent 1 at the chosen axis, not a freshly invented dimension;
+the output keeps the requested dimension at that position. Other bystanders
+and element-type checking are unchanged. This is a Hull model repair, not a
+change to Chelis's decided semantics, compiler behavior or any shell pin.
+
+Acceptance requires coordinate-distinct inner/outer 2-D and middle-axis 3-D
+examples, singleton/empty axes and bystanders, invalid buffers/axes/known
+nonunit extents, and generated unit-axis operands with checked round trips.
+Run the complete Hull suite and two-pass 10,000-program/28-rule generator
+oracle; report a same-seed bounded compiler-check pilot before/after this repair
+separately from the standing full campaign. A released compiler's historical
+type rule is not grounds to weaken the current normative unit-axis contract.
+This does not add an `insert` AST constructor, runtime dimension evaluation,
+exact integer data evaluation, a trap outcome, or a derivative evaluator.
+The f32-buffer and symbolic-evaluation limitations remain explicit; the
+repair must not be described as full language or AD conformance.
+
+**Ordered reduction repair (2026-09-09; Hull implementation acceptance pending).**
+The modeled single-axis `sum` uses the `ESum(operand, axis)` representation above.
+The parser/emitter use an integer literal expression at the axis port, not a
+`Dim` node. Negative indices normalize against operand rank; invalid indices,
+rank-zero operands and boolean tensors fail checking. Equal literal extents at
+different positions remain distinct axes. Type checking removes only the chosen
+position and preserves the other names, extents, element type and operand effects.
+This changes Hull's constructor API, not Chelis syntax, behavior or shell pins.
+
+For the existing f32-buffer evaluator, each output coordinate gathers the input
+slice along that position in increasing coordinate order. Its sum uses the
+adjacent-pair balanced tree of `[05-OP-30]`, carrying an odd tail unchanged; an
+empty slice returns positive zero. Remove only that axis from the result shape.
+Validate the concrete input buffer's element count, nonnegative extents, and
+axis before indexing. Never replace a per-axis result with the whole-buffer
+total. Term equality must distinguish reduction axes. The generator chooses an
+insertion position and records that position as the reduction axis; repeated
+extents do not require inventing a unique dimension.
+
+This repair does not add named-axis expression resolution, multi-axis sums,
+explicit accumulators, exact integer evaluation, or new dtype transport. Those
+remain Hull's dated model-alignment work; the i64 element type may be checked
+but is not thereby given an exact numerical evaluator. Acceptance requires
+coordinate-distinct 2-by-3 and equal-extent 2-by-2 cases, rank-three middle axes,
+negative indices, singleton/empty axes, invalid axes/buffers, canonical Deep text
+and constructed round trips, plus the standing 10,000-check/1,000-eval campaign.
+Until those gates pass, this paragraph states the repair contract, not a completed
+alignment or an AD theorem.
 
 - **Tensor representation: nested-lists-of-scalars.** A `TTensor(dims, elem)` value is a
   nested `List` of scalars whose nesting depth equals the rank and whose shape equals
@@ -764,7 +887,7 @@ structural mapping — just one with three more moving parts than the sketch adm
 invariant **on the well-typed in-fragment domain** — i.e. on the *parser image* of the
 v0.1.0 supported fragment (§3.1), the `Expr` values that `parse` actually produces from
 in-fragment Deep and that `type_check` accepts. It is not claimed over arbitrary `Expr`
-values: out-of-fragment forms (`EWithSeed`, `EHandleEffect`, `EConcat`, `EWhere`,
+values: out-of-fragment forms (`EHandleEffect`, `EConcat`, `EWhere`,
 `ECumsum`, `ESort`, `EScatter`, `EVmap`, `EConstruct`) are not in the round-trip domain
 because the generator does not emit them and `type_check` rejects them. `unparse` is what
 the generator (§7) uses to emit `.dp` corpus files for differential testing.
@@ -886,13 +1009,305 @@ type CheckResult =
 
 ---
 
+### Versioned scalar comparison observations
+
+The released-host differential campaign dispatches explicitly on execution
+envelope version, requiring exit zero and exactly one root. Schema 2 retains its
+historical scalar interpretation: existing scalar conversions and rank-zero f32
+tensor data `{dtype: "f32", values: [number]}` with exactly one numeric element.
+Other tensor ranks, malformed data and missing versions fail this leg. The old
+array-shaped data form and absent/extra/nonnumeric elements remain invalid.
+This is a historical observation relation, not an alternative compiler codec.
+
+Schema 3 uses spec/10 §3.2 to decode numeric scalars, booleans and tensors into
+typed observations retaining exact integer values, floating bit strings, dtype
+and ordered shape. Validate payload members, dtype widths/ranges, nonnegative
+exact-int64 extents, dynamic-int32 rank and complete cardinality before
+projection. Signed zero, infinity signs and NaN payloads remain distinct in the
+observation. Aggregates outside this profile are not silently projected.
+
+The ordinary campaign still compares a separately named scalar projection under
+its historical f32 tolerance and nonfinite-collapse policy; this is neither
+full-tensor nor IEEE-class agreement. Nonzero exits, malformed/out-of-profile
+observations and unsupported explicit schema versions receive distinct failing
+outcomes. All remain in the requested denominator. No compiler wire format,
+behavior or pin changes follow from this Hull observation boundary; the
+compiler's normative decoder still rejects versions other than 3.
+
+Acceptance requires real captured schema-3 output and released schema-2
+end-to-end cases, retaining the rank-zero f32 conditional cast returning 8 and
+a different scalar tensor value. Include positive/negative dtype, payload, rank,
+cardinality and version tests, exact-bit retention, and campaign accounting
+controls for every new failure category. The full standing 10,000-check/
+1,000-eval campaign remains a separate obligation; neither decoding nor scalar
+tolerance agreement certifies the current normative exact codec.
+
+### Opt-in compiler trace for the canonical LaCaDiLE revision
+
+The `chelis-ir/lowering-trace` Cargo feature enables an additive, in-memory
+`try_lower_program_to_library_with_trace` entry point. It calls the same lowering
+implementation as the ordinary entry point. The ordinary entry point does not
+collect snapshots, even in a feature-enabled build; feature-disabled builds have
+no collector field or instrumentation. No CLI, shell interface, default output,
+runtime operation, or serialized format changes.
+
+This is an observation tool, **not a certificate or a validation result**. Its
+initial acceptance oracle is `cargo nextest run -p chelis-ir --features
+lowering-trace --lib --test lowering_trace`. It must cover:
+
+1. Exact parity of the returned library and diagnostics with ordinary lowering,
+   including empty programs, multiple invocations, and rejected AD.
+2. Actual ordinary-grad pre/post snapshots and ordered `wrt` references; repeated
+   operand ports, full constants, dimensions, shape dependencies, and roots stay
+   in their existing `Dag` representation. Snapshots are taken at the production
+   pass invocation, not obtained by invoking AD again.
+3. Distinct context identities for nested lowering, with parent links. Unlowered
+   library definitions, unresolved callable gradients, and vectorization are
+   explicit trace boundaries, not evidence of an accepted ordinary-grad transformation.
+4. Actual library normalization snapshots before DCE, after DCE, after consuming
+   fanout copies, and after drops, together with the two production remap tables.
+   The last snapshot must match the returned library DAG exactly.
+5. Each successful ordinary-gradient observation has its actual call-site
+   application: formal/actual dimension-specialization types, the specialized
+   backward DAG, name-to-caller argument bindings, ordered actual differentiated
+   inputs, the production splice map, and caller snapshots immediately before
+   splicing, immediately after splicing, and after result packing/reuse hints.
+   The returned value retains tuple/ADT structure, field order and names, including
+   empty discrete cotangent slots. Missing raw gradients remain missing in the AD
+   observation; their subsequent shaped zeros appear only in the packing snapshot.
+   Nested applications use their gradient context's parent as the caller context.
+   This does not extend capture to host-classified structured/List applications;
+   those still have `UnloweredDefinitions` boundaries. Structural value copying
+   has a separate unit test, not a claim of host-entry coverage. Tensor result
+   packing alone is not evidence that host-visible List checks were preserved.
+
+The trace deliberately has no `Serialize`/`Deserialize` implementation and is not
+a new numeric wire transport: it retains the existing compiler `Dag` carrier
+without converting constants or introducing scalar numeric payloads.
+A later external evidence envelope must use exact tagged numeric carriers and
+extend the numeric-surface enumerators in that same change. Graph-local IDs are
+not cross-pass identities; consumers must check, not trust, the recorded maps.
+
+The application snapshots and maps are observations, not proofs of call-site
+splicing/result-packing correspondence. Remaining obligations include checking them,
+pre-erasure Random protocol and Resource metadata, the selected emission's
+`VerifiedDagProgram.emission()` ownership actions, external decoding and checking,
+and independent Hull numerical tests. The library entry point alone does not
+cover contextual/host subexpression entry points or certify floating-point AD. In particular, observing
+a Dropout node does not discharge the required Dropout conformance lane. Existing
+compiler/spec discrepancies require separately approved compatibility work; this
+tool must not repair or conceal them.
+
+For example, a host-classified function using a runtime shape can leave this
+library DAG empty. `UnloweredDefinitions` records that boundary; the returned
+library's `lowered_names` table identifies the definitions. An empty trace is
+never evidence that the source program's obligations were discharged.
+
+### Source-owned execution sequence and AD capture
+
+Fixed-control evaluation plans retain one ordered sequence of actual graph
+nodes and explicit seed entry/exit controls. A handler that returns an existing
+value, with no draw or newly computed body node, still has both controls.
+Lowering independently records an occurrence census; source occurrence IDs,
+scope IDs, forward draw IDs, graph IDs and raw seed values are distinct.
+Backward replay is not another source occurrence and does not repeat controls.
+
+Declaration selection follows the independently recorded declaration
+dependencies, not only the final graph's value liveness. An alias declaration
+uses its existing named observation carrier so a reference retains that
+declaration's controls; unrelated sibling declarations remain excluded. The
+explicit plan-selection API also admits a draw-free region without changing
+the profile used by ordinary evaluator dispatch. Other exclusions remain errors.
+The owning copy/drop, context-composition and AD/splice boundaries map the existing
+sequence rather than recovering source controls by sorting a resulting graph.
+Host partitioning uses occurrence cuts recorded at the actual source action;
+even a control-only segment executes before that action. Segment frames retain
+the same invocation's saved keys and scope state across those cuts.
+Validation requires the complete selected graph, source census in order,
+balanced unique seed scopes and forward/replay dominance. Joint deletion of
+runtime controls or draw metadata cannot delete the source census.
+
+The same `lowering-trace` feature additionally exposes
+`try_lower_program_to_evaluation_library_with_trace`. Its ordinary counterpart
+does not collect full snapshots. The additive `EvaluationLoweringTrace` links
+execution-bearing pre/post AD regions to the existing gradient/application
+maps, at the actual production call. It retains exact existing DAG types and
+constants; its occurrence census checks execution identity, not an independent
+arithmetic theorem. `LoweringTrace`, public legacy graph/kernel products and
+serialized formats remain unchanged. Inspection views cannot construct plans.
+
+The owning oracle adds value-free/equal-seed controls, independently selected
+dependencies, joint omission/substitution negatives, and execution of the
+captured backward graph with unchanged outer stream state. This is source/IR
+infrastructure, not a compiled-C capability, host-emission snapshot, new wire
+profile or mixed certificate. Joining actual selected emission and independently
+checking both graph correspondences remains required.
+
+The feature also provides explicit helper-observing counterparts for manifested
+host execution lowering and fixed-control named-entry lowering. Each successful
+host tensor helper retains one private lowering product containing its existing
+execution metadata and, only for the observing ingress, an owned helper trace.
+The trace reuses the production collector at the helper's actual AD, splice,
+result-packing and normalization boundaries. The pre-normalization helper result
+retains its tuple/ADT structure and exact ordered, duplicate-split root IDs. It
+adds execution-splice mappings
+for occurrence, draw and scope identities, because the existing
+`Application.remap` intentionally carries node identities only. Execution
+normalization observations are present only for helpers already lowered through
+the fixed-control execution path; observing an ordinary helper neither creates
+execution metadata nor changes its AD or normalization route. Historical pass
+snapshots remain immutable. When host lowering later rebinds helper dimensions,
+the trace records that actual boundary output separately instead of rewriting
+the earlier snapshots retroactively.
+
+Helper products are appended only after the helper succeeds. A rejected or
+speculative lowering therefore contributes no observation. Function projection
+moves the exact function, helper graphs, execution metadata and optional traces
+together; discarded siblings do not become evidence for the selected function.
+The host execution plan exposes only borrowed, function/helper-indexed or
+global-helper-indexed trace access. Its consuming ownership boundary still
+extracts the original graph/metadata association, after an observer has had a
+chance to copy the selected trace. Ordinary lowering and ordinary execution
+lowering do not collect helper snapshots, including in a feature-enabled build.
+An explicit consuming trace-discard operation removes only these optional
+observations; it cannot remove execution metadata or substitute helper graphs.
+The retained helper trace is owned and `Send + Sync`; the collector's local
+`Rc<RefCell<_>>` never enters the returned carrier.
+
+The focused IR oracle for this companion is `cargo nextest run -p chelis-ir
+--features lowering-trace --test helper_lowering_trace --test lowering_trace`.
+It compares traced/untraced helper graphs, raw versus shaped-zero gradients,
+tuple root order, actual fixed-control pre/post-AD execution and function
+projection. This IR evidence alone does not bind a trace to final emitted bytes;
+the opt-in compilation API below supplies the final-success pairing.
+
+### Opt-in observation of selected compiler emission
+
+The `chelis-compiler-api/emission-observer` feature supplies
+`compile_for_execution_with_observer`, an observational counterpart of the
+strict `compile_for_execution` API. It shares source checking, entry selection,
+optimization, ownership verification, and code generation with that API.
+The callback receives immutable native views immediately before code generation:
+the checked/manifested source and either the exact verified standalone DAG or
+the exact verified host payload (including its verified nested DAG cursors).
+Standalone DAG observations also retain the selected pre-specialization,
+pre-fusion DAG. A host observation makes no claim to have such a single graph.
+
+`EmissionObservation.lowered_host` additionally borrows a snapshot of the actual
+initial host lowering, when one exists, before entry projection and backend
+preparation. It is captured only when an observer is installed, without another
+lowering or ownership-verification pass. In particular, a tuple-gradient entry
+may emit only its derivative while this snapshot still contains its scalar loss.
+The snapshot is not ownership-verified, is not necessarily pre-AD, and does not
+make an unselected function part of the artifact. Consumers must establish their
+own source/snapshot/selected-payload correspondence and separately identify any
+primal compilation used for numerical comparison. Ordinary compilation, including
+feature-enabled calls without an observer, does not make this snapshot copy.
+
+This feature changes no default output, public wire schema, CLI, shell pin, or
+language behavior. Ordinary compilation does not invoke an observer, including
+in feature-enabled builds. Views borrow existing tagged compiler carriers; they
+are not a new serialization format. The callback may copy observations for later
+inspection but cannot mutate the verified payload. Observations may precede a
+later compilation failure: only the enclosing API's successful result establishes
+that code generation and artifact construction completed. An observation is not
+an acceptance verdict, and callback failures are the opt-in caller's failures.
+
+The acceptance oracle is `cargo nextest run -p chelis-compiler-api --features
+emission-observer --test emission_observer --test execution_artifact_metadata`.
+It must compare complete artifacts and diagnostics with ordinary compilation,
+check actual selected entry ownership actions rather than the library DAG,
+exercise standalone and host emission, and preserve rejection without treating
+an empty observation as successful certification. Tuple-gradient cases must
+distinguish the full initial host lowering from the selected emitted functions,
+including partial and complete primal disconnection. Feature-disabled compilation
+is checked separately. This does not yet join the library AD trace to selected
+emission, check fusion or effect erasure, or implement an external certificate.
+
+### Same-compilation helper observation and final-success pairing
+
+`chelis-compiler-api/compilation-trace` enables the existing emission observer
+and IR/core lowering-trace features. Its additive
+`compile_for_execution_with_trace(request, project)` follows the same strict
+compilation as `compile_for_execution`. The callback borrows the actual selected
+ownership-verified emission and helper-local pass captures carried through that
+compilation's lowering, specialization and selection. It does not rerun AD or
+attach a separately lowered library graph to the result.
+
+`SelectedLowering` distinguishes a fixed-control named-entry trace, selected
+host helper traces, and `Unavailable`. Helper slots and function order come
+from the actual selected host product; a missing slot is not an empty proof.
+This first API slice retains passes for the already planned fixed-control C
+lane. Ordinary fallback and other targets explicitly report `Unavailable`;
+collecting observations must not select a different lowering or optimization
+lane. IR's separate observing ingress also tests ordinary helpers without
+manufacturing execution metadata. Duplicate tuple packing and nonidentity
+dimension rebinding have direct production-boundary tests, not a claim that
+every structured source expression is a retained native host helper.
+
+The callback still precedes fallible code generation. Only final successful
+artifact construction and exactly one selected emission return a
+`TracedCompilation<T>` pairing the actual artifact with the caller's projection.
+A later compiler error wins over an earlier observation; duplicate callbacks
+cannot execute the projection twice. The pairing is private and consuming
+access separates its products. Caller projections remain untrusted data.
+
+The gate's opt-in commands run IR helper/library traces and API compilation/
+emission tests, including capture-unit missing/duplicate/failure controls.
+They pin complete observed/unobserved artifacts and diagnostics, nested-call
+isolation, actual helper AD, and the distinction between historical snapshots
+and the later real dimension-rebinding output. Feature closure and both platform
+Clippy owners include the new feature; normal builds remain opt-out.
+
+No existing public Rust layout, serialized schema, shell interface or default
+output changes. This is not a checked source/AD correspondence, Resource
+occurrence census, ordered host-cut collector, native invocation/state receipt,
+numerical proof or external certificate. Those remain separate obligations.
+
+### Value-free Resource cuts in fixed-control C helpers
+
+C fixed-control helper lowering records a checked Resource device literal before
+its body, without creating a DAG value, seed, or runtime action. The existing
+checked-source target validator remains the sole compiler compatibility authority.
+Evaluator and ordinary helper lowering retain their Resource decline; a Resource
+handler without Dropout retains `NoDropout` and its ordinary compilation route.
+In particular, missing trace coverage is not silently promoted to a certificate.
+
+The first Resource cut promotes the original Random schedule/census into a lazy
+private full spine. Before promotion, Random-only plans allocate no sidecar.
+After promotion, the full spine is authoritative; the old random-only vectors
+are checked projections. Appends extend projections incrementally, while rewrites
+rebuild them. Existing public `Copy` carriers and exhaustive variants are unchanged.
+Full-source IDs have a separate namespace from Random occurrence IDs, so AD splice
+and selection rebase them independently. Device text is never a graph identity.
+
+Opt-in `FullSpineObservation` accessors expose actual plan snapshots, including
+pre/post-AD plans and the selected host's retained helpers. They do not reconstruct
+source order from final node liveness. Requirements survive remap, DCE, Copy/Drop
+normalization and source selection; backward replay is not a new source event.
+These are helper-local observations, not an independent checked-AST census or an
+ordered host-invocation collector. Outer host scopes still need a separate join.
+
+The focused tests use CPU Resource around a locally seeded loss, its actual AD
+splice and generated C execution, and reject omitted/duplicated/wrong-ID/reordered
+cuts. Late promotion and a counted 1024-event Random-only case exercise projection
+storage. C/GPU rejection precedes projection. A `main`-selected CPU program excludes
+an unused GPU sibling; direct scalar-gradient selection still visits the whole host
+and rejects that sibling. This newly exposed route boundary is not a claim that the
+same mixed source compiled before this change, and no selection routing is changed.
+
+The source spine, preserving rewrites, additive observations and discriminating
+tests ship together: a marker without retained order or an accessor without the
+actual producer would not supply this evidence slice. None establishes native
+state correspondence, source elaboration, physical memory safety or acceptance.
+
 ## 7. Spec-Driven Test Generation - `Hull.Generate`
 
 Generate random well-typed Deep programs. Naive approach (generate random AST, check if it types) has near-zero hit rate for non-trivial programs. The useful approach is top-down, type-directed generation.
 
 ```chelis
 -- Generate a random expression of a given type at a given depth
-def gen_expr(ctx: Ctx, target: Type, depth: int64, rng: RngState)
+def gen_expr(ctx: Ctx, target: Type, depth: i64, rng: RngState)
     -> (Expr, RngState) =
   if depth <= 0 then gen_leaf(ctx, target, rng)
   else {
@@ -988,7 +1403,7 @@ def gen_leaf(ctx: Ctx, target: Type, rng: RngState) -> (Expr, RngState) =
 
 
 -- Generate random types for argument positions
-def gen_type(rng: RngState, depth: int64) -> (Type, RngState) = {
+def gen_type(rng: RngState, depth: i64) -> (Type, RngState) = {
   (choice, rng) = random_int(rng, 0, 5)
   match choice {
     0 -> (TF32, rng)

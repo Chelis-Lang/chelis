@@ -57,6 +57,12 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
         for &input in &node.inputs {
             counts[input.0] += 1;
         }
+        // An activation is read by the node it owns, so a node that is some
+        // node's activation stays materialized rather than being absorbed
+        // into a chain as an intermediate.
+        if let Some(activation) = node.owner.activation {
+            counts[activation.0] += 1;
+        }
     }
     // Roots count as consumers (they must be materialized).
     for &root in dag.roots() {
@@ -66,7 +72,13 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 }
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible_elementwise(node: &DagNode) -> bool {
+fn is_fusible_elementwise(seeds: &crate::dag::TrapSeeds<'_>, node: &DagNode) -> bool {
+    // A checking operation under an activation substitutes operands its
+    // checks accept where the activation is false (spec/10 section 3.2);
+    // it stays its own kernel, where both lanes substitute them.
+    if seeds.is_activation_gated(node) {
+        return false;
+    }
     // chelis#729 Phase 3 / chelis#699: the typed backends now have trapping
     // direct integer Abs/Sub/extrema kernels, while their general fused
     // integer kernels are still deliberately unavailable. Keep those integer
@@ -89,7 +101,6 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
             | RiscOp::MinElem
-            | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp
@@ -117,7 +128,6 @@ fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
         RiscOp::TruncDiv => FusedStepOp::TruncDiv,
         RiscOp::MaxElem => FusedStepOp::MaxElem,
         RiscOp::MinElem => FusedStepOp::MinElem,
-        RiscOp::CmpLt => FusedStepOp::CmpLt,
         RiscOp::Neg => FusedStepOp::Neg,
         RiscOp::Recip => FusedStepOp::Recip,
         RiscOp::Exp => FusedStepOp::Exp,
@@ -151,14 +161,17 @@ struct Chain {
 fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
     let mut chains = Vec::new();
     let mut in_chain: Vec<bool> = vec![false; dag.len()];
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
+    let is_claim_barrier = |node: &DagNode| claimed_producers[node.id.0];
 
+    let seeds = dag.trap_seeds();
     // Walk in topological order.
     for node in dag.nodes() {
         let id = node.id.0;
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(node) {
+        if !is_fusible_elementwise(&seeds, node) || is_claim_barrier(node) {
             continue;
         }
 
@@ -179,7 +192,14 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c) if is_fusible_elementwise(c) => {
+                // One fused kernel runs under one owner: a node under another
+                // activation checks under that activation, so it starts its
+                // own chain (spec/10 section 3.2).
+                Some(c)
+                    if is_fusible_elementwise(&seeds, c)
+                        && !is_claim_barrier(c)
+                        && c.owner == node.owner =>
+                {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)
@@ -214,7 +234,9 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
     }
 
     let mut new_dag = Dag::new();
+    new_dag.inherit_declarations(dag);
     let mut id_map: UnordMap<usize, NodeId> = UnordMap::new();
+    let claimed_producers = crate::axis_sources::claimed_producers(dag);
 
     for node in dag.nodes() {
         let old_id = node.id.0;
@@ -229,6 +251,10 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
 
             // This is the chain output node — emit a FusedElem.
             let chain = &chains[ci];
+            assert!(
+                chain.nodes.iter().all(|id| !claimed_producers[id.0]),
+                "fusion chain contains a producer-owned extent claim"
+            );
             let (fused_op, external_inputs) = build_fused_elem(dag, chain, &id_map);
             let reusable_input = reusable_external_input(dag, chain, &external_inputs);
 
@@ -247,7 +273,12 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
             // span_id; merged_spans = sort_dedup(rest contributors'
             // spans ∪ each contributor's pre-existing merged_spans).
             let first = dag.get(chain.nodes[0]).expect("chain head exists");
+            // Every chain member has the same owner (see `find_chains`).
             let new_id = new_dag.add_node(
+                dag.get(chain_out)
+                    .expect("chain output exists")
+                    .owner
+                    .remap_with(|old| id_map.get(&old.0).copied()),
                 fused_op,
                 remapped_inputs,
                 output_type,
@@ -302,6 +333,7 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                 })
                 .collect();
             let new_id = new_dag.add_node(
+                node.owner.remap_with(|old| id_map.get(&old.0).copied()),
                 node.op.clone(),
                 new_inputs,
                 node.output_type.clone(),
@@ -326,6 +358,20 @@ fn rebuild_with_fusion(dag: &Dag, chains: &[Chain]) -> (Dag, UnordMap<NodeId, No
                     .collect();
                 if let Some(new_node) = new_dag.node_mut(new_id) {
                     new_node.shape_deps = mapped;
+                }
+            }
+            if !node.result_claim_deps.is_empty() {
+                let mapped = node
+                    .result_claim_deps
+                    .iter()
+                    .map(|old| {
+                        *id_map
+                            .get(&old.0)
+                            .unwrap_or_else(|| panic!("unmapped result claim dependency {old:?}"))
+                    })
+                    .collect();
+                if let Some(new_node) = new_dag.node_mut(new_id) {
+                    new_node.result_claim_deps = mapped;
                 }
             }
             id_map.insert(old_id, new_id);
@@ -477,19 +523,22 @@ mod tests {
     #[test]
     fn consumer_counts_basic() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 1.0),
             vec![],
             scalar_f32(),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(scalar_f32().precision, 2.0),
             vec![],
             scalar_f32(),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], scalar_f32(), None);
         dag.add_root(c);
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[a.0], 1); // consumed by c
@@ -500,21 +549,24 @@ mod tests {
     #[test]
     fn multi_consumer_blocks_chain() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let shared = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let _left = dag.add_node(RiscOp::Neg, vec![shared], vec_f32(4), None);
-        let _right = dag.add_node(RiscOp::Exp, vec![shared], vec_f32(4), None);
+        let shared = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let _left = dag.add_node(decl, RiscOp::Neg, vec![shared], vec_f32(4), None);
+        let _right = dag.add_node(decl, RiscOp::Exp, vec![shared], vec_f32(4), None);
 
         let counts = build_consumer_counts(&dag);
         assert_eq!(counts[shared.0], 2); // two consumers
@@ -532,20 +584,23 @@ mod tests {
     #[test]
     fn simple_chain_found() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let a = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
         let b = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let c = dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
-        let d = dag.add_node(RiscOp::Neg, vec![c], vec_f32(4), None);
+        let c = dag.add_node(decl, RiscOp::Add, vec![a, b], vec_f32(4), None);
+        let d = dag.add_node(decl, RiscOp::Neg, vec![c], vec_f32(4), None);
         dag.add_root(d);
 
         let counts = build_consumer_counts(&dag);
@@ -557,15 +612,23 @@ mod tests {
     #[test]
     fn integer_abs_stays_materialized_until_typed_fused_kernels_exist() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_i64(4),
+            None,
+        );
         let one = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_i64(4).precision, 1.0),
             vec![],
             vec_i64(4),
             None,
         );
-        let abs = dag.add_node(RiscOp::Abs, vec![x], vec_i64(4), None);
-        let add = dag.add_node(RiscOp::Add, vec![abs, one], vec_i64(4), None);
+        let abs = dag.add_node(decl, RiscOp::Abs, vec![x], vec_i64(4), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![abs, one], vec_i64(4), None);
         dag.add_root(add);
 
         let fused = fuse(&dag);
@@ -591,22 +654,31 @@ mod tests {
     #[test]
     fn fusion_preserves_unambiguous_external_reusable_input() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let bias = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let add = dag.add_node(RiscOp::Add, vec![x, bias], vec_f32(4), None);
+        let add = dag.add_node(decl, RiscOp::Add, vec![x, bias], vec_f32(4), None);
         dag.set_reusable_input(add, x);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
-        let mul = dag.add_node(RiscOp::Mul, vec![add, scale], vec_f32(4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, scale], vec_f32(4), None);
         dag.add_root(mul);
 
         let fused = fuse_with_remap(&dag);
@@ -627,11 +699,24 @@ mod tests {
     #[test]
     fn fusion_drops_ambiguous_reusable_inputs() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
-        let add = dag.add_node(RiscOp::Add, vec![x, y], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let y = dag.add_node(
+            decl,
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let add = dag.add_node(decl, RiscOp::Add, vec![x, y], vec_f32(4), None);
         dag.set_reusable_input(add, x);
-        let mul = dag.add_node(RiscOp::Mul, vec![add, y], vec_f32(4), None);
+        let mul = dag.add_node(decl, RiscOp::Mul, vec![add, y], vec_f32(4), None);
         dag.set_reusable_input(mul, y);
         dag.add_root(mul);
 

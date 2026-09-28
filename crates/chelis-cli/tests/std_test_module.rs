@@ -206,7 +206,7 @@ fn std_test_assert_eq_int_pass() {
 
 import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq(cast(3, int64), cast(3, int64), "eq-int-pass")
+def test_case() -> unit ! { Test } = assert_eq(cast(3, i64), cast(3, i64), "eq-int-pass")
 
 ran = test_case()
 "#,
@@ -225,7 +225,7 @@ fn std_test_assert_eq_int_fail_reports_label() {
 
 import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq(cast(3, int64), cast(5, int64), "eq-int-fail")
+def test_case() -> unit ! { Test } = assert_eq(cast(3, i64), cast(5, i64), "eq-int-fail")
 
 ran = test_case()
 "#,
@@ -428,7 +428,7 @@ fn std_test_assert_eq_tensor_int64_pass() {
 import Std.Test (assert_eq_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_eq_tensor(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), "eq-tensor-i64-pass")
+  assert_eq_tensor(to_tensor([cast(0, i64), cast(1, i64), cast(2, i64)]), to_tensor([cast(0, i64), cast(1, i64), cast(2, i64)]), "eq-tensor-i64-pass")
 
 ran = test_case()
 "#,
@@ -448,7 +448,7 @@ fn std_test_assert_eq_tensor_int64_fail_reports_label() {
 import Std.Test (assert_eq_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_eq_tensor(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(7, int64), cast(2, int64)]), "eq-tensor-i64-fail")
+  assert_eq_tensor(to_tensor([cast(0, i64), cast(1, i64), cast(2, i64)]), to_tensor([cast(0, i64), cast(7, i64), cast(2, i64)]), "eq-tensor-i64-fail")
 
 ran = test_case()
 "#,
@@ -472,7 +472,7 @@ fn std_test_assert_shape_pass() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0, 3.0]), [cast(3, int64)], "shape-3-pass")
+  assert_shape(to_tensor([1.0, 2.0, 3.0]), [cast(3, i64)], "shape-3-pass")
 
 ran = test_case()
 "#,
@@ -492,7 +492,7 @@ fn std_test_assert_shape_fail_reports_label() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0]), [cast(7, int64)], "shape-fail")
+  assert_shape(to_tensor([1.0, 2.0]), [cast(7, i64)], "shape-fail")
 
 ran = test_case()
 "#,
@@ -617,7 +617,7 @@ fn std_test_assert_shape_reports_label_on_mismatch() {
 
 import Std.Test (assert_shape)
 
-def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), [cast(7, int64)], "shape-bad")
+def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), [cast(7, i64)], "shape-bad")
 
 ran = test_shape_bad()
 "#,

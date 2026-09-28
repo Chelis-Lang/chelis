@@ -416,21 +416,47 @@ two faces of one defect in how a pipe stage's argument positions survive the
 round trip, with #1241 adjacent in the migrator that consumes it. Both are
 pending decision 3.
 
-### The CI-pinned set (11, all legitimately live)
+### The CI-pinned set (19, source-derived as of 2026-09-13)
 
-`spec/design/loud_unsupported_issue_manifest.json` requires these OPEN while
-emitter `unimplemented_rejection!` sites cite them - closing one reddens the
-Rejection Authority Liveness job: **#600** (value-derived output dims),
-**#689** (HIP typed kernels beyond f32/f64), **#729** (the tracker), **#759**
-(the HIP cast half - `cast_trunc` landed on C, but HIP still emits an
-unguarded device conversion and the issue demands every-lane parity),
-**#829**, **#879** (C-host function-value ABI), **#951** (`emit_fused_reduce`
-f32-hardcoded), **#1058**, **#1059**, **#1138**, and **#1192** (compiled
-seeded-dropout kernels, added by PR #1186 when the host-helper `dropout`
-emitter panic became a branded rejection). Each closes by landing its support,
-not by cleanup. (#691 and #714 left this set via PR #1164; their one-time
-closure by #1151 and un-closure by the #1159 revert is the worked example of
-why closing a pinned issue from the roadmap top-down breaks the build.)
+`spec/design/loud_unsupported_issue_manifest.json` is generated from the exact
+literal issue identities cited by production `unimplemented_rejection!`
+invocations. Cargo supplies one package/target view for every repository-local
+workspace member, including members outside `crates/`; the existing `syn`
+inventory owner follows each non-test library or binary-like target's
+production module graph, including literal `#[path]` sources outside the
+target directory. One `test=false` source view excludes test-only items,
+statements, expressions, arms, fields, arguments, and generic parameters
+before include, macro, or module-wiring validation. The direct-construction
+boundary consumes that same view. The shared Cargo representation retains each
+production target's package identity, name, kind, root, and required features.
+Rustc runs with the union of those package-qualified required features and must
+emit non-test dep-info for every exact target identity before its source closure
+is independently reconciled against the graph through the repository's
+existing configuration-closure parser.
+Its current set is **#600, #689, #729, #759, #829, #879, #912,
+#951, #1058, #1059, #1138, #1192, #1277, #1298, #1306, #1364, #1383, #1482,
+and #1844**. Repeated citation sites collapse to one row; a missing cited row,
+an uncited stale row, or a dynamic/malformed issue argument fails the
+generator. The first regeneration removed #1291 because no production
+rejection cites it; #1291's remaining hardware work and closing condition are
+unchanged and no longer masquerade as rejection-construction authority.
+
+Every `.rs` edit and every `Cargo.toml` edit anywhere in the repository
+conservatively triggers Rejection Authority Liveness, which first rechecks
+structural citation/generated-byte agreement and then checks every standing
+row, so closing any listed issue reddens that run. The #1870 changed-row PR
+narrowing and scheduled
+standing-state canary are not part of this prerequisite slice. (#691 and #714 left the set via PR
+#1164; their one-time closure by #1151 and un-closure by the #1159 revert is
+the worked example of why closing a pinned issue from the roadmap top-down
+breaks the build.)
+
+The dedicated liveness job is the hosted owner of fresh production-graph,
+compiler-closure, boundary, and tracker execution. Script-unit tests consume
+fixtures or injected source evidence for those paths, avoiding four redundant
+Cargo inventory/closure runs while preserving the dedicated job's fail-closed
+checks. Its target-coverage assertion prevents Cargo's ordinary
+required-feature skip behavior from reducing the compiler-backed universe.
 
 ### Where the graph puts things
 
@@ -1087,7 +1113,7 @@ that measures it.
    on the #912 leg rather than scoping the leg out. Both behaviors are
    correct. The hazard is the converse - an oracle nobody runs proves nothing,
    which is #1089.
-6. **Release notes drift, and the guard against it is unbuilt.** v0.18.4 had
+6. **Release notes drift; PR fragments are required.** v0.18.4 had
    to author its own section from the commits (`[Unreleased]` was empty and no
    commit since v0.18.3 touched `CHANGELOG.md` - 21 PRs, zero entries, per PR
    #1199's account, and `git log v0.18.3..v0.18.4 -- CHANGELOG.md` returns
@@ -1122,17 +1148,15 @@ that measures it.
    designed - a fragment scheme has to leave a way to amend an already-written
    fragment, or it recreates this case as a conflict.
 
-   Say the trade plainly: this reinstates exactly the drift risk the rest of
-   this condition documents, for the sake of not serializing every in-flight
-   PR behind every other one. It is accepted deliberately and it is not free -
-   assembling from PR bodies is a manual step with no gate behind it, which is
-   the same shape that produced 0.18.3's 1-of-20 coverage. #1251 is the
-   reconciliation path and until it lands this condition is a known open risk,
-   not a solved problem. The previously proposed guard - **CI asserting that a
-   PR diff adds no changelog line below the first `## [` header** - still
-   catches the chelis#945 case where a rebase moves an entry into an
-   already-released section, and remains worth building under either
-   convention.
+   #1251 supplies the [fragment contract](../../changelog.d/README.md), a tested
+   local Python assembler, and a required `Changelog` CI check.
+
+   Behavior-changing PRs author fragments; release assembly
+   preserves historical sections and consumes the pending entries. GitHub
+   Releases use the committed version section. Missing fragments and direct
+   changelog edits outside reproducible assembly fail CI;
+   `no-changelog` suppresses only the missing-fragment requirement. The executable
+   acceptance command is `.venv/bin/python -m unittest scripts.test_changelog`.
 7. **The plan set's oracles cannot see the ecosystem.** Every phase oracle in
    these five plans is repo-internal, so a change can pass all of them and
    still break a shell. #1200 is what that costs: a linearity regression that

@@ -1,5 +1,7 @@
 name: Hull Conformance
 
+run-name: ${{ inputs.retarget_token != '' && format('Retarget Hull {0}', inputs.retarget_token) || github.workflow }}
+
 # The Hull Phase 5b conformance gate: runs the frozen, version-stamped Hull
 # conformance corpus (tests/conformance/hull/) against the just-built chelis
 # binary and FAILS on any CompilerUnsound, unexplained Disagree, or EvalDisagree.
@@ -18,13 +20,44 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose synthetic merge must be tested
+        required: true
+        type: number
+      expected_head_sha:
+        description: Exact open pull-request head
+        required: true
+        type: string
+      expected_base_sha:
+        description: Exact retargeted base commit
+        required: true
+        type: string
+      retarget_token:
+        description: Unique coordinator token
+        required: true
+        type: string
+      execution_target:
+        description: Protected self-hosted execution requires separate exact-candidate admission
+        required: false
+        default: github-hosted
+        type: choice
+        options: [github-hosted, self-hosted]
+      expected_candidate_sha:
+        description: Exact synthetic merge SHA required for protected self-hosted execution
+        required: false
+        type: string
 
 concurrency:
-  group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,47 +73,592 @@ jobs:
   # shared-artifact fold is escalated separately.
   changes:
     name: Detect docs-only changes (conformance)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
     outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      ci_contract_changed: ${{ steps.candidate-preflight.outputs.ci_contract_changed }}
+      candidate_preflight: ${{ steps.candidate-preflight.outputs.candidate_preflight }}
+      preflight_reason: ${{ steps.candidate-preflight.outputs.preflight_reason }}
+      rebase_lane: ${{ steps.rebase-reuse.outputs.rebase_lane }}
+      rebase_before: ${{ steps.rebase-reuse.outputs.rebase_before }}
+      rebase_contract_changed: ${{ steps.rebase-reuse.outputs.rebase_contract_changed }}
+      rebase_run_rust: ${{ steps.rebase-reuse.outputs.rebase_run_rust }}
+      rebase_run_script_unit: ${{ steps.rebase-reuse.outputs.rebase_run_script_unit }}
+      rebase_run_integration: ${{ steps.rebase-reuse.outputs.rebase_run_integration }}
+      rebase_run_smt: ${{ steps.rebase-reuse.outputs.rebase_run_smt }}
+      rebase_run_backend: ${{ steps.rebase-reuse.outputs.rebase_run_backend }}
+      rebase_run_diagnostic: ${{ steps.rebase-reuse.outputs.rebase_run_diagnostic }}
+      rebase_run_hull: ${{ steps.rebase-reuse.outputs.rebase_run_hull }}
+      rebase_packages: ${{ steps.rebase-reuse.outputs.rebase_packages }}
     steps:
-      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
-      # expressions have no arithmetic. See ci.yml's changes job.
-      - name: Checkout
-        if: github.event_name == 'pull_request'
+      - name: Checkout trusted retarget validator
+        id: checkout-trusted-retarget
+        continue-on-error: true
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.expected_base_sha }}
+          path: trusted
           fetch-depth: 1
-      - name: Compute docs_only
-        id: detect
+
+      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
+      # expressions have no arithmetic. See ci.yml's changes job. A retarget
+      # dispatch with a pinned candidate checks out that exact merge commit by
+      # SHA (reachable through refs/ci-candidates/<token>) and both parents
+      # (depth 2; 0 is false in expressions, so `&& 0 || 1` would be 1).
+      - name: Checkout exact candidate
+        id: checkout-candidate
+        continue-on-error: true
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.expected_candidate_sha != '' && inputs.expected_candidate_sha || (github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || github.sha) }}
+          path: candidate
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 2 || 1 }}
+
+      - name: Checkout trusted rebase reuse verifier
+        id: checkout-trusted-rebase
+        continue-on-error: true
+        if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-rebase
+          fetch-depth: 1
+
+      - name: Validate exact retarget candidate
+        id: validate-retarget
+        continue-on-error: true
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        working-directory: candidate
+        run: |
+          # A pinned candidate binds its parents, not the live pull-request
+          # base that GitHub recomputes on every main push. See ci.yml.
+          if [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            base_args=(--checkout-base-sha "$EXPECTED_BASE_SHA" --expected-base-ref main)
+          else
+            base_args=(--expected-base-sha "$EXPECTED_BASE_SHA")
+          fi
+          python3 ../trusted/scripts/ci_validate_pr_candidate.py \
+            --repository "${{ github.repository }}" \
+            --pr-number "${{ inputs.pr_number }}" \
+            --expected-head-sha "${{ inputs.expected_head_sha }}" \
+            "${base_args[@]}" \
+            --validate-checkout
+
+      - name: Record exact candidate
+        id: candidate
+        continue-on-error: true
+        env:
+          EXECUTION_TARGET: ${{ inputs.execution_target }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        working-directory: candidate
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          if [ "$EXECUTION_TARGET" = self-hosted ] || [ -n "$EXPECTED_CANDIDATE_SHA" ]; then
+            if [[ ! "$EXPECTED_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+               [ "$candidate" != "$EXPECTED_CANDIDATE_SHA" ]; then
+              echo "::error::The server-controlled candidate differs from the reviewed synthetic merge."
+              exit 1
+            fi
+          fi
+          echo "candidate_sha=$candidate" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap CI contract preflight selection
+        id: ci-contract-bootstrap
+        continue-on-error: true
+        if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+        run: |
+          # Bootstrap before project activation without consulting a checkout-controlled PATH.
+          trusted_git=/usr/bin/git
+          trusted_python=/usr/bin/python3
+          if [ "${RUNNER_ENVIRONMENT:-github-hosted}" = "self-hosted" ]; then
+            trusted_git=/run/current-system/sw/bin/git
+            trusted_python=/run/current-system/sw/bin/python3
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            classifier="trusted/scripts/ci_contract_paths.py"
+          else
+            classifier="$RUNNER_TEMP/ci-contract-paths.py"
+            if ! "$trusted_git" -C candidate show \
+              "$BASE_SHA:scripts/ci_contract_paths.py" > "$classifier"; then
+              echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          set -o pipefail
+          if ! GIT_NO_REPLACE_OBJECTS=1 "$trusted_git" -C candidate \
+            -c core.quotePath=true diff --name-only --no-renames \
+            --no-ext-diff --no-textconv "$BASE_SHA" "$HEAD_SHA" \
+            | "$trusted_python" "$classifier"; then
+            echo "ci_contract_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # One step owns this clone's shape, and every verifier after it reads
+      # a stated property rather than whatever the previous step's fetches
+      # happened to leave behind. Two defects came from the latter:
+      # chelis#2228, where the base backstop's `--depth=1` grafted the
+      # target snapshot out of the identity step's reach, and chelis#2234,
+      # where the head deepen's own boundary grafted the target tip out of
+      # the classifier's. Both were a verifier depending on execution order.
+      #
+      # An invariant that a later fetch can violate is worse than none,
+      # because it reads as a guarantee. A fetch can only add history, with
+      # one exception: a depth-limited fetch adds a graft. So this step owns
+      # every depth-limited fetch in the job, and
+      # scripts/test_ci_establish_candidate_clone.py fails if another step
+      # acquires one.
+      - name: Establish the candidate clone
+        id: clone
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
           COMMITS: ${{ github.event.pull_request.commits }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          # Every command in this preamble is guarded. Under errexit an
+          # unguarded one exits the step, and this step's outcome now gates
+          # the candidate preflight, so a transient `gh` blip would close
+          # required contexts with nothing said about the candidate. Worse,
+          # `Compute docs_only` reads the clone this step establishes and
+          # cannot tolerate a failure of its own, so dying here would fail
+          # the whole job and leave required contexts with no check run at
+          # all, which is chelis#2228's unmergeable shape. The module below
+          # already fails closed *with information*; this preamble has to
+          # do the same rather than fail closed with none.
+          current_pr="$RUNNER_TEMP/current-pr.json"
+          target_tip=""
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$current_pr"; then
+            # A bare assignment is not a guard. `// ""` defaults a null
+            # field; it does not survive a malformed document, and jq exits
+            # 5 on an array or on non-JSON written under a zero exit code,
+            # and 127 when it is absent. The same applies to the rev-parse
+            # below, which is reachable after a successful fetch.
+            if ! base_ref=$(jq -r '.base.ref // ""' "$current_pr"); then
+              base_ref=""
+            fi
+            # Pre-existing and unguarded until now: a base branch renamed
+            # upstream leaves `refs/heads/$base_ref` gone (chelis#2240).
+            if [ -n "$base_ref" ] &&
+               git fetch --no-tags origin "refs/heads/$base_ref" &&
+               target_tip=$(git rev-parse FETCH_HEAD); then
+              :
+            else
+              target_tip=""
+              echo "could not resolve the target tip for base ref" \
+                "'${base_ref:-<unreadable>}'; the clone is established" \
+                "without it and the classifier will fail safe" >&2
+            fi
+          else
+            echo "could not read the live pull request; the target tip is" \
+              "unresolved and the clone is established without it" >&2
+          fi
+          echo "target_tip=$target_tip" >> "$GITHUB_OUTPUT"
+          args=(--base "$BASE" --head "$HEAD" --commits "$COMMITS"
+                --github-output "$GITHUB_OUTPUT")
+          # Named explicitly, and not redundantly: `--unshallow`
+          # un-truncates what the refspec reaches rather than discovering
+          # commits, so a pre-push head unreachable from any live ref after
+          # a force-push stays absent unless it is asked for by name.
+          if [ "$ACTION" = "synchronize" ] && [ -n "$BEFORE" ]; then
+            args+=(--before "$BEFORE")
+          fi
+          if [ -n "$target_tip" ]; then
+            args+=(--target-tip "$target_tip")
+          fi
+          python3 ../candidate/scripts/ci_establish_candidate_clone.py "${args[@]}"
+
+      - name: Compute docs_only
+        id: detect
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          COMMITS: ${{ github.event.pull_request.commits }}
+        working-directory: candidate
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ] &&
+             [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+            echo "ci_contract_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          # No fetching here; see the identical block in ci.yml.
+          # `Establish the candidate clone` owns this clone's shape and has
+          # already asserted that base and head are present and comparable
+          # (chelis#2228, chelis#2234).
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
+      - name: Validate candidate lifecycle
+        id: candidate-lifecycle
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          BEFORE: ${{ github.event.before }}
+          HEAD: ${{ inputs.expected_head_sha || github.event.pull_request.head.sha }}
+          BASE: ${{ inputs.expected_base_sha || github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: candidate
+        run: |
+          args=(--event "$GITHUB_EVENT_PATH")
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # No fetching here either. `Establish the candidate clone`
+            # wrote current-pr.json, resolved the target tip and asserted
+            # that this classifier's commits are walkable; this step
+            # consumes that rather than re-deriving it (chelis#2234).
+            current_pr="$RUNNER_TEMP/current-pr.json"
+            timeline="$RUNNER_TEMP/pr-timeline.json"
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" > "$timeline"
+            args+=(
+              --current-pr "$current_pr"
+              --target-tip "${{ steps.clone.outputs.target_tip }}"
+              --timeline "$timeline"
+            )
+          fi
+          python3 scripts/ci_candidate_lifecycle.py "${args[@]}"
+
+      - name: Select targeted rebase lane
+        id: rebase-reuse
+        continue-on-error: true
+        if: always()
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LIFECYCLE: ${{ steps.candidate-lifecycle.outcome }}
+          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: |
+          record_frontier_defaults() {
+            echo "rebase_packages=" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_rust=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_script_unit=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_integration=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_smt=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_backend=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_diagnostic=false" >> "$GITHUB_OUTPUT"
+            echo "rebase_run_hull=false" >> "$GITHUB_OUTPUT"
+          }
+          record_full() {
+            echo "rebase_lane=full" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
+          }
+          record_ordinary() {
+            echo "rebase_lane=ordinary" >> "$GITHUB_OUTPUT"
+            echo "rebase_before=${BEFORE:-}" >> "$GITHUB_OUTPUT"
+            echo "rebase_reason=$1" >> "$GITHUB_OUTPUT"
+            echo "rebase_contract_changed=false" >> "$GITHUB_OUTPUT"
+            record_frontier_defaults
+          }
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            record_full "trusted exact-candidate dispatch"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" != "pull_request" ] ||
+             [ "$ACTION" != "synchronize" ] ||
+             [ "$LIFECYCLE" != "success" ]; then
+            record_ordinary "not an eligible synchronize event"
+            exit 0
+          fi
+          verifier="../trusted-rebase/scripts/ci_rebase_reuse.py"
+          if [ ! -f "$verifier" ]; then
+            record_full "trusted rebase verifier is not available on the base"
+            exit 0
+          fi
+          if ! python3 "$verifier" \
+            --repository "$GITHUB_REPOSITORY" \
+            --repository-path . \
+            --event "$GITHUB_EVENT_PATH" \
+            --current-pr "$RUNNER_TEMP/current-pr.json" \
+            --timeline "$RUNNER_TEMP/pr-timeline.json" \
+            --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}" \
+            --output "$RUNNER_TEMP/rebase-reuse/decision.json" \
+            --github-output "$GITHUB_OUTPUT"; then
+            record_full "trusted rebase verifier failed closed"
+          fi
+
+      - name: Publish targeted rebase decision for review
+        id: publish-rebase-decision
+        continue-on-error: true
+        if: always()
+        run: |
+          decision="$RUNNER_TEMP/rebase-reuse/decision.json"
+          if [ -f "$decision" ]; then
+            {
+              echo "### Targeted rebase decision"
+              echo
+              echo '```json'
+              cat "$decision"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Install uv for CI contract preflight
+        id: install-uv
+        continue-on-error: true
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Validate changed CI contracts before Hull build
+        id: ci-contract
+        if: ${{ always() && (steps.detect.outputs.ci_contract_changed == 'true' || steps.ci-contract-bootstrap.outputs.ci_contract_changed == 'true' || steps.rebase-reuse.outputs.rebase_contract_changed == 'true') }}
+        continue-on-error: true
+        working-directory: candidate
+        run: >-
+          uv run --managed-python --python 3.11 --no-project
+          --with PyYAML==6.0.3 python -m unittest
+          scripts.test_check_agent_skills
+          scripts.test_ci_candidate_lifecycle
+          scripts.test_ci_establish_candidate_clone
+          scripts.test_ci_preflight_carrier
+          scripts.test_ci_candidate_identity
+          scripts.test_ci_candidate_receipt
+          scripts.test_ci_rebase_reuse
+          scripts.test_ci_change_owned
+          scripts.test_ci_contract_paths
+          scripts.test_ci_detect_docs_only
+          scripts.test_ci_validate_pr_candidate
+          scripts.test_pr_workflow_routing
+          scripts.test_change_owned_workflow
+          scripts.test_hosted_validation
+          scripts.test_regenerate_conformance_assets
+          scripts.test_gate.DocsOnlySkipTests
+          scripts.test_gate.CiParityTests
+          scripts.test_gate.RejectionAuthorityPrBoundaryTests
+
+      # Split from the verdict so the identity step can sit between them:
+      # it needs a gate to run behind, and the verdict needs its outcome.
+      # This half covers everything that establishes and classifies the
+      # candidate; the verdict below adds what this gate then permitted.
+      #
+      # Every step in this job is `continue-on-error`, so the job always
+      # completes and always emits its outputs. Job setup is the exception
+      # that no step condition reaches: an unresolvable `uses:` or a lost
+      # runner still fails the job, and the required Docs context reports
+      # that case.
+      #
+      # The reason names the first failure in THIS list's order, which is
+      # not step order. With two steps failing it names whichever this
+      # checks first, which is deliberate: one stated cause beats a
+      # concatenation, and the job log has the rest. That is the point: a hard
+      # failure here used to leave required contexts with no check run at
+      # all, which cannot be waited out, re-run into existence or
+      # overridden (chelis#2228). Tolerating a step must not make its
+      # failure ignorable, so every one of them is read below, and
+      # scripts/test_ci_preflight_carrier.py fails if a tolerated step is
+      # missing from this list.
+      - name: Compute the candidate preflight gate
+        id: preflight-gate
+        if: always()
+        continue-on-error: true
+        run: |
+          checkout="${{ steps.checkout-candidate.outcome }}"
+          candidate="${{ steps.candidate.outcome }}"
+          candidate_sha="${{ steps.candidate.outputs.candidate_sha }}"
+          clone="${{ steps.clone.outcome }}"
+          clone_invariant="${{ steps.clone.outputs.clone_invariant }}"
+          bootstrap="${{ steps.ci-contract-bootstrap.outcome }}"
+          detect_outcome="${{ steps.detect.outcome }}"
+          lifecycle="${{ steps.candidate-lifecycle.outcome }}"
+          rebase="${{ steps.rebase-reuse.outcome }}"
+          publish="${{ steps.publish-rebase-decision.outcome }}"
+          install_uv="${{ steps.install-uv.outcome }}"
+          contract="${{ steps.ci-contract.outcome }}"
+          retarget_checkout="${{ steps.checkout-trusted-retarget.outcome }}"
+          retarget_validate="${{ steps.validate-retarget.outcome }}"
+          rebase_checkout="${{ steps.checkout-trusted-rebase.outcome }}"
+          detected_contract="${{ steps.detect.outputs.ci_contract_changed }}"
+          bootstrap_contract="${{ steps.ci-contract-bootstrap.outputs.ci_contract_changed }}"
+          rebase_contract="${{ steps.rebase-reuse.outputs.rebase_contract_changed }}"
+          contract_changed=unknown
+          if [ "$detected_contract" = "true" ] ||
+             [ "$bootstrap_contract" = "true" ] ||
+             [ "$rebase_contract" = "true" ]; then
+            contract_changed=true
+          elif [ "$detected_contract" = "false" ] &&
+               [ "$bootstrap_contract" = "false" ] &&
+               { [ "$rebase_contract" = "false" ] || [ -z "$rebase_contract" ]; }; then
+            contract_changed=false
+          fi
+          gate=success
+          reason=""
+          fail() {
+            gate=failure
+            if [ -z "$reason" ]; then
+              reason="$1"
+            fi
+          }
+          if [ "$checkout" = "failure" ]; then
+            fail "the candidate could not be checked out"
+          fi
+          if [ "$candidate" = "failure" ] || [ -z "$candidate_sha" ]; then
+            fail "the exact candidate commit could not be recorded"
+          fi
+          if [ "$retarget_checkout" = "failure" ]; then
+            fail "the trusted retarget validator could not be checked out"
+          fi
+          if [ "$retarget_validate" = "failure" ]; then
+            fail "the retargeted candidate did not validate"
+          fi
+          if [ "$rebase_checkout" = "failure" ]; then
+            fail "the trusted rebase verifier could not be checked out"
+          fi
+          if [ "$clone" = "failure" ] || [ "$clone_invariant" = "failed" ]; then
+            fail "the candidate clone could not be established"
+          fi
+          if [ "$bootstrap" = "failure" ]; then
+            fail "the CI contract bootstrap selection failed"
+          fi
+          if [ "$detect_outcome" = "failure" ]; then
+            fail "the docs-only detector failed"
+          fi
+          if [ "$lifecycle" != "success" ]; then
+            fail "the candidate update could not be classified"
+          fi
+          if [ "$rebase" = "failure" ]; then
+            fail "the targeted rebase lane could not be selected"
+          fi
+          if [ "$publish" = "failure" ]; then
+            fail "the targeted rebase decision could not be published"
+          fi
+          if [ "$install_uv" = "failure" ]; then
+            fail "uv could not be installed for the CI contract suite"
+          fi
+          if [ "$contract_changed" = "true" ]; then
+            if [ "$contract" != "success" ]; then
+              fail "the changed CI contracts did not validate"
+            fi
+          elif [ "$contract_changed" != "false" ]; then
+            fail "whether the CI contracts changed could not be determined"
+          fi
+          echo "ci_contract_changed=$contract_changed" >> "$GITHUB_OUTPUT"
+          echo "gate=$gate" >> "$GITHUB_OUTPUT"
+          echo "gate_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "preflight gate=$gate${reason:+ ($reason)}; combined CI contract=$contract_changed"
+
+      # Ahead of the verdict, so its outcome can reach it. Its gate is the
+      # same condition it had when it sat after the verdict -- an
+      # established clone, a classified lifecycle and a satisfied CI
+      # contract -- computed from the step outcomes rather than from the
+      # verdict it now precedes. Moving it must not make it run on a
+      # candidate the verdict would have stopped.
+      - name: Record immutable candidate identity
+        id: identity
+        continue-on-error: true
+        if: ${{ github.event_name == 'pull_request' && steps.preflight-gate.outputs.gate == 'success' }}
+        working-directory: candidate
+        run: >-
+          python3 scripts/ci_candidate_identity.py
+          --repository "${{ github.repository }}"
+          --workflow-file conformance.yml
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --head-sha "${{ github.event.pull_request.head.sha }}"
+          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --candidate-sha "${{ steps.candidate.outputs.candidate_sha }}"
+          --output "$RUNNER_TEMP/candidate-identity/candidate-identity.json"
+
+      - name: Upload immutable candidate identity
+        continue-on-error: true
+        id: upload-identity
+        if: ${{ github.event_name == 'pull_request' && steps.identity.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-identity-hull
+          path: ${{ runner.temp }}/candidate-identity/candidate-identity.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # The stated reason, which this workflow's Hull gate prints. An unevaluable
+      # candidate produces a red check saying what could not be evaluated,
+      # instead of a job that never reported at all, which is the shape
+      # that made a pull request unmergeable rather than merely red.
+      - name: Record candidate preflight verdict
+        id: candidate-preflight
+        if: always()
+        continue-on-error: true
+        run: |
+          gate="${{ steps.preflight-gate.outputs.gate }}"
+          reason="${{ steps.preflight-gate.outputs.gate_reason }}"
+          identity="${{ steps.identity.outcome }}"
+          upload="${{ steps.upload-identity.outcome }}"
+          verdict="$gate"
+          if [ "$verdict" = "success" ] && [ "$identity" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be recorded"
+          fi
+          if [ "$verdict" = "success" ] && [ "$upload" = "failure" ]; then
+            verdict=failure
+            reason="the candidate identity could not be uploaded"
+          fi
+          if [ -z "$verdict" ]; then
+            verdict=failure
+            reason="the candidate preflight gate did not report"
+          fi
+          echo "ci_contract_changed=${{ steps.preflight-gate.outputs.ci_contract_changed }}" >> "$GITHUB_OUTPUT"
+          echo "candidate_preflight=$verdict" >> "$GITHUB_OUTPUT"
+          echo "preflight_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "candidate preflight=$verdict${reason:+: $reason}"
+
   conformance:
     name: Hull Conformance Gate (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.execution_target == 'self-hosted' && fromJSON(format('["chelis-ci-warm-x64","chelis-ci-reviewed-{0}"]', inputs.retarget_token)) || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: chelis-ci-shell run {0}
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success, and the `if` fails safe (runs when the changes job did not
-    # succeed) so a broken detector never skips the gate on a code PR.
+    # success. The `if` still fails safe for a changes job that did not
+    # succeed, but that is now reachable only through job setup or a lost
+    # runner: every step in it is tolerated, so a broken detector produces
+    # a failed verdict rather than a failed job, and this gate skips. The
+    # required Docs context is what reports that case, together with the
+    # two aggregators below it.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.candidate_preflight == 'success' && (needs.changes.outputs.rebase_lane == 'full' || (needs.changes.outputs.rebase_lane == 'targeted' && needs.changes.outputs.rebase_run_hull == 'true') || (needs.changes.outputs.rebase_lane == 'ordinary' && needs.changes.outputs.docs_only != 'true')))) }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
-    # generous head room for a cold cargo cache.
-    timeout-minutes: 20
+    # generous head room for a cold cargo cache and a cold Devenv: the first
+    # self-hosted realization built OpenBLAS, FLINT, Arb and Kache from source
+    # in 31 minutes, and the publication that seeds the private cache for
+    # every later run must not be cut off by this timeout. The broker's own
+    # job lifetime is two hours.
+    timeout-minutes: 90
     # Strip debuginfo on the build; debuginfo is the dominant target/
     # disk consumer and the conformance binary needs no symbols
     # (chelis#392). Release defaults to debug=false, but set it explicitly
@@ -88,35 +666,44 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
+      # Reached only through the fail-safe branch below, where the
+      # detector job itself did not succeed, so the verdict may be empty.
+      # It still states what it knows rather than a bare suppression
+      # notice, which is also what keeps `preflight_reason` a consumed
+      # output here rather than a declared one nothing reads.
+      - name: Require candidate lifecycle and CI contract preflight
+        shell: bash
+        env:
+          CANDIDATE_PREFLIGHT: ${{ needs.changes.outputs.candidate_preflight }}
+          PREFLIGHT_REASON: ${{ needs.changes.outputs.preflight_reason }}
+        run: |
+          if [ "$CANDIDATE_PREFLIGHT" != "success" ]; then
+            echo "this candidate could not be evaluated, so Hull CI was" \
+              "suppressed." >&2
+            echo "reason: ${PREFLIGHT_REASON:-the detector job did not report}" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.changes.outputs.candidate_sha }}
 
       # Free ~25-30 GB before the cargo build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py). This
       # release-build job was missing the reclaim every ci.yml build job
       # already runs (chelis#392).
       - name: Free disk space (Ubuntu)
+        if: runner.environment == 'github-hosted'
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
-      # reset would otherwise flake this required gate with no code change.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI runners
-      # need a matching uv-managed venv before any cargo run (pyo3-build-config
-      # is a transitive build-dep that runs before main compilation). See
-      # ci.yml lint-and-unit for the same pattern and the v8.1.0 pin rationale.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
+      - name: Set up project CI
+        id: build-cache
+        uses: ./.github/actions/setup-project-ci
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: devenv-${{ runner.environment }}-${{ hashFiles('devenv.lock', 'devenv.yaml', 'devenv.nix', 'devenv/*.nix', 'nix/ci-*.nix', '.kache.toml') }}
 
       # The conformance runner needs the chelis binary by ABSOLUTE path (never a
       # bare PATH name). A release build matches the Hull campaign profile (a
@@ -130,7 +717,7 @@ jobs:
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
         run: |
-          .venv/bin/python -m unittest \
+          python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -139,7 +726,7 @@ jobs:
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
         run: |
-          .venv/bin/python tests/conformance/hull/run_conformance.py \
+          python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
@@ -147,7 +734,7 @@ jobs:
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
         run: |
-          if .venv/bin/python tests/conformance/hull/run_conformance.py \
+          if python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2
@@ -155,3 +742,9 @@ jobs:
           else
             echo "teeth verified: injected CompilerUnsound made the runner exit nonzero"
           fi
+
+      - name: Publish verified outputs and clean cache state
+        if: always() && steps.build-cache.outputs.state-path != ''
+        uses: Chelis-Lang/ci/actions/publish-build-cache@6afc09f65c178211a9d1bea994a4b39b62d23024
+        with:
+          state-path: ${{ steps.build-cache.outputs.state-path }}

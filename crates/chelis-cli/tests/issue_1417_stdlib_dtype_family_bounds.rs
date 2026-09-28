@@ -23,7 +23,7 @@ mod common;
 use common::{make_app, write_file};
 
 const FLOATS: &[&str] = &["f16", "bf16", "f32", "f64"];
-const INTS: &[&str] = &["int8", "int16", "int32", "int64"];
+const INTS: &[&str] = &["i8", "i16", "i32", "i64"];
 
 fn eval(slug: &str, source: &str) -> assert_cmd::assert::Assert {
     let (_dir, reef_home, app_pkg) = make_app(slug);
@@ -69,12 +69,12 @@ fn linspace_rejects_integer_endpoints() {
 
 import Std.Tensor.Construct (linspace)
 
-values = linspace(cast(0, int32), cast(2, int32), cast(3, int64))
+values = linspace(cast(0, i32), cast(2, i32), cast(3, i64))
 "#,
     )
     .failure()
     .stderr(predicate::str::contains("Float"))
-    .stderr(predicate::str::contains("int32"));
+    .stderr(predicate::str::contains("i32"));
 }
 
 // === Every admitted dtype still works ===
@@ -112,7 +112,7 @@ fn linspace_accepts_every_active_float() {
 
 import Std.Tensor.Construct (linspace)
 
-values = linspace(cast(0.0, {dtype}), cast(1.0, {dtype}), cast(3, int64))
+values = linspace(cast(0.0, {dtype}), cast(1.0, {dtype}), cast(3, i64))
 "#
             ),
         )
@@ -134,7 +134,7 @@ fn an_imported_bound_survives_a_local_wrapper() {
 
 import Std.Tensor.Construct (arange)
 
-def wrap[p](start: p, stop: p) -> tensor[n, p] = arange(start, stop)
+def wrap[n, p: Int](start: p, stop: p) -> tensor[n, p] = arange(start, stop)
 
 values = wrap(cast(0.0, f64), cast(2.0, f64))
 "#,

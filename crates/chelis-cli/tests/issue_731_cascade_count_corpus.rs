@@ -30,7 +30,7 @@ mod common;
 
 use common::write_file;
 
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// Number of diagnostics `chelis check` reports for `program`.
 fn diagnostic_count(program: &str) -> usize {
@@ -79,8 +79,8 @@ fn corpus() -> Vec<(&'static str, String, usize)> {
         ),
         // The error under an effect wrapper (chelis#709 shape): still one.
         (
-            "cascade_under_with_seed",
-            format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n"),
+            "cascade_under_with_device",
+            format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n"),
             1,
         ),
         // The error under an `if` branch: one.

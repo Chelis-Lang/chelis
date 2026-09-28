@@ -38,7 +38,11 @@ portable across Surf and Reef boundaries.
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
+| `effect` | `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
+| `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
+| `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
+| `wrt` | variable or nonempty tuple of variables | On `grad`: `(var {} name)` or `(tuple {} (var {} name) ...)`, preserving target order; see §2.7 |
 | `span` | string | External-source span identifier (see §1.1.1) |
 | `chelis_role` | string | Declaration role marker; `"property"` marks a `def` as a `chelis prove` property |
 | `property_source_kind` | string | Property producer: `"user"` or `"bridge:c-earchin"` |
@@ -59,7 +63,7 @@ portable across Surf and Reef boundaries.
 | `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
 The `surf_*` namespace is closed. A public Deep parser or programmatic
-validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
+validator MUST reject an unknown `surf_*` key. Parsing, validation, and resugaring MUST reject a
 known key with any value or placement outside the table above; a standalone
 metadata map or metadata-expression wrapper is not a permitted
 placement. These five keys preserve only surface distinctions that canonical
@@ -73,6 +77,97 @@ the namespace for arbitrary provenance.
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
 | `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
+
+> **[03-META-1]** Every key SHALL occur at most once in an annotation map,
+> including producer-specific and `span_*` extension keys. Every defined or
+> individually reserved key SHALL carry its declared value shape. A malformed value, duplicate key, or forbidden placement SHALL
+> be rejected at program-text ingress, before a semantic consumer observes
+> the program. The diagnostic SHALL identify the key, the violated contract,
+> and the offending value's source location. Programmatic node construction,
+> deserialization, and replacement SHALL enforce the same locally decidable
+> rules. Complete-tree validation SHALL additionally enforce parent and
+> sibling placement; constructing a fragment does not assert its placement.
+
+The value columns denote syntax, not implicit conversions: a string is a
+string atom, `true` is the Boolean atom, a positive integer is an integer atom
+greater than zero, and a named node has the indicated tag and child shape.
+`type` contains type syntax from §2.5. `eff` belongs on `t-fn`, `effects` on
+`fn`, and each contains an `effects` node. `chelis_role` belongs on a
+declaration; the value `"property"` specifically requires a `def`.
+Property keys belong on `def`;
+`property_source_kind` is exactly `"user"` or `"bridge:c-earchin"`.
+Property quantifiers match the ordered parameter names and written type
+annotations of the property's `fn`; equivalent typed-helper spellings and
+non-type binder metadata do not change that signature.
+`property_contracts` contains only string atoms. The `opaque`, `invariant`,
+and `invariant_amenability` keys belong on `deftype`, with the relationships
+specified in §2.2. `loc` is the four-element structural list
+`(loc file line col)`, with a string file and integer line and column;
+it does not introduce a vocabulary tag. The `lin` choices are bare names.
+Type agreement, effect membership, and binder resolution remain semantic
+checks under their owning numbered chapters; shape validation neither
+performs those checks nor treats a well-shaped annotation as trusted.
+
+> **[03-META-2]** Metadata positions SHALL have a role determined by their
+> key and enclosing metadata contract, separately from §7.2's child-index
+> roles. `property_tolerance`, `property_seed`, and `property_samples` carry
+> expressions and obey [03-ROLE-2]. `wrt` carries variable-reference syntax:
+> bare names, empty tuples, and non-variable tuple members are invalid.
+> `type` carries type syntax; the named structured values carry their
+> declared node shapes. `source` carries preserved syntax, not computation:
+> its value is a structural list headed by a macro name, and its remaining
+> elements record the original arguments without interpreting or rewriting
+> their contents as annotations or runtime expressions.
+
+For a `grad` node that carries `wrt`, the operative integer selector child and
+the ordered `wrt` variable-reference metadata SHALL identify the same formal
+parameters of the resolved callable target, including repeated parameters.
+A public semantic or resugaring consumer SHALL reject a malformed or absent
+operative selector child, a callable origin it cannot resolve, a contradictory
+name/index pair, an out-of-range index, or unequal metadata/index arity. It
+SHALL NOT omit or rewrite either representation to make them agree, including
+when reconstructing Surf from a lone Deep expression. Callable-origin
+resolution follows the language's binding rules: function declarations are
+available to legal forward references under [04-INF-8], and a `match` pattern
+receives the corresponding origin projected from its scrutinee, including
+recursive tuple, ADT constructor payload, and record-field projection. Textual
+declaration order and pattern introduction SHALL NOT erase either origin.
+
+> **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
+> data. Chelis semantic passes SHALL neither interpret nor rewrite their
+> payloads. Producer tools may interpret their own data. Compiler-interpreted
+> annotations SHALL have an explicitly specified, compiler-owned key and
+> payload type; an extension key never grants compilation authority.
+
+Extension data uses Deep's lexical scalar tokens, parenthesized lists,
+ordered maps, and prefix records. List heads have no tag meaning. Nested map
+keys have no annotation meaning, including `type`, `span`, and `surf_*`.
+Nested entry order and duplicates are preserved; annotation-key uniqueness
+applies to the enclosing annotation map. Lexical syntax, escaping and balanced
+structure are checked, but AST shape, placement, binder, type and effect rules
+do not apply inside data. Scalar tokens, including numeric suffixes, retain
+their spelling; formatting may canonicalize whitespace and separators.
+
+Semantic expression traversal excludes extension data. A surviving or
+replacement AST node preserves its originating owner's extensions; copying a
+node copies them. Removing a node removes its attached extensions. A node
+synthesized without an originating owner starts with no extensions. Combining
+owners unions distinct keys and coalesces identical payloads. Conflicting
+payloads SHALL NOT overwrite one another: an optional rewrite remains
+unapplied, and a required combination reports the conflicting key. Equality
+for this combination compares data, not its diagnostic source offsets.
+AST and tooling serialization preserve the data; runtime values and machine
+code need not embed arbitrary producer annotations. The external-span
+propagation contract below remains binding.
+
+A `dtype_bounds` payload is a data map governed by §2.2: its keys are binder names, even when
+they spell `type`, `span`, or a `surf_*` name. They are not metadata keys.
+Likewise, the contents of a preserved `source` record are syntax data.
+The annotation-key uniqueness rule does not reinterpret data maps inside
+preserved `source` arguments as annotations. `dtype_bounds` independently
+requires unique binder names under §2.2. These distinctions depend on the
+enclosing role, not heuristics about key spelling. Missing optional metadata is valid; malformed present metadata
+SHALL NOT be dropped, defaulted, or coerced to absence.
 
 **Metadata propagation through transformations.** Semantic metadata and the
 validated surface-fidelity keys are preserved by all spec-defined
@@ -268,7 +363,7 @@ using it forges module identity through the name stem
 | Tag | Form | Semantics |
 |---|---|---|
 | `def` | `(def {} name expr)` | Value/function binding |
-| `defsig` | `(defsig {} name type-expr)` | Type signature (precedes `def`) |
+| `defsig` | `(defsig {} name [(binder...)] type-expr)` | Type signature with an optional nonempty explicit binder list (precedes `def`) |
 | `deftype` | `(deftype {} name (type-params...) variant...)` | ADT declaration |
 | `typealias` | `(typealias {} name (type-params...) type-expr)` | Transparent type alias |
 | `variant` | `(variant {} Name field...)` | Sum type constructor (fields optional) |
@@ -288,26 +383,31 @@ records whose bodies remain in the supplying artifact. Those records are not
 an authored check unit, use the linker's reserved-name/provenance channel, and
 cannot be produced by source-level `defsig` syntax.
 
-A `defsig` may carry `dtype_bounds` metadata restricting its implicitly
-bound type variables to a dtype family (`spec/04-type-system.md` §5.9
+A polymorphic `defsig` carries a structural list of distinct symbol
+names between its declaration name and type expression. A monomorphic
+`defsig` omits that child. The list is unkinded: each use site determines
+whether a listed name is a `t-var`, `d-var`, or `d-rank`; a name absent
+from the list is undeclared. A `defsig` may carry `dtype_bounds`
+metadata restricting its explicitly bound type variables to a dtype
+family (`spec/04-type-system.md` §5.9
 [04-DTYPE-2]):
 
 ```lisp
-(defsig {dtype_bounds: {p: int}} arange
+(defsig {dtype_bounds: {p: int}} arange (n p)
   (t-fn {} (t-var {} p) (t-var {} p)
     (t-tensor {} (d-var {} n) (t-var {} p))))
 ```
 
 The value is a metadata map whose keys are binder names and whose values
 are the family names `float`, `int`, and `numeric`, spelled lowercase as
-effect names are. A key naming a variable the declaration does not bind, a
-key naming a `d-var` or `d-rank`, an unknown family name, and a value that
-is not a family name are each type-resolution errors. Bounds ride in
-metadata for the same reason an opaque invariant does: a `defsig` *child*
-node would change its fixed two-child shape and grow the closed tag
-vocabulary. A `def` does not carry this key: the declaration's signature
-owns its binders, so `dtype_bounds` on a `def` is a declaration error
-whose diagnostic names the signature.
+effect names are. An unknown family name or a value that is not a family
+name violates the metadata shape contract [03-META-1]. A key naming a
+variable the declaration does not bind, or a key naming a `d-var` or
+`d-rank`, is a type-resolution error. Bounds ride in
+metadata because the family qualifies one listed binder rather than
+forming part of the signature type. A `def` does not carry this key:
+the declaration's signature owns its binders, so `dtype_bounds` on a
+`def` is a declaration error whose diagnostic names the signature.
 
 `deftype` may carry `opaque: true` metadata:
 
@@ -393,7 +493,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, i8, i16, i32, i64, bool, string, key — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
@@ -401,6 +501,12 @@ An opaque `deftype` may additionally carry a **declared invariant**
 | `t-var` | `(t-var {} name)` | Type variable |
 | `t-unit` | `(t-unit {})` | Unit type |
 | `t-tuple` | `(t-tuple {} type₁ type₂ ...)` | Tuple type |
+
+Canonical Deep uses `i8`, `i16`, `i32`, and `i64` for signed integer
+primitives. The retired v0.18 children `int8`, `int16`, `int32`, and `int64`
+are rejected at normal Deep ingress. `chelis migrate deep --from 0.18`
+rewrites only the primitive-name child of a `t-prim`; it does not rewrite
+ordinary symbols, identifiers, strings, metadata, or interchange payloads.
 
 #### 2.5.1 Type-expression resolution and binders
 
@@ -410,6 +516,8 @@ environment or a cached compiler context. Resolution is fail-closed:
 - `t-prim` has exactly one symbol child and that symbol is in the language or
   explicitly-reserved primitive vocabulary owned by `spec/04-type-system.md`
   §1.1. An unknown primitive name is a type error, not an inference hole.
+  A retired v0.18 integer spelling is a migration error, never a `t-var`
+  candidate.
 - `t-adt` has a symbol head naming a precollected `deftype` or `typealias`
   header and exactly that header's declared number of nominal arguments.
   A type-kinded slot contains a type expression. A dimension-kinded slot
@@ -427,13 +535,19 @@ environment or a cached compiler context. Resolution is fail-closed:
   do not add a spurious `unknown nominal` cascade.
 - `t-var`, `d-var`, and `d-rank` introduce no binding by themselves. A name is
   legal only when the surrounding resolution context supplies it: the
-  explicit parameter list of a `deftype`/`typealias`, the implicit-generic
-  binder set of one `defsig`, or trusted compiler-generated metadata. The
+  explicit parameter list of a `deftype`/`typealias`, the explicit binder
+  list of one `defsig`, or trusted compiler-generated metadata. The
   special `(t-var {} _)` form is an inference hole only at a use site that
   explicitly admits holes; it is not a way to leave a declaration field or
   alias body unresolved.
-- A `defsig` implicitly binds each well-formed `t-var`/`d-var`/`d-rank` name on
-  first occurrence and reuses that binding throughout the signature. Its
+- A `defsig` binds exactly the distinct names in its structural binder list
+  and reuses each binding throughout the signature. A `t-var`, `d-var`, or
+  `d-rank` whose name is absent from that list is a type-resolution error.
+  An unbounded listed name may be unused and remains a vacuous universal
+  quantifier; a `dtype_bounds` key must name a listed `t-var` that occurs in
+  the signature.
+  Active, reserved, retired, and deferred primitive spellings cannot be
+  rebound as `t-var` names. Its
   `dtype_bounds` metadata attaches a dtype family to a named `t-var` binder;
   the bound restricts every occurrence of that name, and a bounded name used
   in a dimension or rank position is an error. A
@@ -491,6 +605,14 @@ wildcard spelling); it does not allocate an inference variable.
 | `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
+
+The `grad` metadata `wrt` records parameter names using [03-META-2]'s
+variable-reference syntax. Its optional child selects integer parameter
+indices under the transform's type-checking contract; metadata names are
+not runtime variable lookups and do not replace that index child. The child is
+optional only when `wrt` is absent; a `grad` carrying `wrt` requires its
+operative integer selector and the fail-closed consistency checks of
+[03-META-2].
 
 ### 2.8 Metaprogramming
 
@@ -565,7 +687,7 @@ Not built-in — require `(import {} std.x ...)`:
 
 - `std.io`: `println`, `read_tensor`, `write_tensor`
 - `std.init`: `randn`, `uniform`, `zeros`, `ones`, `arange`
-- `std.nn`: `layer_norm`, `conv2d`, `embedding`, `multi_head_attention`, `cross_entropy`
+- `std.nn`: `layer_norm`, `conv`, `embedding`, `multi_head_attention`, `cross_entropy`
 
 ---
 
@@ -616,6 +738,10 @@ all before the application itself. Observable effects occur in that order,
 and the first argument whose evaluation traps determines the trap the
 application raises; later arguments are not evaluated after a trap.
 
+Every argument expression resolves its names in the caller's scope. Callee
+parameter bindings do not enter that scope while later arguments are being
+evaluated; renaming callee parameters therefore cannot change argument values.
+
 This order is a semantic contract in every executable lane, not an
 implementation convenience. Value-level rewrites — a derived built-in's
 lowering to RISC primitives (`spec/05-risc-primitives.md` §3), constant
@@ -627,6 +753,12 @@ the authored operand order for every operator (`spec/02-surf-syntax.md`
 §2). Multi-value constructors follow the same written-order rule: tuple,
 list, record, and record-update children evaluate left to right (§6.2's
 `kv` ordering restates this for records).
+
+A binding's initializer is evaluated where evaluation reaches the binding,
+whether or not the binding is read, so its traps are preserved; this holds for
+a `let` bind pair and for a top-level value declaration that a reached
+expression names. (This requirement is not fully implemented for every
+trapping operation; see chelis#2440.)
 
 Within a single primitive, elementwise and reduction evaluation order is
 owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
@@ -670,6 +802,11 @@ Deep has exactly one textual representation per program.
 - No trailing whitespace. Single newline at EOF.
 
 ### 6.2 Ordering
+- Annotation map entries: ascending by key spelling under ASCII byte
+  comparison, so `Zeta_role`, `_under`, and `doc` appear in that order.
+  Producer-specific and `span_*` extension keys take their places in that one
+  sequence beside the defined keys rather than forming a separate group.
+  [03-META-1] makes every key unique, so the order is total.
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
 - Record and record-update `kv` pairs: written order, which is left-to-right
@@ -694,10 +831,16 @@ explicit call. Explicit `borrow` and `copy` nodes remain explicit.
 
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
-same-named call-like forms. A matching `defsig` and `def` resugar as one inline
-typed Surf definition; a standalone `defsig` remains `sig`. A checked standalone
-`def` carrying semantic `type` metadata resugars as a typed Surf declaration;
-normalization materializes the equivalent `defsig` rather than erasing the type.
+same-named call-like forms. A matching `defsig` and function-valued `def`
+resugar as one inline typed Surf `def`, including the signature's binder list.
+A matching monomorphic `defsig` and non-function `def` resugar as one inline
+typed value binding. A matching binder-bearing `defsig` and non-function `def`
+instead resugar as a standalone binder-bearing Surf `sig` followed by an
+untyped value binding: Surf value bindings have no binder-list position, so
+inlining that type would free the quantified names. A standalone `defsig`
+remains `sig`. A checked standalone `def` carrying semantic `type` metadata
+resugars as a typed Surf declaration; normalization materializes the equivalent
+`defsig` rather than erasing the type.
 All ordered pairs in one `bind` become ordered Surf block bindings. Empty
 `tuple` and `t-tuple` nodes normalize to the language's unit value and type;
 empty `pat-tuple` is written `()` directly. Every zero-argument `app`, including
@@ -709,6 +852,11 @@ The normal and debug emitters share this AST-backed resugarer and Surf printer.
 Debug output may append stable `-- deep-debug: ...` comments; it is not a
 second Surf dialect.
 
+Producer extensions have no Surf representation. Resugaring SHALL reject
+an extension-bearing AST with the extension key and owning source location,
+before emitting output, rather than discard data. Deep-to-Deep normalization
+preserves these payloads, including inside structural annotation containers.
+
 Surf property declarations represent user-authored properties only. They have
 no syntax for the non-forgeable `bridge:c-earchin` producer identity or for a
 producer-local `property_source_id`. Resugaring a property with either form of
@@ -716,7 +864,11 @@ provenance therefore fails explicitly; it must never emit an ordinary
 `@property` that would redesugar with `property_source_kind: "user"`.
 `property_quantifiers` must also be present and exactly match the property
 `fn` parameter list before resugaring; a mismatch fails rather than changing
-the bound names.
+the bound names. When the adjacent property `defsig` carries an explicit binder
+list, canonical Surf writes the same list after the property name
+(`@property name[binders] forall(...)`). Resugaring, AST serialization, and
+public wire conversion preserve the ordered binder names and `dtype_bounds`;
+omitting them would free variables in the quantifier or body types.
 
 ### 6.3.2 Round-trip normalization
 
@@ -724,14 +876,20 @@ the bound names.
 expansion, inferred `effects`, and `invariant_amenability` because those values
 are informational or deterministically recomputed. It may also erase
 matching `type` entries on a `def`, its `fn` value, and its function parameters
-when an adjacent matching `defsig` already carries the exact same types; a
-disagreement is never erased. For a standalone checked `def`, normalization may
+when an adjacent matching `defsig` already carries the exact same types.
+It can also erase a whole-parameter `(t-var {} _)` annotation beside that
+signature, because the hole adds no constraint. This rule does not erase a
+hole inside a structured annotation. Property parameter annotations remain
+part of their quantifier contract. A real type disagreement is never erased.
+For a standalone checked `def`, normalization may
 materialize that metadata as an adjacent `defsig` and then apply the same exact
-redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`. No `app`
+redundancy rule. Empty expression `tuple` and type `t-tuple` nodes normalize
+to `lit` and `t-unit`, respectively. Syntax-valued metadata containers retain
+their declared shapes under [03-META-2]. No `app`
 normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
 `var`, `app`, and `record` structures. Because Surf negative
 numerals are unary minus rather than signed tokens, a negative Deep `lit`
-normalizes to the equivalent `neg` application. The full `int64` minimum uses
+normalizes to the equivalent `neg` application. The full `i64` minimum uses
 Surf's directly representable signed-minimum literal; a narrower signed minimum
 uses `sub(neg(max), 1)` so its positive magnitude never overflows that literal
 width.
@@ -753,7 +911,7 @@ round-trip failure.
 A negative `pat-lit` is not normalized to an application because patterns do
 not contain expression nodes. It resugars as minus followed by the one
 unsuffixed canonical numeric pattern token, including `-0.0` and the full
-`int64` minimum.
+`i64` minimum.
 
 ### 6.4 Literal Normalization
 
@@ -765,10 +923,12 @@ unsuffixed canonical numeric pattern token, including `-0.0` and the full
 | String | Double-quoted; named Surf escapes where available, otherwise minimal lowercase `\u{h}` for control scalars | Printable-character and named-escape Unicode aliases are not canonical |
 | Boolean | `true` / `false` | |
 
-Canonical Deep contains no non-finite float literal. Producers that construct
-Deep programmatically must reject NaN and infinity before serialization;
-Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
-an invalid Surf token.
+Canonical Deep contains no non-finite float literal. Nor does it contain a
+`lit` whose value is non-finite at its declared primitive
+(`spec/04-type-system.md` [04-LIT-2]), such as a float atom `70000.0` typed
+`f16`. Producers that construct Deep programmatically must reject NaN and
+infinity before serialization; Deep-to-Surf resugaring reports either as
+unrepresentable rather than emitting an invalid Surf token.
 
 Every valid Deep string atom has a Surf representation. Resugaring uses the
 single P11 spelling: printable Unicode remains literal, the six named escapes
@@ -779,7 +939,7 @@ and primitive family have one closed canonical pairing:
 
 | Value atom | Permitted primitive family |
 |---|---|
-| integer | `int8`, `int16`, `int32`, `int64` |
+| integer | `i8`, `i16`, `i32`, `i64` |
 | float | `f16`, `bf16`, `f32`, `f64` |
 | boolean | `bool` |
 | string | `string` |
@@ -801,12 +961,10 @@ and the checker validates its closed atom/primitive/uniqueness contract before
 any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
-`int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
-unsuffixed float literal binds at type `f32`. The lexer accepts i64/f64
-ranges so that out-of-range literals produce a useful diagnostic before
-defaulting; the desugarer/type-checker narrows the value to `int32` /
-`f32` before Deep is materialized. See `spec/04-type-system.md` §5.3 for
-the type-system statement. The narrowing is overridable only by an
+`i32` (i.e. its `lit` node carries `{type: (t-prim {} i32)}`); an
+unsuffixed float literal binds at type `f32`, under
+`spec/04-type-system.md` [04-LIT-2]. See `spec/04-type-system.md` §5.3 for
+the type-system statement. The default is overridable only by an
 explicit literal suffix (§6.4.1), the contextual tensor-literal inference
 rule (`spec/02-surf-syntax.md` §P10b), or an explicit `cast`.
 
@@ -824,10 +982,10 @@ the Surf suffix set (`spec/02-surf-syntax.md` §P10a):
 | `f64` | `(t-prim {} f64)` | `1.0f64` |
 | `bf16` | `(t-prim {} bf16)` | `1.0bf16` |
 | `f16` | `(t-prim {} f16)` | `1.0f16` |
-| `i8` | `(t-prim {} int8)` | `42i8` |
-| `i16` | `(t-prim {} int16)` | `42i16` |
-| `i32` | `(t-prim {} int32)` | `42i32` |
-| `i64` | `(t-prim {} int64)` | `42i64` |
+| `i8` | `(t-prim {} i8)` | `42i8` |
+| `i16` | `(t-prim {} i16)` | `42i16` |
+| `i32` | `(t-prim {} i32)` | `42i32` |
+| `i64` | `(t-prim {} i64)` | `42i64` |
 
 In canonical Deep, a suffixed literal MAY be written either with the
 suffix on the literal token (the producer-friendly shape) or as a `lit`
@@ -951,7 +1109,8 @@ always learns which form was rejected.
 > by its syntactic class, which SHALL be exactly one of: a bare identifier, a
 > bare integer literal, a bare float literal, a bare string literal, a bare
 > boolean literal, an empty list, a list without a tag symbol, a metadata map,
-> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> a metadata-annotated form, or opaque extension data supplied through a raw
+> programmatic API. An implementation SHALL NOT substitute a
 > placeholder for either identification. The rejection SHALL be reported at
 > the ingress boundary that reads the program text, before name resolution,
 > type checking, evaluation, lowering, or resugaring observes the program. An
@@ -982,6 +1141,9 @@ shapes; a metadata map is the `Meta` production; the four literal classes are
 producer's mistake is usually specific to one.
 
 ### 7.2 Child Roles
+
+This section classifies child indices. Metadata values have the separate
+per-key roles required by [03-META-2]; they are not unclassified children.
 
 A tagged node's children are not interchangeable. Each per-tag form in §2
 gives its children fixed meanings — `(def {} name body)` puts a declaration

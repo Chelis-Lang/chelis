@@ -7,8 +7,9 @@
 //! `Vec<CheckError>`.
 
 use crate::context::TypeEnv;
-use crate::errors::CheckError;
+use crate::errors::{CheckError, ErrorWitness};
 use crate::infer::{CheckedProgram, InferResult, InferStats, SignatureInferenceMetadata};
+use chelis_unord::UnordMap;
 
 #[cfg(test)]
 thread_local! {
@@ -36,6 +37,53 @@ pub(crate) struct DiagnosticCheckpoint {
     offset: usize,
 }
 
+/// Stable identity shared by one standalone signature and its matching
+/// definition.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DeclarationDiagnosticOwner {
+    lexical_module: Option<String>,
+    lexical_scope_occurrence: usize,
+    declaration_name: String,
+    declaration_occurrence: usize,
+}
+
+impl DeclarationDiagnosticOwner {
+    pub(crate) fn new(
+        lexical_module: Option<&str>,
+        lexical_scope_occurrence: usize,
+        declaration_name: &str,
+        declaration_occurrence: usize,
+    ) -> Self {
+        Self {
+            lexical_module: lexical_module.map(str::to_string),
+            lexical_scope_occurrence,
+            declaration_name: declaration_name.to_string(),
+            declaration_occurrence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeclarationTypeDiagnosticClass {
+    UnknownPrimitive,
+    RejectedPrimitive,
+    UndeclaredTypeVariable,
+    UndeclaredDimensionVariable,
+    UndeclaredRankVariable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum TypeResolutionDiagnosticOwner {
+    Declaration {
+        declaration: DeclarationDiagnosticOwner,
+        class: DeclarationTypeDiagnosticClass,
+    },
+    UnknownPrimitiveLocation {
+        span_offset: Option<usize>,
+        span_id: Option<String>,
+    },
+}
+
 /// The sole destination accepted by witness-minting checker code.
 ///
 /// Its storage and constructor are private to this module.  The narrow
@@ -43,11 +91,84 @@ pub(crate) struct DiagnosticCheckpoint {
 /// preventing early extraction or replacement of the canonical vector.
 pub struct DiagnosticSink<'session> {
     errors: &'session mut Vec<CheckError>,
+    type_resolution_witnesses: UnordMap<(TypeResolutionDiagnosticOwner, String), ErrorWitness>,
 }
 
 impl DiagnosticSink<'_> {
     pub(crate) fn push(&mut self, error: CheckError) {
         self.errors.push(error);
+    }
+
+    pub(crate) fn declaration_type_witness(
+        &self,
+        owner: &DeclarationDiagnosticOwner,
+        spelling: &str,
+        class: DeclarationTypeDiagnosticClass,
+    ) -> Option<ErrorWitness> {
+        self.type_resolution_witnesses
+            .get(&(
+                TypeResolutionDiagnosticOwner::Declaration {
+                    declaration: owner.clone(),
+                    class,
+                },
+                spelling.to_string(),
+            ))
+            .copied()
+    }
+
+    pub(crate) fn record_declaration_type_witness(
+        &mut self,
+        owner: DeclarationDiagnosticOwner,
+        spelling: String,
+        class: DeclarationTypeDiagnosticClass,
+        witness: ErrorWitness,
+    ) {
+        self.type_resolution_witnesses.insert(
+            (
+                TypeResolutionDiagnosticOwner::Declaration {
+                    declaration: owner,
+                    class,
+                },
+                spelling,
+            ),
+            witness,
+        );
+    }
+
+    pub(crate) fn unknown_primitive_site_witness(
+        &self,
+        span_offset: Option<usize>,
+        span_id: Option<&str>,
+        primitive_name: &str,
+    ) -> Option<ErrorWitness> {
+        self.type_resolution_witnesses
+            .get(&(
+                TypeResolutionDiagnosticOwner::UnknownPrimitiveLocation {
+                    span_offset,
+                    span_id: span_id.map(str::to_string),
+                },
+                primitive_name.to_string(),
+            ))
+            .copied()
+    }
+
+    pub(crate) fn record_unknown_primitive_site_witness(
+        &mut self,
+        span_offset: Option<usize>,
+        span_id: Option<String>,
+        primitive_name: String,
+        witness: ErrorWitness,
+    ) {
+        self.type_resolution_witnesses.insert(
+            (
+                TypeResolutionDiagnosticOwner::UnknownPrimitiveLocation {
+                    span_offset,
+                    span_id,
+                },
+                primitive_name,
+            ),
+            witness,
+        );
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -105,6 +226,7 @@ mod diagnostic_checkpoint_tests {
         let mut errors = Vec::new();
         let mut sink = DiagnosticSink {
             errors: &mut errors,
+            type_resolution_witnesses: UnordMap::new(),
         };
         let checkpoint = sink.checkpoint();
         sink.push(diagnostic("first new diagnostic"));
@@ -122,6 +244,7 @@ mod diagnostic_checkpoint_tests {
         let mut errors = Vec::new();
         let mut sink = DiagnosticSink {
             errors: &mut errors,
+            type_resolution_witnesses: UnordMap::new(),
         };
         sink.push(diagnostic("earlier diagnostic"));
         let checkpoint = sink.checkpoint();
@@ -135,14 +258,132 @@ mod diagnostic_checkpoint_tests {
     }
 }
 
+#[cfg(test)]
+mod rejected_signature_resolution_tests {
+    use super::*;
+    use crate::deep_type::{BinderMode, DeepTypeResolver, TypeResolutionEnv, TypeUseSite};
+    use crate::types::{Prim, Type, VarGen};
+
+    fn resolve<T>(
+        source: &str,
+        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+    ) -> (T, Vec<CheckError>) {
+        resolve_with_binders(source, &[], operation)
+    }
+
+    fn resolve_with_binders<T>(
+        source: &str,
+        binder_names: &[&str],
+        operation: impl FnOnce(&mut DeepTypeResolver<'_, '_, '_>, &chelis_deep::Expr) -> T,
+    ) -> (T, Vec<CheckError>) {
+        let program = chelis_deep::parse_and_stamp_file(&format!("(defsig {{}} fixture {source})"))
+            .expect("parse declaration type");
+        let chelis_deep::Expr::Node(declaration, _) = &program[0] else {
+            panic!("a declaration is a stamped node");
+        };
+        let ty = declaration.children_slice().last().expect("defsig type");
+        let headers = TypeResolutionEnv::default();
+        let binders = binder_names
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        let mut variables = VarGen::default();
+        let mut errors = Vec::new();
+        let result = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
+            };
+            let mut resolver = DeepTypeResolver::new(
+                TypeUseSite::Defsig,
+                BinderMode::ExplicitGeneric(&binders),
+                &headers,
+                &mut variables,
+                &mut sink,
+            );
+            operation(&mut resolver, ty)
+        };
+        (result, errors)
+    }
+
+    #[test]
+    fn ordinary_resolution_never_returns_partial_structure_as_success() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
+            |resolver, ty| resolver.resolve(ty),
+        );
+        assert!(result.is_err());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].message.contains("f8e4m3"));
+        assert!(errors[1].message.contains("f8e5m2"));
+    }
+
+    #[test]
+    fn only_a_rejected_outcome_carries_partial_signature_structure() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} f8e4m3) (t-prim {} i32) (t-prim {} f8e5m2))",
+            |resolver, ty| resolver.resolve_signature(ty),
+        );
+        let rejected = result.expect_err("an invalid signature cannot resolve");
+        let Type::Fn(arguments, result) = rejected.ty else {
+            panic!("retain the callable structure");
+        };
+        assert_eq!(arguments.len(), 2);
+        assert!(matches!(arguments[0], Type::Error(_)));
+        assert_eq!(arguments[1], Type::Prim(Prim::Int32));
+        assert!(matches!(*result, Type::Error(_)));
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    #[test]
+    fn valid_structure_resolves_without_an_error_witness() {
+        let (result, errors) = resolve(
+            "(t-fn {} (t-prim {} i32) (t-prim {} bool))",
+            |resolver, ty| resolver.resolve_signature(ty),
+        );
+        assert_eq!(
+            result.expect("valid signature").into_type(),
+            Type::Fn(
+                vec![Type::Prim(Prim::Int32)],
+                Box::new(Type::Prim(Prim::Bool))
+            )
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn parameter_holes_are_distinct_from_named_binders() {
+        let (hole, errors) = resolve("(t-var {} _)", |resolver, ty| {
+            resolver.resolve_parameter(ty)
+        });
+        assert!(hole.expect("a parameter admits a hole").is_none());
+        assert!(errors.is_empty());
+        let (named, errors) = resolve_with_binders("(t-var {} a)", &["a"], |resolver, ty| {
+            resolver.resolve_parameter(ty)
+        });
+        assert!(matches!(
+            named
+                .expect("named binder")
+                .expect("a binder is a constraint")
+                .into_type(),
+            Type::Var(_)
+        ));
+        assert!(errors.is_empty());
+    }
+}
+
 pub(crate) fn infer_program(exprs: &[chelis_deep::Expr]) -> InferResult {
     crate::infer::run_on_grown_stack(|| {
         let mut errors = Vec::new();
         let stats = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
             };
-            crate::infer::infer_program_in_session(exprs, &mut sink)
+            match admit_metadata(exprs, &mut sink) {
+                Ok(()) => crate::infer::infer_program_in_session(exprs, &mut sink),
+                Err(stats) => stats,
+            }
         };
         InferResult {
             errors,
@@ -162,6 +403,7 @@ mod authoritative_type_stamp_tests {
         let result = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
             };
             run_type_stamp_mutation_case(case, &mut sink)
         };
@@ -229,6 +471,89 @@ mod authoritative_type_stamp_tests {
 }
 
 #[cfg(test)]
+mod unresolved_operand_reconcile_tests {
+    use super::*;
+    use crate::errors::CheckErrorKind;
+    use crate::infer::{ReconcileMutationCase, run_reconcile_mutation_case};
+
+    /// This module lives here, beside the finalization cases below, for the
+    /// same reason they do: `DiagnosticSink`'s constructor is private to this
+    /// file on purpose, and adding a second production constructor to hand
+    /// one to a test would be exactly the seam
+    /// `rt800_checker_session_source_contract.rs` pins shut. The case runs in
+    /// `infer`; only the sink is built here.
+    fn run(case: ReconcileMutationCase) -> (String, bool, Vec<CheckError>) {
+        let mut errors = Vec::new();
+        let (produced, bound) = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
+            };
+            run_reconcile_mutation_case(case, &mut sink)
+        };
+        (produced, bound, errors)
+    }
+
+    /// REGRESSION TEST for chelis#1512's disagreement branch. Reconciling a
+    /// replayed answer against the type the suspended call published must
+    /// push exactly one typed error AND hand back the PRODUCED type.
+    /// Returning the published type instead would be a silent override: the
+    /// program would disagree with itself and still check clean.
+    #[test]
+    fn a_replayed_answer_that_disagrees_is_reported_and_never_silently_overridden() {
+        let (produced, _, errors) = run(ReconcileMutationCase::Disagrees);
+        assert_eq!(
+            produced, "tensor[4, f32]",
+            "the replayed rule's own answer is what the call produces"
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "a disagreement is one diagnostic, got {errors:?}"
+        );
+        assert!(matches!(errors[0].kind, CheckErrorKind::TypeMismatch));
+        assert!(
+            errors[0].message.contains(
+                "`permute` result does not match the type this call produces once its operand is known"
+            ),
+            "the diagnostic must say which call disagreed, got {:?}",
+            errors[0].message
+        );
+    }
+
+    /// NEGATIVE TWIN. Agreement is silent, and the published variable is
+    /// bound to the produced type rather than left free: a suspended call
+    /// publishes a fresh variable, so leaving it unbound would strand every
+    /// consumer of the call.
+    #[test]
+    fn a_replayed_answer_that_agrees_reports_nothing_and_binds_the_published_variable() {
+        let (produced, bound, errors) = run(ReconcileMutationCase::Agrees);
+        assert_eq!(produced, "tensor[3, f32]");
+        assert!(
+            bound,
+            "the published variable must be bound to the rule's answer"
+        );
+        assert!(
+            errors.is_empty(),
+            "agreement must be silent, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn replay_preserves_the_consumers_dtype_family_contract() {
+        let (produced, _, errors) = run(ReconcileMutationCase::FamilyDisagrees);
+        assert_eq!(produced, "tensor[3, i32]");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(matches!(errors[0].kind, CheckErrorKind::PrecisionMismatch));
+        assert!(errors[0].message.contains("Float") && errors[0].message.contains("i32"));
+        let (produced, bound, errors) = run(ReconcileMutationCase::FamilyAgrees);
+        assert_eq!(produced, "tensor[3, f32]");
+        assert!(bound);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+}
+
+#[cfg(test)]
 mod annotated_totality_finalization_tests {
     use super::*;
     use crate::infer::{FinalizationMutationCase, run_finalization_mutation_case};
@@ -238,6 +563,7 @@ mod annotated_totality_finalization_tests {
         {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
             };
             run_finalization_mutation_case(case, &mut sink);
         }
@@ -295,6 +621,7 @@ fn run_result<T>(
     let result = {
         let mut sink = DiagnosticSink {
             errors: &mut errors,
+            type_resolution_witnesses: UnordMap::new(),
         };
         run(&mut sink)
     };
@@ -314,26 +641,78 @@ fn run_result<T>(
     }
 }
 
+// Text ingress and Node construction have already checked these rules.
+// Legacy programmatic carriers still enter here: reject before inference so
+// shape errors cannot be reinterpreted or reported again by semantic owners.
+fn admit_metadata(
+    exprs: &[chelis_deep::Expr],
+    sink: &mut DiagnosticSink<'_>,
+) -> Result<(), InferStats> {
+    if let Err(error) = chelis_deep::metadata::validate_metadata(exprs) {
+        sink.push(
+            CheckError::new(
+                crate::errors::CheckErrorKind::MalformedForm,
+                error.to_string(),
+                vec![],
+            )
+            .at_offset(error.span.offset),
+        );
+        return Err(InferStats {
+            typed_nodes: 0,
+            total_nodes: 0,
+        });
+    }
+    Ok(())
+}
+
+fn run_with_metadata<T>(
+    exprs: &[chelis_deep::Expr],
+    run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
+) -> Result<T, InferResult> {
+    run_result(|sink| {
+        admit_metadata(exprs, sink)?;
+        run(sink)
+    })
+}
+
 pub(crate) fn build_type_env_from_library(
     exprs: &[chelis_deep::Expr],
 ) -> Result<TypeEnv, InferResult> {
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| crate::infer::build_type_env_from_library_in_session(exprs, sink))
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_type_env_from_library_in_session(exprs, sink)
+        })
+    })
+}
+
+pub(crate) fn resolve_declared_surface(
+    exprs: &[chelis_deep::Expr],
+) -> Result<crate::infer::DeclaredTypeSurface, InferResult> {
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::resolve_declared_surface_in_session(exprs, sink)
+        })
     })
 }
 
 pub(crate) fn build_compiled_library_context(
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_result(|sink| crate::infer::build_compiled_library_context_in_session(exprs, sink))
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_compiled_library_context_in_session(exprs, sink)
+        })
+    })
 }
 
 pub(crate) fn build_compiled_library_context_with_base(
     base: &TypeEnv,
     exprs: &[chelis_deep::Expr],
 ) -> Result<(TypeEnv, CheckedProgram), InferResult> {
-    run_result(|sink| {
-        crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+    crate::infer::run_on_grown_stack(|| {
+        run_with_metadata(exprs, |sink| {
+            crate::infer::build_compiled_library_context_with_base_in_session(base, exprs, sink)
+        })
     })
 }
 
@@ -345,7 +724,7 @@ pub(crate) fn check_ir_with_signature_context(
     #[cfg(test)]
     record_type_analysis_session();
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| {
+        run_with_metadata(exprs, |sink| {
             crate::infer::check_ir_with_signature_context_in_session(
                 context,
                 signature_context,
@@ -360,7 +739,9 @@ pub(crate) fn check_typed_program(
     exprs: &[chelis_deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
     crate::infer::run_on_grown_stack(|| {
-        run_result(|sink| crate::infer::check_typed_program_in_session(exprs, sink))
+        run_with_metadata(exprs, |sink| {
+            crate::infer::check_typed_program_in_session(exprs, sink)
+        })
     })
 }
 
@@ -370,8 +751,12 @@ pub(crate) fn infer_ir_program(exprs: &[chelis_deep::Expr]) -> InferResult {
         let stats = {
             let mut sink = DiagnosticSink {
                 errors: &mut errors,
+                type_resolution_witnesses: UnordMap::new(),
             };
-            crate::infer::infer_ir_program_in_session(exprs, &mut sink)
+            match admit_metadata(exprs, &mut sink) {
+                Ok(()) => crate::infer::infer_ir_program_in_session(exprs, &mut sink),
+                Err(stats) => stats,
+            }
         };
         InferResult {
             errors,
@@ -386,6 +771,7 @@ pub(crate) fn try_checked_program_with_effect_annotations(
     annotated_exprs: Vec<chelis_deep::Expr>,
 ) -> Result<CheckedProgram, InferResult> {
     run_result(|sink| {
+        admit_metadata(&annotated_exprs, sink)?;
         Ok(
             crate::infer::checked_program_with_effect_annotations_in_session(
                 original,
@@ -413,4 +799,51 @@ pub(crate) fn param_has_consuming_use(
             sink,
         ))
     })
+}
+
+#[cfg(test)]
+mod builtin_selection_tests {
+    use super::*;
+    use crate::builtin_discovery::BuiltinCaseSelection;
+    use chelis_surf::{desugar::desugar_program, parser::parse_str};
+
+    fn selections(source: &str) -> Result<Vec<BuiltinCaseSelection>, InferResult> {
+        let deep = desugar_program(&parse_str(source).unwrap()).expect("Surf fixture must desugar");
+        run_with_metadata(&deep, |sink| {
+            Ok(crate::infer::builtin_selection_probe(&deep, sink))
+        })
+    }
+
+    #[test]
+    fn builtin_atom_discovery_inference_resolves_enclosing_operands_and_preserves_shadows() {
+        let selected = selections("result = map(fn(x) -> to_string(x), [1.0])").unwrap();
+        assert!(selected.contains(&BuiltinCaseSelection::Resolved(
+            "Boundary:to_string:ToStringScalar".into()
+        )));
+        assert!(
+            selected
+                .iter()
+                .all(|s| matches!(s, BuiltinCaseSelection::Resolved(_)))
+        );
+        for bound in ["Float", "Int", "Numeric"] {
+            let selected = selections(&format!(
+                "sig equal[p: {bound}]: p -> p -> bool\ndef equal(x,y) = eq(x,y)"
+            ))
+            .unwrap();
+            assert!(selected.contains(&BuiltinCaseSelection::Resolved("Numeric:eq:TableA".into())));
+            assert!(!selected.contains(&BuiltinCaseSelection::Resolved(
+                "Container:eq:EqRecursive".into()
+            )));
+        }
+        let selected =
+            selections("def apply(to_string: (f32 -> f32), x: f32) -> f32 = to_string(x)").unwrap();
+        assert!(
+            selected.is_empty(),
+            "lexical shadow acquired builtin metadata: {selected:?}"
+        );
+        assert!(
+            selections("result = map(fn(x) -> len(x), [1.0])").is_err(),
+            "concrete invalid case must not skip deferred resolution"
+        );
+    }
 }

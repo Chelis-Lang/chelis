@@ -23,6 +23,9 @@
 //! (ii) eval-vs-`chelis build --target c` agreement, following the
 //! `issue_513_symbolic_axis_adjoints.rs` conventions.
 
+mod common;
+
+use common::authored_c_symbol;
 use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -132,8 +135,8 @@ fn matrix_literal(data: &[f64], cols: usize) -> String {
 // read is a scalar VALUE (the number of rows), cast to f32 and multiplied
 // into the scalar sum. `grad` w.r.t. every element is exactly `shape(x, 0)`.
 const SHAPE_MUL_BODY: &str = "\
-  n = cast(shape(x, cast(0, int32)), f32)\n\
-  s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  n = cast(shape(x, cast(0, i32)), f32)\n\
+  s = sum(sum(&x, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
   mul(s, n)";
 
 fn forward_source(sig: &str, literal: &str) -> String {
@@ -213,7 +216,7 @@ fn issue_558_shape_value_grad_symbolic_batch_is_extent() {
 fn issue_558_shape_only_loss_grad_is_zero() {
     let source = "module Repro.ShapeOnly\n\
 sig f: tensor[batch, 2, f32] -> f32\n\
-def f(x) = cast(shape(x, cast(0, int32)), f32)\n\
+def f(x) = cast(shape(x, cast(0, i32)), f32)\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]))\n";
     let (shape, grad) = eval_grad(source);
     assert_eq!(shape, vec![2, 2], "shape-only grad shape");
@@ -256,6 +259,7 @@ fn build_c_bare(sig: &str, stem: &str) -> (TempDir, std::path::PathBuf) {
 /// Compile the emitted kernel against a driver that feeds a `rows x 2` f32
 /// matrix `[1, 2, ..., rows*2]` and prints the gradient. Run for each `rows`.
 fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<f64>> {
+    let out_symbol = authored_c_symbol("out");
     let runs = rows
         .iter()
         .map(|r| {
@@ -263,7 +267,7 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
                 "    {{ int64_t shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32); \
                  chelis_tensor_write* x_guard = chelis_tensor_begin_write(x); chelis_write_view x_view = chelis_tensor_write_view(x_guard); \
                  for (int i = 0; i < {n}; i++) ((float *)x_view.data)[i] = (float)(i + 1); chelis_tensor_end_write(x_guard); \
-                 chelis_tensor* g = out(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
+                 chelis_tensor* g = {out_symbol}(x); chelis_read_view g_view = chelis_tensor_read_view(g); \
                  for (int64_t i = 0; i < g_view.count; i++) printf(\"%.6f\\n\", ((const float *)g_view.data)[i]); \
                  printf(\"---\\n\"); chelis_tensor_release(g); chelis_tensor_release(x); }}",
                 n = r * 2
@@ -275,7 +279,8 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         r#"
 #include <stdio.h>
 #include "chelis_runtime.h"
-extern chelis_tensor* out(chelis_tensor* arg0);
+extern chelis_tensor* {out_symbol}(chelis_tensor* arg0);
+static chelis_tensor* out(chelis_tensor* arg0) {{ chelis_tensor_retain(arg0); return arg0; }}
 int main(void) {{
 {runs}
     return 0;
@@ -376,14 +381,14 @@ fn issue_558_shape_value_forward_matches_c() {
 // ---------------------------------------------------------------------------
 
 // A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
-// (narrowed to int32: `shape` reads an int64 extent, the axis slot is int32)
+// (narrowed to i32: `shape` reads an i64 extent, the axis slot is i32)
 // is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
 // so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
 // has no representable axis. The `def`-body is shared by the two tests below.
 const RUNTIME_AXIS_BODY: &str = "\
-  ax = cast(sub(shape(&x, cast(0, int32)), cast(3, int64)), int32)\n\
+  ax = cast(sub(shape(&x, cast(0, i32)), cast(3, i64)), i32)\n\
   n = cast(shape(x, ax), f32)\n\
-  s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
+  s = sum(sum(&x, cast(0, i32)), cast(0, i32)) |> tensor_to_scalar\n\
   mul(s, n)";
 
 const RUNTIME_AXIS_INPUT: &str = "to_tensor([[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)], \

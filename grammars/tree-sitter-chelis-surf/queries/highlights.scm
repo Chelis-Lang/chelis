@@ -83,7 +83,7 @@
 (record_pattern name: (qualified_type_name (type_identifier) @type))
 (constructor_pattern name: (qualified_type_name (type_identifier) @type))
 ((identifier) @type.builtin
-  (#match? @type.builtin "^(f16|bf16|f32|f64|int8|int16|int32|int64|bool|string)$"))
+  (#match? @type.builtin "^(f16|bf16|f32|f64|i8|i16|i32|i64|bool|string)$"))
 (type_identifier) @type
 (identifier) @variable
 (string) @string

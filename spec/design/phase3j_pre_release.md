@@ -58,7 +58,8 @@ Release is driven by `.github/workflows/release.yml`:
   fails to load on older distros. The `-glibc2.31` variant is built inside a
   `debian:11` container (glibc 2.31); the job asserts the build environment's
   glibc, runs the release fixture test inside that container, and asserts the
-  packaged binary requests no glibc symbol version above 2.31.
+  packaged binary requests no glibc symbol version above 2.31. `chelisup
+  install` downloads this variant on Linux (chelis#2686).
 - **Publish:** build jobs upload artifacts and a final `softprops/action-gh-release@v2`
   step attaches them to the tag.
 

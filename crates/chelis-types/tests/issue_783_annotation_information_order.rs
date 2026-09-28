@@ -4,30 +4,17 @@ use chelis_deep::{Atom, DeepTag, Expr, parse_and_stamp};
 use chelis_types::check_ir_program;
 
 fn find_matmul_type(expr: &Expr) -> Option<Expr> {
-    let (tag, meta, children): (DeepTag, &chelis_deep::MetaMap, &[Expr]) = match expr {
+    let (tag, meta, children): (DeepTag, &chelis_deep::Metadata, &[Expr]) = match expr {
         Expr::Node(node, _) => (node.tag(), node.meta(), node.children_slice()),
-        Expr::List(list, _) => (
-            list.tag()?,
-            match list.elements.get(1)? {
-                Expr::Map(meta, _) => meta,
-                _ => return None,
-            },
-            list.elements.get(2..).unwrap_or_default(),
-        ),
         _ => return None,
     };
     if tag == DeepTag::App
         && children.first().is_some_and(|callee| match callee {
             Expr::Node(node, _) if node.tag() == DeepTag::Var => matches!(node.children_slice().first(), Some(Expr::Atom(Atom::Name(name), _)) if name == "matmul"),
-            Expr::List(list, _) if list.tag() == Some(DeepTag::Var) => matches!(list.elements.get(2), Some(Expr::Atom(Atom::Name(name), _)) if name == "matmul"),
             _ => false,
         })
     {
-        return meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value.clone());
+        return meta.ty().map(|ty| ty.expression().clone());
     }
     children.iter().find_map(find_matmul_type)
 }
@@ -35,7 +22,6 @@ fn find_matmul_type(expr: &Expr) -> Option<Expr> {
 fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     match expr {
         Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         _ => None,
     }
 }

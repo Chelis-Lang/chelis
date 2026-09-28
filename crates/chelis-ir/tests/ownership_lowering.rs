@@ -42,13 +42,15 @@ const FIXTURE_DIR: &str = concat!(
 fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
     let ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let source = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let drop = dag.add_node(RiscOp::Drop, vec![source], ty, None);
+    let drop = dag.add_node(decl, RiscOp::Drop, vec![source], ty, None);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
 
     assert_eq!(
@@ -61,15 +63,23 @@ fn verified_dag_exposes_the_exact_drop_source_without_raw_plan_access() {
 fn verified_dag_distinguishes_a_borrowed_logical_drop_from_an_owned_terminal() {
     let ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
-    let borrowed = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-    let borrowed_drop = dag.add_node(RiscOp::Drop, vec![borrowed], ty.clone(), None);
+    let decl = dag.declare("test");
+    let borrowed = dag.add_node(
+        decl,
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty.clone(),
+        None,
+    );
+    let borrowed_drop = dag.add_node(decl, RiscOp::Drop, vec![borrowed], ty.clone(), None);
     let owned = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         ty.clone(),
         None,
     );
-    let owned_drop = dag.add_node(RiscOp::Drop, vec![owned], ty, None);
+    let owned_drop = dag.add_node(decl, RiscOp::Drop, vec![owned], ty, None);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
 
     assert_eq!(
@@ -102,7 +112,7 @@ fn fixture_source(name: &str) -> String {
 
 fn front(source: &str) -> Front {
     let declarations = surf_parse(source).unwrap_or_else(|error| panic!("parse: {error:?}"));
-    let deep = desugar_program(&declarations);
+    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("type check: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked)
@@ -397,6 +407,55 @@ fn source_copy_mints_a_fresh_owned_identity_for_named_fresh_and_tail_values() {
     assert!(tail.contains("return move"), "{tail}");
 }
 
+/// chelis#2068: a by-value Copy scalar named once but used in several argument
+/// slots of a tail-position user call (`f3(x, x)`) must duplicate per slot, not
+/// move the single owner on the first slot and then read a dead owner on the
+/// second. Regressed in 0.18.7; before the fix this failed with
+/// `owner %1 in `g` b1 is not live`.
+#[test]
+fn scalar_reused_in_tail_call_slots_duplicates_and_verifies() {
+    let source = "def f3(a: f32, b: f32) -> f32 = add(a, b)\n\
+                  def g(x: f32) -> f32 = f3(x, x)\n\
+                  def main() -> f32 = g(cast(0.5, f32))\n";
+    // The core oracle: the whole program lowers AND verifies. Before the fix
+    // the verifier rejected `g` because the first slot moved `x` and the second
+    // read it dead.
+    let program = verified_source(source);
+    let g = unit_text(&program, "g");
+    // Each occurrence of the Copy scalar is served by its own minted copy
+    // rather than moving the single owner, so both call slots see a live owner.
+    // The original scalar owner is then discarded, never moved into a slot.
+    assert_eq!(
+        count(&g, "= copy clone %"),
+        2,
+        "both reused scalar slots must duplicate the owner so neither reads it dead:\n{g}"
+    );
+    assert!(
+        g.contains("discard %1"),
+        "the original scalar owner must be discarded, not moved into a call slot:\n{g}"
+    );
+}
+
+/// chelis#2068 soundness guard: the scalar carve-out is scoped strictly to Copy
+/// scalars. A heap value (here a `string`, whose owned parameter mode moves it)
+/// used in two tail-call slots is a genuine use-after-move and MUST still be
+/// rejected, since moving one owned string into two owned slots would need an
+/// explicit copy the user did not write.
+#[test]
+fn heap_value_reused_in_tail_call_slots_is_still_rejected() {
+    let source = "def joins(a: string, b: string) -> string = string_concat(a, b)\n\
+                  def dupstr(s: string) -> string = joins(s, s)\n\
+                  def run_main() -> string = dupstr(\"hi\")\n";
+    let error = match lower_source(source) {
+        Ok(lowered) => verify_ownership(lowered).expect_err("heap double-move must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, OwnershipError::OwnerNotLive { .. }),
+        "a genuine use-after-move of an owned heap value must stay rejected, got: {error}"
+    );
+}
+
 #[test]
 fn debug_observes_the_existing_owner_and_is_not_source_copy() {
     let roots = unit_text(
@@ -467,7 +526,7 @@ fn artifact_entry_borrow_is_copied_before_an_owned_formal() {
 #[test]
 fn artifact_entry_borrow_crosses_a_borrowed_formal_without_a_copy() {
     let verified = verified_source(
-        "def peek(x: &tensor[2, f32]) -> int64 = 1i64\n\
+        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
          input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
          out = peek(&input)\n",
     );
@@ -550,7 +609,7 @@ fn option_some_moves_fresh_payloads_and_clones_named_payloads_before_the_move() 
     let named = unit_text(
         &verified_source(
             r#"
-def length_after_wrap() -> int64 = {
+def length_after_wrap() -> i64 = {
   text = "abc"
   wrapped: Option[string] = Some(text)
   string_len(text)
@@ -562,6 +621,134 @@ length = length_after_wrap()
     );
     assert!(named.contains("= copy clone"), "{named}");
     assert!(named.contains("builtin:Some(move"), "{named}");
+}
+
+/// chelis#2205: a list whose scheduled last use is `append` moves into the
+/// builtin; one that is read again afterwards stays borrowed.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound append chain
+/// the number of `builtin:append` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: on `main` (`1b7e9fcd7`) the 8-step chain rendered 8
+/// borrowing appends and the 16-step chain 16 (no step moved); after the
+/// last-use upgrade both render 0, and every step moves.
+#[test]
+fn append_at_a_lists_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  x0: List[i64] = []\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  x{step} = append(x{}, cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(x{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn borrowing_appends(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:append(borrow"),
+            count(&text, "builtin:append(move"),
+        )
+    }
+    let (small_borrow, small_move) = borrowing_appends(8);
+    let (large_borrow, large_move) = borrowing_appends(16);
+    eprintln!(
+        "#2205 receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every append in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing appends must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every append in a let-bound chain is its container's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205 negative half: a list read after the append is not moved into
+/// it, and a list read twice moves only at the second, final append.
+#[test]
+fn append_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = [cast(1, i64)]\n  b = append(a, cast(4, i64))\n  c = append(a, cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let first = line_index(&text, "builtin:append(");
+    let second = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:append("))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("two appends");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[first].contains("builtin:append(borrow"),
+        "the first append still borrows `a`, which is read again: {text}"
+    );
+    assert!(
+        lines[second].contains("builtin:append(move"),
+        "the second append is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// RT-2225 verification P0: tensor `concat` takes a `List[tensor]` of parts as
+/// its first operand and produces a tensor. That list is borrowed by the
+/// runtime and released after the call; it must never be upgraded to a move,
+/// or the release disappears (a leak on the round-1 head) and the emitter's
+/// fail-closed check refuses the program (the repair head). The result class
+/// keeps the two `concat`s apart.
+#[test]
+fn tensor_concat_keeps_its_parts_list_borrowed() {
+    let text = unit_text(
+        &verified_source(
+            "def join(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[4, f32] = concat([a, b], 0)\n",
+        ),
+        "join",
+    );
+    assert!(
+        text.contains("builtin:concat(borrow"),
+        "the parts list of a tensor concat stays borrowed: {text}"
+    );
+    assert!(
+        !text.contains("builtin:concat(move"),
+        "a tensor concat never consumes its parts list: {text}"
+    );
+}
+
+/// chelis#2205: a tuple-held alias retains the list, so the append at the
+/// binding's last use is still a verified Move (the strong-owner count, not
+/// the IR, decides whether the runtime pushes in place).
+#[test]
+fn append_at_last_use_moves_even_when_an_aggregate_holds_the_list() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  xs = [cast(1, i64), cast(2, i64)]\n  held = (xs, cast(9, i64))\n  zs = append(xs, cast(3, i64))\n  add(len(zs), len(held.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `xs`: {text}"
+    );
+    assert!(
+        text.contains("builtin:append(move"),
+        "the append is `xs`'s last use and moves it: {text}"
+    );
 }
 
 #[test]
@@ -591,19 +778,17 @@ fn fold_accumulator_is_one_owned_block_parameter_on_both_paths() {
 
 #[test]
 fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
-    let verified =
-        verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[int64]) -> v, xs)\n");
+    let verified = verified_source("xs = [[1i64], [2i64]]\nys = map(fn (v: List[i64]) -> v, xs)\n");
     let roots = unit_text(&verified, "roots");
     assert!(roots.contains("empty_list"), "{roots}");
     assert!(roots.contains("list_push"), "{roots}");
     assert!(roots.contains("loop borrow"), "{roots}");
 
     for source in [
-        "xs = [1i64, 2i64]\nys = filter(fn (v: int64) -> gte(v, 2i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = scan(fn (acc: int64, v: int64) -> add(acc, v), 0i64, xs)\n",
-        "xs = [1i64, 2i64]\nys = partition(fn (v: int64) -> gt(v, 1i64), xs)\n",
-        "xs = [1i64, 2i64]\nys = flat_map(fn (v: int64) -> [v, v], xs)\n",
-        "sampled = with seed(7i64) { 1i64 }\n",
+        "xs = [1i64, 2i64]\nys = filter(fn (v: i64) -> gte(v, 2i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = scan(fn (acc: i64, v: i64) -> add(acc, v), 0i64, xs)\n",
+        "xs = [1i64, 2i64]\nys = partition(fn (v: i64) -> gt(v, 1i64), xs)\n",
+        "xs = [1i64, 2i64]\nys = flat_map(fn (v: i64) -> [v, v], xs)\n",
     ] {
         verify_ownership(lower_source(source).unwrap()).unwrap();
     }
@@ -611,7 +796,7 @@ fn all_previously_supported_host_combinators_reach_the_verified_boundary() {
 
 fn assert_front_rejects(source: &str) {
     let declarations = surf_parse(source).expect("negative twin still parses");
-    let deep = desugar_program(&declarations);
+    let deep = desugar_program(&declarations).expect("Surf fixture must desugar");
     assert!(
         check_typed_program(&deep).is_err(),
         "negative twin unexpectedly checked"
@@ -620,18 +805,17 @@ fn assert_front_rejects(source: &str) {
 
 #[test]
 fn supported_combinators_keep_their_preexisting_typed_failure_twins() {
-    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: int64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = filter(fn (v: i64) -> missing(v), xs)\n");
     assert_front_rejects(
-        "xs = [1i64]\nys = scan(fn (acc: int64, v: int64) -> missing(acc, v), 0i64, xs)\n",
+        "xs = [1i64]\nys = scan(fn (acc: i64, v: i64) -> missing(acc, v), 0i64, xs)\n",
     );
-    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: int64) -> missing(v), xs)\n");
-    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: int64) -> missing(v), xs)\n");
-    assert_front_rejects("sampled = with seed(7i64) { missing }\n");
+    assert_front_rejects("xs = [1i64]\nys = partition(fn (v: i64) -> missing(v), xs)\n");
+    assert_front_rejects("xs = [1i64]\nys = flat_map(fn (v: i64) -> missing(v), xs)\n");
 }
 
 #[test]
 fn malformed_real_host_programs_fail_at_typed_boundaries() {
-    let front = front("def id(p: int64) -> int64 = p\nout = id(1i64)\n");
+    let front = front("def id(p: i64) -> i64 = p\nout = id(1i64)\n");
     let mut wrong_arity = front.host.clone();
     wrong_arity.globals[0].value = HostExpr::new(HostExprKind::Call {
         function: "id".to_string(),
@@ -661,8 +845,8 @@ fn malformed_real_host_programs_fail_at_typed_boundaries() {
 #[test]
 fn checked_scalar_call_slots_restore_the_exact_literal_type() {
     let verified = verified_source(
-        "def keep_i32(x: int32) -> int32 = x\n\
-         def keep_i64(x: int64) -> int64 = x\n\
+        "def keep_i32(x: i32) -> i32 = x\n\
+         def keep_i64(x: i64) -> i64 = x\n\
          def keep_f32(x: f32) -> f32 = x\n\
          def keep_f64(x: f64) -> f64 = x\n\
          a = keep_i32(7)\n\
@@ -679,10 +863,10 @@ fn checked_scalar_call_slots_restore_the_exact_literal_type() {
 
 #[test]
 fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery() {
-    let source = "sig guarded: tensor[n, f32] -> tensor[n, f32]\n\
+    let source = "sig guarded[n]: tensor[n, f32] -> tensor[n, f32]\n\
                   def guarded(x) = {\n\
-                    n = cast(shape(x, cast(0, int32)), int64)\n\
-                    if gt(cast(1, int64), n) then fail(\"empty\") else x\n\
+                    n = cast(shape(x, cast(0, i32)), i64)\n\
+                    if gt(cast(1, i64), n) then fail(\"empty\") else x\n\
                   }\n\
                   def call(x: tensor[4, f32]) -> tensor[4, f32] = guarded(x)\n\
                   out = call(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
@@ -719,8 +903,8 @@ fn checked_tensor_call_slots_preserve_dimension_instantiation_and_reject_forgery
 fn checked_nominal_dimension_provenance_rejects_a_different_name() {
     let mut front = front(
         "def nominal(x: tensor[batch, f32]) -> tensor[batch, f32] = {\n\
-           size = cast(shape(x, cast(0, int32)), int64)\n\
-           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+           size = cast(shape(x, cast(0, i32)), i64)\n\
+           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
          }\n\
          def caller(x: tensor[batch, f32]) -> tensor[batch, f32] = nominal(x)\n\
          out = 0\n",
@@ -752,10 +936,10 @@ fn checked_nominal_dimension_provenance_rejects_a_different_name() {
 #[test]
 fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
     let mut front = front(
-        "sig paired: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
+        "sig paired[n]: tensor[n, f32] -> tensor[n, f32] -> tensor[n, f32]\n\
          def paired(x, y) = {\n\
-           size = cast(shape(y, cast(0, int32)), int64)\n\
-           if gt(cast(1, int64), size) then fail(\"empty\") else x\n\
+           size = cast(shape(y, cast(0, i32)), i64)\n\
+           if gt(cast(1, i64), size) then fail(\"empty\") else x\n\
          }\n\
          def caller(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = paired(x, y)\n\
          out = 0\n",
@@ -786,7 +970,7 @@ fn checked_repeated_dimension_variable_rejects_inconsistent_actuals() {
 
 #[test]
 fn forged_call_argument_types_cannot_retag_an_actual_expression() {
-    let front = front("def keep(x: int32) -> int32 = x\nout = keep(1)\n");
+    let front = front("def keep(x: i32) -> i32 = x\nout = keep(1)\n");
 
     let mut forged_slot = front.host.clone();
     let HostExprKind::Call { arg_tys, .. } = &mut forged_slot
@@ -850,11 +1034,11 @@ fn every_current_concrete_host_expr_kind_has_a_closed_disposition() {
     ]
     .into_iter()
     .collect();
-    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap", "WithSeed"]
+    let successor: BTreeSet<&str> = ["Filter", "Scan", "Partition", "FlatMap"]
         .into_iter()
         .collect();
     assert!(lowered.is_disjoint(&successor));
-    assert_eq!(lowered.len() + successor.len(), 24);
+    assert_eq!(lowered.len() + successor.len(), 23);
 }
 
 #[test]
@@ -970,34 +1154,57 @@ fn scalar_tensor() -> TensorType {
 #[test]
 fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let neg = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let neg = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_root(neg);
     let dag = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
     assert!(dag.render().contains("borrow load n0"));
     assert!(dag.render().contains("root move n1"));
 
     let mut terminal_dag = Dag::new();
+    let terminal_dag_decl = terminal_dag.declare("test");
     let load = terminal_dag.add_node(
+        terminal_dag_decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let produced = terminal_dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let copied = terminal_dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Neg,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
+    let copied = terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     terminal_dag.add_node(
+        terminal_dag_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    terminal_dag.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    terminal_dag.add_node(
+        terminal_dag_decl,
+        RiscOp::Drop,
+        vec![copied],
+        scalar_tensor(),
+        None,
+    );
     let terminal = verify_ownership(lower_dag_ownership(terminal_dag).unwrap()).unwrap();
     let terminal = terminal.render();
     assert!(terminal.contains("clone n2 from n1"), "{terminal}");
@@ -1005,7 +1212,7 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
     assert!(terminal.contains("drop n4 move n2"), "{terminal}");
 
     let host = verified_source(
-        "def peek(x: &tensor[2, f32]) -> int64 = 1i64\n\
+        "def peek(x: &tensor[2, f32]) -> i64 = 1i64\n\
          input = to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
          out = peek(&input)\n",
     );
@@ -1016,20 +1223,23 @@ fn standalone_and_nested_dags_cross_verified_payload_boundaries() {
 #[test]
 fn a_dag_owner_cannot_have_two_terminal_directives() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load { name: "x".into() },
         vec![],
         scalar_tensor(),
         None,
     );
-    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    dag.add_node(RiscOp::Drop, vec![produced], scalar_tensor(), None);
+    dag.add_node(decl, RiscOp::Drop, vec![produced], scalar_tensor(), None);
     assert!(matches!(
         lower_dag_ownership(dag),
         Err(OwnershipError::DagDuplicateTerminal { owner: 1 })
@@ -1039,7 +1249,9 @@ fn a_dag_owner_cannot_have_two_terminal_directives() {
 #[test]
 fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1047,8 +1259,8 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
         scalar_tensor(),
         None,
     );
-    let discarded = dag.add_node(RiscOp::Drop, vec![load], scalar_tensor(), None);
-    let copied_after_discard = dag.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    let discarded = dag.add_node(decl, RiscOp::Drop, vec![load], scalar_tensor(), None);
+    let copied_after_discard = dag.add_node(decl, RiscOp::Copy, vec![load], scalar_tensor(), None);
     dag.add_root(copied_after_discard);
     let verified = verify_ownership(lower_dag_ownership(dag).unwrap()).unwrap();
     assert_eq!(
@@ -1060,7 +1272,9 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
     );
 
     let mut twin = Dag::new();
+    let twin_decl = twin.declare("test");
     let load = twin.add_node(
+        twin_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1068,15 +1282,17 @@ fn a_borrowed_dag_drop_is_a_non_consuming_logical_discard() {
         scalar_tensor(),
         None,
     );
-    let copied = twin.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
-    twin.add_node(RiscOp::Drop, vec![copied], scalar_tensor(), None);
+    let copied = twin.add_node(twin_decl, RiscOp::Copy, vec![load], scalar_tensor(), None);
+    twin.add_node(twin_decl, RiscOp::Drop, vec![copied], scalar_tensor(), None);
     verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
 }
 
 #[test]
 fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source() {
     let mut borrowed = Dag::new();
+    let borrowed_decl = borrowed.declare("test");
     let load = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1084,8 +1300,20 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let realized = borrowed.add_node(RiscOp::Realize, vec![load], scalar_tensor(), None);
-    let later = borrowed.add_node(RiscOp::Copy, vec![load], scalar_tensor(), None);
+    let realized = borrowed.add_node(
+        borrowed_decl,
+        RiscOp::Realize,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
+    let later = borrowed.add_node(
+        borrowed_decl,
+        RiscOp::Copy,
+        vec![load],
+        scalar_tensor(),
+        None,
+    );
     borrowed.add_root(realized);
     borrowed.add_root(later);
     let verified = verify_ownership(lower_dag_ownership(borrowed).unwrap()).unwrap();
@@ -1098,7 +1326,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     );
 
     let mut fanned = Dag::new();
+    let fanned_decl = fanned.declare("test");
     let load = fanned.add_node(
+        fanned_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1106,9 +1336,21 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let produced = fanned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let realized = fanned.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
-    let later = fanned.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = fanned.add_node(fanned_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = fanned.add_node(
+        fanned_decl,
+        RiscOp::Realize,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
+    let later = fanned.add_node(
+        fanned_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     fanned.add_root(realized);
     fanned.add_root(later);
     let verified = verify_ownership(lower_dag_ownership(fanned).unwrap()).unwrap();
@@ -1121,7 +1363,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
     );
 
     let mut last = Dag::new();
+    let last_decl = last.declare("test");
     let load = last.add_node(
+        last_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1129,8 +1373,14 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
         scalar_tensor(),
         None,
     );
-    let produced = last.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let realized = last.add_node(RiscOp::Realize, vec![produced], scalar_tensor(), None);
+    let produced = last.add_node(last_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let realized = last.add_node(
+        last_decl,
+        RiscOp::Realize,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     last.add_root(realized);
     let verified = verify_ownership(lower_dag_ownership(last).unwrap()).unwrap();
     assert_eq!(
@@ -1145,7 +1395,9 @@ fn realize_clones_a_borrowed_or_fanned_out_source_and_moves_a_last_owned_source(
 #[test]
 fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
     let mut borrowed = Dag::new();
+    let borrowed_decl = borrowed.declare("test");
     let load = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1154,6 +1406,7 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         None,
     );
     let stored = borrowed.add_node(
+        borrowed_decl,
         RiscOp::Store { name: "out".into() },
         vec![load],
         scalar_tensor(),
@@ -1170,7 +1423,9 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
     );
 
     let mut owned = Dag::new();
+    let owned_decl = owned.declare("test");
     let load = owned.add_node(
+        owned_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1178,8 +1433,9 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
         scalar_tensor(),
         None,
     );
-    let produced = owned.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = owned.add_node(owned_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     let stored = owned.add_node(
+        owned_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
@@ -1199,13 +1455,16 @@ fn store_clones_a_borrowed_source_but_moves_an_owned_source() {
 #[test]
 fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let unused = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 1.0),
         vec![],
         scalar_tensor(),
         None,
     );
     let output = dag.add_node(
+        decl,
         RiscOp::synth_const(Prim::F32, 2.0),
         vec![],
         scalar_tensor(),
@@ -1224,7 +1483,9 @@ fn dangling_owned_dag_producer_receives_a_verified_scope_drop() {
 #[test]
 fn a_dag_copy_after_store_move_is_rejected() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let load = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1232,14 +1493,15 @@ fn a_dag_copy_after_store_move_is_rejected() {
         scalar_tensor(),
         None,
     );
-    let produced = dag.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let produced = dag.add_node(decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
     dag.add_node(
+        decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
         None,
     );
-    let copied = dag.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let copied = dag.add_node(decl, RiscOp::Copy, vec![produced], scalar_tensor(), None);
     dag.add_root(copied);
     assert!(matches!(
         lower_dag_ownership(dag),
@@ -1250,7 +1512,9 @@ fn a_dag_copy_after_store_move_is_rejected() {
     ));
 
     let mut twin = Dag::new();
+    let twin_decl = twin.declare("test");
     let load = twin.add_node(
+        twin_decl,
         RiscOp::Load {
             name: "entry".into(),
         },
@@ -1258,9 +1522,16 @@ fn a_dag_copy_after_store_move_is_rejected() {
         scalar_tensor(),
         None,
     );
-    let produced = twin.add_node(RiscOp::Neg, vec![load], scalar_tensor(), None);
-    let copied = twin.add_node(RiscOp::Copy, vec![produced], scalar_tensor(), None);
+    let produced = twin.add_node(twin_decl, RiscOp::Neg, vec![load], scalar_tensor(), None);
+    let copied = twin.add_node(
+        twin_decl,
+        RiscOp::Copy,
+        vec![produced],
+        scalar_tensor(),
+        None,
+    );
     twin.add_node(
+        twin_decl,
         RiscOp::Store { name: "out".into() },
         vec![produced],
         scalar_tensor(),
@@ -1268,4 +1539,463 @@ fn a_dag_copy_after_store_move_is_rejected() {
     );
     twin.add_root(copied);
     verify_ownership(lower_dag_ownership(twin).unwrap()).unwrap();
+}
+
+#[test]
+fn signature_entry_requires_tensor_observations_and_preserves_borrows() {
+    let front = front(
+        "def guarded[n](x: tensor[n, f32]) -> tensor[n, f32] ! { IO } = { _ = print(\"entered\")\n x }\nout = guarded(to_tensor([1.0f32, 2.0f32]))\n",
+    );
+    let mut host = front.host.clone();
+    let function = host
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "guarded")
+        .unwrap();
+    let ty = match &function.params[0].ty {
+        ConcreteHostType::Tensor(ty) => ty.clone(),
+        other => panic!("{other:?}"),
+    };
+    let plan = chelis_ir::host::SignatureEntryPlan::new([chelis_ir::host::HostTensorInput {
+        name: "x".into(),
+        ty,
+    }]);
+    function.body = HostExpr::new(HostExprKind::Let {
+        bindings: vec![chelis_ir::host::HostBinding {
+            name: "checked".into(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: ConcreteHostType::Unit,
+            value: HostExpr::new(HostExprKind::SignatureEntry {
+                plan,
+                args: vec![HostExpr::new(HostExprKind::Var(
+                    "x".into(),
+                    function.params[0].ty.clone(),
+                ))],
+            }),
+        }],
+        body: Box::new(function.body.clone()),
+        ty: function.ret_ty.clone(),
+    });
+    verify_ownership(lower_host_ownership(&front.manifested, host.clone()).unwrap()).unwrap();
+    for missing in [false, true] {
+        let mut forged = host.clone();
+        let function = forged
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "guarded")
+            .unwrap();
+        let HostExprKind::Let { bindings, .. } = &mut function.body.kind else {
+            panic!("let")
+        };
+        let HostExprKind::SignatureEntry { args, .. } = &mut bindings[0].value.kind else {
+            panic!("entry")
+        };
+        if missing {
+            args.clear();
+        } else {
+            args[0] = HostExpr::new(HostExprKind::String("not a tensor".into()));
+        }
+        let error = lower_host_ownership(&front.manifested, forged).unwrap_err();
+        if missing {
+            assert!(
+                matches!(
+                    error,
+                    OwnershipError::CallArityMismatch {
+                        supplied: 0,
+                        declared: 1,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, OwnershipError::CallArgumentType { argument: 0, .. }),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+/// chelis#2205: a dictionary whose scheduled last use is `dict_insert` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound insert chain
+/// the number of `builtin:dict_insert` applications that still BORROW their
+/// container must not grow with N. Evidentiary status: REGRESSION TEST,
+/// proven failing first: without the dictionary rows in
+/// `CONTAINER_CONSUMERS` the 8-step chain renders 8 borrowing inserts and the
+/// 16-step chain 16 (no step moves); with them both render 0.
+#[test]
+fn dict_insert_at_a_dicts_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source =
+            String::from("def build() -> i64 = {\n  d0 = dict_of([] : List[(i64, i64)])\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  d{step} = dict_insert(d{}, cast({step}, i64), cast({step}, i64))\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  len(d{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:dict_insert(borrow"),
+            count(&text, "builtin:dict_insert(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 dict receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every insert in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing inserts must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every insert in a let-bound chain is its dictionary's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205: `dict_merge` and `dict_remove` move their consumed operand at
+/// its last use too, so the dictionary kind is covered by its whole table
+/// row set rather than by `dict_insert` alone.
+#[test]
+fn dict_merge_and_dict_remove_move_at_their_last_use() {
+    let merged = unit_text(
+        &verified_source(
+            "def fold_two() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(dict_of([] : List[(i64, i64)]), cast(2, i64), cast(2, i64))\n  joined = dict_merge(a, b)\n  len(joined)\n}\nresult = fold_two()\n",
+        ),
+        "fold_two",
+    );
+    assert!(
+        merged.contains("builtin:dict_merge(move"),
+        "the merge is `a`'s last use and moves it: {merged}"
+    );
+    let removed = unit_text(
+        &verified_source(
+            "def shrink_dict() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  smaller = dict_remove(a, cast(1, i64))\n  len(smaller)\n}\nresult = shrink_dict()\n",
+        ),
+        "shrink_dict",
+    );
+    assert!(
+        removed.contains("builtin:dict_remove(move"),
+        "the removal is `a`'s last use and moves it: {removed}"
+    );
+}
+
+/// chelis#2205 negative half for the dictionary kind: a dictionary read after
+/// the insert is not moved into it, and one read twice moves only at the
+/// second, final insert.
+#[test]
+fn dict_insert_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  b = dict_insert(a, cast(4, i64), cast(4, i64))\n  c = dict_insert(a, cast(5, i64), cast(5, i64))\n  add(len(b), len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:dict_insert("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three inserts are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:dict_insert(borrow"),
+        "the insert into `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:dict_insert(move"),
+        "the last insert is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: an aggregate that retains the dictionary does not stop the
+/// insert at the binding's last use from being a verified Move; the
+/// strong-owner count, not the IR, decides whether the runtime rewrites in
+/// place.
+#[test]
+fn dict_insert_at_last_use_moves_even_when_an_aggregate_holds_the_dict() {
+    let text = unit_text(
+        &verified_source(
+            "def held() -> i64 = {\n  d = dict_insert(dict_of([] : List[(i64, i64)]), cast(1, i64), cast(1, i64))\n  kept = (d, cast(9, i64))\n  grown = dict_insert(d, cast(2, i64), cast(2, i64))\n  add(len(grown), len(kept.0))\n}\nresult = held()\n",
+        ),
+        "held",
+    );
+    assert!(
+        text.contains("= copy clone"),
+        "the tuple retains `d`: {text}"
+    );
+    assert!(
+        text.contains("builtin:dict_insert(move"),
+        "the insert is `d`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: a string whose scheduled last use is `string_concat` moves
+/// into the builtin, exactly as a list does into `append`.
+///
+/// Counted receipt, asserted as a ratio: for an N-step let-bound concat chain
+/// the number of `builtin:string_concat` applications that still BORROW their
+/// operand must not grow with N. Evidentiary status: REGRESSION TEST, proven
+/// failing first: without the string row in `CONTAINER_CONSUMERS` the 8-step
+/// chain renders 8 borrowing concats and the 16-step chain 16 (no step
+/// moves); with it both render 0.
+#[test]
+fn string_concat_at_a_strings_last_use_moves_and_the_chain_stops_borrowing() {
+    fn chain(steps: usize) -> String {
+        let mut source = String::from("def build() -> i64 = {\n  s0 = \"\"\n");
+        for step in 1..=steps {
+            source.push_str(&format!(
+                "  s{step} = string_concat(s{}, \"x\")\n",
+                step - 1
+            ));
+        }
+        source.push_str(&format!("  string_len(s{steps})\n}}\nbuilt = build()\n"));
+        source
+    }
+    fn dispositions(steps: usize) -> (usize, usize) {
+        let text = unit_text(&verified_source(&chain(steps)), "build");
+        (
+            count(&text, "builtin:string_concat(borrow"),
+            count(&text, "builtin:string_concat(move"),
+        )
+    }
+    let (small_borrow, small_move) = dispositions(8);
+    let (large_borrow, large_move) = dispositions(16);
+    eprintln!(
+        "#2205 string receipt: 8-step chain borrows {small_borrow} / moves {small_move}; \
+         16-step chain borrows {large_borrow} / moves {large_move}"
+    );
+    assert_eq!(
+        small_borrow + small_move,
+        8,
+        "every concat in the 8-step chain is rendered exactly once"
+    );
+    assert!(
+        large_borrow <= small_borrow,
+        "#2205: borrowing concats must not grow with the chain; 8 steps borrowed \
+         {small_borrow}, 16 steps borrowed {large_borrow}"
+    );
+    assert_eq!(
+        (small_borrow, large_borrow, small_move, large_move),
+        (0, 0, 8, 16),
+        "#2205: every concat in a let-bound chain is its string's last use and moves; \
+         a count of rendered applications carries no machine budget, so the exact figure is \
+         locked too"
+    );
+}
+
+/// chelis#2205 negative half for the string kind: a string read after the
+/// concat is not moved into it, and one read twice moves only at the second,
+/// final concat.
+///
+/// This is also the executable answer to chelis#2205's own secondary
+/// observation, written before the scheduler landed, that "the last-use path
+/// does not fire at all once a value has more than one use". It fires on the
+/// last use; only the earlier use retains.
+#[test]
+fn string_concat_before_a_later_read_keeps_borrowing() {
+    let text = unit_text(
+        &verified_source(
+            "def twice() -> i64 = {\n  a = string_concat(\"a\", \"b\")\n  b = string_concat(a, \"1\")\n  c = string_concat(a, \"2\")\n  add(string_len(b), string_len(c))\n}\nresult = twice()\n",
+        ),
+        "twice",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let sites: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("builtin:string_concat("))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(sites.len(), 3, "three concats are rendered: {text}");
+    assert!(
+        lines[sites[1]].contains("builtin:string_concat(borrow"),
+        "the concat reading `a` that is read again still borrows it: {text}"
+    );
+    assert!(
+        lines[sites[2]].contains("builtin:string_concat(move"),
+        "the last concat is `a`'s last use and moves it: {text}"
+    );
+}
+
+/// chelis#2205: `string_slice` and `string_trim` return a substring of their
+/// operand and are deliberately not rows, so neither is ever upgraded even
+/// when its operand is dead immediately afterwards.
+#[test]
+fn string_slice_and_string_trim_never_consume_their_operand() {
+    let sliced = unit_text(
+        &verified_source(
+            "def cut() -> i64 = {\n  a = string_concat(\"abc\", \"def\")\n  b = string_slice(a, cast(1, i64), cast(2, i64))\n  string_len(b)\n}\nresult = cut()\n",
+        ),
+        "cut",
+    );
+    assert!(
+        sliced.contains("builtin:string_slice(borrow"),
+        "`string_slice` keeps its operand borrowed: {sliced}"
+    );
+    assert!(
+        !sliced.contains("builtin:string_slice(move"),
+        "`string_slice` is not a consumer row: {sliced}"
+    );
+    let trimmed = unit_text(
+        &verified_source(
+            "def tidy() -> i64 = {\n  a = string_concat(\" ab \", \"cd \")\n  b = string_trim(a)\n  string_len(b)\n}\nresult = tidy()\n",
+        ),
+        "tidy",
+    );
+    assert!(
+        trimmed.contains("builtin:string_trim(borrow"),
+        "`string_trim` keeps its operand borrowed: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains("builtin:string_trim(move"),
+        "`string_trim` is not a consumer row: {trimmed}"
+    );
+}
+
+/// chelis#2122: an owner carries the Surf span of the expression it was minted
+/// for. Real Surf, so the ids come from the parser through Deep `meta["span"]`
+/// and host lowering rather than a synthetic fixture, and every assertion
+/// resolves the span back to the source bytes it points at: a span that merely
+/// exists proves nothing, and a constant one would pass such a check.
+#[test]
+fn lowered_owners_carry_the_surf_span_of_their_defining_expression() {
+    let source = "module M\nexport (build)\ndef build(flag: bool) -> (string, i64) = {\n  head = if flag then \"a\" else \"b\"\n  (head, 1i64)\n}\n";
+    let rendered = verified_source(source).render();
+    let spans = owner_spans(&rendered, source);
+
+    let texts = spans
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"a\"", "\"b\"", "1i64"],
+        "each owner points at its own defining expression, in block order:\n{rendered}"
+    );
+}
+
+/// chelis#2122: sibling bindings each point at their own region rather than
+/// sharing one. This exercises the restore in passing but does not pin it: each
+/// binding here sets its own span, so dropping the restore leaves the test
+/// green. See the PR's coverage note.
+#[test]
+fn sibling_expressions_keep_their_own_spans() {
+    let source = "module M\nexport (pair)\ndef pair() -> (string, string) = {\n  first = \"alpha\"\n  second = \"omega\"\n  (first, second)\n}\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"alpha\"".to_string(), "\"omega\"".to_string()],
+        "the second binding keeps its own region rather than the first's:\n{rendered}"
+    );
+}
+
+/// chelis#2122: an argument of a direct call to a user-defined `def` reaches
+/// lowering without passing through `lower_expr`, so it needs the same span
+/// handling. Each argument points at itself, not at the whole call.
+#[test]
+fn direct_call_arguments_carry_their_own_spans() {
+    let source = "module M\nexport (go)\ndef my_take(a: string, b: string) -> string = string_concat(a, b)\ndef go() -> string = my_take(\"alpha\", \"omega\")\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert!(
+        texts.contains(&"\"alpha\"".to_string()) && texts.contains(&"\"omega\"".to_string()),
+        "both arguments point at themselves rather than at the enclosing call: {texts:?}\n{rendered}"
+    );
+}
+
+/// chelis#2122: an integer literal argument whose declared slot already matches
+/// is admitted raw, returning before the expression is lowered. That exit needs
+/// the span too, or sibling arguments collide on the call's own region (red
+/// team round 2).
+#[test]
+fn raw_literal_call_arguments_carry_their_own_spans() {
+    let source = "module M\nexport (go)\ndef my_add(a: i64, b: i64) -> i64 = add(a, b)\ndef go() -> i64 = my_add(11i64, 22i64)\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["11i64".to_string(), "22i64".to_string()],
+        "each raw literal argument points at itself, not at `my_add(11i64, 22i64)`:\n{rendered}"
+    );
+}
+
+/// The same admission path with one raw literal beside one lowered argument:
+/// the two must not disagree about which region they came from.
+#[test]
+fn mixed_raw_and_lowered_call_arguments_each_point_at_themselves() {
+    let source = "module M\nexport (go)\ndef my_pick(a: string, b: i64) -> string = a\ndef go() -> string = my_pick(\"ss\", 9i64)\n";
+    let rendered = verified_source(source).render();
+
+    let texts = owner_spans(&rendered, source)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        vec!["\"ss\"".to_string(), "9i64".to_string()],
+        "the lowered and raw-admitted arguments both point at themselves:\n{rendered}"
+    );
+}
+
+/// Resolve every `%owner…@surf:start..end` label in a rendered dump back to the
+/// source bytes the span points at, so tests assert on regions rather than on
+/// the presence of a span.
+fn owner_spans(rendered: &str, source: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for (index, _) in rendered.match_indices("@surf:") {
+        let head = &rendered[..index];
+        let owner_start = head.rfind('%').expect("a span follows an owner label");
+        let owner = head[owner_start..].to_string();
+        let rest = &rendered[index + "@surf:".len()..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let (start_text, end_text) = rest[..end]
+            .split_once("..")
+            .unwrap_or_else(|| panic!("span reads start..end, got {:?}", &rest[..end]));
+        let start: usize = start_text.parse().expect("span start is a byte offset");
+        let stop: usize = end_text.parse().expect("span end is a byte offset");
+        assert!(
+            stop <= source.len() && start <= stop,
+            "span {start}..{stop} lies inside the source (len {})",
+            source.len()
+        );
+        found.push((owner, source[start..stop].to_string()));
+    }
+    found
 }

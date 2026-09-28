@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::session::DiagnosticSink;
 use crate::types::Type;
 use crate::unify::{TypeError, TypeErrorKind};
+use crate::unsupported::Unsupported;
 
 /// Zero-sized witness that a `Type::Error` was minted HONESTLY: either a
 /// diagnostic reached the error vector (via [`report`]) or an existing
@@ -237,6 +238,15 @@ pub enum CheckErrorKind {
     UseAfterConsume,
     UnconsumedLinear,
     InvalidBorrow,
+    /// [04-LIN-9]: a random key, or a value that carries one, is used a
+    /// second time, borrowed, copied, captured by a closure, or read by an
+    /// operation that leaves it live. Keys are affine; the repair derives
+    /// fresh keys with `split_key` or `split_keys`, never `copy`.
+    ///
+    /// [04-LIN-10]: also a function's type parameter instantiated at a
+    /// key-carrying type, which would let a generic body use the key more than
+    /// once; the repair passes the key through a concrete parameter.
+    KeyReuse,
     CycleDetected,
     /// A tensor type uses a precision the Phase 0f backend cannot represent
     /// (currently f16, bf16, f64, f8e4m3). Host scalar precisions are unaffected.
@@ -301,6 +311,12 @@ pub enum CheckErrorKind {
     /// failure to a later stage (the runtime catching it) is not a
     /// disposition.
     MalformedForm,
+    /// A recognized language construct whose implementation is not complete
+    /// enough to admit. The typed payload retains the rejection's stage,
+    /// issue authority, location, and supported alternative.
+    UnsupportedFeature {
+        unsupported: Box<Unsupported>,
+    },
     Other,
 }
 
@@ -330,6 +346,7 @@ impl CheckErrorKind {
             CheckErrorKind::UseAfterConsume => "UseAfterConsume",
             CheckErrorKind::UnconsumedLinear => "UnconsumedLinear",
             CheckErrorKind::InvalidBorrow => "InvalidBorrow",
+            CheckErrorKind::KeyReuse => "KeyReuse",
             CheckErrorKind::CycleDetected => "CycleDetected",
             CheckErrorKind::UnsupportedTensorPrecision => "UnsupportedTensorPrecision",
             CheckErrorKind::DuplicateDefinition => "DuplicateDefinition",
@@ -339,6 +356,7 @@ impl CheckErrorKind {
             CheckErrorKind::BuiltinShadowing => "BuiltinShadowing",
             CheckErrorKind::UnknownForm => "UnknownForm",
             CheckErrorKind::MalformedForm => "MalformedForm",
+            CheckErrorKind::UnsupportedFeature { .. } => "unsupported_feature",
             CheckErrorKind::Other => "Other",
         }
     }
@@ -369,6 +387,7 @@ impl CheckErrorKind {
             CheckErrorKind::UseAfterConsume => 0.9,
             CheckErrorKind::UnconsumedLinear => 0.9,
             CheckErrorKind::InvalidBorrow => 0.8,
+            CheckErrorKind::KeyReuse => 0.9,
             CheckErrorKind::CycleDetected => 0.9,
             CheckErrorKind::UnsupportedTensorPrecision => 0.8,
             CheckErrorKind::DuplicateDefinition => 0.9,
@@ -381,6 +400,7 @@ impl CheckErrorKind {
             // class. The invariant that governs is that any pushed error
             // forces score < 1.0, which §C4.4's corpus locks independently.
             CheckErrorKind::UnknownForm | CheckErrorKind::MalformedForm => 0.5,
+            CheckErrorKind::UnsupportedFeature { .. } => 1.0,
             CheckErrorKind::Other => 0.5,
         }
     }
@@ -399,6 +419,35 @@ impl CheckError {
             got: None,
             span_offset: None,
             span_id: None,
+        }
+    }
+
+    /// Preserve one typed unsupported rejection through the checker error
+    /// channel. Human and machine fields derive from the same payload.
+    pub fn from_unsupported(unsupported: Unsupported) -> Self {
+        let message = unsupported.to_string();
+        let suggestions = unsupported
+            .supported_alternative
+            .as_deref()
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        let span_offset = unsupported.span.as_deref().and_then(|span| span.offset);
+        let span_id = unsupported
+            .span
+            .as_deref()
+            .and_then(|span| span.span_id.clone());
+        Self {
+            kind: CheckErrorKind::UnsupportedFeature {
+                unsupported: Box::new(unsupported),
+            },
+            message,
+            suggestions,
+            severity: 1.0,
+            expected: None,
+            got: None,
+            span_offset,
+            span_id,
         }
     }
 
@@ -436,17 +485,44 @@ impl CheckError {
     }
 }
 
+/// [04-LIN-10]: the repair every generic-instantiation key diagnostic carries.
+/// It names a concrete key parameter, never `copy`, because a key is never
+/// copied.
+pub(crate) const KEY_PARAMETER_SUGGESTION: &str = "Pass keys through a concrete `key` or \
+     `tensor[n, key]` parameter rather than a type parameter; derive fresh keys with \
+     `split_key(k)` or `split_keys(k, n)` where more than one is needed";
+
+/// [04-LIN-10]: the repair for a generic that is a value binding rather than a
+/// function, such as a generalized `let` binding: an ascription gives the
+/// binding a type with no type parameter, and a value written where it is
+/// used is never generalized.
+fn key_value_binding_suggestion(binding: &str) -> String {
+    format!(
+        "Ascribe `{binding}` a type with no type parameter where it is bound, such as \
+         `{binding}: List[key] = Nil`, or write its value where it is used; a binding without an \
+         ascription is generalized, and a generic never stands for a key"
+    )
+}
+
 impl From<TypeError> for CheckError {
     fn from(te: TypeError) -> Self {
+        let value_binding = match &te.kind {
+            TypeErrorKind::KeyInstantiation { value_binding } => value_binding.clone(),
+            _ => None,
+        };
         let kind = match te.kind {
             TypeErrorKind::TypeMismatch => CheckErrorKind::TypeMismatch,
-            TypeErrorKind::PrecisionMismatch => CheckErrorKind::PrecisionMismatch,
+            TypeErrorKind::PrecisionMismatch | TypeErrorKind::DtypeFamilyMismatch => {
+                CheckErrorKind::PrecisionMismatch
+            }
+            TypeErrorKind::KeyInstantiation { .. } => CheckErrorKind::KeyReuse,
             TypeErrorKind::DimensionMismatch => CheckErrorKind::DimensionMismatch,
             TypeErrorKind::ArityMismatch => CheckErrorKind::ArityMismatch,
             TypeErrorKind::OccursCheck => CheckErrorKind::OccursCheck,
             TypeErrorKind::NotAFunction => CheckErrorKind::NotAFunction,
         };
         let severity = match &kind {
+            CheckErrorKind::KeyReuse => 0.9,
             CheckErrorKind::PrecisionMismatch | CheckErrorKind::DimensionMismatch => 0.8,
             CheckErrorKind::ArityMismatch => 0.7,
             CheckErrorKind::UnboundVariable { .. } => 0.6,
@@ -454,6 +530,10 @@ impl From<TypeError> for CheckError {
         };
         let mut suggestions = match &kind {
             CheckErrorKind::PrecisionMismatch => vec!["Insert explicit cast".to_string()],
+            CheckErrorKind::KeyReuse => vec![match &value_binding {
+                Some(binding) => key_value_binding_suggestion(binding),
+                None => KEY_PARAMETER_SUGGESTION.to_string(),
+            }],
             _ => vec![],
         };
         // Enrich TypeMismatch with opaque/option hints.
@@ -536,7 +616,7 @@ fn opaque_accessor_hint(message: &str) -> Option<String> {
         return None;
     }
     let (left, right) = (sides[0].trim(), sides[1].trim());
-    let primitives = ["f32", "f64", "int32", "int64", "bool"];
+    let primitives = ["f32", "f64", "i32", "i64", "bool"];
     // Opaque type (PascalCase, no brackets) vs primitive
     if is_opaque_candidate(left) && primitives.contains(&right) {
         let accessor = format!("{}_value", to_snake_case(left));
@@ -554,7 +634,7 @@ fn opaque_accessor_hint(message: &str) -> Option<String> {
 }
 
 /// Heuristic: a type name that starts with uppercase, has no brackets/parens,
-/// and isn't a known non-opaque ADT like Option/List/Result is likely opaque.
+/// and isn't a known non-opaque ADT like Option/List is likely opaque.
 fn is_opaque_candidate(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -568,7 +648,7 @@ fn is_opaque_candidate(s: &str) -> bool {
         return false;
     }
     // Exclude well-known non-opaque ADTs
-    !matches!(s, "Option" | "List" | "Result" | "String")
+    !matches!(s, "Option" | "List" | "String")
 }
 
 fn to_snake_case(s: &str) -> String {

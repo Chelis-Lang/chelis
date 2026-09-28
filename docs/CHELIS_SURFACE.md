@@ -118,24 +118,25 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature | AD adjoint |
 |---|---|---|
-| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `insert(g, axis)` |
-| `count` | `(&tensor[..,bool], axes: int32...) -> tensor[..,int64]` | **non-differentiable** (`IntegerReductionOutput`) |
-| `max_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmax)` |
-| `min_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmin)` |
-| `prod_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | per-slice product/quotient |
-| `argmax_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,int64]` | **non-differentiable** (index output) |
-| `argmin_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,int64]` | **non-differentiable** (index output) |
+| `sum` | `(&tensor[..,p], axis: i32, accumulator: prec = default(p)) -> tensor[..,acc]` | `insert(g, axis)` |
+| `count` | `(&tensor[..,bool], axes: i32...) -> tensor[..,i64]` | **non-differentiable** (`IntegerReductionOutput`) |
+| `max_reduce` | `(&tensor[..,p], axis: i32) -> tensor[..,p]` | `g * one_hot(argmax)` |
+| `min_reduce` | `(&tensor[..,p], axis: i32) -> tensor[..,p]` | `g * one_hot(argmin)` |
+| `prod_reduce` | `(&tensor[..,p], axis: i32) -> tensor[..,p]` | per-slice product/quotient |
+| `argmax_reduce` | `(&tensor[..,p], axis: i32) -> tensor[..,i64]` | **non-differentiable** (index output) |
+| `argmin_reduce` | `(&tensor[..,p], axis: i32) -> tensor[..,i64]` | **non-differentiable** (index output) |
 
-- **Axis must be a compile-time constant** (literal, or `cast(N,int32)` of a literal).
+- **Axis must be a compile-time constant** (literal, or `cast(N,i32)` of a literal).
   A runtime-axis reduction is a check-time error (chelis#259). Negative axes index
   from the end (`-1` = last).
 - `count` requires one or more unique axes. Concrete-rank calls may use several
   positional axes in any order; rank-polymorphic calls use named axes only. It lowers
   to one dedicated `Count` node whose normalized original positions are stored in
-  descending order. Eval and C implement it; HIP/Metal reject pending chelis#1291.
+  descending order. Eval, C, HIP, and Metal implement it with dedicated kernels;
+  the HIP hardware gate is still pending under chelis#1291.
 - **`accumulator` (sum only)** controls running-sum precision and result dtype.
-  Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, int8/int16→int32,
-  int32→int32, int64→int64. Full table: `spec/04` §5.7.1.
+  Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, i8/i16→i32,
+  i32→i32, i64→i64. Full table: `spec/04` §5.7.1.
 - `sum` uses a stride-4 ILP cascade — bit-exact with torch CPU `row_sum` for n≤16,
   **not** bit-exact with `numpy.sum`. GPU reduction kernels may differ at ~1 ULP.
 
@@ -143,7 +144,7 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature |
 |---|---|
-| `reduce_window_max` / `_min` / `_sum` / `_mean` | `(&tensor[..,p], window_shape: List[int64], strides: List[int64]) -> tensor[..,p]` |
+| `reduce_window_max` / `_min` / `_sum` / `_mean` | `(&tensor[..,p], window_shape: List[i64], strides: List[i64]) -> tensor[..,p]` |
 
 Tier-1 in its own right (single `RiscOp::ReduceWindow{reducer,window_shape,strides}`;
 adjoint via `RiscOp::ReduceWindowGrad`). Output extent per windowed axis is
@@ -156,9 +157,9 @@ explicitly first. Windowed extents must be statically known on the build path.
 | Name | Signature | AD adjoint |
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | `reshape(g, old_shape)` |
-| `permute` | `(&tensor[..,p], axes: int32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
-| `expand` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D',p]` | `insert(sum(g, axis), axis, 1i64)` |
-| `insert` | `(&tensor[D,p], axis: int32, size: int64) -> tensor[D_plus,p]` | `sum(g, axis)` |
+| `permute` | `(&tensor[..,p], axes: i32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
+| `expand` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D',p]` | `insert(sum(g, axis), axis, 1i64)` |
+| `insert` | `(&tensor[D,p], axis: i32, size: i64) -> tensor[D_plus,p]` | `sum(g, axis)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
 | `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | [05-MOV-1]'s zero-filled inverse sampling map at the original shape |
@@ -166,7 +167,7 @@ explicitly first. Windowed extents must be statically known on the build path.
 `expand` sets an existing size-1 axis to `size` and leaves the rank alone; `insert`
 adds an axis and raises the rank by one. Neither copies data (stride-0 on the
 broadcast axis). The named-axis and four-argument anchored forms belong to `insert`;
-`expand` takes a positional int32 axis, which must be a compile-time constant.
+`expand` takes a positional i32 axis, which must be a compile-time constant.
 
 ### 1.6 Memory & effectful — `spec/05` §2.5–2.6
 
@@ -174,12 +175,44 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(&tensor[D,f32], rate: f32) -> tensor[D,f32]` | differentiable (mask fixed wrt seed); introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
-| `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
+| `dropout` | `(key, &tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; consumes its key and introduces no effect; fixed-control input AD replays its forward mask. C builds it with a runtime key (a `chelis_key` entry argument or a derived key) and a runtime rate (#2411). HIP refuses every draw (#2585); Metal has no compiled dropout. |
+| `uniform_like` | `(key, &tensor[D,p_float], lo: p_float, hi: p_float) -> tensor[D,p_float]` | active float `p`; consumes its key and introduces no effect; zero gradient to the template |
+| `key_from_seed` | `(i64) -> key` | [05-OP-69]; non-differentiable |
+| `split_key` | `(key) -> (key, key)` | [05-OP-70]; consumes its key ([04-LIN-9]) |
+| `split_keys` | `(key, i64) -> tensor[n, key]` | [05-OP-71]; consumes its key; `n` is the runtime count |
+| `fold_in` | `(key, i64) -> key` | [05-OP-72]; consumes its key |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
 target), `Gather`/`ScatterAdd`/`Scatter` (the sparse nodes below).
+
+Fixed-control source evaluation carries a non-serialized execution plan through
+ordinary, prepared, contextual, helper, and input-AD paths. Dropout validates its
+same-dtype rate before drawing; accepted empty/zero-rate and dead-value calls
+still consume an ordinal. Nested handlers restore their parent on errors, and
+backward keyed replay consumes no new ordinal. Runtime-rate/rate AD, higher-order
+AD, random vmap, resource scopes, dynamic control, and general UniformLike arithmetic remain
+outside this repair. Legacy bare-Dag Rust evaluators and baked-seed wire/cache
+projections are unchanged; cloning a plan's inspection DAG loses execution
+metadata and is not a supported conversion back to the repaired source path.
+
+The C callable context API preserves fixed-control plans for selected tensor
+entries using checked Reef library helpers, including encoded/decoded contexts
+(chelis#1876). Source-fixed rates, saved-mask input AD, nested seeds and subsequent
+draws use the same ownership-verified plan as direct source compilation. Entry
+selection still names only new-code tensor roots; runtime-rate and rootless
+entries retain their existing rejection.
+
+Reef imports respect each module's export list even within the same package
+(chelis#1878). Local private helpers remain available in their declaring module;
+public types still export their constructors. The active
+`context_imports_enforce_module_exports_before_checking_or_emission` regression
+checks qualified, selective and wildcard imports through live and decoded contexts,
+before both checking and C emission. A same-package import of a previously hidden
+helper must now name an explicitly exported binding; this is an acceptance tightening,
+not a new module grammar or a complete export-checker proof. `Std.Tokenizer` explicitly
+exports its existing `Tokenizer` type (and thus `BpeTokenizer`) used by its package
+tests. Consumers need a reviewed migration before adopting the compiler release.
 
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 
@@ -187,9 +220,9 @@ First-class `RiscOp`s with evaluator/verifier/AD/C+HIP support:
 
 | Surf builtin | Lowers to | Signature | AD adjoint |
 |---|---|---|---|
-| `gather` | `RiscOp::Gather{axis}` | `(&values, &indices, axis: int32) -> tensor` | `ScatterAdd` |
-| `scatter_replace` | `RiscOp::Scatter{axis}` | `(&base, &indices, &updates, axis: int32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
-| `scatter_elements` | `RiscOp::ScatterElements{axis}` | `(&data, &indices, &updates, axis: int32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
+| `gather` | `RiscOp::Gather{axis}` | `(&values, &indices, axis: i32) -> tensor` | `ScatterAdd` |
+| `scatter_replace` | `RiscOp::Scatter{axis}` | `(&base, &indices, &updates, axis: i32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
+| `scatter_elements` | `RiscOp::ScatterElements{axis}` | `(&data, &indices, &updates, axis: i32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
 | _(scatter-add internal)_ | `RiscOp::ScatterAdd{axis}` | — | `Gather` |
 
 `scatter_replace` is last-write-wins (hyperplane shape) with a deterministic row-major
@@ -218,8 +251,8 @@ and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
-| `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
-| `conv2d` | `im2col` → `matmul` → `reshape` (`spec/05` §4.5) | differentiable |
+| `layer_norm` | explicit epsilon plus mean/var normalize + affine (`spec/05` §4.4) | differentiable |
+| `conv` | N-dimensional padded window gather → one matrix contraction → reshape/permute; explicit per-axis i64 strides and `(low,high)` padding pairs (`spec/05` §4.5) | differentiable |
 
 The derived activations and arithmetic also have a host-lane C-emit path
 (`host_emit.rs`) used when they appear inside the host lane — i.e. they are
@@ -227,12 +260,13 @@ effectively `DAG+Host`, but their canonical lowering is the DAG.
 
 **Documented composite lowerings** that are spec-level recipes, not builtins in the
 closed vocabulary (provided via desugaring or `chelis-std`/shell libraries):
-`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `im2col`, `argmax`
-(`spec/05` §3.5, §4.3–4.7).
+`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `argmax`
+(`spec/05` §3.5, §4.3–4.7). Window matrix extraction in §4.5 is a
+convolution lowering step, not a separate callable.
 
-> **`normalize`** is accepted by the type checker but has **no specified lowering**
-> (`spec/05` §3.4 note). Do **not** treat it as a stable builtin until the spec and IR
-> lowering are aligned.
+`normalize` is an ordinary user-defined name, not a builtin. An undeclared
+call is an unbound-variable error under `spec/05` §3.4.
+`examples/explicit_normalization.ch` defines an explicit formula.
 
 ---
 
@@ -248,31 +282,32 @@ capability.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `cumsum` | `(&tensor, axis: int32) -> tensor` | cumulative sum along axis; precision-preserving per dtype |
-| `sort` | `(&tensor, axis: int32) -> (values, indices)` | returns sorted values + int32 index tensor |
+| `cumsum` | `(&tensor, axis: i32) -> tensor` | cumulative sum along axis; precision-preserving per dtype |
+| `sort` | `(&tensor, axis: i32) -> (values, indices)` | returns sorted values + i32 index tensor |
 | `einsum` | `(equation: string, &lhs, &rhs) -> tensor` | 2-operand only today; no ellipsis; static-extent errors rejected at check |
-| `diagonal` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | diagonal extraction |
-| `trace` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | matrix trace |
+| `diagonal` | `(&tensor, axis1: i32, axis2: i32) -> tensor` | diagonal extraction |
+| `trace` | `(&tensor, axis1: i32, axis2: i32) -> tensor` | matrix trace |
 | `where` | `(&cond, &a, &b) -> tensor` | Spec: element-wise selection without converting the boolean condition to a numeric dtype; the pre-v0.19 numeric-mask DAG form is tracked by #1284 (`spec/05` §3.5) |
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
-| `concat` | `(tensors: List[tensor], axis: int32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
-| `split` | `(&tensor, axis: int32, sizes: List[int]) -> list` | partition along axis |
-| `scatter` | `(base, indices, updates, axis: int32, mode: string) -> tensor` | host pentaop form (string mode); distinct from tensor-lane `scatter_replace` (§1.7) |
+| `concat` | `(tensors: List[tensor], axis: i32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
+| `split` | `(&tensor, axis: i32, sizes: List[int]) -> list` | partition along axis |
+| `scatter` | `(base, indices, updates, axis: i32, mode: string) -> tensor` | host pentaop form (string mode); distinct from tensor-lane `scatter_replace` (§1.7) |
 | `pad_sequences`, `pad_sequences_to` | variable-length padding | runtime-derived extents |
 
 ### 3.2 Host-runtime tensor builder — `spec/05` §3.6
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,int64)->T, n: int64) -> tensor[n, T]` | **host-only**, no AD; **`chelis build` (C/HIP) rejects it whole-program**; `grad`/`vmap` over a body reaching it are rejected (reachability-scoped). The sanctioned init-time per-index tensor constructor (`T` scalar; accumulator is f64-backed, exact to 2^53). |
+| `tensor_scan` | `(initial: T, fn: (T,i64)->T ! E, n: i64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-OP-38] admits scalar or fixed-shape tensor state. The runtime currently implements scalar state with exact tagged values; tensor state, compiled execution, and transforms remain implementation gaps recorded in `spec/design/dtype_semantics.md`. |
 
-**`tensor_scan` (tensor lane, init-only) ≠ `scan` (list combinator, §3.3).** Don't
-put `tensor_scan` in a loss, forward, or anything `grad`/`build` must reach.
+`tensor_scan` stacks successive states into a tensor; `scan` (§3.3) returns
+a List. The normative scan contract includes float-state AD and callback
+effects even where an execution lane has not implemented them.
 
 ### 3.3 Higher-order list / sequence combinators
 
 `map`, `filter`, `fold`, `scan`, `partition`, `flat_map`, `flatten`, `zip`,
-`enumerate`, `chunk`, `take`, `drop`, `range`, `append`, `index`, `len`, `concat`.
+`enumerate`, `chunk`, `take`, `skip`, `range`, `append`, `index`, `len`, `concat`.
 Higher-order ones (`map`/`filter`/`fold`/`scan`/`partition`/`flat_map`) take callback
 functions — the DAG has no function-pointer node, which is why they are host-lane.
 The host lane is eager (no lazy list fusion).
@@ -281,12 +316,13 @@ The host lane is eager (no lazy list fusion).
 
 - **Dict:** `dict_of`, `dict_get`, `dict_contains`, `dict_remove`, `dict_insert`,
   `dict_merge`, `dict_keys`, `dict_values`, `dict_entries`.
-- **String:** `string_len`, `string_concat`, `string_slice`, `string_contains`,
-  `string_starts_with`, `string_ends_with`, `string_trim`, `to_string`.
+- **String:** `char_code`, `char_from_code`, `string_len`, `string_concat`,
+  `string_slice`, `string_contains`, `string_starts_with`, `string_ends_with`,
+  `string_trim`, `to_string`.
 - **Scalar coercion:** `to_int`, `to_float`.
 - **Tensor↔host bridges & queries:** `rank`, `shape`, `numel`, `tensor_to_scalar`,
-  `scalar_to_tensor`, `to_tensor`, `to_list`. `shape(t, axis: int32)` returns the
-  selected runtime extent as `int64`; reductions/expands still need
+  `scalar_to_tensor`, `to_tensor`, `to_list`. `shape(t, axis: i32)` returns the
+  selected runtime extent as `i64`; reductions/expands still need
   compile-time-constant axes regardless.
 
 ### 3.5 I/O and process — introduces `IO`
@@ -296,8 +332,18 @@ The host lane is eager (no lazy list fusion).
 
 | Name | Signature | Notes |
 |---|---|---|
-| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by the entry name's byte sequence, per [05-HOST-4]. |
-| `process_run` | `(cmd: string, args: List[string]) -> (int64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
+| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
+| `process_run` | `(cmd: string, args: List[string]) -> (i64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
+
+String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
+preserves valid names exactly, without normalization; on conversion failure its
+diagnostic identifies the directory and first invalid entry in host-name order
+using reversible byte escapes. A byte-preserving path API is not provided by
+this contract.
+
+The executable [directory listing example](../examples/io/list_directory.ch)
+prints names in that order. Its fixture-based eval/C coverage is
+`crates/chelis-cli/tests/issue_1479_list_dir_lane_parity.rs`.
 
 ### 3.6 Diagnostics & test — `Test` effect on asserts
 
@@ -306,10 +352,14 @@ The host lane is eager (no lazy list fusion).
 
 ### 3.7 Integer / bitwise elementwise
 
-`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only, host-lane,
-no AD. Shifts use declared-width two's-complement semantics; counts at or
-above the width fully shift out the value, while negative counts trap
-([04-NUM-13]).
+`mod`, `bitand`, `bitor`, `bitxor`, `shl`, `shr` — integer-only. The bitwise
+family executes at declared width in Eval and compiled C, including as a
+computed integer extent for `reshape`. `grad` preserves bitwise forward
+coefficients that are independent of its selected data path and rejects a
+selected discrete bitwise path. `vmap` maps bitwise values elementwise. HIP
+and Metal bitwise kernels remain unavailable. Shifts use declared-width
+two's-complement semantics; counts at or above the width fully shift out the
+value, while negative counts trap ([04-NUM-13]).
 
 ### 3.8 Decimal rounding — **eval-only**
 
@@ -338,12 +388,12 @@ coerced or defaulted. The compiled-lane source module is `Std.Io.Csv` (§11).
 | `parse_csv` | `(s: string) -> List[Dict[string,string]]` | RFC-4180-style quoted fields, doubled quotes, embedded commas/newlines, LF or CRLF, leading UTF-8 BOM; rejects malformed, ragged, blank-interior, or duplicate-header input |
 | `to_csv` | `(rows: List[Dict[string,string]]) -> string` | requires every row to have the first row's unique string-keyed columns; quotes fields as needed and emits LF rows with a trailing newline |
 | `csv_f64s` | `(rows, col: string) -> List[f64]` | strict finite JSON-number grammar after ASCII space/tab trim; overflow and non-numbers fail |
-| `csv_ints` | `(rows, col: string) -> List[int64]` | exact integer grammar and int64 range; float syntax fails naming `csv_f64s` |
+| `csv_ints` | `(rows, col: string) -> List[i64]` | exact integer grammar and i64 range; float syntax fails naming `csv_f64s` |
 | `csv_strs` | `(rows, col: string) -> List[string]` | whole column verbatim |
-| `csv_nrows` | `(rows) -> int64` | exact data-row count |
+| `csv_nrows` | `(rows) -> i64` | exact data-row count |
 | `csv_cols` | `(rows) -> List[string]` | first row's columns in insertion order |
 | `csv_f64` | `(rows, row: int, col: string) -> f64` | one cell; row is a nonnegative 0-based data-row index |
-| `csv_int` | `(rows, row: int, col: string) -> int64` | one exact integer cell |
+| `csv_int` | `(rows, row: int, col: string) -> i64` | one exact integer cell |
 | `csv_str` | `(rows, row: int, col: string) -> string` | one cell verbatim |
 
 Missing columns name the requested column and list the available columns.
@@ -373,15 +423,16 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
+              key_from_seed split_key split_keys fold_in
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax normalize mean matmul layer_norm conv2d
+              softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
-              take drop range append index len
+              take skip range append index len
               dict_of dict_get dict_contains dict_remove dict_insert dict_merge
               dict_keys dict_values dict_entries
-              string_len string_concat string_slice string_contains
+              char_code char_from_code string_len string_concat string_slice string_contains
               string_starts_with string_ends_with string_trim to_string to_int
               to_float rank shape numel tensor_to_scalar scalar_to_tensor to_tensor
               to_list
@@ -393,10 +444,8 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               print fail debug test_assert test_assert_eq test_assert_close_tensor
               test_assert_eq_tensor
               mod bitand bitor bitxor shl shr
+              drop
 ```
-
-`normalize` is listed because it is in `BUILTIN_NAMES`, but it has **no specified
-lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 `List`/`Cons`/`Nil`, and `MappedFile`.
@@ -451,21 +500,24 @@ native compiler** — `chelis build` emits source + flags; the user runs `gcc`/`
 | `BlasMatmul` | ✓ | ✓ (rocBLAS; bf16/f16 via GemmEx) | ✓ (tiled MSL) |
 | `ReduceWindow` / `ReduceWindowGrad` | ✓ | ✗ rejected | ✗ rejected |
 | `Pad`, `Shrink` | ✓ | ✗ rejected | ✗ rejected |
-| `dropout` | ✗ (eval-only) | ✗ | ✗ |
-| `Gather`/`ScatterAdd`/`Scatter` | ✓ (all precisions) | ✓ **f32 payloads only**, int32/int64 indices, indices must come from `load` (not computed) | ✗ deferred |
+| `dropout` | ✓ (runtime key and rate) | ✗ refuses every draw (#2585) | ✗ |
+| `Gather`/`ScatterAdd`/`Scatter` | ✓ (all precisions) | ✓ **f32 payloads only**, i32/i64 indices, indices must come from `load` (not computed) | ✗ deferred |
 | `f64` | ✓ | ✓ | ✗ **hard-rejected** (Apple Silicon lacks FP64 ALUs) |
 
 Rejections are clean `unsupported_feature` diagnostics at compile time, not silent
 fallbacks (`reject_unsupported_hip_ops` / `reject_unsupported_metal_ops`). Reduce-window
 build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 first).
 
+A C dropout entry may take its key and its rate as runtime arguments
+([05-OP-37], #2411).
+
 ---
 
 ## 7. Type system — `spec/04-type-system.md`
 
-- **Precisions:** floats `f32`, `f64`, `bf16`, `f16`; ints `int8`, `int16`, `int32`,
-  `int64`; `bool`; `string`. (`f8e4m3` reserved, not admitted. No unsigned ints.)
-- **Literal defaults:** integer literals → `int32`, float literals → `f32`.
+- **Precisions:** floats `f32`, `f64`, `bf16`, `f16`; ints `i8`, `i16`, `i32`,
+  `i64`; `bool`; `string`. (`f8e4m3` reserved, not admitted. No unsigned ints.)
+- **Literal defaults:** integer literals → `i32`, float literals → `f32`.
 - **No implicit precision promotion** — widening requires an explicit `cast`.
 - **Cast ladder:** `cast(x, T)` is CHECKED ([04-NUM-14]) — a fractional or
   non-finite float into an integer target traps `Domain`. `cast_trunc(x, T)`
@@ -503,14 +555,26 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 
 | Effect | Introduced by | Handled by |
 |---|---|---|
-| `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
 | `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
-| `Resource(String)` | device/resource pinning | `with device("gpu:0"|"cpu") { ... }` |
+| `Resource(String)` | device/resource pinning | exact `with device("cpu") { ... }` for host C; every other selector is rejected before C artifacts |
 
 Effects are inferred and checked after types, before lowering. The style gate and
-`chelis check` report effect rows per function.
+`chelis check` report effect rows per function. Randomness is not an effect: a draw
+takes a `key` (§1.6), and `with seed` and `Random` are a typed `RetiredRandomness`
+parse error.
+
+The C/HIP compiler APIs check Resource regions against their selected target
+before emitting an artifact or invoking an emission observer. Entry-scoped C
+compilation checks the selected source dependency closure, with lexical locals
+excluded from helper resolution; whole-program emission checks all definitions.
+The C target positively recognizes only the exact `cpu` host selector; it
+rejects labeled CPU, CUDA, Metal, GPU, unknown, empty, and malformed selectors
+with `BuildTargetMismatch` rather than erasing the region into host execution.
+Contextual compilation retains its existing callable-lane limitations:
+region-bearing imported helpers can decline before a tensor entry is selected.
+That decline is not evidence of successful Resource validation or support.
 
 ---
 
@@ -534,7 +598,7 @@ the transform boundary (reachability-scoped).
 
 | Command | Purpose | Style gate? |
 |---|---|---|
-| `build` | Compile to C/HIP/Metal (`--target {c\|hip\|metal}`, default `c`) | yes |
+| `build` | Compile to C/HIP/Metal (`--target {c\|hip\|metal}`, default `c`), staging the runtime `chelis` carries | yes |
 | `check` | Type/effect/linearity front-end (`--show-inferred`) | yes |
 | `validate` | Syntax validation (`--surf`/`--deep`/`--desugar`) | file subject |
 | `eval` | Evaluate expr or `--file` (`--json`) | yes (file) |
@@ -548,6 +612,7 @@ the transform boundary (reachability-scoped).
 | `tide` | REPL / HTTP API / MCP / LSP server (`serve`, `mcp`, `lsp`) | no |
 | `cove` | Terminal UI (`--file`) | no |
 | `reef` | Package manager (`init`, `build`, `publish`, `install`) | no |
+| `runtime` | `export <dir>`: write the carried runtime archive, public headers and staging receipt | no |
 
 The style gate (`fmt --check` + blocking `lint`) runs inside `build`, `check`,
 `validate`, and `eval --file`. Bypass with `--allow-style-violations` (never in CI) or
@@ -565,20 +630,20 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 |---|---|
 | `Std.Tensor.Construct` | `linspace`, `arange` (evaluator; their `Float`/`Int` dtype families are declared bounds and are enforced, while compiled-host generic casts remain [chelis#1418](https://github.com/Chelis-Lang/chelis/issues/1418)); `stack`, `squeeze`, and `unsqueeze` are exported but concrete-call typing is not fully implemented ([chelis#1416](https://github.com/Chelis-Lang/chelis/issues/1416)) |
 | `Std.Tensor.Mask` | `where_indices` |
-| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including computed/nested conditionals inside `grad`) |
-| `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `int64` indices) |
+| `Std.Init.{Random,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (each takes its key first and consumes it; Box-Muller `normal_like` splits its key for its two uniforms) |
+| `Std.Sort` | `sort` (rank-polymorphic numeric tensor; returns sorted values and `i64` indices) |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
-| `Std.Index` | `list_index`, `take_list`, `drop_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(int64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, independent of insertion history. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Index` | `list_index`, `take_list`, `skip_list` (scalar/tensor/nested/multi-target List adjoints preserve runtime length/positions through composed calls in eval and generated C) |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(i64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, escapes every RFC 8259 control character, decodes full `\uXXXX` escapes including valid surrogate pairs, and rejects malformed or unpaired sequences. Caveat: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |
 
 `Std.Tensor.Reduce` was removed in chelis#333: its `min`/`prod`/`argmax`/`argmin`
-were bodyless sigs taking a *runtime* `int32` axis, but the `*_reduce` builtins they
+were bodyless sigs taking a *runtime* `i32` axis, but the `*_reduce` builtins they
 would forward to require a *compile-time-constant* axis, so they were unimplementable
 as declared and never had a runtime function. Call the builtins directly with a const
-axis instead: `min_reduce(x, cast(1, int32))`, `prod_reduce`, `argmax_reduce`,
+axis instead: `min_reduce(x, cast(1, i32))`, `prod_reduce`, `argmax_reduce`,
 `argmin_reduce`.
 
 ---
@@ -618,3 +683,29 @@ is a tested-not-proven trusted base.
 | [`spec/design/implicit_linearity.md`](../spec/design/implicit_linearity.md) | why `copy()`/`drop()` exist |
 | [`spec/design/chelis_canonical_reference.md`](../spec/design/chelis_canonical_reference.md) | core vs std vs shell scope taxonomy |
 | [`spec/design/shell_repo_contract.md`](../spec/design/shell_repo_contract.md) | what a downstream shell's `CHELIS_SURFACE.md` view must carry |
+
+Deep metadata follows `spec/03-deep-syntax.md` [03-META-1/2]. Malformed
+registered values, duplicate annotation keys (including extensions and `span_*`),
+and forbidden placements
+are rejected at ingress with the metadata key and source location. Producer
+extensions remain available outside the closed `surf_*` namespace. Under
+[03-META-3], their contents are opaque data: nested annotation-like keys,
+variable spellings and macro forms have no compiler meaning and survive
+semantic rewrites unchanged. Surf conversion rejects extensions it cannot
+preserve, naming the key and owning location. `grad`'s
+`wrt` metadata uses `(var {} name)` or a nonempty tuple of those references;
+bare names are rejected. `dtype_bounds` binder names and historical `source`
+arguments are data, so annotation-key spelling does not reclassify them.
+
+Rust AST carriers use `Metadata`: compiler annotations are dedicated
+`MetadataValue` variants, and `ExtensionMap` accepts producer keys paired
+with sealed `ExtensionData` values. Use `ExtensionData::parse` or explicit
+raw-syntax conversion; program expressions cannot be inserted directly.
+Serialized extensions have an explicit data tag; regenerate older checkpoints.
+Insertion rejects duplicates; replacement is explicit. Validated payloads
+expose immutable expression leaves and fallible role-aware rebuilding.
+Raw key/value pairs are confined to parsing and serialization boundaries.
+
+For Rust callers, `chelis_surf::resugar::normalize_deep_for_surface_roundtrip`
+returns `Result<Vec<Expr>, ResugarError>` and rejects malformed metadata before
+normalizing it. Handle the error rather than assuming an unchecked AST is valid.

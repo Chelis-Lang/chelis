@@ -4,8 +4,13 @@ use chelis_ir::tier2::{lower_gelu, lower_sigmoid, lower_silu, lower_tanh};
 use chelis_types::types::Prim;
 use chelis_types::{FloatUnOp, ScalarValue, float_unop, scalar_from_f64, tensor_from_scalars};
 
-type ActivationLowerer =
-    fn(&mut Dag, chelis_ir::dag::NodeId, &TensorType, Option<&str>) -> chelis_ir::dag::NodeId;
+type ActivationLowerer = fn(
+    chelis_ir::dag::Owner,
+    &mut Dag,
+    chelis_ir::dag::NodeId,
+    &TensorType,
+    Option<&str>,
+) -> chelis_ir::dag::NodeId;
 
 fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> ScalarValue {
     let ty = TensorType {
@@ -13,7 +18,9 @@ fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> S
         precision: prim,
     };
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let x = dag.add_node(
+        decl,
         RiscOp::Load {
             name: "x".to_string().into(),
         },
@@ -21,7 +28,7 @@ fn evaluate_tier2(prim: Prim, input: ScalarValue, lower: ActivationLowerer) -> S
         ty.clone(),
         None,
     );
-    let root = lower(&mut dag, x, &ty, None);
+    let root = lower(decl.into(), &mut dag, x, &ty, None);
     let input = TensorValue::from_storage(vec![], tensor_from_scalars(prim, &[input]));
     let values =
         eval_tensor_roots_with_strict(&dag, &[root], |name| (name == "x").then(|| input.clone()))

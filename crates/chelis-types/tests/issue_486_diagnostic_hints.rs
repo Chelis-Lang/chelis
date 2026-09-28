@@ -59,11 +59,11 @@ fn option_t_vs_t_suggests_match_unwrap() {
 #[test]
 fn t_vs_option_t_suggests_match_unwrap() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions("type mismatch: int32 vs Option[int32]", &mut suggestions);
+    enrich_type_mismatch_suggestions("type mismatch: i32 vs Option[i32]", &mut suggestions);
     assert!(
         suggestions
             .iter()
-            .any(|s| s.contains("Option[int32]") && s.contains("match ... with")),
+            .any(|s| s.contains("Option[i32]") && s.contains("match ... with")),
         "expected Option unwrap hint; got: {suggestions:?}"
     );
 }
@@ -71,8 +71,8 @@ fn t_vs_option_t_suggests_match_unwrap() {
 #[test]
 fn option_mismatch_with_different_inner_type_no_hint() {
     let mut suggestions = Vec::new();
-    enrich_type_mismatch_suggestions("type mismatch: Option[f32] vs int32", &mut suggestions);
-    // inner type f32 != int32, so no option hint
+    enrich_type_mismatch_suggestions("type mismatch: Option[f32] vs i32", &mut suggestions);
+    // inner type f32 != i32, so no option hint
     assert!(
         !suggestions.iter().any(|s| s.contains("match ... with")),
         "should not suggest unwrap when inner types differ; got: {suggestions:?}"

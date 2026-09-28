@@ -86,14 +86,17 @@ clipped = clamp(running, floor15, ceil30)
 - `to_tensor(list)`, `to_list(tensor)` bridge lists and tensors. `pad_sequences(list, fill)`
   builds a rectangular tensor from ragged rows.
 - `cast(x, precision)` changes precision.
-- `shape(t, axis)` returns a runtime `int64` scalar for an axis length; the
-  axis argument itself is `int32`.
+- `shape(t, axis)` returns a runtime `i64` scalar for an axis length; the
+  axis argument itself is `i32`.
 - `copy(x)` produces a fresh owned value; `realize(x)` materializes an intermediate.
 
 ### Randomness
 
-`dropout(x, rate)` and `uniform_like(x, low, high)` carry the `Random` effect, discharged by
-`with seed(...)`. The `Std.Init` modules build their initializers on these.
+`dropout(k, x, rate)` and `uniform_like(k, x, low, high)` draw from the key `k` they are
+given and consume it; they carry no effect. `key_from_seed(seed)` makes a root key from an
+`i64`, `split_key(k)` returns two keys, `split_keys(k, n)` returns a `tensor[n, key]`, and
+`fold_in(k, n)` derives the key of an integer. The `Std.Init` modules build their
+initializers on these.
 
 ## Standard library modules
 
@@ -101,7 +104,7 @@ clipped = clamp(running, floor15, ceil30)
 
 `Std.Tensor.Construct` builds and reshapes tensors:
 
-- `linspace(start, stop, count)` uses float endpoints and an `int64` count;
+- `linspace(start, stop, count)` uses float endpoints and an `i64` count;
   `arange(start, stop)` uses signed-integer endpoints.
 - `stack(xs, axis)` concatenates tensors along a new axis.
 - `squeeze(x, axis)` removes a size-1 dimension; `unsqueeze(x, axis)` inserts
@@ -116,28 +119,38 @@ do not yet actualize the helpers' generic cast targets
 
 `Std.Tensor.Mask`:
 
-- `where_indices(mask)` returns the `int64` indices where a `bool` mask is true.
+- `where_indices(mask)` returns the `i64` indices where a `bool` mask is true.
 
 ### Initializers
 
 `Std.Init.Random`:
 
-- `normal_like(template, mean, std)` draws a normal tensor shaped like the template.
+- `normal_like(k, template, mean, std)` draws a normal tensor shaped like the template. It
+  splits `k` and draws its two Box-Muller uniforms from the halves.
 
 `Std.Init.Kaiming`:
 
-- `kaiming_uniform(template, fan_in)`, `kaiming_normal(template, fan_in)`.
+- `kaiming_uniform(k, template, fan_in)`, `kaiming_normal(k, template, fan_in)`.
 
 `Std.Init.XavierExt`:
 
-- `xavier_uniform(template, fan_in, fan_out)`, `xavier_normal(template, fan_in, fan_out)`.
-- `trunc_normal(template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
+- `xavier_uniform(k, template, fan_in, fan_out)`, `xavier_normal(k, template, fan_in, fan_out)`.
+- `trunc_normal(k, template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
 
-All initializers carry the `Random` effect. A `with seed(...)` handler advances
-only for draws that actually execute: an untaken conditional branch inside a
-forward call or `grad(...)` consumes no stream positions. This includes
-computed and nested predicates, branches with different numbers of draws, and
-repeated or nested seed handlers.
+Every initializer takes its key first, consumes it, and carries no effect. The same key
+gives the same tensor, so `kaiming_uniform(key_from_seed(7i64), w, 4.0)` is reproducible;
+initialising two tensors takes two keys, for example the halves of one `split_key`. A draw
+in a conditional branch that does not run is not evaluated.
+
+`normal_like`, `kaiming_uniform`, `xavier_uniform` and `trunc_normal` are each written in
+two layers inside their module: a draw from the key, and a pure layer that turns the draws
+into the result. `normal_like(k, template, mean, std)` is
+`normal_like_given(units, template, mean, std)` applied to `normal_like_sample(k, template)`;
+the two uniform initializers apply `kaiming_uniform_given` and `xavier_uniform_given` to a
+unit `uniform_like` draw, and `trunc_normal` applies `trunc_normal_given` to a
+`normal_like` draw. `kaiming_normal` and `xavier_normal` call `normal_like` directly. The
+layers are private to their modules; the exported function taking the key first is the
+public surface.
 
 ### Sorting and scanning
 
@@ -145,7 +158,7 @@ repeated or nested seed handlers.
 
 - `sort(values, axis)` accepts a numeric tensor of any rank and returns
   `(sorted_values, indices)`, with both tensors preserving the input shape and
-  the indices using `int64`.
+  the indices using `i64`.
 
 `Std.Scan`:
 
@@ -153,10 +166,10 @@ repeated or nested seed handlers.
 
 `Std.Index`:
 
-- `list_index(values, idx)`, `take_list(values, count)`, `drop_list(values, count)`.
+- `list_index(values, idx)`, `take_list(values, count)`, `skip_list(values, count)`.
   Their adjoints preserve the input List's runtime length and positions: index
-  routes the cotangent to the selected element, while take/drop fill excluded
-  positions with zeros. Negative indices/counts fail; take/drop counts beyond
+  routes the cotangent to the selected element, while take/skip fill excluded
+  positions with zeros. Negative indices/counts fail; take/skip counts beyond
   the length retain their ordinary truncation behavior. Scalar, tensor, empty,
   nested, and multiple-List targets use the same rule, including runtime
   selectors/counts reused elsewhere in the differentiated body and selection
@@ -203,7 +216,7 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
 `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
 are exported, so documents can be built directly). Integer-form tokens outside
-int64 retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
+the `i64` range retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
 image is non-finite are rejected:
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
@@ -212,16 +225,15 @@ image is non-finite are rejected:
 - `to_json(value)` renders a `Json` value compactly (object keys recursively
   sorted by increasing Unicode scalar-value sequence before escaping, f64 via
   `to_string`'s shortest-round-trip form — a claim made for **f64
-  specifically**, the dtype `JsonFloat` carries — escapes for `\" \\ \n \t
-  \r`). Equal object mappings therefore produce the same bytes regardless of
-  insertion history. Non-finite numbers have no JSON representation: `to_json`
+  specifically**, the dtype `JsonFloat` carries — and RFC 8259 escaping for
+  quotes, backslashes, and every control character). Equal object mappings
+  therefore produce the same bytes regardless of insertion history.
+  Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
-  its `Option` twin. Control characters outside the escaped set pass through
-  unescaped — RFC 8259-invalid output for such input — because chelis has no
-  `char_code` primitive to emit `\u00XX`; the parser's `decode_escape` likewise
-  rejects `\uXXXX` input. Both halves of that asymmetry need a character-level
-  primitive and are tracked as chelis#953.
+  its `Option` twin. The parser decodes all four-hex-digit `\uXXXX` escapes,
+  combines valid UTF-16 surrogate pairs into one Unicode scalar, and rejects
+  malformed or unpaired surrogate sequences.
 
 These IO modules carry the `IO` effect and run in **both lanes**: under
 `chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
@@ -236,7 +248,7 @@ the shared CSV names apart in both lanes.
 
 - `load_tokenizer(path)` and `try_load_tokenizer(path)`.
 - `encode(tokenizer, text)`, `decode(tokenizer, ids)`.
-- `batch_encode(tokenizer, texts, max_length, pad_value)` returns a padded `int64` tensor.
+- `batch_encode(tokenizer, texts, max_length, pad_value)` returns a padded `i64` tensor.
 
 ### Testing
 

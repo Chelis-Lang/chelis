@@ -1,20 +1,20 @@
 //! Issue #369: residue of the #318 shape-derived expand-of-scalar fix.
 //!
 //! PR #324 (#318) recovered the broadcast extent for the INLINE-DIRECT
-//! form `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), int64))` — the
+//! form `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), i64))` — the
 //! `shape(...)` application is DIRECTLY in the `expand` size argument. The
 //! canonical `tensor_full_like` helper instead writes the shape read into
 //! a `let` binding first:
 //!
 //! ```chelis
 //! def tensor_full_like[n](x: &tensor[n, f32], value: f32) -> tensor[n, f32] = {
-//!   len = shape(x, cast(0, int32))
+//!   len = shape(x, cast(0, i32))
 //!   scalar_t = scalar_to_tensor(value)
-//!   expand(scalar_t, cast(0, int32), cast(len, int64))
+//!   expand(scalar_t, cast(0, i32), cast(len, i64))
 //! }
 //! ```
 //!
-//! so the `expand` size argument is `cast(var len, int32)`, NOT a direct
+//! so the `expand` size argument is `cast(var len, i32)`, NOT a direct
 //! `shape(...)` app. The pre-fix extent recognizer cannot see through the
 //! `let`, so the size silently defaults to `Lit(1)`; the forward `mul(x,
 //! twos)` then mixes `tensor[3]` with `tensor[1]`, the type checker
@@ -53,13 +53,13 @@ use tempfile::tempdir;
 /// idiom. `df(to_tensor([1,2,3])) = [2, 2, 2]`.
 const REPRO_CALLEE: &str = "module Repro.GradFullLikeCallee\n\
 def tensor_full_like[n](x: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
-  len = shape(x, cast(0, int32))\n\
+  len = shape(x, cast(0, i32))\n\
   scalar_t = scalar_to_tensor(value)\n\
-  insert(scalar_t, cast(0, int32), cast(len, int64))\n\
+  insert(scalar_t, cast(0, i32), cast(len, i64))\n\
 }\n\
 def loss_full_like(x: tensor[3, f32]) -> f32 = {\n\
   twos = tensor_full_like(&x, cast(2.0, f32))\n\
-  sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
+  sum(mul(x, twos), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_full_like)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
@@ -69,9 +69,9 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// trigger is the `let` binding, not the callee boundary.
 const REPRO_INLINE_LET: &str = "module Repro.GradInlineLet\n\
 def loss_inline(x: tensor[3, f32]) -> f32 = {\n\
-  len = shape(&x, cast(0, int32))\n\
-  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(len, int64))\n\
-  sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
+  len = shape(&x, cast(0, i32))\n\
+  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, i32), cast(len, i64))\n\
+  sum(mul(x, twos), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_inline)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
@@ -81,8 +81,8 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// discriminator.
 const REPRO_INLINE_DIRECT: &str = "module Repro.GradInlineDirect\n\
 def loss_direct(x: tensor[3, f32]) -> f32 = {\n\
-  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
-  sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
+  twos = insert(scalar_to_tensor(cast(2.0, f32)), cast(0, i32), cast(shape(&x, cast(0, i32)), i64))\n\
+  sum(mul(x, twos), cast(0, i32)) |> tensor_to_scalar\n\
 }\n\
 def df(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss_direct)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
@@ -109,24 +109,24 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]))\n";
 /// would have produced a tensor[3]-shaped failure, not a wrong gradient).
 const REPRO_CROSS_DEF_SHADOW: &str = "module Repro.GradCrossDefShadow\n\
 def tensor_full_like[n](y: &tensor[n, f32], value: f32) -> tensor[n, f32] = {\n\
-  len = shape(y, cast(0, int32))\n\
+  len = shape(y, cast(0, i32))\n\
   scalar_t = scalar_to_tensor(value)\n\
-  insert(scalar_t, cast(0, int32), cast(len, int64))\n\
+  insert(scalar_t, cast(0, i32), cast(len, i64))\n\
 }\n\
 def loss_cross(x: tensor[5, f32]) -> f32 = {\n\
   guide = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
-  len = shape(&guide, cast(0, int32))\n\
-  zeros3 = insert(scalar_to_tensor(cast(0.0, f32)), cast(0, int32), cast(len, int64))\n\
-  caller_contrib = sum(zeros3, cast(0, int32)) |> tensor_to_scalar\n\
+  len = shape(&guide, cast(0, i32))\n\
+  zeros3 = insert(scalar_to_tensor(cast(0.0, f32)), cast(0, i32), cast(len, i64))\n\
+  caller_contrib = sum(zeros3, cast(0, i32)) |> tensor_to_scalar\n\
   twos = tensor_full_like(&x, cast(2.0, f32))\n\
-  main = sum(mul(x, twos), cast(0, int32)) |> tensor_to_scalar\n\
+  main = sum(mul(x, twos), cast(0, i32)) |> tensor_to_scalar\n\
   add(main, caller_contrib)\n\
 }\n\
 def df(x: tensor[5, f32]) -> tensor[5, f32] = grad(loss_cross)(x)\n\
 out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32)]))\n";
 
 /// NEGATIVE PARITY: a `tensor[k]` output whose `expand` size is a bare
-/// `int32` SCALAR PARAMETER (no `shape(...)` read, no in-scope tensor dim)
+/// `i32` SCALAR PARAMETER (no `shape(...)` read, no in-scope tensor dim)
 /// must STILL be rejected loudly — the fix recovers extents only from
 /// genuine `shape(...)` reads (direct or `let`-bound), never from an
 /// arbitrary runtime scalar. Guards that the size-1-default removal did
@@ -134,16 +134,16 @@ out = df(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f3
 ///
 /// SCOPE: this verifies the rejection only for the BARE `expand(s, 0, k)`
 /// spelling (the size slot is the scalar parameter directly). The
-/// cast-wrapped form `expand(s, 0, cast(k, int64))` is a SEPARATE,
+/// cast-wrapped form `expand(s, 0, cast(k, i64))` is a SEPARATE,
 /// pre-existing gap that this fixture does NOT cover; it is tracked as
 /// chelis#521. Do not read this test as a broad §4.7.2 sourceless-size
 /// guarantee.
 const REPRO_BARE_SCALAR_REJECTS: &str = "module Repro.BareScalarRejects\n\
-def bad(x: tensor[3, f32], k: int32) -> tensor[k, f32] = {\n\
+def bad[k](x: tensor[3, f32], k: i32) -> tensor[k, f32] = {\n\
   scalar_t = scalar_to_tensor(cast(2.0, f32))\n\
-  insert(scalar_t, cast(0, int32), k)\n\
+  insert(scalar_t, cast(0, i32), k)\n\
 }\n\
-out = bad(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]), cast(4, int32))\n";
+out = bad(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)]), cast(4, i32))\n";
 
 fn run_check(path: &Path) -> Value {
     let output = Command::cargo_bin("chelis")
@@ -276,14 +276,14 @@ fn issue_369_eval_cross_def_callee_shadow_inner_len_wins() {
     );
 }
 
-/// NEGATIVE PARITY: a genuinely sourceless `expand` size (a bare `int32`
+/// NEGATIVE PARITY: a genuinely sourceless `expand` size (a bare `i32`
 /// scalar parameter) must STILL be rejected loudly. The fix must not have
 /// turned the size-1 default into a silent extent guess for arbitrary
 /// runtime scalars — only `shape(...)` reads (direct or `let`-bound)
 /// recover an extent.
 ///
 /// SCOPE: verified ONLY for the bare `expand(s, 0, k)` spelling. The
-/// cast-wrapped form `expand(s, 0, cast(k, int64))` is a separate
+/// cast-wrapped form `expand(s, 0, cast(k, i64))` is a separate
 /// pre-existing gap tracked as chelis#521 and is NOT asserted here; this
 /// is not a broad §4.7.2 sourceless-size guarantee.
 #[test]

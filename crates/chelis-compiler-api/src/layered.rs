@@ -114,7 +114,11 @@ pub fn check_layered(
     // failure here is a real front-end error, not a clean miss — but the
     // monolithic path would surface it too, so hand back `Ok(None)` and
     // let the monolithic path produce the byte-identical diagnostic.
-    let prepared = match crate::pipeline::prepare_surf_decls(non_stdlib_decls, None) {
+    let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+        non_stdlib_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared,
         Err(_) => return Ok(None),
     };
@@ -267,7 +271,11 @@ pub fn check_layered_for_build(
     // check it against the chelis-std sub-context — the pre-chelis#1168
     // two-layer path, byte-for-byte.
     if dependency_decls.is_empty() {
-        let prepared = match crate::pipeline::prepare_surf_decls(entry_decls, None) {
+        let prepared = match crate::pipeline::prepare_surf_decls_with_context(
+            entry_decls,
+            stdlib_ctx.checked_library().program().exprs(),
+            None,
+        ) {
             Ok(prepared) => prepared,
             Err(_) => return Ok(None),
         };
@@ -307,7 +315,11 @@ pub fn check_layered_for_build(
     let mut combined_decls = Vec::with_capacity(dependency_decls.len() + entry_decls.len());
     combined_decls.extend_from_slice(dependency_decls);
     combined_decls.extend_from_slice(entry_decls);
-    let combined_deep = match crate::pipeline::prepare_surf_decls(&combined_decls, None) {
+    let combined_deep = match crate::pipeline::prepare_surf_decls_with_context(
+        &combined_decls,
+        stdlib_ctx.checked_library().program().exprs(),
+        None,
+    ) {
         Ok(prepared) => prepared.into_expanded_deep(),
         Err(_) => return Ok(None),
     };
@@ -392,11 +404,10 @@ mod artifact_outcome_tests {
 
     #[test]
     fn layered_outcomes_are_exclusive_for_each_semantic_stage() {
-        let clean = check("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
+        let clean = check("def identity[n](x: tensor[n, f32]) -> tensor[n, f32] = x\n");
         assert!(matches!(clean, LayeredCheck::Clean { .. }));
 
-        let effect =
-            check("def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n");
+        let effect = check("def noisy() -> unit ! { } = test_assert(true, \"leak\")\n");
         assert!(matches!(
             effect,
             LayeredCheck::EffectRejected { effect_errors, .. } if !effect_errors.is_empty()
@@ -532,8 +543,8 @@ mod build_layering_tests {
         // `dep_double` stands in for a dependency-library def; `main_value`
         // (the entry) references it. Flat top-level defs so no cross-module
         // linking is required for the raw (unlinked) test decls.
-        let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
+        let deps = parse("def dep_double(x: i32) -> i32 = add(x, x)\n");
+        let entry = parse("def main_value() ->i32 = dep_double(cast(21, i32))\n");
 
         let layered = three_layer_program(&deps, &entry);
         let monolithic = monolithic_program(&deps, &entry);
@@ -550,9 +561,9 @@ mod build_layering_tests {
     /// cache hit never masks an entry edit.
     #[test]
     fn entry_change_still_matches_monolithic() {
-        let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry_a = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
-        let entry_b = parse("def main_value() ->int32 = dep_double(cast(100, int32))\n");
+        let deps = parse("def dep_double(x: i32) -> i32 = add(x, x)\n");
+        let entry_a = parse("def main_value() ->i32 = dep_double(cast(21, i32))\n");
+        let entry_b = parse("def main_value() ->i32 = dep_double(cast(100, i32))\n");
 
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry_a),
@@ -578,7 +589,7 @@ mod build_layering_tests {
     #[test]
     fn empty_dependency_branch_matches_monolithic() {
         let deps: Vec<chelis_surf::ast::Decl> = Vec::new();
-        let entry = parse("def main_value() ->int32 = add(cast(1, int32), cast(2, int32))\n");
+        let entry = parse("def main_value() ->i32 = add(cast(1, i32), cast(2, i32))\n");
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry),
             &monolithic_program(&deps, &entry),
@@ -596,14 +607,14 @@ mod build_layering_tests {
     fn macro_hygiene_across_dependency_boundary_matches_monolithic() {
         let deps = parse(
             "macro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\
-             def dep_val(x: int32) -> int32 = dmk(x)\n",
+             def dep_val(x: i32) -> i32 = dmk(x)\n",
         );
         // The entry both invokes its own binder-minting macro AND binds a
         // name (`v_macro_0`) that a restarted hygiene counter would collide
         // with — the exact capture the reviewer's fixture exhibited.
         let entry = parse(
-            "macro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\
-             def main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+            "macro emk(a) = {\n  v = cast(7, i32)\n  add(v, a)\n}\n\
+             def main_value() ->i32 = {\n  v_macro_0 = dep_val(cast(5, i32))\n  emk(v_macro_0)\n}\n",
         );
 
         let layered = three_layer_program(&deps, &entry);
@@ -621,7 +632,7 @@ mod build_layering_tests {
     fn rejected_dependency_falls_back() {
         let stdlib_ctx = build_stdlib_context(&[]).expect("empty stdlib context");
         // `no_such_builtin` is unbound: the dependency does not compose.
-        let bad_deps = parse("def broken(x: int32) -> int32 = no_such_builtin(x)\n");
+        let bad_deps = parse("def broken(x: i32) -> i32 = no_such_builtin(x)\n");
         let built = build_library_context(&stdlib_ctx, &bad_deps).expect("build returns Ok");
         assert!(
             built.is_none(),

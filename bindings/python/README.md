@@ -9,8 +9,19 @@ Current guarantees:
 - `chelis.check(...)`, `compile(...)`, `desugar(...)`, `decompile(...)`, `validate(...)`
   share the same compiler implementation as Tide through `chelis-compiler-api`
 - `chelis.from_dlpack(...)` is CPU-only; unsupported GPU tensors fail as `ValueError`
-- `chelis.eval(...)` may copy inputs into the evaluator's internal `Vec<f64>`
-  representation in `3b`
+- `chelis.eval(...)` copies inputs through execution wire v4's exact dtype
+  carriers. Float payloads use fixed-width lowercase IEEE bit strings, preserving
+  signed zero and every NaN payload. Scalars return their declared NumPy integer
+  or float type; `bf16` uses `ml_dtypes.bfloat16`. Tensor results carry the dtype
+  in `TensorValue.dtype`, with exact integer values or own-width float scalars in
+  `TensorValue.data`. Calling `float(value)` explicitly converts a result.
+- NumPy `uint8`, `uint16`, and `uint32` inputs widen exactly to `int16`, `int32`,
+  and `int64`; unsupported widths such as `uint64` require an explicit caller
+  conversion. Native and nonnative byte order, strided arrays, and rank-zero
+  arrays preserve their stored bits.
+- Execution results require schema version 3 before any value is decoded.
+  Missing or other versions, malformed dtype carriers, invalid shapes, and
+  mismatched element counts raise `ValueError`.
 - `chelis.compile_and_load(...)` is the product path for compiled execution;
   `chelis.load(...)` is the advanced path for existing artifacts
 - compiled execution currently supports fully concrete `float32` tensors
@@ -141,3 +152,58 @@ Compiler selection:
   `clang` + Accelerate on macOS, `gcc` + OpenBLAS on Linux; override with `CHELIS_CC`
 - native HIP compilation prefers `/usr/bin/hipcc` when present; override with
   `CHELIS_HIPCC`
+
+## Editable development installs
+
+From the repository root, `uv pip install -e bindings/python` builds an editable,
+checkout-backed extension. It stages the development runtime and checks the
+declared runtime sources before each stage; changing a declared source without
+rebuilding the extension raises `ChelisError`. `maturin develop` uses the same
+unsealed development configuration.
+
+## Build and smoke a distribution wheel
+
+The local PEP 517 backend seals standard wheel builds with `sealed-runtime`.
+The default Maturin feature remains only `extension-module`, so editable builds
+do not inherit the distribution-only feature.
+
+To build a wheel from the repository root:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 \
+CARGO_TARGET_DIR="$PWD/target/python-wheel" \
+uv build --wheel --out-dir target/python-wheel/wheels bindings/python
+```
+
+For the bounded end-to-end smoke, run the smoke directly instead of first
+building a wheel. It performs one standard wheel build from a disposable source
+copy, removes that copy, installs the wheel outside the checkout, and exercises
+compiled execution and persisted reload in separate Python processes:
+
+```sh
+CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0 \
+CARGO_TARGET_DIR="$PWD/target/python-wheel-smoke/cargo" \
+.venv/bin/python bindings/python/tests/python_wheel_smoke.py \
+  --receipt target/python-wheel-smoke/cargo/wheel-smoke.json
+```
+
+If a wheel was already built, pass `--wheel <path>` to consume it without
+building again. That mode verifies installed consumer behavior but does not
+prove the wheel was built without its source copy. The optional
+`--crossed-bundle` builds a synthetic second sealed wheel after changing the
+exported key-seed operation in its disposable runtime source. A native C program
+links each wheel's staged archive and requires seed 7 to yield key bits 7 in A
+and 8 in B; the first wheel must reject B's compiled artifact. The smoke records
+runtime and library digests, exact values, process results,
+and negative controls; on failure it retains command logs and receipts under
+the Cargo target directory. This is a bounded Python distribution check, not
+the aggregate runtime-artifact oracle.
+
+On macOS, installed-wheel subprocesses also run under an OS sandbox that
+denies reads from the original checkout. The receipt records a denied read
+of its `Cargo.toml` for native compile/call, persisted reload, and crossed
+bundle rejection. On Linux, the disposable source copy is removed and the
+developer target withheld, but the original checkout remains readable;
+`checkout_read_denied: false` does not claim filesystem isolation.
+`source_free_build_proven` is true only when this driver built the wheel and
+every installed consumer verified that checkout read denial.

@@ -11,12 +11,13 @@
 //! through tide is identical to the CLI on the same module (the parity
 //! the cross-surface test locks).
 
-use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, Metadata};
 use chelis_types::types::{Prim, Type};
 use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64};
 
@@ -379,7 +380,8 @@ pub fn run_surf_source_obligations(
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e}"))?;
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs =
+        chelis_surf::desugar::desugar_program(&decls).map_err(|e| format!("desugar: {e}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -416,23 +418,19 @@ pub fn run_surf_source_obligations(
 /// if it does not type-check; `Ok(Ran(..))` otherwise.
 ///
 /// This entry and the CLI's `chelis prove foo.dp` path (`run_deep_obligations`)
-/// reach the same engine but do NOT hand it the same representation, and this
-/// comment used to claim they were the identical path (chelis#1125 PP7): the
-/// route below normalizes through `deep_compat::parse_file_to_lists`, so the
-/// engine sees `Expr::List`, while the CLI passes `parse_and_stamp_file`
-/// output straight through, so the engine sees `Expr::Node`. That difference
-/// used to change the answer -- the engine's readers decoded only the list
-/// carrier, so the CLI's obligation could not lower and fell through to Tier
-/// C while tide's proved at Tier B. Those readers now decode both carriers
-/// ([04-TOT-5]), so the two routes agree on the outcome; they are still two
-/// routes, and neither this comment nor a reader in the engine may assume
-/// which carrier arrives.
+/// hand the engine the same representation: both parse with
+/// `parse_and_stamp_file` and pass the stamped tree straight through, and a
+/// Deep node has the single spelling `Expr::Node` (chelis#1125). An earlier
+/// version of this comment claimed the two were identical while this route
+/// still normalized to the deleted list spelling; the engine's readers then
+/// decoded only that spelling, so the CLI's obligation fell through to Tier C
+/// while tide's proved at Tier B (PP7).
 pub fn run_deep_source_obligations(
     source: &str,
     options: &ObligationRunOptions,
 ) -> Result<ObligationRunResult, String> {
-    let exprs = crate::deep_compat::parse_file_to_lists(source)
-        .map_err(|error| format!("parse: {error}"))?;
+    let exprs =
+        chelis_deep::parse_and_stamp_file(source).map_err(|error| format!("parse: {error}"))?;
     let sigs: BTreeMap<String, Type> = match chelis_types::check_typed_program(&exprs) {
         Ok(checked) => checked
             .signature_inference()
@@ -1554,9 +1552,7 @@ fn module_zero_arg_scalar_defs(exprs: &[Expr]) -> Vec<String> {
                     out.push(name.to_string());
                 }
             }
-            if let Expr::List(l, _) = expr {
-                walk(&l.elements[2.min(l.elements.len())..], out);
-            }
+            walk(node_children(expr), out);
         }
     }
     let mut out = Vec::new();
@@ -1568,7 +1564,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
     // An in-module constant may be a value binding (`(var name)`) or a
     // zero-argument constant function (`(app (var name))`, the desugaring
     // of `def eps() -> f32 = 0.01`).
-    let exprs: Vec<Expr> = crate::deep_compat::parse_file_to_lists(source)
+    let exprs: Vec<Expr> = chelis_deep::parse_and_stamp_file(source)
         .ok()?
         .iter()
         .map(strip_invariant_meta)
@@ -1601,7 +1597,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
             && value.shape.is_empty()
             && value.data.len() == 1
         {
-            return Some(value.data.element_as_f64_lossy(0));
+            return Some(value.data.element_f64_lossy(0));
         }
     }
     None
@@ -1654,9 +1650,7 @@ fn literal_const_value(exprs: &[Expr], name: &str) -> Option<f64> {
                     }
                 }
             }
-            if let Expr::List(l, _) = expr
-                && let Some(v) = find(&l.elements[2.min(l.elements.len())..], name)
-            {
+            if let Some(v) = find(node_children(expr), name) {
                 return Some(v);
             }
         }
@@ -1672,11 +1666,16 @@ fn inject_const_probe(exprs: &[Expr], def: Expr) -> Vec<Expr> {
     for expr in exprs {
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.push(def.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.push(def.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -1721,10 +1720,16 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
         {
             return true;
         }
-        if let Expr::List(l, _) = expr {
-            return l.elements.iter().any(|c| module_defines(c, type_name));
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(_, _, children) => children
+                .iter()
+                .any(|child| module_defines(child, type_name)),
+            ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => false,
         }
-        false
     }
     let mut out = Vec::with_capacity(exprs.len());
     let mut injected = false;
@@ -1732,11 +1737,16 @@ fn inject_into_defining_module(exprs: &[Expr], type_name: &str, new_defs: Vec<Ex
         if !injected
             && list_tag(expr) == Some(DeepTag::Module)
             && module_defines(expr, type_name)
-            && let Expr::List(l, span) = expr
+            && let Expr::Node(module, span) = expr
         {
-            let mut elements = l.elements.clone();
-            elements.extend(new_defs.clone());
-            out.push(Expr::List(List { elements }, *span));
+            let mut children = module.children_slice().to_vec();
+            children.extend(new_defs.clone());
+            out.push(Expr::node(
+                module.tag(),
+                module.meta().clone(),
+                children,
+                *span,
+            ));
             injected = true;
         } else {
             out.push(expr.clone());
@@ -1950,38 +1960,7 @@ fn flatten_field_value(
             let prim = Prim::parse_name(prim_name)
                 .ok_or_else(|| format!("unknown scalar field precision `{prim_name}`"))?;
             let scalar = match value {
-                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
-                    scalar_from_f64("prove-produced-field", prim, f64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
-                    scalar_from_i64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
+                ExecutionValue::Scalar { value } if value.get().prim() == prim => value.get(),
                 ExecutionValue::Bool { value } if prim == Prim::Bool => {
                     scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value))
                         .map_err(|trap| trap.to_string())?
@@ -2073,7 +2052,7 @@ fn inject_into_module_stripped(
     type_name: &str,
     defs: Vec<Expr>,
 ) -> Result<Vec<Expr>, String> {
-    let exprs = crate::deep_compat::parse_file_to_lists(module_source)
+    let exprs = chelis_deep::parse_and_stamp_file(module_source)
         .map_err(|error| format!("reparse module: {error}"))?;
     let stripped: Vec<Expr> = exprs.iter().map(strip_invariant_meta).collect();
     Ok(inject_into_defining_module(&stripped, type_name, defs))
@@ -2083,20 +2062,22 @@ fn inject_into_module_stripped(
 /// recursively (keeps `opaque: true`).
 fn strip_invariant_meta(expr: &Expr) -> Expr {
     match expr {
-        Expr::List(list, span) => {
-            let mut elements: Vec<Expr> = list.elements.iter().map(strip_invariant_meta).collect();
-            if list.tag() == Some(DeepTag::Deftype)
-                && let Some(Expr::Map(map, mspan)) = elements.get(1)
-            {
-                let kept: Vec<(String, Expr)> = map
-                    .entries
-                    .iter()
-                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
-                    .cloned()
-                    .collect();
-                elements[1] = Expr::Map(MetaMap { entries: kept }, *mspan);
+        Expr::Node(node, span) => {
+            let mut metadata = node.meta().clone();
+            if node.tag() == DeepTag::Deftype {
+                metadata.remove(K::Invariant);
+                metadata.remove(K::InvariantAmenability);
             }
-            Expr::List(List { elements }, *span)
+            let children = node
+                .children_slice()
+                .iter()
+                .map(strip_invariant_meta)
+                .collect();
+            Expr::node(node.tag(), metadata, children, *span)
+        }
+        // A structural list is walked as the untagged list it replaced was.
+        Expr::BareList(elements, span) => {
+            Expr::BareList(elements.iter().map(strip_invariant_meta).collect(), *span)
         }
         other => other.clone(),
     }
@@ -2104,9 +2085,9 @@ fn strip_invariant_meta(expr: &Expr) -> Expr {
 
 /// Build a typed scalar literal Deep expr for a producer argument. Integer
 /// widths are recognized through the single-source `is_int_width` (review
-/// 5) and built width-appropriately: int32 is the literal default, the
-/// other widths cast an int32 literal to the target width (matching the
-/// generator's `int_lit`), so an int8/int16/int64 producer argument is a
+/// 5) and built width-appropriately: i32 is the literal default, the
+/// other widths cast an i32 literal to the target width (matching the
+/// generator's `int_lit`), so an i8/i16/i64 producer argument is a
 /// well-typed integer, not a silently-mistyped float.
 fn scalar_lit(prim: &str, value: ScalarValue) -> Expr {
     if crate::opaque::is_int_width(prim) {
@@ -2153,7 +2134,7 @@ fn producer_param_names(exprs: &[Expr], producer: &str) -> Vec<String> {
 
 fn sample_scalar(kind: &str, rng: &mut Lcg) -> ScalarValue {
     // Integer widths sample within the width's representable range via the
-    // single-source `int_sample_bounds` (review 5): an int8 producer arg
+    // single-source `int_sample_bounds` (review 5): an i8 producer arg
     // samples in [-128, 127], never an unrepresentable value.
     if let Some((lo, hi)) = crate::opaque::int_sample_bounds(kind) {
         return scalar_from_i64(
@@ -2195,35 +2176,30 @@ fn deep_sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), Span::new(0, 0))
 }
 fn deep_node(tag: &str, children: Vec<Expr>) -> Expr {
-    let mut elements = vec![
-        deep_sym(tag),
-        Expr::Map(MetaMap::default(), Span::new(0, 0)),
-    ];
-    elements.extend(children);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::node(
+        DeepTag::parse(tag).expect("vocabulary builder"),
+        Metadata::default(),
+        children,
+        Span::new(0, 0),
+    )
 }
 fn deep_var(name: &str) -> Expr {
     deep_node("var", vec![deep_sym(name)])
 }
 fn deep_typed_lit(type_prim: &str, value: Expr) -> Expr {
-    let mut entries = MetaMap::default();
-    entries.entries.push((
-        "type".to_string(),
-        deep_node("t-prim", vec![deep_sym(type_prim)]),
+    let mut entries = Metadata::default();
+    entries.replace(M::Type(
+        TypeSyntax::try_new(deep_node("t-prim", vec![deep_sym(type_prim)]))
+            .expect("primitive type"),
     ));
-    Expr::List(
-        List {
-            elements: vec![deep_sym("lit"), Expr::Map(entries, Span::new(0, 0)), value],
-        },
-        Span::new(0, 0),
-    )
+    Expr::node(DeepTag::Lit, entries, vec![value], Span::new(0, 0))
 }
-/// A width-appropriate integer literal Deep expr: an int32 literal for the
-/// default width, otherwise an int32 literal cast to the target width
+/// A width-appropriate integer literal Deep expr: an i32 literal for the
+/// default width, otherwise an i32 literal cast to the target width
 /// (review 5). `prim` must be an integer width (`is_int_width`).
 fn deep_int_lit_for(v: i64, prim: &str) -> Expr {
-    let lit = deep_typed_lit("int32", Expr::Atom(Atom::Int(v), Span::new(0, 0)));
-    if prim == "int32" {
+    let lit = deep_typed_lit("i32", Expr::Atom(Atom::Int(v), Span::new(0, 0)));
+    if prim == "i32" {
         lit
     } else {
         deep_node("cast", vec![lit, deep_node("t-prim", vec![deep_sym(prim)])])
@@ -2233,17 +2209,23 @@ fn deep_bool_lit(v: bool) -> Expr {
     deep_typed_lit("bool", Expr::Atom(Atom::Bool(v), Span::new(0, 0)))
 }
 fn list_tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 fn node_children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(l, _) if l.elements.len() >= 2 => &l.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 fn sym_text(expr: &Expr) -> Option<&str> {
@@ -2254,13 +2236,14 @@ fn sym_text(expr: &Expr) -> Option<&str> {
 }
 
 fn binder_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
-        Expr::MetaExpr(meta, _) => sym_text(&meta.expr),
-        Expr::BareList(elements, _) | Expr::List(List { elements }, _) => {
-            elements.first().and_then(sym_text)
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Name(name)) => Some(name.as_str()),
+        ExprCarrier::MetadataExpression(meta) => sym_text(&meta.expr),
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(sym_text),
+        ExprCarrier::UndecodableHead(_, _, _) => None,
+        ExprCarrier::DecodedNode(_, _, _) | ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => {
+            None
         }
-        _ => None,
     }
 }
 
@@ -2297,6 +2280,9 @@ impl Lcg {
 mod tests;
 
 #[cfg(test)]
+use crate::wire_values;
+
+#[cfg(test)]
 mod finding_tests {
     //! Unit tests for the PR #386 fresh-context review findings #7, #8, #11.
     //! These drive the private flatten/validate helpers directly with
@@ -2305,9 +2291,56 @@ mod finding_tests {
     // `super::*` already brings `ExecutionValue`, `OpaqueInvariant`, `Prim`,
     // `BTreeMap`, and the private flatten/validate helpers into scope.
     use super::*;
+
     use crate::opaque::FieldType;
-    use chelis_compiler_api::schema::{TensorElements, TensorValue};
+    use chelis_compiler_api::schema::TensorValue;
     use chelis_pred::PredAmenability;
+
+    #[test]
+    fn scalar_flattening_moves_exact_bits_and_rejects_dtype_substitution() {
+        for (wire, language_dtype) in [
+            (serde_json::json!({"dtype":"f16","bits":"7c01"}), "f16"),
+            (serde_json::json!({"dtype":"bf16","bits":"ff81"}), "bf16"),
+            (serde_json::json!({"dtype":"f32","bits":"80000000"}), "f32"),
+            (
+                serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
+                "f64",
+            ),
+            (
+                serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
+                "i64",
+            ),
+            (serde_json::json!({"dtype":"int32","value":i32::MIN}), "i32"),
+            (serde_json::json!({"dtype":"int16","value":i16::MIN}), "i16"),
+            (serde_json::json!({"dtype":"int8","value":i8::MIN}), "i8"),
+        ] {
+            let input: ExecutionValue =
+                serde_json::from_value(serde_json::json!({"type":"scalar","value":wire})).unwrap();
+            let mut env = BTreeMap::new();
+            flatten_field_value(
+                &input,
+                &FieldType::Scalar(language_dtype.into()),
+                "p.value",
+                &mut env,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(env["p.value"]).unwrap(), wire);
+            let other = if language_dtype == "f32" {
+                "f64"
+            } else {
+                "f32"
+            };
+            assert!(
+                flatten_field_value(
+                    &input,
+                    &FieldType::Scalar(other.into()),
+                    "p.value",
+                    &mut env
+                )
+                .is_err()
+            );
+        }
+    }
 
     /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
     /// and `flatten_field_value` read only `ctor_name`, `binder`, and
@@ -2318,8 +2351,14 @@ mod finding_tests {
             ctor_name: ctor_name.to_string(),
             fields: vec![(field.to_string(), FieldType::Scalar("f32".to_string()))],
             // Never read by the flatten helpers under test; a placeholder
-            // `fn` node keeps the struct well-formed.
-            predicate: deep_node("fn", vec![]),
+            // `(fn (params p) true)` keeps the struct well-formed.
+            predicate: deep_node(
+                "fn",
+                vec![
+                    deep_node("params", vec![deep_sym("p")]),
+                    deep_bool_lit(true),
+                ],
+            ),
             binder: "p".to_string(),
             amenability: PredAmenability::Linear,
         }
@@ -2337,7 +2376,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let wrong = ExecutionValue::Adt {
             ctor: "Velocity".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
+            fields: vec![wire_values::scalar_f32(0.5)],
         };
         let err = opaque_record_env(&wrong, &inv)
             .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
@@ -2356,7 +2395,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let right = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
+            fields: vec![wire_values::scalar_f32(0.5)],
         };
         let env =
             opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
@@ -2380,7 +2419,7 @@ mod finding_tests {
         let multi = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![3],
-                data: TensorElements::F32(vec![0.5, f32::NAN, 0.5]),
+                data: wire_values::storage_f32(vec![0.5, f32::NAN, 0.5]),
             },
         };
         let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
@@ -2404,7 +2443,7 @@ mod finding_tests {
         let single = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::F32(vec![0.5]),
+                data: wire_values::storage_f32(vec![0.5]),
             },
         };
         flatten_field_value(&single, &fty, "p.value", &mut env)
@@ -2417,13 +2456,8 @@ mod finding_tests {
         // A plain exact-tagged f32 scalar is unaffected by the fix.
         let fty = FieldType::Scalar("f32".to_string());
         let mut env = BTreeMap::new();
-        flatten_field_value(
-            &ExecutionValue::Float32 { value: 0.25 },
-            &fty,
-            "p.value",
-            &mut env,
-        )
-        .expect("a true scalar still flattens");
+        flatten_field_value(&wire_values::scalar_f32(0.25), &fty, "p.value", &mut env)
+            .expect("a true scalar still flattens");
         assert_eq!(
             env.get("p.value").map(ScalarValue::as_f64_lossy),
             Some(0.25)
@@ -2432,31 +2466,29 @@ mod finding_tests {
 
     #[test]
     fn int64_scalar_field_flattens_without_crossing_f64() {
-        let fty = FieldType::Scalar("int64".to_string());
+        let fty = FieldType::Scalar("i64".to_string());
         let mut env = BTreeMap::new();
         flatten_field_value(
-            &ExecutionValue::Int64 {
-                value: 9_007_199_254_740_993,
-            },
+            &wire_values::scalar_integer(Prim::Int64, 9_007_199_254_740_993),
             &fty,
             "p.value",
             &mut env,
         )
-        .expect("an int64 scalar field must flatten exactly");
+        .expect("an i64 scalar field must flatten exactly");
         assert_eq!(env["p.value"].as_i64_exact(), Some(9_007_199_254_740_993));
     }
 
     #[test]
     fn scalar_field_requires_the_exact_public_carrier_dtype() {
-        let fty = FieldType::Scalar("int64".to_string());
+        let fty = FieldType::Scalar("i64".to_string());
         let mut env = BTreeMap::new();
         let error = flatten_field_value(
-            &ExecutionValue::Int32 { value: 7 },
+            &wire_values::scalar_integer(Prim::Int32, 7),
             &fty,
             "p.value",
             &mut env,
         )
-        .expect_err("an int32 carrier must not substitute for declared int64");
+        .expect_err("an i32 carrier must not substitute for declared i64");
         assert!(
             error.contains("not a scalar value"),
             "unexpected error: {error}"
@@ -2468,17 +2500,17 @@ mod finding_tests {
     fn int64_tensor_field_flattens_without_crossing_f64() {
         let fty = FieldType::Tensor {
             dims: vec![1],
-            precision: "int64".to_string(),
+            precision: "i64".to_string(),
         };
         let value = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::Int64(vec![9_007_199_254_740_993]),
+                data: wire_values::storage_i64(vec![9_007_199_254_740_993]),
             },
         };
         let mut env = BTreeMap::new();
         flatten_field_value(&value, &fty, "p.ids", &mut env)
-            .expect("an int64 tensor field must flatten exactly");
+            .expect("an i64 tensor field must flatten exactly");
         assert_eq!(env["p.ids.0"].as_i64_exact(), Some(9_007_199_254_740_993));
     }
 
@@ -2486,12 +2518,12 @@ mod finding_tests {
     fn tensor_field_dtype_mismatch_fails_closed() {
         let fty = FieldType::Tensor {
             dims: vec![1],
-            precision: "int64".to_string(),
+            precision: "i64".to_string(),
         };
         let value = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::F64(vec![1.0]),
+                data: wire_values::storage_f64(vec![1.0]),
             },
         };
         let mut env = BTreeMap::new();
@@ -2512,7 +2544,7 @@ mod finding_tests {
         // representative width (and a couple of others for good measure).
         assert_eq!(prim_name(&Prim::Bf16), "bf16");
         assert_eq!(prim_name(&Prim::F32), "f32");
-        assert_eq!(prim_name(&Prim::Int64), "int64");
+        assert_eq!(prim_name(&Prim::Int64), "i64");
         // Every variant's canonical name must match `prim_name` exactly. This
         // list must enumerate the WHOLE `Prim` vocabulary (including the f8
         // widths) or the "every variant" claim is hollow.

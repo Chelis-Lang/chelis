@@ -9,9 +9,9 @@ def read_csv(path: string) -> List[Dict[string, string]] =
 def try_read_csv(path: string) -> Option[List[Dict[string, string]]] =
   if not(file_exists(path)) then None else {
     raw_lines = read_lines(path)
-    lines = filter(fn (line: string) -> gt(string_len(line), cast(0, int64)), raw_lines)
-    if eq(len(lines), cast(0, int64)) then Some([]) else match parse_line(index(lines, cast(0, int64))) with {
-      | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)))
+    lines = filter(fn (line: string) -> gt(string_len(line), cast(0, i64)), raw_lines)
+    if eq(len(lines), cast(0, i64)) then Some([]) else match parse_line(index(lines, cast(0, i64))) with {
+      | Some(headers) => parse_rows(headers, skip(lines, cast(1, i64)))
       | None => None
     }
   }
@@ -21,8 +21,8 @@ def to_csv(rows: List[Dict[string, string]]) -> string =
     | None => fail(string_concat("to_csv failed at row ", string_concat(to_string(first_invalid_row(rows)), ": every row must have exactly the header row's keys, and no field or header may contain CR or LF")))
   }
 def try_to_csv(rows: List[Dict[string, string]]) -> Option[string] =
-  if eq(len(rows), cast(0, int64)) then Some("") else {
-    headers = dict_keys(index(rows, cast(0, int64)))
+  if eq(len(rows), cast(0, i64)) then Some("") else {
+    headers = dict_keys(index(rows, cast(0, i64)))
     if and(fields_ok(headers), rows_ok(headers, rows)) then Some(render_all(headers, rows)) else None
   }
 def write_csv(path: string, rows: List[Dict[string, string]]) -> unit =
@@ -51,21 +51,21 @@ def render_row(headers: List[string], row: Dict[string, string]) -> string =
   }), headers))
 def render_line(fields: List[string]) -> string = {
   line = join(fields, ",")
-  if eq(string_len(line), cast(0, int64)) then "\"\"" else line
+  if eq(string_len(line), cast(0, i64)) then "\"\"" else line
 }
 def render_field(text: string) -> string = if or(string_contains(text, ","), string_contains(text, "\"")) then string_concat("\"", string_concat(double_quotes(text), "\"")) else text
-def double_quotes(text: string) -> string = if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: int64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, int64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, int64))), "", range(cast(0, int64), string_len(text)))
-def first_invalid_row(rows: List[Dict[string, string]]) -> int64 =
-  if eq(len(rows), cast(0, int64)) then cast(-1, int64) else {
-    headers = dict_keys(index(rows, cast(0, int64)))
-    if not(fields_ok(headers)) then cast(0, int64) else {
-      scan = fold(fn (acc: (int64, int64), row: Dict[string, string]) -> if gte(acc.1, cast(0, int64)) then (add(acc.0, cast(1, int64)), acc.1) else if row_ok(headers, row) then (add(acc.0, cast(1, int64)), cast(-1, int64)) else (add(acc.0, cast(1, int64)), acc.0), (cast(0, int64), cast(-1, int64)), rows)
+def double_quotes(text: string) -> string = if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: i64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, i64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, i64))), "", range(cast(0, i64), string_len(text)))
+def first_invalid_row(rows: List[Dict[string, string]]) -> i64 =
+  if eq(len(rows), cast(0, i64)) then cast(-1, i64) else {
+    headers = dict_keys(index(rows, cast(0, i64)))
+    if not(fields_ok(headers)) then cast(0, i64) else {
+      scan = fold(fn (acc: (i64, i64), row: Dict[string, string]) -> if gte(acc.1, cast(0, i64)) then (add(acc.0, cast(1, i64)), acc.1) else if row_ok(headers, row) then (add(acc.0, cast(1, i64)), cast(-1, i64)) else (add(acc.0, cast(1, i64)), acc.0), (cast(0, i64), cast(-1, i64)), rows)
       scan.1
     }
   }
 -- Row parsing runs on the linear combinator lane. The pre-#1213 shape
 -- recursed one line at a time through `append(rows, ...)` and
--- `drop(lines, 1)`; both deep-clone their list argument, so reading r
+-- `skip(lines, 1)`; both deep-clone their list argument, so reading r
 -- rows allocated O(r^2) list bytes and every intermediate generation
 -- stayed live until the recursion bottomed out. `map` and `fold` lower
 -- to a capacity-reserved list plus in-place pushes (chelis#943/#949),
@@ -96,7 +96,7 @@ def parse_rows(headers: List[string], lines: List[string]) -> Option[List[Dict[s
 -- One test rejects both failure modes: `width` is `len(headers)`, and
 -- `headers` came from a `parse_line` that returned `Some`, so `width` is
 -- at least 1, while an unparsable line takes the `None` arm directly.
-def line_ok(width: int64, line: string) -> bool =
+def line_ok(width: i64, line: string) -> bool =
   match parse_line(line) with {
     | Some(fields) => eq(len(fields), width)
     | None => false
@@ -109,12 +109,12 @@ def fields_of(line: string) -> List[string] =
     | Some(fields) => fields
     | None => []
   }
-def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, int64), false, "", [])
-def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =
+def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, i64), false, "", [])
+def parse_line_chars(line: string, idx: i64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =
   if gte(idx, string_len(line)) then if in_quotes then None else Some(append(fields, current)) else {
-    ch = string_slice(line, idx, cast(1, int64))
+    ch = string_slice(line, idx, cast(1, i64))
     if eq(ch, "\"") then if in_quotes then {
-      next = add(idx, cast(1, int64))
-      if and(lt(next, string_len(line)), eq(string_slice(line, next, cast(1, int64)), "\"")) then parse_line_chars(line, add(idx, cast(2, int64)), true, string_concat(current, "\""), fields) else parse_line_chars(line, add(idx, cast(1, int64)), false, current, fields)
-    } else parse_line_chars(line, add(idx, cast(1, int64)), true, current, fields) else if and(eq(ch, ","), not(in_quotes)) then parse_line_chars(line, add(idx, cast(1, int64)), false, "", append(fields, current)) else parse_line_chars(line, add(idx, cast(1, int64)), in_quotes, string_concat(current, ch), fields)
+      next = add(idx, cast(1, i64))
+      if and(lt(next, string_len(line)), eq(string_slice(line, next, cast(1, i64)), "\"")) then parse_line_chars(line, add(idx, cast(2, i64)), true, string_concat(current, "\""), fields) else parse_line_chars(line, add(idx, cast(1, i64)), false, current, fields)
+    } else parse_line_chars(line, add(idx, cast(1, i64)), true, current, fields) else if and(eq(ch, ","), not(in_quotes)) then parse_line_chars(line, add(idx, cast(1, i64)), false, "", append(fields, current)) else parse_line_chars(line, add(idx, cast(1, i64)), in_quotes, string_concat(current, ch), fields)
   }

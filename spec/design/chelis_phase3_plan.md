@@ -250,8 +250,7 @@ Tensors alone cannot express that variable-length host-side structure.
   dict remove/update/overlay, key/value/entry enumeration, and dataset-friendly
   helpers such as cumulative scans, stable boolean partitioning, and callback-driven
   list expansion
-- effect propagation through iteration
-  this is now covered by checker tests for callback-driven `IO` and `Random`
+- effect propagation through iteration, including callback-driven `IO`
 
 **Collection/tensor bridge:**
 
@@ -422,8 +421,9 @@ more C-side ownership risk exactly where the language is getting broader.
 - `chelis build` emits generated source/header plus `chelis_runtime.h` and
   `libchelis_runtime.a`
 - `chelis_runtime.c` stops being an emitted build artifact
-- runtime library discovery order is explicit: `CHELIS_RUNTIME_DIR`, then path
-  relative to `current_exe()`, then a clear hard failure
+- `chelis build` stages the runtime the CLI carries and rejects a set
+  `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1; chelis#1354 replaced the
+  original directory discovery order)
 
 ### Implementation Shape
 
@@ -442,7 +442,7 @@ A mixed tensor + host-value Chelis program can:
 
 - build through `chelis build --target c`
 - emit `chelis_runtime.h` and `libchelis_runtime.a` but not `chelis_runtime.c`
-- compile and link with `-lchelis_runtime`
+- compile and link against the staged `libchelis_runtime.a`
 - run as a native binary and match `chelis eval`
 
 Authoritative oracle:
@@ -451,7 +451,7 @@ Authoritative oracle:
 
 Manual HIP mirror gate:
 
-- `CHELIS_RUNTIME_DIR=<runtime-dir> cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture`
+- `cargo test -p chelis-cli phase3m_rust_runtime_hip_manual_gate -- --ignored --nocapture`
 
 ---
 
@@ -485,10 +485,28 @@ Pragmatic surface. IO effect on everything.
 | `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
 | `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
 | `file_exists` | `String -> Bool` | IO | Check file existence |
-| `list_dir` | `String -> List[String]` | IO | List directory entry names, in [05-HOST-4] byte order |
+| `list_dir` | `String -> List[String]` | IO | List directory entry names in [05-HOST-4] byte order, with strict UTF-8 conversion and whole-call failure on an invalid name |
 | `mmap_file` | `String -> MappedFile` | IO | Memory-map a file for zero-copy random access |
 | `mmap_read` | `(MappedFile, Int, Int) -> List[Int]` | Pure | Read bytes from offset+length after open |
 | `mmap_len` | `MappedFile -> Int` | Pure | File size in bytes |
+
+The #1479 row-7 directory conversion acceptance command is:
+
+```sh
+cargo nextest run -p chelis-runtime -p chelis-compiler-api -p chelis-cli --lib --test issue_1479_list_dir_order --test issue_1479_list_dir_lane_parity -E 'test(list_dir_conversion) | binary(~issue_1479_list_dir)' --no-fail-fast --retries 0
+```
+
+Acceptance requires every selected case to execute and pass, including the
+Linux filesystem cases and the compiled C executions (a C compiler is required).
+The suites also run in the hosted workspace jobs. macOS executes the in-memory
+invalid-name conversion controls and valid-name filesystem/parity controls; Linux
+additionally creates invalid filenames and verifies whole-call failure through
+the evaluator, runtime FFI, and generated C. macOS alone does not prove those
+filesystem failure paths. The executable example is
+`examples/io/list_directory.ch`, with an absolute fixture path substituted by
+the parity suite before formatting, checking, evaluating, and compiling it.
+This is the conversion row's acceptance surface, not completion of #1479's
+other carriers or this phase's broader I/O work.
 
 **Memory-mapped I/O:** For datasets that don't fit in memory (billions of trade events,
 large token corpora), `mmap_file` provides zero-copy random access to file contents. The
@@ -553,7 +571,7 @@ tok = load_tokenizer("tokenizer.json")
 
 tokens = encode(tok, "Hello, world!")
 
-inputs = batch_encode(tok, ["Hello, world!"], cast(512, int64), cast(0, int64))
+inputs = batch_encode(tok, ["Hello, world!"], cast(512, i64), cast(0, i64))
 ```
 
 Implementation: the tokenizer is a Chelis program, not a C library wrapper. BPE merge
@@ -578,13 +596,13 @@ Compose the above into a training data loader:
 import Std.Tokenizer
 
 def load_training_data(data_path: string, tok_path: string,
-                       max_len: int64, batch_size: int64) -> List[tensor[batch, max_len, int64]] = {
+                       max_len: i64, batch_size: i64) -> List[tensor[batch, max_len, i64]] = {
   tok = load_tokenizer(tok_path)
   lines = read_lines(data_path)
   encoded = map(fn (line: string) -> encode(tok, line), lines)
   batches = chunk(encoded, batch_size)
   map(
-    fn (batch: List[List[int64]]) -> pad_sequences_to(batch, max_len, cast(0, int64)),
+    fn (batch: List[List[i64]]) -> pad_sequences_to(batch, max_len, cast(0, i64)),
     batches
   )
 }
@@ -651,9 +669,9 @@ with KV caching, optimizer variants, and learning rate scheduling.
 Pure Chelis standard library module for dates and durations.
 
 - `Date` type: year, month, day. Constructed via
-  `date(cast(2024, int64), cast(1, int64), cast(15, int64))`.
+  `date(cast(2024, i64), cast(1, i64), cast(15, i64))`.
 - `Duration` type: days, hours, minutes, seconds. Constructed via
-  `duration(cast(1, int64), cast(2, int64), cast(3, int64), cast(4, int64))`.
+  `duration(cast(1, i64), cast(2, i64), cast(3, i64), cast(4, i64))`.
 - Arithmetic: `add_days(date, n)`, `sub_days(date, n)`, `days_between(date1, date2)`.
 - Comparison and ordering on dates.
 - Formatting: `date_to_string(date)` → ISO 8601 (`"2024-01-15"`).
@@ -666,7 +684,7 @@ Pure Chelis standard library module for dates and durations.
 Pure Chelis standard library module for fixed-point exact arithmetic.
 
 - `Decimal` type: exact representation with configurable scale.
-- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, int64))`.
+- Construction: `decimal("0.1")`, `decimal_from_int(cast(42, i64))`.
 - Arithmetic: `decimal_add`, `decimal_sub`, `decimal_mul`, `decimal_div` with explicit
   rounding mode.
 - Rounding modes: `round_half_up`, `round_half_even` (banker's rounding), `round_down`,
@@ -686,16 +704,16 @@ feed-back is the fundamental inference loop, and doing it manually via `fold` is
 but verbose.
 
 ```chelis
-import Std.Nn.Generate
+import School.Nn.Generate
 
 -- Simple greedy generation
-generated = generate(model_fn, context, cast(512, int64))
+generated = generate(model_fn, context, cast(512, i64))
 
 -- With sampling controls
-generated = generate_with(model_fn, context, GenerateConfig {
-  max_tokens: cast(512, int64),
+generated = generate_with(key_from_seed(42i64), model_fn, context, GenerateConfig {
+  max_tokens: cast(512, i64),
   temperature: 0.8,
-  top_k: cast(50, int64),
+  top_k: cast(50, i64),
   top_p: 0.95
 })
 ```
@@ -706,16 +724,17 @@ Internals:
   polymorphic: `KVCache[a]`.
 - `generate` runs the autoregressive loop: call the model with cached KV, get logits for
   the next position, sample or argmax, append to the sequence, update the cache.
-- Sampling: `sample_token(logits, temperature, top_k, top_p)` applies temperature
+- Sampling: `sample_next_tokens(k, logits, config)` applies temperature
   scaling, top-k filtering (via `sort`), top-p (nucleus) filtering (via suffix-mass on
-  sorted probabilities), and categorical sampling (`Random` effect).
+  sorted probabilities), and categorical sampling with an explicit key.
 - The model function signature:
-  `(input_ids: tensor[batch, seq, int64], cache: Option[KVCache[p]]) -> (logits: tensor[batch, vocab, f32], new_cache: KVCache[p])`.
+  `(input_ids: tensor[batch, seq, i64], cache: Option[KVCache[p]]) -> (logits: tensor[batch, vocab, f32], new_cache: KVCache[p])`.
 
-Effects: the shipped `generate` helper is the pure greedy surface. The more general
-`generate_with` helper currently carries `Random` because effect tracking is static at
-the function boundary, even when a runtime config sets `temperature = 0`; call sampled
-generation under `with seed(...)`.
+The greedy `generate` helper needs no key. At the explicit-key School release,
+sampled `generate_with` receives a key and splits it for each sampling step;
+the key is consumed even when a runtime config chooses greedy output. The
+sampled-noise helper accepts exact supplied uniform values so tests can check
+token selection independently of the generator.
 
 ### Std.Optim (expansion)
 
@@ -746,8 +765,8 @@ import Std.Schedule
 lr = cosine_with_warmup(
   step,
   CosineWarmupConfig {
-    warmup_steps: cast(1000, int64),
-    total_steps: cast(100000, int64),
+    warmup_steps: cast(1000, i64),
+    total_steps: cast(100000, i64),
     min_lr: 1e-6,
     max_lr: 3e-4
   }
@@ -757,7 +776,7 @@ lr = cosine_with_warmup(
 lr = linear_warmup(
   step,
   LinearWarmupConfig {
-    warmup_steps: cast(1000, int64),
+    warmup_steps: cast(1000, i64),
     target_lr: 3e-4
   }
 )
@@ -768,7 +787,7 @@ lr = step_decay(
   StepDecayConfig {
     initial_lr: 3e-4,
     decay_factor: 0.1,
-    decay_steps: [cast(30000, int64), cast(60000, int64)]
+    decay_steps: [cast(30000, i64), cast(60000, i64)]
   }
 )
 ```
@@ -797,7 +816,8 @@ these are host-value computations (Time, Decimal, Schedule) and tensor computati
 - Decimal: banker's rounding matches expected behavior
 - Decimal: division with explicit rounding mode
 - Generate: greedy generation produces correct tokens for a trivial model
-- Generate: temperature sampling with seed produces reproducible output
+- Generate: temperature sampling with the same key produces reproducible output;
+  a second use of that key is rejected
 - Generate: positional record-constructor misuse is rejected in package mode
 - AdamW: zero-gradient decay still updates parameters via decoupled weight decay
 - LAMB: trust-ratio update produces the expected tensor output on a fixed probe case
@@ -980,7 +1000,7 @@ tag push. Release history:
         emit real C definitions and link cleanly.
         (Superseded — the four `Std.Tensor.Reduce` wrappers were later
         REMOVED in chelis#333: they were bodyless sigs taking a runtime
-        `int32` axis but the `*_reduce` builtins require a const axis, so
+        `i32` axis but the `*_reduce` builtins require a const axis, so
         they were unimplementable as declared and never had a runtime
         function. Consumers call `min_reduce`/`prod_reduce`/`argmax_reduce`/
         `argmin_reduce` directly with a const axis. `Std.Nn.Linear.forward`
@@ -1094,7 +1114,7 @@ adjoint tier.
 | Module | Contents | Key Dependencies |
 |---|---|---|
 | `Nautilus.Special` | `erf`, `erfinv`, `log_gamma`, `digamma`, `beta`, `lbeta`. Required by Distributions. | scalar math |
-| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling. `normal_like` is Box-Muller inside this module. | `Nautilus.Special`, `Random` effect |
+| `Nautilus.Distributions` | Normal, LogNormal, Uniform, Student-t, Chi-squared, Exponential, Gamma — PDF, CDF, inverse CDF, sampling. `normal_like` is Box-Muller inside this module. | `Nautilus.Special`, explicit keys for sampling |
 | `Nautilus.LinAlg` | SVD, PCA, eigendecomposition, Cholesky, QR, LU, solve, inverse, determinant. nalgebra-backed with hand-written adjoint rules for AD. | runtime nalgebra FFI, adjoint registry |
 
 #### P1
@@ -1110,7 +1130,7 @@ adjoint tier.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Uses `Random` effect. | `Nautilus.ODE`, `Random`, cumsum |
+| `Nautilus.SDE` | SDE solvers (Euler-Maruyama, Milstein). Stochastic steps consume explicit keys. | `Nautilus.ODE`, keyed draws, cumsum |
 | `Nautilus.Integrate` | Numerical integration (trapezoidal, Simpson's, Gaussian quadrature) | fold, scalar math |
 | `Nautilus.Interpolation` | Linear, cubic, spline interpolation | sort, gather |
 | `Nautilus.Testing` | Hypothesis testing, confidence intervals, p-values | `Nautilus.Distributions`, `Nautilus.Stats` |
@@ -1129,8 +1149,9 @@ adjoint tier.
   `cholesky`, `solve`, `qr`, `eig` on non-degenerate inputs
 - **AD composition:** `grad` through `Nautilus.ODE.rk4`, `Nautilus.Optim.solve_qp`,
   `Nautilus.Interpolation.cubic`
-- **Effect propagation:** `Nautilus.Distributions.sample` propagates `Random`;
-  `Nautilus.Signal` stub propagates correct effect annotations
+- **Key discipline:** each sampler consumes its key once, splits keys for independent
+  draws, and has a supplied-noise helper for deterministic value tests;
+  `Nautilus.Signal` stub propagates its actual effect annotations
 - **Package gate:** `chelis reef build` produces a valid `.chb`, consumer imports and
   type-checks
 
@@ -1184,7 +1205,7 @@ A DataFrame is `Dict[String, Column]` where:
 
 ```chelis
 type Column =
-  | IntCol(tensor[n, int64])
+  | IntCol(tensor[n, i64])
   | FloatCol(tensor[n, f32])
   | StringCol(List[String])
   | BoolCol(tensor[n, bool])
@@ -1337,10 +1358,10 @@ requires understanding the type system's extension points).
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, `Random` effect, cumsum |
-| `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, `Random` effect |
+| `Shoals.Pricing` | Black-Scholes analytical, Heston semi-analytical, SABR calibration, Monte Carlo engines with variance reduction. Greeks via `grad` for free — write the pricing function, `grad(price, wrt=(spot, vol, rate))` gives delta/vega/rho automatically. | `Nautilus.Distributions`, `Nautilus.SDE`, explicit keys, cumsum |
+| `Shoals.Risk` | VaR (parametric, historical, Monte Carlo), CVaR/expected shortfall, stress testing, scenario generation | `Nautilus.Stats`, sort/quantile, explicit keys |
 | `Shoals.Curves` | Yield curve construction (bootstrap from market instruments), interpolation (linear, cubic, Nelson-Siegel), day count conventions (ACT/360, ACT/365, 30/360) | `Nautilus.Interpolation`, `Nautilus.Roots`, `Std.Time` |
-| `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, `Random`, cumsum, einsum |
+| `Shoals.Stochastic` | SDE models: GBM, Heston, SABR, jump-diffusion. Path generation using cumsum + `Nautilus.SDE`. Variance reduction (antithetic, control variates). | `Nautilus.SDE`, explicit keys, cumsum, einsum |
 | `Shoals.Orderbook` | Limit order book representation (price-priority sorted collections), matching logic, bid/ask spread computation, VWAP | Host-side collections, sort, `Std.Decimal` |
 
 ### What Makes This Work in Chelis
@@ -1348,15 +1369,16 @@ requires understanding the type system's extension points).
 - **Greeks for free:** `grad(black_scholes_price, wrt=(spot, vol, rate, T))` gives all
   four first-order Greeks in one backward pass. `vmap(grad(...))` gives per-instrument
   Greeks for a portfolio. No bump-and-reprice, no finite differences.
-- **Reproducible Monte Carlo:** The `Random` effect with `withSeed` handlers means every
-  simulation is exactly reproducible. Two runs with the same seed produce identical
-  paths. This is a regulatory requirement.
+- **Reproducible Monte Carlo:** `key_from_seed` and key-first draws make a
+  simulation's random inputs explicit. Two runs with the same keys and declared
+  inputs produce identical paths under [05-RNG-1]. Split child keys for separate
+  paths and draws; this reproducibility is required for audit.
 - **Typed market data:** Named tensor dimensions like `tensor[instrument, scenario, f32]`
   prevent accidentally multiplying a `[portfolio, maturity]` matrix by a
   `[maturity, scenario]` matrix when the dimensions don't match.
-- **Effect-tracked data provenance:** A function that reads from a market data feed has
-  `IO` effect. A function using Monte Carlo has `Random` effect. The type system tracks
-  what each computation depends on.
+- **Data provenance:** A function that reads from a market data feed has an
+  `IO` effect. A Monte Carlo function receives its key as an ordinary typed
+  input, so its random dependency is visible in its signature.
 
 ### Test Plan
 
@@ -1373,18 +1395,17 @@ requires understanding the type system's extension points).
 - `Shoals.Stochastic`: GBM paths satisfy known statistical properties
   (mean = spot * exp(mu*T), variance matches theory)
 - `Shoals.Orderbook`: matching logic satisfies price-time priority invariant
-- Effect tracking: MC pricing propagates `Random`, curve construction propagates `IO`
-  for market data
-- Reproducibility: same seed produces identical prices across runs
-- Manifest: `chelis manifest --check` passes for every Shoals example program (all
-  Random ops covered by seed handlers)
+- Key discipline: MC pricing consumes its key once, and curve construction
+  propagates `IO` for market data
+- Reproducibility: identical keys and declared inputs produce identical prices
+- Manifest: once `chelis manifest` is implemented, it records random operations
+  and their explicit key roots for Shoals examples
 
-**Reproducibility manifests.** The `chelis manifest` command (compiler-side pass)
-extracts all `Random`-effect-annotated operations into a structured JSON report.
-`chelis manifest --check` is a CI gate: fail the build if any random operation in a
-Shoals program is unseeded. Status: **demo-blocking, scoped, ready to build.** Full
-design: `chelis_manifest_spec.md` (concrete CLI surface and JSON schema); historical
-context in `chelis_reproducibility_manifests.md`.
+**Reproducibility manifests.** `chelis_manifest_spec.md` specifies a planned
+`chelis manifest` command that follows random operations' explicit key derivations
+to a seed or entry argument and emits a structured report. It is not an existing
+Shoals CI gate. Historical context is in
+`archive/chelis_reproducibility_manifests.md`.
 
 **Canonical finance properties.** Shoals ships with a `properties/` directory of
 reference `@property` functions:
@@ -1495,8 +1516,9 @@ Full architectural spec: `chelis_octant_design.md`. Executable sub-phase contrac
   parser returns diagnostics naming the offending token — it must never
   silently drop to an empty `SymExpr`. This test lives inside the acceptance
   oracle, not only in loose unit tests.
-- Type-overlay rendering: named tensor dims appear as subscripts, `Random`/`IO`
-  effects produce correct markers, `grad(f, wrt=x)` renders as
+- Type-overlay rendering: named tensor dims appear as subscripts, `IO`
+  effects produce correct markers, explicit key parameters render as ordinary
+  inputs, and `grad(f, wrt=x)` renders as
   `\frac{\partial f}{\partial x}`.
 - Provenance completeness: a fuzz-style test generates ten varied in-scope
   expressions, lowers each, and asserts zero Deep nodes have missing or empty
@@ -1547,7 +1569,7 @@ Full design: `chelis_octant_design.md`. Sub-phase contract: `phase3n_octant.md`.
 
 | Module | Contents | Key Dependencies |
 |---|---|---|
-| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, `Random` effect), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
+| `Octant.Lower` (LLM-assisted path) | SDE notation → `Shoals.Stochastic` (discretization, time grid, noise strategy), Monte Carlo expectation → `Shoals.Pricing` (variance reduction, explicit keys), calibration → `Nautilus.Optim`, yield curve → `Shoals.Curves`. Boundary rule: if LaTeX specifies the *what* but not the *how*, the coding model fills in the *how*. | `Shoals.Stochastic`, `Shoals.Pricing`, `Shoals.Curves`, `Nautilus.Optim`, `Std.Time` |
 | `Octant.Render` (finance additions) | Greek pattern matches — `grad(price, wrt=spot) → \Delta`, `grad(price, wrt=vol) → \mathcal{V}`, `grad(price, wrt=rate) → \rho`, `grad(price, wrt=T) → \Theta`. Configurable variable-name conventions. | 3n render surface |
 | `Octant.Notebook` | Cell runtime — formula, parameter, execution, Greek cells. Not a Jupyter kernel. Cells produce Deep, execution runs compiled C, rendering is mathematical notation. UI layer (web / VS Code / Cove extension / standalone) is a separate implementation decision. | full 3n Octant surface |
 | `Octant.Provenance` (extension) | Same contract as 3n, applied to the new SDE / MC / calibration / curve node kinds. No Deep node produced by Octant lowering may be missing a span. | 3n provenance surface |
@@ -1655,7 +1677,7 @@ The refreshed skill should teach:
 
 - the shipped pipe-first Surf idiom from `3e`
 - effects, linearity, macros, `vmap`, and tuples
-- handler syntax (`withSeed`, `withDevice`)
+- supported effect handlers and explicit key inputs
 - scalar types (`Int`, `Float`, `Bool`) and operations
 - strings and string operations
 - collections (`List`, `Dict`) and functional iteration (`map`, `filter`, `fold`)
@@ -1687,27 +1709,23 @@ change — excluded or down-weighted for training). This is the labeling convent
 Phase 4a corpus-curation step relies on. Nautilus candidates for `stable`: all
 of `Nautilus.Special`, all of `Nautilus.Distributions` (pdf/cdf/inv_cdf). Candidates
 for `alpha`: `Nautilus.CurveFit`, `Nautilus.SDE` (APIs may shift when autonomous
-`Random` sampling lands). Apply the same convention to `Coral` and `Shoals` when they
+keyed sampling lands). Apply the same convention to `Coral` and `Shoals` when they
 ship.
 
-### Effect-Polymorphic Test Handlers
+### Supplied-Value Random Tests And Effect Handlers
 
-Document and standardize the pattern of replacing effects with test doubles:
+Document and standardize the two distinct patterns for test doubles:
 
-- `with seed(n) { ... }` replaces `Random` with deterministic output — already used
-  throughout Nautilus tests.
-- `with_deterministic_random(sequence) { ... }` — a test handler that returns values
-  from a fixed sequence instead of pseudorandom values. Useful for testing exact output
-  sequences.
+- A sampled function receives a key and delegates value-dependent work to a pure
+  helper that accepts sampled noise. Tests pass exact noise to that helper, while
+  same-key replay and split-child tests check the random boundary separately.
 - `with_mock_io(recorded_trace) { ... }` — a test handler for `IO` effect that returns
   recorded data instead of reading files.
 - `with_cpu_fallback { ... }` — a test handler for `Resource(GPU)` that routes all GPU
   allocations to CPU.
 
-The effect system guarantees these substitutions are type-safe: a program's behavior is
-identical modulo the handled effects (by LaCaDiLE Theorem 3, effect correctness). This
-gives property-based testing where the test harness is provably faithful to the
-production semantics.
+The supplied-noise helper is ordinary pure function composition. Effect-handler
+substitutions remain governed by the actual effects they handle.
 
 Implementation: standard library functions in `Std.Test` (or documented patterns in the
 SKILL.md if the functions are trivial). Not a compiler change — library code plus
@@ -1796,8 +1814,8 @@ Before calling Phase 3 healthy enough to continue, red-team these concrete surfa
 
 - no active docs or build/test paths still rely on `chelis_runtime.c`
 - generated host C no longer peeks into non-tensor runtime struct fields
-- runtime discovery failures clearly mention `libchelis_runtime.a` and
-  `CHELIS_RUNTIME_DIR`
+- `chelis build` stages only the runtime the CLI carries and rejects a set
+  `CHELIS_RUNTIME_DIR` (`spec/08-backends.md` §2.1)
 - mixed-program compiled execution matches `chelis eval` on both C and HIP paths
 
 **Data loading/tokenization (`3g`):**
@@ -1816,9 +1834,9 @@ since moved to `School.*` in chelis-std 0.4.0; `Std.Time` / `Std.Decimal` stayed
 
 - `Std.Time` and `Std.Decimal` stay standard-library scoped rather than leaking
   compiler-intrinsic assumptions
-- `Std.Nn.Generate` keeps the pure greedy path (`generate`) distinct from the seeded
+- generation keeps the pure greedy path (`generate`) distinct from the keyed
   sampled path (`generate_with`)
-- temperature + top-k + top-p sampling with seed is reproducible
+- temperature + top-k + top-p sampling replays across runs with the same initial key
 - decoupled AdamW weight decay remains observable even with zero gradients
 - cosine_with_warmup matches expected edge points
 - at least one pure package-mode 3i program builds to C, links, runs, and matches

@@ -45,6 +45,9 @@
 //! the flip was ONLY by deleting the `#[ignore]` attribute; the assertions
 //! never weakened. The full corpus runs in the default suite. A new hole
 //! EXTENDS the census and gets filed - it does not edit this set silently.
+//! chelis#2413 retired `with seed`: its body cell became the unsuffixed
+//! `key_from_seed` seed cell, and the `with device` cell carries the
+//! handle-effect body lock that the suffixed `with seed` sibling did.
 //!
 //! chelis#710 filed FOUR forms, not two. Phase 1 closed forms 1-3 (the two
 //! named above plus a `(t-prim {} bogus_dtype)` cast target, covered by
@@ -62,10 +65,10 @@ use chelis_types::{CheckedProgram, InferResult};
 
 const WELL_TYPED: &str = "add(cast(1.0, f32), cast(2.0, f32))";
 /// Same ill-typed expression the chelis#709 canary uses.
-const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, int64))";
+const MASKED_ERROR: &str = "add(cast(1.0, f32), cast(2, i64))";
 
 /// Mirror of `should_attach_type_metadata`'s exclusion list
-/// (crates/chelis-types/src/infer.rs). A List node whose tag is NOT in
+/// (crates/chelis-types/src/infer.rs). A node whose tag is NOT in
 /// this set gets a `type:` stamp during annotation unless its type
 /// inferred to `Type::Error`. If that list changes, this mirror must
 /// change in the same PR (the control corpus goes red otherwise, which
@@ -116,22 +119,15 @@ const NON_TYPE_STAMPED_TAGS: &[&str] = &[
     "d-lit",
 ];
 
-fn tag_of(list: &deep::List) -> Option<&str> {
-    match list.elements.first() {
-        Some(deep::Expr::Atom(deep::Atom::Name(s), _)) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
 /// The `(t-var {} _)` shape `type_to_deep_expr` produces for `Type::Error`.
 fn is_error_type_stamp(expr: &deep::Expr) -> bool {
-    let deep::Expr::List(list, _) = expr else {
+    let deep::Expr::Node(node, _) = expr else {
         return false;
     };
-    tag_of(list) == Some("t-var")
+    node.tag().as_str() == "t-var"
         && matches!(
-            list.elements.get(2),
-            Some(deep::Expr::Atom(deep::Atom::Name(s), _)) if s == "_"
+            node.children_slice(),
+            [deep::Expr::Atom(deep::Atom::Name(s), _)] if s == "_"
         )
 }
 
@@ -148,57 +144,74 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
-            for (key, value) in &map.entries {
-                if key == "type" {
-                    continue;
+            map.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}.{}", key.spelling()),
+                        check_stamp,
+                        out,
+                    );
                 }
-                collect_tree_traces(value, &format!("{path}.{key}"), check_stamp, out);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
             collect_tree_traces(&meta.expr, path, check_stamp, out);
-            for (key, value) in &meta.entries {
-                if key == "type" {
-                    continue;
+            meta.metadata.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}.{}", key.spelling()),
+                        check_stamp,
+                        out,
+                    );
                 }
-                collect_tree_traces(value, &format!("{path}.{key}"), check_stamp, out);
-            }
+            });
         }
-        deep::Expr::List(list, _) => {
-            let tag = tag_of(list);
-            if check_stamp
-                && let (Some(tag), Some(deep::Expr::Map(meta, _))) = (tag, list.elements.get(1))
-                && !NON_TYPE_STAMPED_TAGS.contains(&tag)
-            {
-                match meta.entries.iter().find(|(key, _)| key == "type") {
+        deep::Expr::Node(node, _) => {
+            let tag = node.tag().as_str();
+            let meta = node.meta();
+            if check_stamp && !NON_TYPE_STAMPED_TAGS.contains(&tag) {
+                match meta.ty() {
                     None => out.push(format!(
                         "{path}/{tag}: stamp-eligible node with no `type:` stamp \
                          (a silent Type::Error verdict)"
                     )),
-                    Some((_, value)) if is_error_type_stamp(value) => out.push(format!(
+                    Some(value) if is_error_type_stamp(value.expression()) => out.push(format!(
                         "{path}/{tag}: `type:` stamp is `(t-var {{}} _)` \
                          (the Type::Error encoding)"
                     )),
                     Some(_) => {}
                 }
             }
-            let label = tag.unwrap_or("<untagged>");
-            let child_check = tag != Some("params");
-            for (index, element) in list.elements.iter().enumerate() {
+            // Paths keep the written-form indices: the metadata map is
+            // element 1 and child `i` is element `i + 2`.
+            let child_check = tag != "params";
+            meta.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}/{tag}[1].{}", key.spelling()),
+                        child_check,
+                        out,
+                    );
+                }
+            });
+            for (index, child) in node.children_slice().iter().enumerate() {
                 collect_tree_traces(
-                    element,
-                    &format!("{path}/{label}[{index}]"),
+                    child,
+                    &format!("{path}/{tag}[{}]", index + 2),
                     child_check,
                     out,
                 );
             }
         }
-        // Bridge: reconstruct List so type-stamp checking works unchanged (#908)
-        deep::Expr::Node(node, span) => {
-            let bridged = deep::Expr::List(node.to_list(*span), *span);
-            collect_tree_traces(&bridged, path, check_stamp, out);
+        deep::Expr::BareList(elements, _) => {
+            for (index, element) in elements.iter().enumerate() {
+                collect_tree_traces(element, &format!("{path}/<untagged>[{index}]"), true, out);
+            }
         }
-        deep::Expr::BareList(_, _) | deep::Expr::UnknownForm(_) => {}
+        deep::Expr::UnknownForm(_) => {}
     }
 }
 
@@ -349,7 +362,8 @@ fn assert_reports_errors(name: &str, exprs: &[deep::Expr]) {
 fn surf_to_deep(source: &str) -> Vec<deep::Expr> {
     let decls = chelis_surf::parser::parse_str(source).expect("control/hole Surf must parse");
     assert!(!decls.is_empty(), "program must have declarations");
-    let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
+    let deep_exprs =
+        chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
     chelis_macros::expand_program(&deep_exprs, &chelis_macros::ExpansionOptions::default())
         .expect("macro expansion must succeed")
         .into_exprs()
@@ -445,7 +459,7 @@ fn control_wellformed_dp_checks_clean_and_total() {
         ),
         (
             "def_with_body",
-            "(module {} m.main (def {} answer (lit {type: (t-prim {} int32)} 7)))",
+            "(module {} m.main (def {} answer (lit {type: (t-prim {} i32)} 7)))",
         ),
     ];
     for (name, program) in cases {
@@ -478,32 +492,24 @@ fn control_reported_errors_keep_the_invariant_vacuous() {
 // The four known holes: red today, flip by un-ignoring after Phase 1.
 // ===========================================================================
 
-/// chelis#709 hole 1 (closed by chelis#731 Phase 1): the `with seed` body used
-/// to type as a silent Type::Error (no `handle-effect` case in infer.rs). The
-/// handle-effect case now checks the body, so its error is reported and the
-/// invariant holds (verdict Reported, no silent Error).
+/// The unsuffixed seed of the retired `with seed` body cell, in key form: an
+/// unsuffixed `key_from_seed` seed is an i32, and its diagnostic is reported
+/// (verdict Reported, no silent Error).
 #[test]
-fn totality_holds_for_with_seed_body() {
-    let program = format!("def f() -> f32 = with seed(42) {{ {MASKED_ERROR} }}\n");
-    assert_totality("with_seed_body", &surf_to_deep(&program));
+fn totality_holds_for_an_unsuffixed_key_seed() {
+    assert_totality(
+        "unsuffixed_key_seed",
+        &surf_to_deep("def f() -> key = key_from_seed(42)\n"),
+    );
 }
 
-/// chelis#731 red team F3: the cell above uses an UNSUFFIXED seed, so its
-/// suffix diagnostic alone satisfies [04-TOT-2] (verdict Reported) even if the
-/// BODY check regressed - the cell is vacuous w.r.t. the handle-effect body
-/// fix. This sibling uses a SUFFIXED seed (`42i64`), so the seed pushes no
-/// diagnostic and the ONLY thing that can make the funnel report is the body's
-/// masked error. If the body check ever silently exempts again, this cell trips
-/// (the handle-effect node carries a silent Type::Error under an empty error
-/// vector). The original cell stays untouched per B2.1.
-#[test]
-fn totality_holds_for_with_seed_suffixed_body_locks_body_check() {
-    let program = format!("def f() -> f32 = with seed(42i64) {{ {MASKED_ERROR} }}\n");
-    assert_totality("with_seed_suffixed_body", &surf_to_deep(&program));
-}
-
-/// chelis#709 hole 2 (closed by chelis#731 Phase 1): same mechanism through
-/// `with device`; the device body is now checked.
+/// chelis#709 hole 2 (closed by chelis#731 Phase 1): the `with device` body
+/// used to type as a silent Type::Error (no `handle-effect` case in infer.rs);
+/// the device body is now checked. The handler expression `"gpu:0"` pushes no
+/// diagnostic, so the ONLY thing that can make the funnel report is the body's
+/// masked error: if the body check ever silently exempts again, this cell trips
+/// (chelis#731 red team F3's lock, carried by this cell since chelis#2413
+/// retired its `with seed(42i64)` sibling).
 #[test]
 fn totality_holds_for_with_device_body() {
     let program = format!("def f() -> f32 = with device(\"gpu:0\") {{ {MASKED_ERROR} }}\n");

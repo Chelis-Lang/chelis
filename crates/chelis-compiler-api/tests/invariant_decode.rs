@@ -10,6 +10,9 @@
 //!
 //! Run: `cargo nextest run -p chelis-compiler-api --test invariant_decode`.
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
 use chelis_compiler_api::compiler::eval;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_compiler_api::{DecodeError, RuntimeValue, decode_adt_value, try_decode_adt_value};
@@ -49,7 +52,7 @@ def wrap(x: f32, w: f32) -> Pair = Pair { prob: make(x), weight: w }
 /// declarations supply the field tables and invariants).
 fn program_exprs(source: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 /// Evaluate `source` and return the `ExecutionValue` bound to top-level
@@ -71,33 +74,20 @@ fn eval_result_value(source: &str) -> ExecutionValue {
 
 /// Structural equality over `ExecutionValue` with EXACT scalar comparison
 /// (bit-identical floats; no tolerance). `ExecutionValue` does not derive
-/// `PartialEq` because it carries `f64`, so the comparison is explicit and
-/// the float equality is deliberately strict (this is a round-trip check,
-/// not a numeric-agreement check).
+/// `PartialEq`; its canonical stored-bit codec makes the comparison exact
+/// even for signed zero, NaN payloads and i64 values above 2^53.
 fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
     use ExecutionValue::*;
     match (a, b) {
-        (Int8 { value: x }, Int8 { value: y }) => x == y,
-        (Int16 { value: x }, Int16 { value: y }) => x == y,
-        (Int32 { value: x }, Int32 { value: y }) => x == y,
-        (Int64 { value: x }, Int64 { value: y }) => x == y,
-        (Float16 { value: x }, Float16 { value: y })
-        | (Bfloat16 { value: x }, Bfloat16 { value: y }) => x.to_bits() == y.to_bits(),
-        (Float32 { value: x }, Float32 { value: y }) => x.to_bits() == y.to_bits(),
-        // Bit-identical float compare: `to_bits` so a NaN payload would
-        // compare equal to itself, and -0.0 is distinguished from 0.0.
-        (Float64 { value: x }, Float64 { value: y }) => x.to_bits() == y.to_bits(),
+        (Scalar { value: x }, Scalar { value: y }) => {
+            serde_json::to_value(x).unwrap() == serde_json::to_value(y).unwrap()
+        }
         (Bool { value: x }, Bool { value: y }) => x == y,
         (String { value: x }, String { value: y }) => x == y,
         (Unit, Unit) => true,
         (Tensor { value: x }, Tensor { value: y }) => {
             x.shape == y.shape
-                && x.data.len() == y.data.len()
-                && x.data
-                    .to_f64_lossy_vec()
-                    .iter()
-                    .zip(y.data.to_f64_lossy_vec())
-                    .all(|(l, r)| l.to_bits() == r.to_bits())
+                && serde_json::to_value(&x.data).unwrap() == serde_json::to_value(&y.data).unwrap()
         }
         (List { value: x }, List { value: y }) | (Tuple { value: x }, Tuple { value: y }) => {
             x.len() == y.len()
@@ -275,7 +265,7 @@ fn wrong_constructor_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "NotAProbability".to_string(),
-        fields: vec![ExecutionValue::Float32 { value: 0.3 }],
+        fields: vec![wire_values::scalar_f32(0.3)],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("unknown ctor rejected");
     assert!(
@@ -300,10 +290,7 @@ fn extra_field_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![
-            ExecutionValue::Float32 { value: 0.3 },
-            ExecutionValue::Float32 { value: 0.4 },
-        ],
+        fields: vec![wire_values::scalar_f32(0.3), wire_values::scalar_f32(0.4)],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("extra field rejected");
     assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -316,7 +303,10 @@ fn wrong_scalar_type_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Int64 { value: 0 }],
+        fields: vec![wire_values::scalar_integer(
+            chelis_types::types::Prim::Int64,
+            0,
+        )],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("int into float field rejected");
     assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -332,7 +322,10 @@ fn structural_and_invariant_message_prefixes_distinguish() {
         &exprs,
         &ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Int64 { value: 0 }],
+            fields: vec![wire_values::scalar_integer(
+                chelis_types::types::Prim::Int64,
+                0,
+            )],
         },
     )
     .expect_err("structural");
@@ -382,9 +375,9 @@ fn nested_inner_violating_rejected_naming_inner_type() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float32 { value: 1.5 }],
+                fields: vec![wire_values::scalar_f32(1.5)],
             },
-            ExecutionValue::Float32 { value: 2.0 },
+            wire_values::scalar_f32(2.0),
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload)
@@ -410,9 +403,9 @@ fn nested_inner_nan_rejected_fail_closed() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float32 { value: f32::NAN }],
+                fields: vec![wire_values::scalar_f32(f32::NAN)],
             },
-            ExecutionValue::Float32 { value: 2.0 },
+            wire_values::scalar_f32(2.0),
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("inner NaN rejected");
@@ -444,7 +437,7 @@ fn rejected_decode_yields_no_value() {
         },
         ExecutionValue::Adt {
             ctor: "Nope".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.3 }],
+            fields: vec![wire_values::scalar_f32(0.3)],
         },
     ];
     for payload in &rejecting {
@@ -459,9 +452,7 @@ fn rejected_decode_yields_no_value() {
 fn prob_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Float32 {
-            value: value as f32,
-        }],
+        fields: vec![wire_values::scalar_f32(value as f32)],
     }
 }
 
@@ -490,9 +481,7 @@ def make(x: f32) -> Tol = Tol { value: x }
 fn tol_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Tol".to_string(),
-        fields: vec![ExecutionValue::Float32 {
-            value: value as f32,
-        }],
+        fields: vec![wire_values::scalar_f32(value as f32)],
     }
 }
 
@@ -729,52 +718,20 @@ const PROBABILITY_DEEP_WELL_FORMED_INVARIANT: &str = r#"
 
 #[test]
 fn malformed_invariant_metadata_fails_closed_at_decode() {
-    // FINDING 2 (red test): the deftype declares an `invariant` whose
-    // metadata is a bare literal, NOT the `(fn {} (params {} <binder>)
-    // <body>)` shape. A structurally-valid payload (`value: 0.3`, which a
-    // well-formed `[0, 1]` invariant would happily accept) must STILL be
-    // rejected -- the predicate cannot be evaluated, so the value cannot be
-    // safely materialized (spec/10 §4.1, fail-closed).
-    //
-    // Before the fix this WRONGLY returns Ok: the collector skipped the
-    // malformed metadata, leaving `Probability` with no table entry, so
-    // `revalidate_adt_value` treated it as invariant-free and decoded the
-    // payload with zero check (a fail-OPEN soundness hole).
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
-    let err = try_decode_adt_value(&exprs, &prob_payload(0.3)).expect_err(
-        "a malformed declared invariant must fail closed: a structurally-valid \
-         payload cannot be safely materialized without a usable predicate",
-    );
-    match err {
-        DecodeError::Invariant(msg) => {
-            assert!(
-                msg.contains("malformed"),
-                "names the malformed-metadata rejection: {msg}"
-            );
-            assert!(
-                msg.contains("Probability"),
-                "names the declaring opaque type: {msg}"
-            );
-        }
-        other => panic!(
-            "a malformed declared invariant is an invariant-class (fail-closed) \
-             decode failure, not a structural one, got {other:?}"
-        ),
-    }
+    let error = chelis_deep::parser::parse_str(PROBABILITY_DEEP_MALFORMED_INVARIANT)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invariant"), "{error}");
 }
 
 #[test]
 fn malformed_invariant_rejects_every_payload_no_pass_through() {
-    // Parity: the malformed invariant must reject across the board (no value
-    // can be materialized), not just one probe. This pins that the fix is a
-    // categorical fail-closed, not a value-dependent fluke.
-    let exprs = program_exprs_deep(PROBABILITY_DEEP_MALFORMED_INVARIANT);
-    for v in [0.0_f64, 0.5_f64, 1.0_f64, -0.5_f64, 1.5_f64] {
-        assert!(
-            try_decode_adt_value(&exprs, &prob_payload(v)).is_err(),
-            "malformed invariant must reject payload {v} (fail-closed, never a \
-             pass-through decode)"
-        );
+    for value in [0.0_f64, 0.5, 1.0, -0.5, 1.5] {
+        let bad = serde_json::json!({"entries": [["invariant", chelis_deep::Expr::Atom(chelis_deep::Atom::Float(value), chelis_deep::Span::new(0, 0))]]});
+        let error = serde_json::from_value::<chelis_deep::Metadata>(bad)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invariant"));
     }
 }
 

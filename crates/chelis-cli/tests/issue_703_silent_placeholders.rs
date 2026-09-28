@@ -213,15 +213,15 @@ fn scalar_sqrt_and_exp_are_correct() {
 fn sin_and_exp_on_integer_tensors_are_rejected() {
     for op in ["sin", "exp"] {
         let program = format!(
-            "def run(x: tensor[4, int32]) -> tensor[4, int32] = {op}(x)\n\
-             out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-             cast(4, int32)]))\n"
+            "def run(x: tensor[4, i32]) -> tensor[4, i32] = {op}(x)\n\
+             out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+             cast(4, i32)]))\n"
         );
         let err = build_and_run_c(&program, &format!("reject_{op}"))
-            .expect_err(&format!("`{op}` on an int32 tensor must be rejected"));
+            .expect_err(&format!("`{op}` on an i32 tensor must be rejected"));
         assert!(
             err.contains("recision") || err.contains("recisionMismatch"),
-            "`{op}` on an int32 tensor must be rejected with a precision \
+            "`{op}` on an i32 tensor must be rejected with a precision \
              diagnostic; got: {err}"
         );
     }
@@ -300,9 +300,9 @@ fn assert_int_tensor_transcendental_not_zeroed(op: &str, name: &str) {
         return;
     }
     let program = format!(
-        "def run(x: tensor[4, int32]) -> tensor[4, int32] = {op}(x)\n\
-         out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
-         cast(4, int32)]))\n"
+        "def run(x: tensor[4, i32]) -> tensor[4, i32] = {op}(x)\n\
+         out = run(to_tensor([cast(1, i32), cast(2, i32), cast(3, i32), \
+         cast(4, i32)]))\n"
     );
     match build_and_run_c(&program, name) {
         // Rejection is the correct outcome for cos/tan/atan (matching sin/exp).
@@ -310,7 +310,7 @@ fn assert_int_tensor_transcendental_not_zeroed(op: &str, name: &str) {
         Ok((_, stdout)) => {
             assert!(
                 !stdout.contains("[0.0, 0.0, 0.0, 0.0]"),
-                "`{op}` on an int32 tensor built successfully and returned all \
+                "`{op}` on an i32 tensor built successfully and returned all \
                  zeros. lower_transcendental's non-float branch emits \
                  `RiscOp::Const {{ value: 0.0 }}` with the operand dropped and \
                  raises no error. Its siblings `sin`/`exp` are correctly \
@@ -364,8 +364,8 @@ fn tensor_scan_does_not_silently_compile_to_a_stub() {
         return;
     }
     let program = "def gen() -> tensor[5, f32] = \
-                   tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), \
-                   cast(5, int64))\n\
+                   tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), \
+                   cast(5, i64))\n\
                    out = gen()\n";
     match build_and_run_c(program, "tscan") {
         // A clean rejection is exactly what the guard was written to produce,
@@ -394,7 +394,7 @@ fn tensor_scan_is_correct_in_the_eval_lane() {
     let got = eval_first_line(
         "module M.Main\n\
          def gen() -> tensor[5, f32] = \
-         tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+         tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
          out = print(to_list(gen()))\n",
     )
     .expect("tensor_scan should evaluate");
@@ -432,7 +432,7 @@ fn no_build_ever_emits_a_silent_unsupported_builtin_stub() {
     let cases: &[(&str, &str)] = &[
         (
             "bitwise_682",
-            "def f() -> int64 = bitand(cast(12, int64), cast(10, int64))\nout = f()\n",
+            "def f() -> i64 = bitand(cast(12, i64), cast(10, i64))\nout = f()\n",
         ),
         (
             "scalar_relu_704",
@@ -441,7 +441,7 @@ fn no_build_ever_emits_a_silent_unsupported_builtin_stub() {
         (
             "tensor_scan_705",
             "def gen() -> tensor[5, f32] = \
-             tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
+             tensor_scan(0.0, fn (prev: f32, i: i64) -> add(prev, 1.0), cast(5, i64))\n\
              out = gen()\n",
         ),
     ];

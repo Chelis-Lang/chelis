@@ -6,14 +6,15 @@
 use std::collections::BTreeMap;
 
 use chelis_ir::dag::{
-    DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    ComparisonKind, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedStepOp,
+    LogicalKind, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
-    HipStorageLane, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
+    HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{ElementRef, ScalarValue};
+use chelis_types::{ElementRef, NumericTrap, ScalarValue};
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
@@ -70,19 +71,19 @@ fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// chelis#616: the HIP lane only supports Load-declared symbolic dims; an
-/// op-declared dim implies a node-valued movement bound or runtime reshape
-/// target, which `reject_unsupported_hip_ops` rejects before codegen. This
-/// panic is a defensive backstop against a seam bypass.
+/// The input tensor axis a HIP prologue declaration reads.
+///
+/// The HIP lane only supports extents the function entry supplies, and since
+/// chelis#665 that is the only thing a [`chelis_ir::dag::SymbolicDimSource`]
+/// can be: `symbolic_bindings_interface` mints an occurrence from a class
+/// member that resolves to an input tensor's axis and from nothing else. A
+/// node-valued movement bound or runtime reshape target reaches no
+/// occurrence at all, and `reject_unsupported_hip_ops` still refuses it
+/// before codegen. This function used to carry a defensive `panic!` arm for
+/// a variant that no longer exists.
 fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
-    match &occurrence.source {
-        chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } => (input_label, *axis),
-        chelis_ir::dag::SymbolicDimSource::OpDeclared { node, .. } => panic!(
-            "HIP backend reached an op-declared runtime dim `{}` (declared by node {}); \
-             reject_unsupported_hip_ops must reject it before codegen (chelis#616)",
-            occurrence.name, node.0
-        ),
-    }
+    let chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } = &occurrence.source;
+    (input_label, *axis)
 }
 
 fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
@@ -119,6 +120,39 @@ pub struct HipEmitter {
     /// Device entrypoints pre-allocate slot storage because borrowed input-backed views
     /// are not the first owners in the host memory plan.
     device_entrypoint_mode: bool,
+    /// Shared specialization for every kernel and its launch arguments.
+    kernel_rank: usize,
+    /// The emission-time key of each rank-0 key derivation, by node. One
+    /// entry point's walk is one activation, so [`Self::begin_activation`]
+    /// resets it per entry.
+    draw_keys: BTreeMap<NodeId, chelis_types::RandomKey>,
+    /// The activation gate of the checking node being emitted, until its
+    /// kernel launch consumes it ([`Self::activation_gate`]).
+    gate: Option<HipActivationGate>,
+    /// Per node id, whether it checks nothing where its activation is false
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]), from one seed
+    /// query over the graph.
+    activation_gated: Vec<bool>,
+    /// Per node id, whether its declared extent rests on a claim checked
+    /// under its activation ([`chelis_ir::dag::TrapSeeds::is_claim_sized`]),
+    /// which this lane has no zero value for.
+    claim_sized: Vec<bool>,
+}
+
+/// How a checking node under an activation (spec/10 section 3.2) reads it:
+/// where the activation is false the node computes but checks nothing, so
+/// its kernel reads each operand through a [`kernels::OperandGate`]. The
+/// checked set is [`DagNode::inactive_operand`]'s, the one the evaluator
+/// and the C lane substitute from.
+#[derive(Debug, Clone)]
+struct HipActivationGate {
+    /// The node's activation, a bool tensor.
+    activation: NodeId,
+    /// Whether the activation indexes the node's output rows (its rank is
+    /// at most the node's); otherwise an element is active when any row is.
+    per_row: bool,
+    /// Each operand slot's value where the element is inactive.
+    operands: kernels::OperandGate,
 }
 
 #[derive(Debug, Clone)]
@@ -143,13 +177,6 @@ struct MatmulEmitSpec {
     /// destructure-`..` F1 footgun (silent `hipblasSgemm` regardless
     /// of accumulator) cannot recur for bf16/f16 in this cycle.
     accumulator: Prim,
-}
-
-struct StridedBatchedMatmulPlan {
-    batch_count_expr: String,
-    a_batch_stride: usize,
-    b_batch_stride: usize,
-    out_batch_stride: usize,
 }
 
 /// Selected matmul-dispatch wrapper. Determined by the
@@ -212,41 +239,240 @@ impl HipEmitter {
         }
     }
 
-    /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
-    /// integer `abs` out of that float-only template until Phase 3 supplies
-    /// the typed, trapping backend kernel (chelis#699).
+    /// Integer abs remains a materialized checking node during fusion.
+    /// Refuse externally supplied fused IR until its per-step traps have
+    /// a device implementation; direct nodes use the exact integer kernel.
     fn reject_integer_abs(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-        if let Some(node) = dag.first_integer_abs_node() {
+        if let Some(node) = dag.first_fused_integer_abs_node() {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("an integer tensor at HIP DAG node {}", node.0),
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
                     689,
-                    "integer abs code generation waits for the typed, trapping Phase 3 \
-                     kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+                    "fused integer abs requires per-step numeric traps; keep abs as a direct node"
                 ),
             ));
         }
         Ok(())
     }
 
-    fn reject_count(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-        if let Some(node) = dag
-            .nodes()
+    /// The activation gate of `node` (spec/10 section 3.2), as the C lane's
+    /// `emit_activation_gate` derives it: a gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`]) whose operation checks its
+    /// operands' values reads every operand through the gate, taking
+    /// [`DagNode::inactive_operand`]'s value for its slot where the
+    /// activation is false. `None` for a node that is not gated, and for a
+    /// gated node whose check is not of every operand's values (an extent,
+    /// a bound, an empty axis, an abort's condition beside its fallback, a
+    /// claim-sized node's zero value), which this lane has no gate for:
+    /// [`Self::begin_node_gate`] refuses it.
+    fn activation_gate(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Option<HipActivationGate> {
+        if !self.activation_gated[node.id.0] || self.claim_sized[node.id.0] {
+            return None;
+        }
+        let activation = node.owner.activation?;
+        let inactive = (0..node.inputs.len())
+            .map(|slot| node.inactive_operand(slot))
+            .collect::<Option<Vec<_>>>()?;
+        let rank = dag
+            .get(activation)
+            .expect("verified activation")
+            .output_type
+            .dims
+            .len();
+        Some(HipActivationGate {
+            activation,
+            per_row: rank <= node.output_type.dims.len(),
+            operands: kernels::OperandGate { inactive },
+        })
+    }
+
+    /// The name of `name`'s kernel read through `gate`: each slot's
+    /// inactive value is part of the kernel's source, so it is part of its
+    /// name, and two gated kernels share a name only when they share it.
+    fn gated_kernel_name(name: String, gate: &kernels::OperandGate) -> String {
+        gate.inactive
             .iter()
-            .find(|node| matches!(node.op, RiscOp::Count { .. }))
-        {
-            return Err(Unsupported::new(
-                UnsupportedKind::Op("count".to_string()),
-                format!("the HIP kernel set (node {})", node.id.0),
-                Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
-                    1291,
-                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; \
-                     chelis#1291 owns the dedicated HIP/Metal kernels"
-                ),
+            .fold(format!("{name}_gated"), |name, value| {
+                format!("{name}_{}", value.to_string().replace('-', "m"))
+            })
+    }
+
+    /// A checking node under an activation whose HIP emitter reads its
+    /// operands without the activation gate: compiled, it would check where
+    /// its activation is false (spec/10 section 3.2), so it is refused.
+    fn ungated_check_unsupported(node: &DagNode, detail: &str) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+            format!(
+                "a checking operation under an activation at HIP DAG node {}: {detail}",
+                node.id.0
+            ),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2413,
+                "this HIP emitter has no activation gate, so it would check where the \
+                 activation is false (spec/10 section 3.2); use `--target c`"
+            ),
+        )
+    }
+
+    /// Set [`Self::gate`] for `node` before its emitter runs. A gated node
+    /// ([`chelis_ir::dag::TrapSeeds::is_activation_gated`], the one declaration every lane
+    /// reads) whose check this lane cannot gate by operand substitution is
+    /// refused here, so a newly gated kind compiles only once its HIP
+    /// emitter takes the gate.
+    fn begin_node_gate(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        self.gate = self.activation_gate(node, dag);
+        if self.activation_gated[node.id.0] && self.gate.is_none() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "HIP has no activation gate for this kind of check",
             ));
+        }
+        Ok(())
+    }
+
+    /// End `node`'s emission: its launch must have consumed the gate.
+    fn end_node_gate(&mut self, node: &DagNode) -> Result<(), Unsupported> {
+        match self.gate.take() {
+            Some(_) => Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP emitter reads its operands without the gate",
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Consume the node's gate at its launch: bind the activation's layout
+    /// (it may be a view, such as a call site's activation expanded to every
+    /// row), its element count and its row width beside the launch's other
+    /// metadata, and return the extra kernel arguments, empty for an ungated
+    /// launch.
+    fn emit_gate_launch_args(&mut self, id: usize) -> String {
+        let Some(gate) = self.gate.take() else {
+            return String::new();
+        };
+        let act = gate.activation.0;
+        self.emit_shape_vars(id, "act", act);
+        self.emit_stride_vars(id, "act", act);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_ndim = d_t{act}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_act_count = d_t{act}->count;"
+        ));
+        if gate.per_row {
+            self.line(&format!(
+                "chelis_device_metadata t{id}_act_row = t{id}_act_count > 0 ? t{id}_size / t{id}_act_count : 0;"
+            ));
+        } else {
+            self.line(&format!("chelis_device_metadata t{id}_act_row = 0;"));
+        }
+        format!(
+            ", &p_t{act}, {}, {}, &t{id}_act_ndim, &t{id}_act_count, &t{id}_act_row",
+            self.shape_arg_refs(id, "act"),
+            self.stride_arg_refs(id, "act"),
+        )
+    }
+
+    fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("count".to_string()),
+            format!("malformed Count at HIP DAG node {}: {detail}", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::deliberate_rejection!(
+                "[05-OP-29]",
+                "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
+                 list, and produces the complementary shape at i64"
+            ),
+        )
+    }
+
+    /// Defend the backend's first typed boundary even when a caller builds a
+    /// DAG directly and bypasses the canonical IR verifier. Ownership
+    /// verification proves the payload's linearity, not [05-OP-29]'s operand
+    /// grammar, so the emitter re-checks the Count contract it is about to
+    /// lower.
+    fn validate_count_nodes(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        for node in dag.nodes() {
+            let RiscOp::Count { axes } = &node.op else {
+                continue;
+            };
+            if node.inputs.len() != 1 {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("expected one input, found {}", node.inputs.len()),
+                ));
+            }
+            let Some(input) = dag.get(node.inputs[0]) else {
+                return Err(Self::invalid_count(
+                    node,
+                    "input node is missing".to_string(),
+                ));
+            };
+            if input.output_type.precision != Prim::Bool {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "expected bool input, found {}",
+                        input.output_type.precision.name()
+                    ),
+                ));
+            }
+            if node.output_type.precision != Prim::Int64 {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "expected i64 output, found {}",
+                        node.output_type.precision.name()
+                    ),
+                ));
+            }
+            if axes.is_empty() {
+                return Err(Self::invalid_count(
+                    node,
+                    "axis list must be non-empty".to_string(),
+                ));
+            }
+            if axes.windows(2).any(|pair| pair[0] <= pair[1]) {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("axes must be unique and strictly descending, found {axes:?}"),
+                ));
+            }
+            let rank = input.output_type.dims.len();
+            if axes.iter().any(|&axis| axis >= rank) {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("axis is out of range for input rank {rank}: {axes:?}"),
+                ));
+            }
+            let expected: Vec<_> = input
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+                .collect();
+            if node.output_type.dims != expected {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "output shape {:?} does not match complementary shape {expected:?}",
+                        node.output_type.dims
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -258,7 +484,40 @@ impl HipEmitter {
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
-        Self::reject_count(dag)?;
+        Self::validate_count_nodes(dag)?;
+        Self::reject_key_results(dag)?;
+        // Device input ownership proves its admitted strides, not a row-major
+        // layout. Only a planned, emitter-materialized slot authorizes GEMM.
+        // Production preparation inserts Realize before ownership is verified.
+        for node in dag.nodes() {
+            let operands = if matches!(node.op, RiscOp::BlasMatmul { .. }) {
+                Some([node.inputs[0], node.inputs[1]])
+            } else if let Some(matmul) = blas::detect_matmul_pattern(dag, node.id)
+                && Self::supports_static_hipblas_matmul(dag, &matmul, &node.output_type)
+            {
+                Some([matmul.a, matmul.b])
+            } else {
+                None
+            };
+            if let Some(operands) = operands {
+                for operand in operands {
+                    if !matches!(
+                        storage_plan.placement(operand),
+                        Some(StoragePlacement::OwnedSlot { .. })
+                    ) {
+                        return Err(unsupported_storage_plan(
+                            chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                                unit: "hip-blas-layout".into(),
+                                detail: format!(
+                                    "BLAS operand {} needs prepare_dag_for_codegen before ownership lowering; borrowed or view storage does not prove contiguous materialization",
+                                    operand.0
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -319,6 +578,7 @@ impl HipEmitter {
             }
         }
         let dag = storage_plan.emission();
+        let seeds = dag.trap_seeds();
         let mut e = HipEmitter {
             lines: Vec::new(),
             indent: 0,
@@ -332,6 +592,27 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
+            draw_keys: BTreeMap::new(),
+            gate: None,
+            activation_gated: dag
+                .nodes()
+                .iter()
+                .map(|node| seeds.is_activation_gated(node))
+                .collect(),
+            claim_sized: dag
+                .nodes()
+                .iter()
+                .map(|node| node.owner.activation.is_some() && seeds.is_claim_sized(node))
+                .collect(),
+            kernel_rank: match dag
+                .nodes()
+                .iter()
+                .map(|node| node.output_type.dims.len())
+                .max()
+            {
+                Some(rank) => rank.max(1),
+                None => 1,
+            },
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
@@ -390,14 +671,14 @@ impl HipEmitter {
         e.line("");
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name, &output_specs);
+        e.emit_reshape_count_preflight(dag);
         e.line("");
 
-        // Emit static kernel module caches
+        // Each invocation owns modules in its current device context
         let kernel_names: Vec<String> = ks.iter().map(|(n, _)| n.clone()).collect();
         for name in &kernel_names {
-            e.line(&format!("static hipModule_t mod_{name} = NULL;"));
             e.line(&format!(
-                "if (!mod_{name}) mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
+                "hipModule_t mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
             ));
         }
         if !kernel_names.is_empty() {
@@ -405,9 +686,21 @@ impl HipEmitter {
         }
 
         // Walk DAG in topological order
+        e.begin_activation();
         for node in dag.nodes() {
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            // chelis#1374/#1376: an `ExtentWitness` nothing reads was already
+            // discharged in the host prologue above. It has no device value,
+            // so emitting it would reach the [05-SHAPE-1] `todo!` backstop
+            // that stays below for a witness the gate should have refused.
+            // `output_specs` can name the last node when the DAG has no root,
+            // and an emitted output still needs its value.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
                 continue;
             }
             if let RiscOp::Load { name } = &node.op {
@@ -450,10 +743,19 @@ impl HipEmitter {
                 let ty = &dag.get(output.id).unwrap().output_type;
                 let ndim = Self::ndim(ty);
                 let dtype = Self::dtype_macro(ty);
+                let shape = if ndim == 0 {
+                    "NULL".to_string()
+                } else {
+                    format!("chelis_output_shape_{slot}")
+                };
                 e.line(&format!(
-                    "outputs[{slot}] = chelis_alloc({ndim}, chelis_output_shape_{slot}, {dtype});"
+                    "outputs[{slot}] = chelis_alloc({ndim}, {shape}, {dtype});"
                 ));
-                e.line(&format!("chelis_device_to_host(outputs[{slot}], d_t{id});"));
+                e.line(&format!("chelis_tensor_write *output_guard_{slot} = chelis_tensor_begin_write(outputs[{slot}]);"));
+                e.line(&format!(
+                    "chelis_device_tensor_copy_to_host(output_guard_{slot}, o_t{id});"
+                ));
+                e.line(&format!("chelis_tensor_end_write(output_guard_{slot});"));
             }
         }
 
@@ -467,6 +769,10 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        e.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
+        for name in &kernel_names {
+            e.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
+        }
         let cleanup = e.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             e.lines.push(line);
@@ -497,6 +803,12 @@ impl HipEmitter {
         Ok((e.lines.join("\n"), breakdown))
     }
 
+    /// Start one entry point's walk. Each entry runs the graph as its own
+    /// activation, so its emission-time keys are its own.
+    fn begin_activation(&mut self) {
+        self.draw_keys.clear();
+    }
+
     fn emit_device_entrypoint(
         &mut self,
         dag: VerifiedDagView<'_>,
@@ -509,7 +821,7 @@ impl HipEmitter {
         let expected_outputs = output_specs.len();
 
         self.line(&format!(
-            "extern \"C\" void {func_name}_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out) {{"
+            "extern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out) {{"
         ));
         self.indent = 1;
 
@@ -536,13 +848,17 @@ impl HipEmitter {
         self.line("}");
         self.line("");
 
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
+        self.line("int current_device = 0;");
+        self.line("CHELIS_HIP_CHECK(hipGetDevice(&current_device));");
+        self.line("for (chelis_device_rank slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at i64\");");
         self.emit_input_shape_preamble_device(dag, input_slots, func_name);
+        self.emit_reshape_count_preflight(dag);
         self.line("");
 
         for name in kernel_names {
-            self.line(&format!("static hipModule_t mod_{name} = NULL;"));
             self.line(&format!(
-                "if (!mod_{name}) mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
+                "hipModule_t mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
             ));
         }
         if !kernel_names.is_empty() {
@@ -555,8 +871,16 @@ impl HipEmitter {
             self.line("");
         }
 
+        self.begin_activation();
         for node in dag.nodes() {
             if self.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            // The host prologue already discharged this section 4.7 entry
+            // obligation; see the identical skip in `emit_dag`'s walk.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
                 continue;
             }
             if let RiscOp::Load { name } = &node.op {
@@ -579,9 +903,9 @@ impl HipEmitter {
                     let input_idx = input_slots
                         .get(name.as_str())
                         .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
-                    format!("outputs[{slot}] = chelis_gpu_clone(inputs[{input_idx}]);")
+                    format!("outputs[{slot}] = chelis_device_tensor_clone(inputs[{input_idx}]);")
                 }
-                _ => format!("outputs[{slot}] = chelis_gpu_clone(d_t{id});"),
+                _ => format!("outputs[{slot}] = chelis_device_tensor_clone(o_t{id});"),
             };
             self.line(&line);
         }
@@ -594,6 +918,10 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        self.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
+        for name in kernel_names {
+            self.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
+        }
         let cleanup = self.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             self.lines.push(line);
@@ -614,6 +942,9 @@ impl HipEmitter {
             // Skip reduction-inlined FusedElem nodes (they become part of the
             // reduction kernel).
             if self.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            if self.is_emission_literal(node) {
                 continue;
             }
             match &node.op {
@@ -662,6 +993,22 @@ impl HipEmitter {
                 }
                 _ => {}
             }
+            if matches!(
+                node.op,
+                RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. }
+            ) {
+                let name = format!("kernel_materialize_{}", node.id.0);
+                let width = node
+                    .output_type
+                    .precision
+                    .runtime_dtype()
+                    .expect("verified representation")
+                    .byte_width();
+                self.kernel_sources.push((
+                    name.clone(),
+                    kernels::reshape_copy(self.kernel_rank, &name, width),
+                ));
+            }
             let name = self.kernel_name_for_op(&node.op, node, dag)?;
             if let Some(name) = name
                 && seen.insert(name.clone())
@@ -691,7 +1038,8 @@ impl HipEmitter {
     fn is_per_node_kernel_name(name: &str) -> bool {
         // FusedElem: kernel_fused_<id>
         // Fused reductions: kernel_fused_sum_<id>, kernel_fused_maxred_<id>
-        name.starts_with("kernel_fused_")
+        // Count: kernel_count_<id> (axes are embedded in the source)
+        name.starts_with("kernel_fused_") || name.starts_with("kernel_count_")
     }
 
     fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
@@ -717,6 +1065,7 @@ impl HipEmitter {
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into format-string context;
@@ -737,6 +1086,7 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            self.line(&format!("if (chelis_tensor_read_view(inputs[{slot}]).dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at i64\");", Self::dtype_macro(ty)));
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
@@ -772,7 +1122,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
+                "chelis_device_metadata {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -821,14 +1171,90 @@ impl HipEmitter {
             self.line(&format!(
                 "fprintf(stderr, \"extent `1`: claimed = 1, {label_fmt} axis {read_axis} = %lld\\n\", (long long)chelis_tensor_shape(inputs[{slot}], {read_axis}));"
             ));
-            self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+            self.line("chelis_numeric_trap(\"numeric trap: domain in load at i64\");");
             self.indent -= 1;
             self.line("}");
         }
 
-        // Host allocation consumes the published runtime ABI's int64_t shape
-        // carrier. Keep these declarations in the already-classified shape
-        // preamble; device allocations below deliberately retain int[].
+        // chelis#1374/#1376: a witness nothing reads carries a section 4.7
+        // ENTRY obligation, not device work. `reject_unsupported_hip_ops` lets
+        // exactly those through ([05-SHAPE-1] still refuses any witness a
+        // device node reads), and they are discharged here, in the host
+        // prologue, in the same [04-NUM-9] rendering the C emitter produces.
+        // Claims the entry schedule already checks are omitted upstream by
+        // `witness_entry_obligations`, so no comparison is emitted twice.
+        for node in dag.nodes() {
+            if !dag.witness_is_entry_obligation(node.id) {
+                continue;
+            }
+            let Some(obligations) = dag.witness_entry_obligations(node.id) else {
+                continue;
+            };
+            for obligation in obligations {
+                let render = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => Some((
+                        "claimed = %lld".to_string(),
+                        format!("(long long){required}"),
+                    )),
+                    chelis_ir::axis_sources::ExtentRecord::Read {
+                        load,
+                        axis,
+                        parameter,
+                    } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        let parameter =
+                            chelis_ir::span_sanitize::sanitize_for_format_string(parameter);
+                        Some((
+                            format!("{parameter} axis {axis} = %lld"),
+                            format!("(long long)chelis_tensor_shape(inputs[{slot}], {axis})"),
+                        ))
+                    }
+                };
+                let compare = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => {
+                        Some(required.to_string())
+                    }
+                    chelis_ir::axis_sources::ExtentRecord::Read { load, axis, .. } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        Some(format!("chelis_tensor_shape(inputs[{slot}], {axis})"))
+                    }
+                };
+                let (Some((first_text, first_value)), Some((second_text, second_value))) =
+                    (render(&obligation.records.0), render(&obligation.records.1))
+                else {
+                    continue;
+                };
+                let (Some(left), Some(right)) = (
+                    compare(&obligation.records.0),
+                    compare(&obligation.records.1),
+                ) else {
+                    continue;
+                };
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
+                let operation = obligation.operation;
+                self.line(&format!("if ({left} != {right}) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"extent `{label}`: {first_text}, {second_text}\\n\", {first_value}, {second_value});"
+                ));
+                self.line(&format!(
+                    "chelis_numeric_trap(\"numeric trap: domain in {operation} at i64\");"
+                ));
+                self.indent -= 1;
+                self.line("}");
+            }
+        }
+
+        // Host allocation consumes the published runtime ABI's
+        // chelis_device_metadata shape carrier. Keep these declarations in the
+        // already-classified shape preamble; device allocations below
+        // deliberately retain int[].
         for (slot, output) in output_specs.iter().enumerate() {
             let node = dag
                 .get(output.id)
@@ -848,8 +1274,8 @@ impl HipEmitter {
                 dims.join(", ")
             };
             self.line(&format!(
-                "int64_t chelis_output_shape_{slot}[{}] = {{ {shape} }};",
-                Self::ndim(&node.output_type)
+                "chelis_device_metadata chelis_output_shape_{slot}[{}] = {{ {shape} }};",
+                Self::ndim(&node.output_type).max(1)
             ));
         }
     }
@@ -865,6 +1291,7 @@ impl HipEmitter {
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at i64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Format-string-context sanitization for producer-supplied
@@ -882,13 +1309,15 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            self.line(&format!("const chelis_gpu_tensor *input_view_{slot} = chelis_device_tensor_view(inputs[{slot}]);"));
+            self.line(&format!("if (input_view_{slot}->dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at i64\");", Self::dtype_macro(ty)));
             self.line(&format!(
-                "if (inputs[{slot}]->ndim != {}) {{",
+                "if (input_view_{slot}->rank != {}) {{",
                 Self::ndim(ty)
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` expected rank {}, got %d\\n\", input_view_{slot}->rank);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -897,11 +1326,11 @@ impl HipEmitter {
             for (axis, dim) in ty.dims.iter().enumerate() {
                 if let Some(expected) = Self::known_dim_size(dim) {
                     self.line(&format!(
-                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                        "if (input_view_{slot}->shape[{axis}] != {expected}) {{"
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)input_view_{slot}->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -916,7 +1345,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                "chelis_device_metadata {} = input_view_{canonical_slot}->shape[{canonical_axis}];",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -924,12 +1353,12 @@ impl HipEmitter {
                 let slot = input_slots[occ_label];
                 let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    "if (input_view_{slot}->shape[{occ_axis}] != {}) {{",
                     binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
+                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]= %lld but {binding_name_fmt}=%lld\\n\", (long long)input_view_{slot}->shape[{occ_axis}], (long long){});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -960,7 +1389,8 @@ impl HipEmitter {
             let elem = Self::elem_kind(&fused_node.output_type)?;
             let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
             let name = Self::fused_reduction_kernel_name(node.id.0, kind);
-            let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind, elem);
+            let source =
+                kernels::reduce_fused(self.kernel_rank, &name, axis, steps, n_ext, kind, elem);
             return Ok(vec![(name, source)]);
         }
 
@@ -989,6 +1419,7 @@ impl HipEmitter {
                     // WS-A4 i8/i16 → i32 promoted-accumulator path.
                     let name = Self::reduction_kernel_name_typed(kind, axis, src_prec, acc);
                     let source = kernels::reduce_sum_promoted(
+                        self.kernel_rank,
                         &name,
                         axis,
                         Self::dtype_c_type(src_prec),
@@ -1003,14 +1434,15 @@ impl HipEmitter {
                     let operand_kind = Self::elem_kind(operand_ty)?;
                     let acc_kind = Self::elem_kind(&node.output_type)?;
                     let name = Self::reduction_kernel_name(kind, axis, acc_kind);
-                    let source = kernels::reduce_sum(&name, axis, operand_kind, acc_kind);
+                    let source =
+                        kernels::reduce_sum(self.kernel_rank, &name, axis, operand_kind, acc_kind);
                     (name, source)
                 }
             }
             kernels::ReduceKind::Max => {
                 let acc_kind = Self::elem_kind(&node.output_type)?;
                 let name = Self::reduction_kernel_name(kind, axis, acc_kind);
-                let source = kernels::reduce_max(&name, axis, acc_kind);
+                let source = kernels::reduce_max(self.kernel_rank, &name, axis, acc_kind);
                 (name, source)
             }
         };
@@ -1027,36 +1459,51 @@ impl HipEmitter {
         // an i64 result tensor; Min/Prod emit an in-precision result.
         // For all four, kernel naming + body are driven by the OPERAND
         // precision, which lives on the input tensor (Argmax/Argmin's
-        // output_type is `int64` and would otherwise tip elem_kind into
+        // output_type is `i64` and would otherwise tip elem_kind into
         // its panic arm).
         let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
         let elem = Self::elem_kind(input_ty)?;
         Ok(match &node.op {
             RiscOp::MinReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("min", *axis, elem);
-                let src = kernels::reduce_min(&name, *axis, elem);
+                let src = kernels::reduce_min(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::ProdReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("prod", *axis, elem);
-                let src = kernels::reduce_prod(&name, *axis, elem);
+                let src = kernels::reduce_prod(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::Argmax { axis } => {
                 let name = Self::extra_reduction_kernel_name("argmax", *axis, elem);
-                let src = kernels::reduce_argmax(&name, *axis, elem);
+                let src = kernels::reduce_argmax(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::Argmin { axis } => {
                 let name = Self::extra_reduction_kernel_name("argmin", *axis, elem);
-                let src = kernels::reduce_argmin(&name, *axis, elem);
+                let src = kernels::reduce_argmin(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             _ => unreachable!("extra_reduction_kernel_sources expected Min/Prod/Argmax/Argmin"),
         })
     }
 
+    /// The kernel `node` launches: its operation's kernel, read through the
+    /// node's activation gate when it has one ([`Self::activation_gate`]).
     fn kernel_name_for_op(
+        &self,
+        op: &RiscOp,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<Option<String>, Unsupported> {
+        let name = self.ungated_kernel_name_for_op(op, node, dag)?;
+        Ok(match self.activation_gate(node, dag) {
+            Some(gate) => name.map(|name| Self::gated_kernel_name(name, &gate.operands)),
+            None => name,
+        })
+    }
+
+    fn ungated_kernel_name_for_op(
         &self,
         op: &RiscOp,
         node: &DagNode,
@@ -1080,7 +1527,7 @@ impl HipEmitter {
                 "kernel_add{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            RiscOp::Sub => Some(format!("kernel_sub_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Sub => Some(format!("kernel_sub_{}", operand_prec().name())),
             RiscOp::Mul => Some(format!(
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1096,9 +1543,22 @@ impl HipEmitter {
                 "kernel_floor_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::Compare(kind) => Some(format!(
+                "kernel_compare_{}{}",
+                kind.surf_name(),
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::Logical(kind) => Some(format!("kernel_logical_{}", kind.surf_name())),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
+            RiscOp::Where => Some(format!(
+                "kernel_where{}",
+                Self::dtype_kernel_suffix(node.output_type.precision)
             )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
             RiscOp::MaxElem => Some(format!(
@@ -1120,7 +1580,7 @@ impl HipEmitter {
                 };
                 Some(format!(
                     "kernel_{extrema}_adjoint_{selected}_{}",
-                    kind_for_node(node)?.suffix()
+                    operand_prec().name()
                 ))
             }
             RiscOp::Relu => Some(format!(
@@ -1131,14 +1591,6 @@ impl HipEmitter {
                 "kernel_relu_adjoint{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
-            RiscOp::CmpLt => {
-                // CmpLt has bool output but operand-precision storage;
-                // dispatch on the operand precision so the kernel name
-                // matches the kernel source emitted in
-                // `kernel_source_for_op`.
-                let operand_kind = Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?;
-                Some(format!("kernel_cmplt_{}", operand_kind.suffix()))
-            }
             RiscOp::Neg => Some(format!("kernel_neg_{}", kind_for_node(node)?.suffix())),
             RiscOp::Recip => Some(format!("kernel_recip_{}", kind_for_node(node)?.suffix())),
             RiscOp::Exp => Some(format!("kernel_exp_{}", kind_for_node(node)?.suffix())),
@@ -1148,15 +1600,26 @@ impl HipEmitter {
             RiscOp::Cos => Some(format!("kernel_cos_{}", kind_for_node(node)?.suffix())),
             RiscOp::Tan => Some(format!("kernel_tan_{}", kind_for_node(node)?.suffix())),
             RiscOp::Atan => Some(format!("kernel_atan_{}", kind_for_node(node)?.suffix())),
-            RiscOp::Abs => Some(format!("kernel_abs_{}", kind_for_node(node)?.suffix())),
+            RiscOp::Abs => Some(format!(
+                "kernel_abs{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
             RiscOp::Floor => Some(format!("kernel_floor_{}", kind_for_node(node)?.suffix())),
             RiscOp::Ceil => Some(format!("kernel_ceil_{}", kind_for_node(node)?.suffix())),
             RiscOp::Round => Some(format!("kernel_round_{}", kind_for_node(node)?.suffix())),
-            RiscOp::UniformLike { .. } => Some(format!(
+            RiscOp::UniformLike => Some(format!(
                 "kernel_uniform_like_{}",
                 kind_for_node(node)?.suffix()
             )),
-            RiscOp::Dropout { .. } | RiscOp::Drop => None,
+            RiscOp::Drop
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => None,
             RiscOp::Copy => Some(Self::cast_kernel_name(node, dag)?),
             // WS-A4: bind `accumulator` instead of `..` per the
             // destructure-`..` memory rule. The kernel name encodes
@@ -1256,19 +1719,29 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` rejects it cleanly before
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
-            RiscOp::Shape { .. } => None,
-            RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix())),
-            RiscOp::ConstTensor { .. } => {
-                Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => None,
+            RiscOp::Const { .. } => {
+                Some(format!("kernel_fill_{}", node.output_type.precision.name()))
             }
-            RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
+            RiscOp::ConstTensor { .. } => None,
+            RiscOp::Reshape { .. } => Some(format!(
+                "kernel_reshape_{}",
+                Self::dtype_macro(&node.output_type)
+            )),
+            RiscOp::Realize => Some(format!(
+                "kernel_realize_{}",
+                Self::dtype_macro(&node.output_type)
+            )),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
             // Both `reject_unsupported_hip_ops` copies (chelis-cli and
             // chelis-compiler-api) gate this out before codegen; the
             // emitter arms below are the backstop if a future caller
             // reaches the backend without passing a gate.
             RiscOp::CastTrunc { .. } => None,
-            RiscOp::Count { .. } => None,
+            RiscOp::Count { .. } => Some(format!("kernel_count_{}", node.id.0)),
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1285,7 +1758,6 @@ impl HipEmitter {
             // Pure-metadata movement ops and Load/Store are not kernels
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
-            | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
             | RiscOp::Stride { .. }
@@ -1332,6 +1804,15 @@ impl HipEmitter {
     /// the in-precision identity kernel; when they differ, it's the
     /// cross-precision conversion kernel.
     fn cast_kernel_name(node: &DagNode, dag: VerifiedDagView<'_>) -> Result<String, Unsupported> {
+        let source = dag.get(node.inputs[0]).unwrap().output_type.precision;
+        let target = node.output_type.precision;
+        if source.is_integer() && target.is_float() {
+            return Ok(format!(
+                "kernel_cast_{}_to_{}",
+                source.name(),
+                target.name()
+            ));
+        }
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
             format!("kernel_cast_{}", dst_kind.suffix())
@@ -1347,19 +1828,23 @@ impl HipEmitter {
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Result<String, Unsupported> {
-        // CmpLt's output type is `bool` (semantically) but the kernel
-        // writes 1.0/0.0 of operand precision to the GPU buffer. Use the
-        // operand precision for kernel emission; the rest of the
-        // floating ops have output_type == operand_type so the more
-        // common path uses output_type below. For Add/Mul/Sum the
-        // output may be a non-float dtype (i32 acc for i8/i16 sum,
-        // i8/i16 for narrow-int Add/Mul), so each of those arms
-        // resolves the right template inline rather than touching the
-        // float-only `elem_kind` shorthand.
+        // Direct comparisons have Bool8 output while their operands retain
+        // their own storage dtype. Each such arm resolves operand storage
+        // explicitly rather than using the output-oriented unary shorthand.
         let elem_for_unary =
             || -> Result<kernels::ElemKind, Unsupported> { Self::elem_kind(&node.output_type) };
         let operand_prec = || dag.get(node.inputs[0]).unwrap().output_type.precision;
-        Ok(match op {
+        // The node's activation gate. Exactly the arms whose templates read
+        // their operands through it take it; a gate left untaken is refused
+        // below rather than compiled into a kernel that checks where the
+        // activation is false (spec/10 section 3.2).
+        let gate = self.activation_gate(node, dag).map(|gate| gate.operands);
+        let gate_taken = std::cell::Cell::new(false);
+        let take_gate = || {
+            gate_taken.set(true);
+            gate.as_ref()
+        };
+        let source = match op {
             // WS-A4: Add / Mul dispatch on operand precision so each
             // dtype gets its own kernel source. f32/f64 route through
             // the WS-A2 `ElemKind` template (which now also handles
@@ -1367,30 +1852,65 @@ impl HipEmitter {
             RiscOp::Add => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
                         name,
                         "+",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
-                    kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
+                        name,
+                        "+",
+                        Self::dtype_c_type(prec),
+                        take_gate(),
+                    )
                 }
             }
-            RiscOp::Sub => kernels::binary_elementwise(
-                name,
-                "-",
-                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
-            ),
+            RiscOp::Sub => {
+                let precision = operand_prec();
+                if precision.is_integer() {
+                    let (minimum, maximum) = Self::signed_integer_bounds(precision);
+                    kernels::binary_checked_sub_integer(
+                        self.kernel_rank,
+                        name,
+                        Self::dtype_c_type(precision),
+                        minimum,
+                        maximum,
+                        take_gate(),
+                    )
+                } else if let Some(kind) = Self::reduced_float_kind(precision) {
+                    kernels::binary_sub_reduced(self.kernel_rank, name, kind)
+                } else {
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
+                        name,
+                        "-",
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
+                    )
+                }
+            }
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
-                    kernels::binary_elementwise(
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
                         name,
                         "*",
-                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                        Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                        take_gate(),
                     )
                 } else {
-                    kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
+                        name,
+                        "*",
+                        Self::dtype_c_type(prec),
+                        take_gate(),
+                    )
                 }
             }
             // IEEE elementwise division. The type checker rejects
@@ -1409,10 +1929,12 @@ impl HipEmitter {
                      codegen; the type checker should reject this at \
                      spec/04-type-system.md \u{00a7}5.4 before lowering"
                 );
-                kernels::binary_elementwise(
+                kernels::binary_elementwise_typed(
+                    self.kernel_rank,
                     name,
                     "/",
-                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+                    Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?.c_type(),
+                    take_gate(),
                 )
             }
             // chelis#178: floor division (round toward -inf). Integer
@@ -1420,11 +1942,19 @@ impl HipEmitter {
             // `floorf(a / b)`.
             RiscOp::FloorDiv => {
                 let prec = operand_prec();
-                kernels::binary_floor_div_typed(name, Self::dtype_c_type(prec), prec.is_integer())
+                kernels::binary_floor_div_typed(
+                    self.kernel_rank,
+                    name,
+                    Self::dtype_c_type(prec),
+                    prec.is_integer(),
+                    take_gate(),
+                )
             }
             // chelis#178: truncating (round-toward-zero) division. Integer
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -1433,53 +1963,110 @@ impl HipEmitter {
                      codegen; the type checker should reject this at \
                      spec/05-risc-primitives.md \u{00a7}2.1 before lowering"
                 );
-                kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
+                kernels::binary_elementwise_typed(
+                    self.kernel_rank,
+                    name,
+                    "/",
+                    Self::dtype_c_type(prec),
+                    take_gate(),
+                )
             }
+            RiscOp::Compare(kind) => {
+                let precision = operand_prec();
+                let (lhs, rhs) = Self::comparison_value_expressions(precision);
+                kernels::comparison(
+                    self.kernel_rank,
+                    name,
+                    Self::comparison_operator(*kind),
+                    Self::comparison_c_type(precision),
+                    Self::comparison_value_helpers(precision),
+                    lhs,
+                    rhs,
+                )
+            }
+            RiscOp::Logical(LogicalKind::And) => {
+                kernels::logical_binary(self.kernel_rank, name, "&&")
+            }
+            RiscOp::Logical(LogicalKind::Or) => {
+                kernels::logical_binary(self.kernel_rank, name, "||")
+            }
+            RiscOp::Logical(LogicalKind::Not) => kernels::logical_not(self.kernel_rank, name),
+            RiscOp::Where => kernels::where_stored(
+                self.kernel_rank,
+                name,
+                Self::where_storage_c_type(node.output_type.precision),
+            ),
             RiscOp::MaxElem | RiscOp::MinElem => {
                 let precision = operand_prec();
                 let is_max = matches!(op, RiscOp::MaxElem);
                 if precision.is_integer() {
-                    kernels::binary_extrema_integer(name, is_max, Self::dtype_c_type(precision))
+                    kernels::binary_extrema_integer(
+                        self.kernel_rank,
+                        name,
+                        is_max,
+                        Self::dtype_c_type(precision),
+                    )
+                } else if let Some(kind) = Self::reduced_float_kind(precision) {
+                    kernels::binary_extrema_reduced(self.kernel_rank, name, is_max, kind)
                 } else {
-                    kernels::binary_extrema(name, is_max, elem_for_unary()?)
+                    kernels::binary_extrema(self.kernel_rank, name, is_max, elem_for_unary()?)
                 }
             }
-            RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
-                name,
-                matches!(kind, ExtremaKind::Max),
-                matches!(operand, ExtremaOperand::Left),
-                elem_for_unary()?,
-            ),
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let precision = operand_prec();
+                if let Some(reduced) = Self::reduced_float_kind(precision) {
+                    kernels::extrema_adjoint_reduced(
+                        self.kernel_rank,
+                        name,
+                        matches!(kind, ExtremaKind::Max),
+                        matches!(operand, ExtremaOperand::Left),
+                        reduced,
+                    )
+                } else {
+                    kernels::extrema_adjoint(
+                        self.kernel_rank,
+                        name,
+                        matches!(kind, ExtremaKind::Max),
+                        matches!(operand, ExtremaOperand::Left),
+                        elem_for_unary()?,
+                    )
+                }
+            }
             RiscOp::Relu => match operand_prec() {
-                Prim::F16 => kernels::relu_reduced(name, 0x7c00, 0x03ff),
-                Prim::Bf16 => kernels::relu_reduced(name, 0x7f80, 0x007f),
-                _ => kernels::relu(name, elem_for_unary()?),
+                Prim::F16 => kernels::relu_reduced(self.kernel_rank, name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
+                _ => kernels::relu(self.kernel_rank, name, elem_for_unary()?),
             },
             RiscOp::ReluAdjoint => match operand_prec() {
-                Prim::F16 => kernels::relu_adjoint_reduced(name, 0x7c00, 0x03ff),
-                Prim::Bf16 => kernels::relu_adjoint_reduced(name, 0x7f80, 0x007f),
-                _ => kernels::relu_adjoint(name, elem_for_unary()?),
+                Prim::F16 => kernels::relu_adjoint_reduced(self.kernel_rank, name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_adjoint_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
+                _ => kernels::relu_adjoint(self.kernel_rank, name, elem_for_unary()?),
             },
-            RiscOp::CmpLt => {
-                let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                Self::require_result_width_matches_operand(node, operand_ty)?;
-                kernels::cmplt(name, Self::elem_kind(operand_ty)?)
-            }
-            RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()?),
+            RiscOp::Neg => kernels::unary_prefix(self.kernel_rank, name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
-            RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()?),
-            RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()?),
-            RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()?),
-            RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()?),
-            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem_for_unary()?),
-            RiscOp::Cos => kernels::unary_func(name, "cosf", elem_for_unary()?),
-            RiscOp::Tan => kernels::unary_func(name, "tanf", elem_for_unary()?),
-            RiscOp::Atan => kernels::unary_func(name, "atanf", elem_for_unary()?),
-            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()?),
-            RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()?),
-            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()?),
-            RiscOp::Round => kernels::unary_func(name, "rintf", elem_for_unary()?),
-            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()?),
+            RiscOp::Recip => kernels::unary_recip(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::Exp => kernels::unary_func(self.kernel_rank, name, "expf", elem_for_unary()?),
+            RiscOp::Log => kernels::unary_func(self.kernel_rank, name, "logf", elem_for_unary()?),
+            RiscOp::Sin => kernels::unary_func(self.kernel_rank, name, "sinf", elem_for_unary()?),
+            RiscOp::Sqrt => kernels::unary_func(self.kernel_rank, name, "sqrtf", elem_for_unary()?),
+            RiscOp::Cos => kernels::unary_func(self.kernel_rank, name, "cosf", elem_for_unary()?),
+            RiscOp::Tan => kernels::unary_func(self.kernel_rank, name, "tanf", elem_for_unary()?),
+            RiscOp::Atan => kernels::unary_func(self.kernel_rank, name, "atanf", elem_for_unary()?),
+            RiscOp::Abs if operand_prec().is_integer() => kernels::unary_checked_abs_integer(
+                self.kernel_rank,
+                name,
+                operand_prec(),
+                take_gate(),
+            ),
+            RiscOp::Abs => kernels::unary_func(self.kernel_rank, name, "fabsf", elem_for_unary()?),
+            RiscOp::Floor => {
+                kernels::unary_func(self.kernel_rank, name, "floorf", elem_for_unary()?)
+            }
+            RiscOp::Ceil => kernels::unary_func(self.kernel_rank, name, "ceilf", elem_for_unary()?),
+            RiscOp::Round => {
+                kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
+            }
+            RiscOp::UniformLike => kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?),
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
             // template doesn't carry a dtype suffix); the unfused path
@@ -1493,6 +2080,7 @@ impl HipEmitter {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
                     kernels::reduce_fused(
+                        self.kernel_rank,
                         name,
                         *axis,
                         steps,
@@ -1505,6 +2093,7 @@ impl HipEmitter {
                     if matches!(src, Prim::Int8 | Prim::Int16) && *accumulator == Prim::Int32 {
                         // WS-A4 i8/i16 → i32 promoted-accumulator path.
                         kernels::reduce_sum_promoted(
+                            self.kernel_rank,
                             name,
                             *axis,
                             Self::dtype_c_type(src),
@@ -1518,7 +2107,7 @@ impl HipEmitter {
                         // by the WS-A4 promoted path panic loudly inside
                         // `elem_kind` rather than silently downgrading.
                         let acc_kind = Self::elem_kind(&node.output_type)?;
-                        kernels::reduce_sum(name, *axis, operand_kind, acc_kind)
+                        kernels::reduce_sum(self.kernel_rank, name, *axis, operand_kind, acc_kind)
                     }
                 }
             }
@@ -1529,6 +2118,7 @@ impl HipEmitter {
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
                     let inner_kind = Self::elem_kind(&fused_node.output_type)?;
                     kernels::reduce_fused(
+                        self.kernel_rank,
                         name,
                         *axis,
                         steps,
@@ -1537,33 +2127,56 @@ impl HipEmitter {
                         inner_kind,
                     )
                 } else {
-                    kernels::reduce_max(name, *axis, elem_for_unary()?)
+                    kernels::reduce_max(self.kernel_rank, name, *axis, elem_for_unary()?)
                 }
             }
             RiscOp::MinReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_min(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::ProdReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_prod(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmax { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_argmax(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmin { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_argmin(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
-            RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()?),
-            RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()?),
-            RiscOp::Realize => Self::cast_kernel_source(name, node, dag)?,
-            RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Const { .. } => {
+                kernels::fill_stored(name, Self::comparison_c_type(node.output_type.precision))
+            }
+            RiscOp::ConstTensor { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::Reshape { .. } | RiscOp::Realize => kernels::reshape_copy(
+                self.kernel_rank,
+                name,
+                node.output_type
+                    .precision
+                    .runtime_dtype()
+                    .expect("verified numeric representation")
+                    .byte_width(),
+            ),
+            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag, take_gate())?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
             }
-            RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Count { axes } => {
+                let input = dag
+                    .get(node.inputs[0])
+                    .expect("validated Count input must exist");
+                kernels::count(
+                    self.kernel_rank,
+                    name,
+                    axes,
+                    input.output_type.dims.len(),
+                    Self::dtype_c_type(input.output_type.precision),
+                    Self::dtype_c_type(node.output_type.precision),
+                )
+            }
+            RiscOp::Copy => self.cast_kernel_source(name, node, dag, None)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
                     let reusable = reuse.mechanics(node.id).reusable_input;
@@ -1572,22 +2185,53 @@ impl HipEmitter {
                         .position(|&input| input == reusable)
                         .expect("reusable input must appear in node inputs")
                 });
-                kernels::fused_elementwise(
-                    name,
-                    ops,
-                    node.inputs.len(),
-                    aliased_ext,
-                    elem_for_unary()?,
-                )
+                if let Some(kind) = Self::reduced_float_kind(node.output_type.precision) {
+                    if !ops.iter().all(|step| {
+                        matches!(
+                            step.op,
+                            FusedStepOp::Sub | FusedStepOp::MaxElem | FusedStepOp::MinElem
+                        )
+                    }) {
+                        return Err(Unsupported::new(
+                            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
+                            format!(
+                                "HIP narrow-float fused kernel at node {} contains an operation outside sub/max_elem/min_elem",
+                                node.id.0
+                            ),
+                            Stage::Codegen("hip"),
+                            chelis_types::unimplemented_rejection!(
+                                729,
+                                "this narrow-float fused chain has no complete typed HIP kernel"
+                            ),
+                        ));
+                    }
+                    kernels::fused_elementwise_reduced(
+                        self.kernel_rank,
+                        name,
+                        ops,
+                        node.inputs.len(),
+                        aliased_ext,
+                        kind,
+                    )
+                } else {
+                    kernels::fused_elementwise(
+                        self.kernel_rank,
+                        name,
+                        ops,
+                        node.inputs.len(),
+                        aliased_ext,
+                        elem_for_unary()?,
+                    )
+                }
             }
             RiscOp::Gather { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 let elem = elem_for_unary()?;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::gather(name, "int", elem),
-                    Prim::Int64 => kernels::gather(name, "long long", elem),
+                    Prim::Int32 => kernels::gather(self.kernel_rank, name, "int", elem),
+                    Prim::Int64 => kernels::gather(self.kernel_rank, name, "long long", elem),
                     other => panic!(
-                        "HIP backend sparse gather requires int32/int64 indices, got {}",
+                        "HIP backend sparse gather requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1596,10 +2240,10 @@ impl HipEmitter {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 let elem = elem_for_unary()?;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_add(name, "int", elem),
-                    Prim::Int64 => kernels::scatter_add(name, "long long", elem),
+                    Prim::Int32 => kernels::scatter_add(self.kernel_rank, name, "int", elem),
+                    Prim::Int64 => kernels::scatter_add(self.kernel_rank, name, "long long", elem),
                     other => panic!(
-                        "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_add requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1607,10 +2251,10 @@ impl HipEmitter {
             RiscOp::Scatter { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_replace(name, "int"),
-                    Prim::Int64 => kernels::scatter_replace(name, "long long"),
+                    Prim::Int32 => kernels::scatter_replace(self.kernel_rank, name, "int"),
+                    Prim::Int64 => kernels::scatter_replace(self.kernel_rank, name, "long long"),
                     other => panic!(
-                        "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_replace requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1618,10 +2262,10 @@ impl HipEmitter {
             RiscOp::ScatterElements { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_elements(name, "int"),
-                    Prim::Int64 => kernels::scatter_elements(name, "long long"),
+                    Prim::Int32 => kernels::scatter_elements(self.kernel_rank, name, "int"),
+                    Prim::Int64 => kernels::scatter_elements(self.kernel_rank, name, "long long"),
                     other => panic!(
-                        "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+                        "HIP backend sparse scatter_elements requires i32/i64 indices, got {}",
                         other.name()
                     ),
                 }
@@ -1630,28 +2274,52 @@ impl HipEmitter {
             // Dispatch on the output dtype (the input dtype always matches:
             // these ops do not change precision) so the full active
             // dtype set is covered, matching the C backend.
-            RiscOp::Pad { .. } => {
-                kernels::pad_typed(name, Self::dtype_c_type(node.output_type.precision))
-            }
-            RiscOp::Shrink { .. } => {
-                kernels::shrink_typed(name, Self::dtype_c_type(node.output_type.precision))
-            }
+            RiscOp::Pad { .. } => kernels::pad_typed(
+                self.kernel_rank,
+                name,
+                Self::dtype_c_type(node.output_type.precision),
+            ),
+            RiscOp::Shrink { .. } => kernels::shrink_typed(
+                self.kernel_rank,
+                name,
+                Self::dtype_c_type(node.output_type.precision),
+            ),
             _ => unreachable!("no kernel for op: {op:?}"),
-        })
+        };
+        if gate.is_some() && !gate_taken.get() {
+            return Err(Self::ungated_check_unsupported(
+                node,
+                "its HIP kernel reads its operands without the gate",
+            ));
+        }
+        Ok(source)
     }
 
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
     fn cast_kernel_source(
+        &self,
         name: &str,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
+        gate: Option<&kernels::OperandGate>,
     ) -> Result<String, Unsupported> {
+        let source = dag.get(node.inputs[0]).unwrap().output_type.precision;
+        let target = node.output_type.precision;
+        if source.is_integer() && target.is_float() {
+            return Ok(kernels::cast_integer_to_float(
+                self.kernel_rank,
+                name,
+                source,
+                target,
+                gate,
+            ));
+        }
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
-            kernels::cast(name, dst_kind)
+            kernels::cast(self.kernel_rank, name, dst_kind, gate)
         } else {
-            kernels::cast_convert(name, src_kind, dst_kind)
+            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind, gate)
         })
     }
 
@@ -1699,6 +2367,10 @@ impl HipEmitter {
 
     fn emit_node(&mut self, node: &DagNode, dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
         let id = node.id.0;
+        // A checking node under an activation checks nothing where it is
+        // false (spec/10 section 3.2): its launch consumes the gate, and
+        // `end_node_gate` refuses a node whose emitter did not.
+        self.begin_node_gate(node, dag)?;
         // Resolve the precision-suffixed kernel name once, so the launch
         // shims agree with the kernel-source emitter on the symbol the
         // host references (e.g. `kernel_add_f32` vs `kernel_add_f64`).
@@ -1708,40 +2380,79 @@ impl HipEmitter {
                 .unwrap_or_else(|| panic!("op {:?} has no kernel name", node.op)))
         };
         match &node.op {
-            RiscOp::Const { value } => {
-                self.emit_const(id, value.as_f64_lossy(), &node.output_type)?
-            }
-            RiscOp::ConstTensor { data } => {
-                self.emit_const_tensor(id, &data.to_f64_lossy_vec(), &node.output_type)?
-            }
+            RiscOp::Const { .. } if self.is_emission_literal(node) => {}
+            RiscOp::Const { value } => self.emit_const(id, *value, &node.output_type)?,
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
-            RiscOp::Sub => self.emit_binary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
-            ),
+            RiscOp::Sub => {
+                let trap = node.output_type.precision.is_integer().then(|| {
+                    format!(
+                        "numeric trap: overflow in sub at {}",
+                        node.output_type.precision.name()
+                    )
+                });
+                self.emit_binary_launch(
+                    id,
+                    &resolved_kernel_name()?,
+                    &node.inputs,
+                    &node.output_type,
+                    trap.as_deref(),
+                )
+            }
             RiscOp::Mul => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::Div => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
+            RiscOp::Bitwise(kind) => return Err(Self::bitwise_unsupported(node, *kind)),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+                None,
+            ),
+            RiscOp::Compare(_) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+                None,
+            ),
+            RiscOp::Logical(LogicalKind::And | LogicalKind::Or) => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+                None,
+            ),
+            RiscOp::Logical(LogicalKind::Not) => self.emit_unary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::GuardedFail { .. } => return Err(Self::guarded_fail_unsupported(node)),
+            RiscOp::Where => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -1752,6 +2463,7 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                None,
             ),
             RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
                 id,
@@ -1770,12 +2482,7 @@ impl HipEmitter {
                 &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
-            ),
-            RiscOp::CmpLt => self.emit_binary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
+                None,
             ),
             RiscOp::Neg => self.emit_unary_launch(
                 id,
@@ -1831,12 +2538,22 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::Abs => self.emit_unary_launch(
-                id,
-                &resolved_kernel_name()?,
-                &node.inputs,
-                &node.output_type,
-            ),
+            RiscOp::Abs => {
+                let trap = node.output_type.precision.is_integer().then(|| {
+                    chelis_types::dtype_semantics::NumericTrap::Overflow {
+                        op: "abs",
+                        prim: node.output_type.precision,
+                    }
+                    .to_string()
+                });
+                self.emit_unary_launch_with_trap(
+                    id,
+                    &resolved_kernel_name()?,
+                    &node.inputs,
+                    &node.output_type,
+                    trap.as_deref(),
+                );
+            }
             RiscOp::Floor => self.emit_unary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -1855,11 +2572,28 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like_launch(id, *low, *high, *seed, &node.output_type)?
+            RiscOp::UniformLike => {
+                let (low, high, key) = self.keyed_uniform_like_parameters(node, dag)?;
+                self.emit_uniform_like_launch(id, low, high, key, &node.output_type)?
             }
-            RiscOp::Dropout { .. } => {
-                unreachable!("dropout should be rejected before HIP code generation")
+            RiscOp::KeyFromSeed | RiscOp::Split { .. } | RiscOp::FoldIn => {
+                self.record_derived_key(node, dag)?
+            }
+            RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key-operand random node in the HIP DAG emitter",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "the HIP lane has no port of the key-operand random kernels or the \
+                         draw key yet; compiled dropout on every target is phase 6 of chelis#2413"
+                    ),
+                ));
             }
             RiscOp::Copy => self.emit_unary_launch(
                 id,
@@ -1877,7 +2611,7 @@ impl HipEmitter {
                         if drop == node.id && node.inputs.first() == Some(&source) =>
                     {
                         if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
-                            self.line(&format!("chelis_gpu_free_view(d_t{});", source.0));
+                            self.line(&format!("chelis_device_tensor_release(o_t{});", source.0));
                         }
                     }
                     _ => {
@@ -1963,7 +2697,10 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
             // `todo!` is a defensive backstop matching the ReduceWindow
             // stubs above, reached only if some path bypasses that guard.
-            RiscOp::Shape { .. } => {
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 todo!(
                     "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
                 )
@@ -2006,11 +2743,11 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::Realize => self.emit_unary_launch(
+            RiscOp::Realize => self.emit_logical_copy(
                 id,
-                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                &resolved_kernel_name()?,
             ),
             RiscOp::Cast { .. } => self.emit_unary_launch(
                 id,
@@ -2019,16 +2756,8 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
-            RiscOp::Count { .. } => {
-                return Err(Unsupported::new(
-                    UnsupportedKind::Op("count".to_string()),
-                    format!("the HIP kernel set (node {})", node.id.0),
-                    Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
-                        1291,
-                        "chelis#1291 owns the dedicated HIP/Metal count kernels"
-                    ),
-                ));
+            RiscOp::Count { axes } => {
+                self.emit_count_launch(id, axes, &node.inputs, &node.output_type, dag)
             }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
@@ -2089,7 +2818,7 @@ impl HipEmitter {
                 self.emit_scatter_elements_launch(id, *axis, &node.inputs, &node.output_type, dag)
             }
         }
-        Ok(())
+        self.end_node_gate(node)
     }
 
     // ------------------------------------------------------------------
@@ -2103,109 +2832,192 @@ impl HipEmitter {
         }
     }
 
+    fn emit_reshape_count_preflight(&mut self, dag: VerifiedDagView<'_>) {
+        for node in dag.nodes() {
+            if !matches!(node.op, RiscOp::Reshape { .. }) {
+                continue;
+            }
+            let source = dag.get(node.inputs[0]).expect("verified reshape source");
+            let id = node.id.0;
+            self.emit_metadata_plan(
+                &format!("reshape_input{id}"),
+                &source.output_type,
+                None,
+                "0",
+            );
+            self.emit_metadata_plan(&format!("reshape_output{id}"), &node.output_type, None, "0");
+            self.line(&format!("if (chelis_metadata_plan_count(reshape_input{id}) != chelis_metadata_plan_count(reshape_output{id})) chelis_numeric_trap(\"numeric trap: domain in reshape at i64\");"));
+            self.line(&format!(
+                "chelis_metadata_plan_release(reshape_output{id});"
+            ));
+            self.line(&format!("chelis_metadata_plan_release(reshape_input{id});"));
+        }
+    }
+
+    fn tagged_i64(expression: &str) -> String {
+        format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)({expression}))")
+    }
+
+    fn emit_metadata_plan(
+        &mut self,
+        name: &str,
+        ty: &TensorType,
+        strides: Option<&[String]>,
+        capacity: &str,
+    ) {
+        let rank = ty.dims.len();
+        let rank_scalar = Self::tagged_i64(&rank.to_string());
+        let exemplar = format!("chelis_scalar_from_bits({}, 0)", Self::dtype_macro(ty));
+        let shape = if rank == 0 {
+            "NULL".to_string()
+        } else {
+            let values = ty
+                .dims
+                .iter()
+                .map(|dim| Self::tagged_i64(&Self::emit_dim_info(dim)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.line(&format!(
+                "const chelis_scalar {name}_shape[{rank}] = {{ {values} }};"
+            ));
+            format!("{name}_shape")
+        };
+        if let Some(strides) = strides {
+            assert_eq!(
+                strides.len(),
+                rank,
+                "a view requires every checked axis stride"
+            );
+            let stride_array = if rank == 0 {
+                "NULL".to_string()
+            } else {
+                let values = strides
+                    .iter()
+                    .map(|stride| Self::tagged_i64(stride))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!(
+                    "const chelis_scalar {name}_strides[{rank}] = {{ {values} }};"
+                ));
+                format!("{name}_strides")
+            };
+            let capacity = Self::tagged_i64(capacity);
+            self.line(&format!("chelis_metadata_plan *{name} = chelis_metadata_plan_view({rank_scalar}, {shape}, {stride_array}, {exemplar}, {capacity});"));
+        } else {
+            self.line(&format!("chelis_metadata_plan *{name} = chelis_metadata_plan_new({rank_scalar}, {shape}, {exemplar});"));
+        }
+    }
+
+    fn emit_owner_observation(&mut self, id: usize) {
+        self.line(&format!(
+            "const chelis_gpu_tensor *d_t{id} = chelis_device_tensor_view(o_t{id});"
+        ));
+        // Kernel launch argument storage is local; no cast removes packet constness.
+        self.line(&format!("void *p_t{id} = d_t{id}->data;"));
+    }
+
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
         if self.device_entrypoint_mode {
             return;
         }
         let slot_id = self.slot_id_for_node(id);
-        let slot = self.plan.slot(slot_id);
-        if slot.first_owner != NodeId(id) {
+        if self.plan.slot(slot_id).first_owner != NodeId(id) {
             return;
         }
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        self.emit_metadata_plan(&format!("slot_plan{slot_id}"), ty, None, "0");
+        self.line(&format!("chelis_device_tensor_owner *chelis_slot{slot_id} = chelis_device_tensor_alloc(slot_plan{slot_id});"));
     }
 
     fn emit_slot_wrapper(&mut self, id: usize, ty: &TensorType) {
         self.emit_slot_allocation_if_needed(id, ty);
-        let slot_id = self.slot_id_for_node(id);
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
-        ));
+        let slot = self.slot_id_for_node(id);
+        let source = format!("chelis_device_tensor_view(chelis_slot{slot})");
+        let capacity = format!("{source}->byte_capacity");
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, None, &capacity);
+        self.line(&format!("chelis_device_tensor_owner *o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});", Self::tagged_i64(&capacity)));
+        self.emit_owner_observation(id);
     }
 
     fn emit_device_slot_allocations(&mut self, dag: VerifiedDagView<'_>) {
-        let declarations = self
+        let slots = self
             .plan
             .slots()
             .iter()
-            .map(|slot| {
-                let ty = &dag
-                    .get(slot.first_owner)
-                    .unwrap_or_else(|| panic!("missing first owner {}", slot.first_owner.0))
-                    .output_type;
-                let ndim = Self::ndim(ty);
-                let shape = Self::shape_literal(ty);
-                let dtype = Self::dtype_macro(ty);
-                format!(
-                    "chelis_gpu_tensor *chelis_slot{} = chelis_gpu_alloc({ndim}, {shape}, {dtype});",
-                    slot.id
-                )
-            })
+            .map(|slot| (slot.id, slot.first_owner))
             .collect::<Vec<_>>();
-        for declaration in declarations {
-            self.line(&declaration);
+        for (slot, owner) in slots {
+            if matches!(
+                self.plan.node_kind(owner),
+                NodeMemoryKind::UniqueInput { .. }
+            ) {
+                // Device inputs borrow caller storage; their host-mirror slot
+                // is absent on this entry path and never authorizes reuse.
+                self.line(&format!(
+                    "chelis_device_tensor_owner *chelis_slot{slot} = NULL;"
+                ));
+                continue;
+            }
+            let ty = &dag
+                .get(owner)
+                .expect("verified slot first owner")
+                .output_type;
+            self.emit_metadata_plan(&format!("slot_plan{slot}"), ty, None, "0");
+            self.line(&format!("chelis_device_tensor_owner *chelis_slot{slot} = chelis_device_tensor_alloc(slot_plan{slot});"));
         }
     }
 
-    fn emit_alias_view(&mut self, id: usize, ty: &TensorType, data_expr: &str, storage_expr: &str) {
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, {data_expr}, {storage_expr});"
-        ));
+    fn emit_alias_view(&mut self, id: usize, ty: &TensorType, source: &str) {
+        let strides = (0..ty.dims.len())
+            .map(|axis| format!("{source}->strides[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, source, &strides);
     }
 
-    fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) -> Result<(), Unsupported> {
+    fn emit_strided_view(&mut self, id: usize, ty: &TensorType, source: &str, strides: &[String]) {
+        let capacity = format!("{source}->byte_capacity");
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, Some(strides), &capacity);
+        self.line(&format!("chelis_device_tensor_owner *o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});", Self::tagged_i64(&capacity)));
+        self.emit_owner_observation(id);
+    }
+
+    fn emit_const(
+        &mut self,
+        id: usize,
+        value: ScalarValue,
+        ty: &TensorType,
+    ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
-        let elem = Self::elem_kind(ty)?;
-        let kernel = format!("kernel_fill_{}", elem.suffix());
+        let kernel = format!("kernel_fill_{}", ty.precision.name());
         self.line("{");
         self.indent += 1;
-        match elem {
-            kernels::ElemKind::F32 => {
-                // Issue #250 (parallel #189): narrow the IR's f64 source to
-                // f32 (storage width is f32) and reconstruct the fill value
-                // from its exact bit pattern via the `chelis_f32_from_bits`
-                // static inline helper (declared in the included
-                // `chelis_runtime.h`). The pre-fix `{:.8}f` format string
-                // printed decimal places after the point, not significant
-                // digits, so small magnitudes drifted by ~3% or collapsed
-                // to zero when the emitted HIP host code parsed the literal
-                // back. Bit-pattern emission round-trips the closest-f32 to
-                // the source value verbatim.
-                let bits = (value as f32).to_bits();
-                self.line(&format!(
-                    "float fill_val = chelis_f32_from_bits(0x{bits:08x}u);"
-                ));
-            }
-            kernels::ElemKind::F64 => {
-                // Issue #250 sibling: emit the source f64's exact bit
-                // pattern and reconstruct it via `chelis_f64_from_bits`
-                // rather than a decimal format string. Symmetric with the
-                // f32 arm above and with the C backend's #189 fix.
-                let bits = value.to_bits();
-                self.line(&format!(
-                    "double fill_val = chelis_f64_from_bits(0x{bits:016x}uLL);"
-                ));
+        if let Some(integer) = value.as_i64_exact() {
+            self.line(&format!(
+                "{} fill_val = {};",
+                Self::dtype_c_type(ty.precision),
+                Self::i64_c_literal(integer)
+            ));
+        } else {
+            match Self::elem_kind(ty)? {
+                kernels::ElemKind::F32 => self.line(&format!(
+                    "float fill_val = chelis_f32_from_bits(0x{:08x}u);",
+                    (value.as_f64_lossy() as f32).to_bits()
+                )),
+                kernels::ElemKind::F64 => self.line(&format!(
+                    "double fill_val = chelis_f64_from_bits(0x{:016x}uLL);",
+                    value.as_f64_lossy().to_bits()
+                )),
             }
         }
-        self.line(&format!("int fill_size = d_t{id}->size;"));
         self.line(&format!(
-            "void *fill_args[] = {{ &d_t{id}->data, &fill_val, &fill_size }};"
+            "chelis_device_metadata fill_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "void *fill_args[] = {{ &p_t{id}, &fill_val, &fill_size }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel}"),
             &kernel,
-            "(fill_size + 255) / 256",
+            "fill_size / 256 + (fill_size % 256 != 0)",
             "256",
             "fill_args",
         );
@@ -2219,10 +3031,35 @@ impl HipEmitter {
     fn emit_const_tensor(
         &mut self,
         id: usize,
-        data: &[f64],
+        data: &chelis_types::dtype_semantics::TensorStorage,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
+        if ty.precision.is_integer() {
+            let host_ty = Self::dtype_c_type(ty.precision);
+            self.line("{");
+            self.indent += 1;
+            self.line(&format!(
+                "{host_ty} *__host_data = ({host_ty}*)malloc({}u * sizeof({host_ty}));",
+                data.len()
+            ));
+            for index in 0..data.len() {
+                let value = data
+                    .scalar_at(index)
+                    .as_i64_exact()
+                    .expect("typed integer constant");
+                self.line(&format!(
+                    "__host_data[{index}] = {};",
+                    Self::i64_c_literal(value)
+                ));
+            }
+            self.line(&format!("CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, __host_data, {}u * sizeof({host_ty}), hipMemcpyHostToDevice));", data.len()));
+            self.line("free(__host_data);");
+            self.indent -= 1;
+            self.line("}");
+            return Ok(());
+        }
+        let data = data.to_f64_lossy_vec();
         let elem = Self::elem_kind(ty)?;
         self.line("{");
         self.indent += 1;
@@ -2232,7 +3069,9 @@ impl HipEmitter {
                 // temporary then hipMemcpy to device. For simplicity,
                 // reuse the fill kernel per-element is too slow; instead
                 // build a host-side buffer and copy.
-                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!(
+                    "chelis_device_metadata fill_size = d_t{id}->count;"
+                ));
                 self.line(&format!(
                     "float *__host_data = (float*)malloc({}u * sizeof(float));",
                     data.len()
@@ -2250,7 +3089,9 @@ impl HipEmitter {
                 self.line("free(__host_data);");
             }
             kernels::ElemKind::F64 => {
-                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!(
+                    "chelis_device_metadata fill_size = d_t{id}->count;"
+                ));
                 self.line(&format!(
                     "double *__host_data = (double*)malloc({}u * sizeof(double));",
                     data.len()
@@ -2281,17 +3122,13 @@ impl HipEmitter {
         match self.plan.node_kind(NodeId(id)) {
             NodeMemoryKind::UniqueInput { .. } => {
                 self.emit_slot_wrapper(id, ty);
+                let slot = self.slot_id_for_node(id);
                 self.line(&format!(
-                    "chelis_host_to_device(d_t{id}, inputs[{input_idx}]);"
+                    "chelis_device_tensor_copy_from_host(chelis_slot{slot}, inputs[{input_idx}]);"
                 ));
             }
             NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("d_t{}->data", canonical_load.0),
-                    &format!("d_t{}->storage_size", canonical_load.0),
-                );
+                self.emit_alias_view(id, ty, &format!("d_t{}", canonical_load.0));
             }
             other => panic!("unexpected memory plan for load node {id}: {other:?}"),
         }
@@ -2300,20 +3137,10 @@ impl HipEmitter {
     fn emit_load_device(&mut self, id: usize, input_idx: usize, ty: &TensorType) {
         match self.plan.node_kind(NodeId(id)) {
             NodeMemoryKind::UniqueInput { .. } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("inputs[{input_idx}]->data"),
-                    &format!("inputs[{input_idx}]->storage_size"),
-                );
+                self.emit_alias_view(id, ty, &format!("input_view_{input_idx}"));
             }
             NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("d_t{}->data", canonical_load.0),
-                    &format!("d_t{}->storage_size", canonical_load.0),
-                );
+                self.emit_alias_view(id, ty, &format!("d_t{}", canonical_load.0));
             }
             other => panic!("unexpected memory plan for load node {id}: {other:?}"),
         }
@@ -2329,40 +3156,61 @@ impl HipEmitter {
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
+        numeric_trap: Option<&str>,
     ) {
         let a = inputs[0].0;
         let b = inputs[1].0;
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         // Stride params for a (8 ints)
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         // Stride params for b (8 ints)
         self.emit_stride_vars(id, "b", b);
-        self.line(&format!("int t{id}_b_ndim = d_t{b}->ndim;"));
-        self.line(&format!("int t{id}_b_size = d_t{b}->storage_size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_b_ndim = d_t{b}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_b_size = (d_t{b}->byte_capacity / chelis_dtype_size(d_t{b}->dtype));"
+        ));
         // Shape params for output (8 ints)
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        let gate_args = self.emit_gate_launch_args(id);
         // Build args array
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch_expr(
-            &format!("mod_{kernel_name}"),
-            kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
-            "256",
-            "args",
-        );
+        let module = format!("mod_{kernel_name}");
+        let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
+        if let Some(message) = numeric_trap {
+            self.emit_numeric_trap_kernel_launch_expr(
+                &module,
+                kernel_name,
+                &grid,
+                "256",
+                "args",
+                message,
+            );
+        } else {
+            self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -2384,21 +3232,27 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         for (name, source) in [("a", a), ("b", b), ("g", g)] {
             self.emit_stride_vars(id, name, source);
-            self.line(&format!("int t{id}_{name}_ndim = d_t{source}->ndim;"));
             self.line(&format!(
-                "int t{id}_{name}_size = d_t{source}->storage_size;"
+                "chelis_device_metadata t{id}_{name}_ndim = d_t{source}->rank;"
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{name}_size = (d_t{source}->byte_capacity / chelis_dtype_size(d_t{source}->dtype));"
             ));
         }
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &d_t{g}->data, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &p_t{g}, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             g_stride_refs = self.stride_arg_refs(id, "g"),
@@ -2407,7 +3261,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2426,31 +3280,207 @@ impl HipEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
     ) {
+        self.emit_unary_launch_with_trap(id, kernel_name, inputs, ty, None);
+    }
+
+    fn emit_unary_launch_with_trap(
+        &mut self,
+        id: usize,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        numeric_trap: Option<&str>,
+    ) {
         let a = inputs[0].0;
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        let gate_args = self.emit_gate_launch_args(id);
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size{gate_args} }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
-        self.emit_kernel_launch_expr(
-            &format!("mod_{kernel_name}"),
-            kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
-            "256",
-            "args",
-        );
+        let module = format!("mod_{kernel_name}");
+        let grid = format!("t{id}_size / 256 + (t{id}_size % 256 != 0)");
+        if let Some(message) = numeric_trap {
+            self.emit_numeric_trap_kernel_launch_expr(
+                &module,
+                kernel_name,
+                &grid,
+                "256",
+                "args",
+                message,
+            );
+        } else {
+            self.emit_kernel_launch_expr(&module, kernel_name, &grid, "256", "args");
+        }
         self.indent -= 1;
         self.line("}");
+    }
+
+    /// A constant the storage plan gives no storage because only draw
+    /// emission reads it, as a literal: a key derivation's seed or index and
+    /// a draw's bounds, which [`Self::record_derived_key`] and
+    /// [`Self::keyed_uniform_like_parameters`] fold into the launch.
+    fn is_emission_literal(&self, node: &DagNode) -> bool {
+        matches!(node.op, RiscOp::Const { .. })
+            && *self.plan.node_kind(node.id) == NodeMemoryKind::Skipped
+    }
+
+    /// A key the HIP lane computes at emission has no device value, so no
+    /// key can be a graph result on this lane.
+    fn reject_key_results(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        for root in dag.roots() {
+            let Some(node) = dag.get(*root) else {
+                continue;
+            };
+            if node.output_type.precision == Prim::Key {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op(chelis_ir::grad::risc_op_name(&node.op).to_string()),
+                    "a key result in the HIP DAG emitter",
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        1192,
+                        "the HIP lane computes keys at emission, so a key has no device value \
+                         to return; compiled randomness on every target is phase 6 of chelis#2413"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A rank-0 key operation ([05-OP-69], [05-OP-70], [05-OP-72]) whose
+    /// operands are literals or emission-time keys: the HIP lane computes its
+    /// key while it emits, since a device kernel receives keys only as launch
+    /// arguments.
+    fn record_derived_key(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(), Unsupported> {
+        let name = chelis_ir::grad::risc_op_name(&node.op);
+        let refuse = |reason: &str| {
+            Unsupported::new(
+                UnsupportedKind::Op(name.to_string()),
+                format!("a HIP {name} {reason}"),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane derives a key only at emission, from literal seeds and \
+                     indices and rank-0 keys; compiled randomness on every target is phase 6 \
+                     of chelis#2413"
+                ),
+            )
+        };
+        if !node.output_type.dims.is_empty() {
+            return Err(refuse("over a key tensor"));
+        }
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let parent = |this: &Self| {
+            this.draw_keys
+                .get(&node.inputs[0])
+                .copied()
+                .ok_or_else(|| refuse("whose key is not an emission-time key"))
+        };
+        let key = match &node.op {
+            RiscOp::KeyFromSeed => {
+                let seed = literal(node.inputs[0]).ok_or_else(|| refuse("with a runtime seed"))?;
+                chelis_types::RandomKey::from_seed(seed)
+                    .map_err(|error| refuse(&format!("whose seed is not an i64: {error}")))?
+            }
+            RiscOp::Split { branch } => {
+                let (left, right) = parent(self)?.split();
+                match branch {
+                    chelis_ir::dag::KeyBranch::Left => left,
+                    chelis_ir::dag::KeyBranch::Right => right,
+                }
+            }
+            RiscOp::FoldIn => {
+                let parent = parent(self)?;
+                let index =
+                    literal(node.inputs[1]).ok_or_else(|| refuse("with a runtime index"))?;
+                parent
+                    .fold_in(index)
+                    .map_err(|error| refuse(&format!("whose index is not an i64: {error}")))?
+            }
+            _ => unreachable!("record_derived_key records only rank-0 key derivations"),
+        };
+        self.draw_keys.insert(node.id, key);
+        Ok(())
+    }
+
+    /// The literal f32 bounds and emission-time key of a keyed `UniformLike`
+    /// whose key [`Self::record_derived_key`] computed.
+    fn keyed_uniform_like_parameters(
+        &self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+    ) -> Result<(f64, f64, u64), Unsupported> {
+        let unsupported = || {
+            Unsupported::new(
+                UnsupportedKind::Op("UniformLike".to_string()),
+                "a HIP uniform_like without an emission-time key",
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    1192,
+                    "the HIP lane draws only with a rank-0 key it derives at emission from \
+                     literal seeds and indices, with literal bounds; compiled randomness on \
+                     every target is phase 6 of chelis#2413"
+                ),
+            )
+        };
+        // Whether a draw under an activation draws is decided when the graph
+        // runs, which this lane does not do yet.
+        if node.owner.activation.is_some() {
+            return Err(unsupported());
+        }
+        let bound = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(value.as_f64_lossy()),
+            _ => None,
+        };
+        let key = self
+            .draw_keys
+            .get(&node.inputs[3])
+            .copied()
+            .ok_or_else(unsupported)?;
+        // A key validates nothing, so the draw validates its bounds.
+        let literal = |input: NodeId| match dag.get(input).map(|node| &node.op) {
+            Some(RiscOp::Const { value }) => Some(*value),
+            _ => None,
+        };
+        let (Some(low), Some(high)) = (literal(node.inputs[1]), literal(node.inputs[2])) else {
+            return Err(unsupported());
+        };
+        chelis_types::dtype_semantics::UniformLikeParameters::new(
+            node.output_type.precision,
+            low,
+            high,
+        )
+        .map_err(|_| unsupported())?;
+        match (bound(node.inputs[1]), bound(node.inputs[2])) {
+            (Some(low), Some(high)) => Ok((low, high, key.bits())),
+            _ => Err(unsupported()),
+        }
     }
 
     fn emit_uniform_like_launch(
@@ -2458,7 +3488,7 @@ impl HipEmitter {
         id: usize,
         low: f64,
         high: f64,
-        seed: u64,
+        key: u64,
         ty: &TensorType,
     ) -> Result<(), Unsupported> {
         self.emit_slot_wrapper(id, ty);
@@ -2491,24 +3521,82 @@ impl HipEmitter {
                 ));
             }
         }
-        self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("unsigned long long t{id}_key = {key}ULL;"));
         self.line(&format!(
-            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_key, &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel}"),
             &kernel,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
         self.indent -= 1;
         self.line("}");
         Ok(())
+    }
+
+    fn emit_logical_metadata_args(&mut self, id: usize, prefix: &str, source: usize) -> String {
+        self.emit_shape_vars(id, prefix, source);
+        self.emit_stride_vars(id, prefix, source);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_{prefix}_ndim = d_t{source}->rank;"
+        ));
+        format!(
+            "{}, {}, &t{id}_{prefix}_ndim",
+            self.shape_arg_refs(id, prefix),
+            self.stride_arg_refs(id, prefix)
+        )
+    }
+
+    fn emit_materialize_into_slot(&mut self, id: usize, source: usize) {
+        self.line(&format!("if (d_t{id}->count != d_t{source}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at i64\");"));
+        self.line("{");
+        self.indent += 1;
+        self.emit_stride_vars(id, "copy", source);
+        self.emit_shape_vars(id, "copy", source);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_copy_rank = d_t{source}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_copy_count = d_t{id}->count;"
+        ));
+        self.line(&format!("void *copy_args[] = {{ &p_t{source}, {}, {}, &t{id}_copy_rank, &p_t{id}, &t{id}_copy_count }};", self.stride_arg_refs(id, "copy"), self.shape_arg_refs(id, "copy")));
+        let name = format!("kernel_materialize_{id}");
+        self.emit_kernel_launch_expr(
+            &format!("mod_{name}"),
+            &name,
+            &format!("t{id}_copy_count / 256 + (t{id}_copy_count % 256 != 0)"),
+            "256",
+            "copy_args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_sparse_geometry(&mut self, id: usize, axis: usize, ty: &TensorType) {
+        let plan = format!("sparse_geometry{id}");
+        self.emit_metadata_plan(&plan, ty, None, "0");
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = chelis_metadata_plan_shape({plan})[{axis}];"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_after = chelis_metadata_plan_strides({plan})[{axis}];"
+        ));
+        // An empty source admits no logical read. Avoid dividing by its zero
+        // extent/stride; the bounds check rejects any attempted index into it.
+        self.line(&format!("chelis_device_metadata t{id}_before = 0;"));
+        self.line(&format!("if (chelis_metadata_plan_count({plan}) != 0) t{id}_before = chelis_metadata_plan_count({plan}) / t{id}_axis_size / t{id}_after;"));
+        self.line(&format!("chelis_metadata_plan_release({plan});"));
     }
 
     fn emit_gather_launch(
@@ -2535,13 +3623,10 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse gather requires int32/int64 indices, got {}",
+                "HIP backend sparse gather requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
-        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
         let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
@@ -2552,18 +3637,22 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{id}->size;"));
+        self.emit_sparse_geometry(id, axis, values_ty);
         self.line(&format!(
-            "void *args[] = {{ &d_t{values}->data, &d_t{indices}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{id}->count;"
+        ));
+        let values_metadata = self.emit_logical_metadata_args(id, "values", values);
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
+        self.line(&format!(
+            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {values_metadata}, {indices_metadata} }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_total + 255) / 256"),
+            &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
         );
@@ -2600,13 +3689,10 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_add requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
         let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
@@ -2617,21 +3703,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
+        self.emit_materialize_into_slot(id, target);
+        self.emit_sparse_geometry(id, axis, target_ty);
         self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
         ));
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
+        let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
+        self.line(&format!(
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_total + 255) / 256"),
+            &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
         );
@@ -2674,13 +3762,10 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_replace requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => "kernel_scatter_replace_i32",
             Prim::Int64 => "kernel_scatter_replace_i64",
@@ -2690,16 +3775,18 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
+        self.emit_materialize_into_slot(id, target);
+        self.emit_sparse_geometry(id, axis, target_ty);
         self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
         ));
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
+        let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
+        self.line(&format!(
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -2734,7 +3821,7 @@ impl HipEmitter {
         }
         if !matches!(indices_ty.precision, Prim::Int32 | Prim::Int64) {
             panic!(
-                "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
+                "HIP backend sparse scatter_elements requires i32/i64 indices, got {}",
                 indices_ty.precision.name()
             );
         }
@@ -2750,19 +3837,29 @@ impl HipEmitter {
         self.indent += 1;
         // Initialize the output from `data`; the kernel overwrites only
         // the scattered cells, so the remainder must equal `data`.
-        self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{data}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
-        ));
+        self.emit_materialize_into_slot(id, data);
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_ndim = d_t{id}->ndim;"));
-        self.line(&format!("int t{id}_axis = {axis};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!("chelis_device_metadata t{id}_axis = {axis};"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = {axis_size};"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
         let idx_sh_refs = self.shape_arg_refs(id, "idx");
         let out_sh_refs = self.shape_arg_refs(id, "out");
+        self.emit_stride_vars(id, "idx", indices);
+        self.emit_stride_vars(id, "updates", updates);
+        self.emit_stride_vars(id, "out", id);
+        let idx_stride_refs = self.stride_arg_refs(id, "idx");
+        let update_stride_refs = self.stride_arg_refs(id, "updates");
+        let out_stride_refs = self.stride_arg_refs(id, "out");
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total, {idx_stride_refs}, {update_stride_refs}, {out_stride_refs} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -2790,33 +3887,40 @@ impl HipEmitter {
         }
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
 
         // Emit stride vars for each external input
         for (i, inp) in inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int t{id}_{pfx}_ndim = d_t{}->ndim;", inp.0));
             self.line(&format!(
-                "int t{id}_{pfx}_size = d_t{}->storage_size;",
+                "chelis_device_metadata t{id}_{pfx}_ndim = d_t{}->rank;",
                 inp.0
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
 
         // Build args array
         let mut arg_parts = Vec::new();
         for (i, inp) in inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
-            arg_parts.push(format!("&d_t{}->data", inp.0));
+            arg_parts.push(format!("&p_t{}", inp.0));
             arg_parts.push(self.stride_arg_refs(id, &pfx));
             arg_parts.push(format!("&t{id}_{pfx}_ndim"));
             arg_parts.push(format!("&t{id}_{pfx}_size"));
         }
-        arg_parts.push(format!("&d_t{id}->data"));
+        arg_parts.push(format!("&p_t{id}"));
         arg_parts.push(self.shape_arg_refs(id, "out"));
         arg_parts.push(format!("&t{id}_out_ndim"));
         arg_parts.push(format!("&t{id}_size"));
@@ -2825,7 +3929,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2855,39 +3959,47 @@ impl HipEmitter {
         ty: &TensorType,
         spec: FusedReuseMechanics,
     ) {
-        let slot_id = self.slot_id_for_node(id);
-        let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
+        let slot = self.slot_id_for_node(id);
+        let first = self.plan.slot(slot).first_owner == NodeId(id);
         let reusable = spec.reusable_input.0;
-        if !self.device_entrypoint_mode && slot_is_first_owner {
-            self.line(&format!("chelis_gpu_tensor *chelis_slot{slot_id} = NULL;"));
+        if !self.device_entrypoint_mode && first {
             if spec.slot_has_later_owner {
+                self.emit_slot_allocation_if_needed(id, ty);
+            } else {
                 self.line(&format!(
-                    "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                    "chelis_device_tensor_owner *chelis_slot{slot} = NULL;"
                 ));
             }
         }
-        self.line(&format!("chelis_gpu_tensor *d_t{id};"));
-        self.line(&format!("if (chelis_gpu_is_contiguous(d_t{reusable})) {{"));
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, None, "0");
+        self.line(&format!(
+            "bool contiguous_t{id} = d_t{reusable}->rank == chelis_metadata_plan_rank(plan_t{id});"
+        ));
+        self.line(&format!("for (chelis_device_rank axis = 0; contiguous_t{id} && axis < d_t{reusable}->rank; ++axis) contiguous_t{id} = d_t{reusable}->strides[axis] == chelis_metadata_plan_strides(plan_t{id})[axis];"));
+        self.line(&format!("chelis_device_tensor_owner *o_t{id};"));
+        self.line(&format!("if (contiguous_t{id}) {{"));
         self.indent += 1;
         self.line(&format!(
-            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{reusable}->data, d_t{reusable}->storage_size);"
+            "o_t{id} = chelis_device_tensor_borrow(plan_t{id}, d_t{reusable}->data, {});",
+            Self::tagged_i64(&format!("d_t{reusable}->byte_capacity"))
         ));
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        if !self.device_entrypoint_mode && slot_is_first_owner && !spec.slot_has_later_owner {
+        if !self.device_entrypoint_mode && first && !spec.slot_has_later_owner {
+            self.emit_metadata_plan(&format!("slot_plan{slot}"), ty, None, "0");
             self.line(&format!(
-                "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                "chelis_slot{slot} = chelis_device_tensor_alloc(slot_plan{slot});"
             ));
         }
+        let source = format!("chelis_device_tensor_view(chelis_slot{slot})");
         self.line(&format!(
-            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
+            "o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});",
+            Self::tagged_i64(&format!("{source}->byte_capacity"))
         ));
         self.indent -= 1;
         self.line("}");
+        self.emit_owner_observation(id);
     }
 
     // ------------------------------------------------------------------
@@ -2966,23 +4078,33 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
-        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{a}->shape[{axis}];"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_out_size + 255) / 256"),
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3026,17 +4148,126 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
-        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{a}->shape[{axis}];"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            &kernel_name,
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+        Ok(())
+    }
+
+    /// Launch the dedicated [05-OP-29] Count kernel. The device reports
+    /// payload, arithmetic, and hardware-limit failures through a separate
+    /// status buffer; no host evaluation or cast-plus-sum fallback exists.
+    fn emit_count_launch(
+        &mut self,
+        id: usize,
+        axes: &[usize],
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let a = inputs[0].0;
+        let input_ty = &dag
+            .get(inputs[0])
+            .expect("validated Count input must exist")
+            .output_type;
+        debug_assert_eq!(input_ty.precision, Prim::Bool);
+        debug_assert_eq!(ty.precision, Prim::Int64);
+
+        let overflow = NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        let domain = NumericTrap::Domain {
+            op: "count",
+            prim: Prim::Bool,
+        }
+        .to_string();
+        let kernel_name = format!("kernel_count_{id}");
+        // The status word is device scratch outside the storage plan: one
+        // i32 per Count node, live until the launch is checked. Count it in
+        // the static peak estimate through the memory plan's width authority,
+        // once per node: the device-tensor entrypoint is a second emission of
+        // the same nodes, and the peak is per call, not summed across entries.
+        if !self.device_entrypoint_mode {
+            let status_word_bytes = crate::memory::bytes_expr(&DimExpr::Concrete(1), Prim::Int32)
+                .evaluate(&chelis_unord::UnordMap::new())
+                .expect("a concrete element count evaluates without bindings");
+            self.extra_peak_device_bytes_estimate += status_word_bytes;
+        }
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!("chelis_device_metadata t{id}_count_n = 1;"));
+        for axis in axes.iter().rev() {
+            self.line(&format!(
+                "if (d_t{a}->shape[{axis}] != 0 && t{id}_count_n > INT64_MAX / d_t{a}->shape[{axis}]) {{ fprintf(stderr, {overflow:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+            ));
+            self.line(&format!(
+                "t{id}_count_n *= (long long)d_t{a}->shape[{axis}];"
+            ));
+        }
+        self.line(&format!("if (t{id}_out_size > 0) {{"));
+        self.indent += 1;
+        self.emit_stride_vars(id, "a", a);
+        self.emit_shape_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype);"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!("int *t{id}_count_error = NULL;"));
+        self.line(&format!("int t{id}_count_error_host = 0;"));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMalloc((void**)&t{id}_count_error, sizeof(int)));"
+        ));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemset(t{id}_count_error, 0, sizeof(int)));"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, {a_shape_refs}, \
+             &t{id}_a_ndim, &t{id}_a_size, &d_t{id}->data, {out_shape_refs}, \
+             &t{id}_out_ndim, &t{id}_out_size, &t{id}_count_n, &t{id}_count_error }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            a_shape_refs = self.shape_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
@@ -3046,9 +4277,26 @@ impl HipEmitter {
             "256",
             "args",
         );
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(&t{id}_count_error_host, t{id}_count_error, sizeof(int), hipMemcpyDeviceToHost));"
+        ));
+        self.line(&format!("CHELIS_HIP_CHECK(hipFree(t{id}_count_error));"));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 1) {{ fprintf(stderr, {domain:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 2) {{ fprintf(stderr, {overflow:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 3) {{ fprintf(stderr, \"count exceeded the dedicated 64-frame HIP reduction stack\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 4) {{ fprintf(stderr, \"count produced an out-of-range HIP storage index\\n\"); abort(); }}"
+        ));
         self.indent -= 1;
         self.line("}");
-        Ok(())
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ------------------------------------------------------------------
@@ -3080,9 +4328,11 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
         self.line(&format!(
-            "int t{id}_axis_size = d_t{}->shape[{axis}];",
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{}->shape[{axis}];",
             reduction_inputs[0].0
         ));
 
@@ -3090,27 +4340,32 @@ impl HipEmitter {
         for (i, inp) in ext_inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int t{id}_{pfx}_ndim = d_t{}->ndim;", inp.0));
             self.line(&format!(
-                "int t{id}_{pfx}_size = d_t{}->storage_size;",
+                "chelis_device_metadata t{id}_{pfx}_ndim = d_t{}->rank;",
                 inp.0
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
 
         // Build args array: ext inputs + output
         let mut arg_parts = Vec::new();
         for (i, inp) in ext_inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
-            arg_parts.push(format!("&d_t{}->data", inp.0));
+            arg_parts.push(format!("&p_t{}", inp.0));
             arg_parts.push(self.stride_arg_refs(id, &pfx));
             arg_parts.push(format!("&t{id}_{pfx}_ndim"));
             arg_parts.push(format!("&t{id}_{pfx}_size"));
         }
-        arg_parts.push(format!("&d_t{id}->data"));
+        arg_parts.push(format!("&p_t{id}"));
         arg_parts.push(self.shape_arg_refs(id, "out"));
         arg_parts.push(format!("&t{id}_out_ndim"));
         arg_parts.push(format!("&t{id}_out_size"));
@@ -3120,7 +4375,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_out_size + 255) / 256"),
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3144,9 +4399,10 @@ impl HipEmitter {
         // accumulator dtype before this function is called.
         let a = spec.a.0;
         let b = spec.b.0;
-        let m_expr = Self::emit_dim_expr(&spec.m);
-        let n_expr = Self::emit_dim_expr(&spec.n);
-        let k_expr = Self::emit_dim_expr(&spec.k);
+        let matrix_axis = ty.dims.len() - 2;
+        let m_expr = format!("d_t{id}->shape[{matrix_axis}]");
+        let n_expr = format!("d_t{id}->shape[{}]", matrix_axis + 1);
+        let k_expr = format!("d_t{a}->shape[d_t{a}->rank - 1]");
         // F1 footgun fix (WS-A3): dispatch by `(operand, accumulator)`
         // pair, not by operand alone. The original implementation
         // unconditionally called `hipblasSgemm` regardless of the
@@ -3216,12 +4472,14 @@ impl HipEmitter {
         // (the WS-A0 RT-1 F1 footgun was destructure-and-ignore).
         let _ = (operand_prec, declared_acc);
 
+        self.line(&format!("if (d_t{id}->count != 0) {{"));
+        self.indent += 1;
         if spec.batch_dims.is_empty() {
             self.line(&format!(
                 "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});",
                 call = wrapper.row_major_call_name(),
             ));
-        } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
+        } else if Self::strided_batched_hipblas_plan(dag, spec, ty).is_some() {
             // Batched/strided-batched bf16/f16 wrappers are not yet
             // present (would need `hipblasGemmStridedBatchedEx`
             // plumbing). For this cycle, batched matmul is
@@ -3230,13 +4488,11 @@ impl HipEmitter {
                 "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
                  `hipblasGemmStridedBatchedEx`); rank-2 only in this cycle",
             );
+            let last_batch_axis = matrix_axis - 1;
             self.line(&format!(
-                "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
-                batch_count = plan.batch_count_expr,
-                a_stride = plan.a_batch_stride,
-                b_stride = plan.b_batch_stride,
-                out_stride = plan.out_batch_stride,
+                "chelis_device_metadata t{id}_batch_count = d_t{id}->count / {m_expr} / {n_expr};"
             ));
+            self.line(&format!("{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, t{id}_batch_count, d_t{a}->strides[{last_batch_axis}], d_t{b}->strides[{last_batch_axis}], d_t{id}->strides[{last_batch_axis}]);"));
         } else {
             let call = wrapper.batched_row_major_call_name().expect(
                 "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
@@ -3246,6 +4502,8 @@ impl HipEmitter {
                 "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
             ));
         }
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ------------------------------------------------------------------
@@ -3253,28 +4511,53 @@ impl HipEmitter {
     // ------------------------------------------------------------------
 
     fn emit_reshape(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let kernel_name = format!("kernel_reshape_{}", Self::dtype_macro(ty));
+        self.emit_logical_copy(id, inputs, ty, &kernel_name);
+    }
+
+    fn emit_logical_copy(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        kernel_name: &str,
+    ) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if (d_t{id}->count != d_t{a}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at i64\");"));
+        self.line("{");
+        self.indent += 1;
+        self.emit_stride_vars(id, "a", a);
+        self.emit_shape_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {}, {}, &t{id}_a_ndim, &p_t{id}, &t{id}_size }};",
+            self.stride_arg_refs(id, "a"),
+            self.shape_arg_refs(id, "a")
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
+            "256",
+            "args",
         );
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn emit_permute(&mut self, id: usize, axes: &[usize], inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        for (new_d, &old_d) in axes.iter().enumerate() {
-            self.line(&format!(
-                "d_t{id}->strides[{new_d}] = d_t{a}->strides[{old_d}];"
-            ));
-        }
+        let strides = axes
+            .iter()
+            .map(|axis| format!("d_t{a}->strides[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
     fn emit_expand(
@@ -3286,30 +4569,19 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        self.line(&format!("if (d_t{id}->ndim == d_t{a}->ndim) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int d = 0; d < d_t{a}->ndim; d++) d_t{id}->strides[d] = d_t{a}->strides[d];"
-        ));
-        self.line(&format!("d_t{id}->strides[{axis}] = 0;"));
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        for d in 0..axis {
-            self.line(&format!("d_t{id}->strides[{d}] = d_t{a}->strides[{d}];"));
-        }
-        self.line(&format!("d_t{id}->strides[{axis}] = 0;"));
-        self.line(&format!(
-            "for (int d = {axis}; d < d_t{a}->ndim; d++) d_t{id}->strides[d+1] = d_t{a}->strides[d];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        let rank = ty.dims.len();
+        let strides = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    "0".to_string()
+                } else if d < axis {
+                    format!("d_t{a}->strides[{d}]")
+                } else {
+                    format!("d_t{a}->strides[d_t{a}->rank == {rank} ? {d} : {}]", d - 1)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
     fn emit_stride(
@@ -3320,38 +4592,30 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        let max_dims = ty.dims.len().max(1);
-        for (d, &s) in stride_factors.iter().enumerate() {
-            if d >= max_dims {
-                break;
-            }
-            self.line(&format!(
-                "d_t{id}->strides[{d}] = d_t{a}->strides[{d}] * {s};"
-            ));
-        }
+        assert_eq!(stride_factors.len(), ty.dims.len());
+        let strides = stride_factors.iter().enumerate().map(|(axis, factor)| {
+            format!("chelis_int_checked_mul(d_t{a}->strides[{axis}], INT64_C({factor}), 64, \"numeric trap: overflow in stride at i64\")")
+        }).collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
-    /// Emit per-axis `int t{node_id}_{prefix}{0..7} = <val>;` constants
+    /// Emit per-axis `chelis_device_metadata t{node_id}_{prefix}{0..7} = <val>;` constants
     /// from a compile-time vector, zero-padding the unused trailing axes.
     /// Used by `pad`/`shrink` for the low-padding / start-offset vectors,
     /// which are pinned in the `RiscOp` (not read from runtime metadata).
     fn emit_axis_const_vars(&mut self, node_id: usize, prefix: &str, values: &[usize]) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             let v = values.get(i).copied().unwrap_or(0);
-            self.line(&format!("int t{node_id}_{prefix}{i} = {v};"));
+            self.line(&format!(
+                "chelis_device_metadata t{node_id}_{prefix}{i} = {v};"
+            ));
         }
     }
 
     /// Generate `&t{node_id}_{prefix}0, ...` arg references for the
     /// per-axis constants emitted by [`Self::emit_axis_const_vars`].
     fn axis_const_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3386,21 +4650,29 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         self.emit_axis_const_vars(id, "lo", &lo);
         // Source shape is read from runtime metadata so symbolic/strided
         // inputs bounds-check against their real extents.
         self.emit_shape_vars(id, "srcsh", a);
         self.emit_typed_scalar_local(&format!("t{id}_fill"), fill);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {lo_refs}, {srcsh_refs}, &t{id}_fill, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             lo_refs = self.axis_const_arg_refs(id, "lo"),
             srcsh_refs = self.shape_arg_refs(id, "srcsh"),
@@ -3409,7 +4681,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3440,17 +4712,25 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         self.emit_axis_const_vars(id, "start", &start);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {start_refs}, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             start_refs = self.axis_const_arg_refs(id, "start"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -3458,7 +4738,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3504,12 +4784,7 @@ impl HipEmitter {
 
     fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
+        self.emit_alias_view(id, ty, &format!("d_t{a}"));
         // Producer-supplied Store name in a `/* ... */` block-comment
         // context. LoadStoreName grammar already excludes `*` and `/`,
         // so a `*/` cannot reach this format!() via the constructor;
@@ -3526,27 +4801,27 @@ impl HipEmitter {
     // Stride/shape variable helpers
     // ------------------------------------------------------------------
 
-    /// Emit `int t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
+    /// Emit `chelis_device_metadata t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
     fn emit_stride_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->ndim) ? d_t{src_id}->strides[{i}] : 0;"
+                "chelis_device_metadata t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->strides[{i}] : 0;"
             ));
         }
     }
 
-    /// Emit `int t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
+    /// Emit `chelis_device_metadata t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
     fn emit_shape_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->ndim) ? d_t{src_id}->shape[{i}] : 0;"
+                "chelis_device_metadata t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->shape[{i}] : 0;"
             ));
         }
     }
 
     /// Generate `&t{node_id}_{prefix}_s0, &t{node_id}_{prefix}_s1, ...` for args array.
     fn stride_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}_s{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3554,7 +4829,7 @@ impl HipEmitter {
 
     /// Generate `&t{node_id}_{prefix}_sh0, &t{node_id}_{prefix}_sh1, ...` for args array.
     fn shape_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}_sh{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3570,11 +4845,49 @@ impl HipEmitter {
     ) {
         self.line(&format!("chelis_prepare_kernel_launch({module_var});"));
         self.line(&format!(
-            "chelis_launch_kernel({module_var}, \"{kernel_name}\", dim3({grid_expr}), dim3({block_expr}), {args_var});"
+            "chelis_launch_kernel({module_var}, \"{kernel_name}\", ({grid_expr}), ({block_expr}), {args_var});"
         ));
         self.line(&format!(
             "chelis_finalize_kernel_launch({module_var}, \"{kernel_name}\");"
         ));
+    }
+
+    fn emit_numeric_trap_kernel_launch_expr(
+        &mut self,
+        module_var: &str,
+        kernel_name: &str,
+        grid_expr: &str,
+        block_expr: &str,
+        args_var: &str,
+        trap_message: &str,
+    ) {
+        self.line("{");
+        self.indent += 1;
+        self.line("hipDeviceptr_t chelis_numeric_flag_symbol;");
+        self.line("hipDeviceptr_t chelis_numeric_index_symbol;");
+        self.line("size_t chelis_numeric_flag_size = 0;");
+        self.line("size_t chelis_numeric_index_size = 0;");
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipModuleGetGlobal(&chelis_numeric_flag_symbol, &chelis_numeric_flag_size, {module_var}, \"chelis_numeric_failure_flag\"));"
+        ));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipModuleGetGlobal(&chelis_numeric_index_symbol, &chelis_numeric_index_size, {module_var}, \"chelis_numeric_failure_index\"));"
+        ));
+        self.line("if (chelis_numeric_flag_size < sizeof(unsigned int) || chelis_numeric_index_size < sizeof(unsigned long long)) { fprintf(stderr, \"HIP error: numeric trap symbols have unexpected size\\n\"); abort(); }");
+        self.line("unsigned int chelis_numeric_flag = 0;");
+        self.line("unsigned long long chelis_numeric_index = ~0ULL;");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyHtoD(chelis_numeric_flag_symbol, &chelis_numeric_flag, sizeof(chelis_numeric_flag)));");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyHtoD(chelis_numeric_index_symbol, &chelis_numeric_index, sizeof(chelis_numeric_index)));");
+        self.emit_kernel_launch_expr(module_var, kernel_name, grid_expr, block_expr, args_var);
+        self.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_flag, chelis_numeric_flag_symbol, sizeof(chelis_numeric_flag)));");
+        self.line("CHELIS_HIP_CHECK(hipMemcpyDtoH(&chelis_numeric_index, chelis_numeric_index_symbol, sizeof(chelis_numeric_index)));");
+        self.line("if ((chelis_numeric_flag == 0) != (chelis_numeric_index == ~0ULL)) { fprintf(stderr, \"HIP error: inconsistent numeric trap record\\n\"); abort(); }");
+        self.line(&format!(
+            "if (chelis_numeric_flag != 0) chelis_numeric_trap(\"{trap_message}\");"
+        ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn reduction_kernel_name(
@@ -3666,7 +4979,7 @@ impl HipEmitter {
         dag: VerifiedDagView<'_>,
         spec: &MatmulEmitSpec,
         ty: &TensorType,
-    ) -> Option<StridedBatchedMatmulPlan> {
+    ) -> Option<()> {
         if spec.batch_dims.is_empty()
             || !matches!(ty.precision, Prim::F32 | Prim::F64)
             || !spec.batch_dims.iter().all(Self::is_simple_runtime_dim)
@@ -3674,9 +4987,9 @@ impl HipEmitter {
             return None;
         }
 
-        let m = spec.m.as_concrete()?;
-        let n = spec.n.as_concrete()?;
-        let k = spec.k.as_concrete()?;
+        spec.m.as_concrete()?;
+        spec.n.as_concrete()?;
+        spec.k.as_concrete()?;
         let batch_rank = spec.batch_dims.len();
         if ty.dims.len() != batch_rank + 2 {
             return None;
@@ -3730,44 +5043,58 @@ impl HipEmitter {
             return None;
         }
 
-        Some(StridedBatchedMatmulPlan {
-            batch_count_expr: Self::batch_count_expr(&spec.batch_dims),
-            a_batch_stride: m * k,
-            b_batch_stride: k * n,
-            out_batch_stride: m * n,
-        })
+        Some(())
     }
 
     fn is_simple_runtime_dim(expr: &DimExpr) -> bool {
         matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
     }
 
-    fn batch_count_expr(batch_dims: &[DimExpr]) -> String {
-        batch_dims
-            .iter()
-            .map(Self::emit_dim_expr)
-            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-            .unwrap_or_else(|| "1".to_string())
+    /// chelis#1464 / [05-OP-68]: defensive. A guarded abort is emitted
+    /// HOST-side, exactly as on the C target, so it does not reach device
+    /// kernel selection — measured on both a scalar and a `vmap`-batched
+    /// guard, which each produced a complete HIP artifact carrying
+    /// `chelis_fail` and the authored message.
+    ///
+    /// This arm therefore exists so the operation cannot fall through a
+    /// wildcard into a device kernel, where emitting the fallback alone
+    /// would silently restore the substitution the identity exists to
+    /// prevent. chelis#2360 owns confirming the host-side guard on real
+    /// device hardware and deciding whether this stays defensive.
+    fn guarded_fail_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("guarded_fail".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2360,
+                "a guarded abort reaching device kernel selection has no device form; it is emitted host-side"
+            ),
+        )
     }
 
-    fn dim_product_expr(dims: &[DimInfo]) -> String {
-        dims.iter()
-            .map(Self::emit_dim_info)
-            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-            .unwrap_or_else(|| "1".to_string())
+    fn bitwise_unsupported(node: &DagNode, kind: chelis_types::BitwiseKind) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op(kind.name().to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                2702,
+                "exact signed-width bitwise tensor kernels have no HIP implementation; select the C target"
+            ),
+        )
     }
 
-    #[allow(dead_code)]
-    fn supports_staged_scalar_reduction(
-        node: &DagNode,
-        input_node: &DagNode,
-        axis: usize,
-        dag: VerifiedDagView<'_>,
-    ) -> bool {
-        Self::total_size(&node.output_type) == 1
-            && input_node.output_type.dims.len() <= 1
-            && axis == 0
-            && Self::node_is_statically_contiguous(dag, input_node.id)
+    fn remainder_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("mod".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1277,
+                "checked integer remainder has no device kernel; the C host path preserves [05-OP-64] DivZero traps"
+            ),
+        )
     }
 
     /// The [05-OP-6] rung has no guarded device kernel, so it never
@@ -3792,8 +5119,8 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
-            RiscOp::Load { .. }
-            | RiscOp::Const { .. }
+            RiscOp::Load { .. } => false,
+            RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }
             | RiscOp::Add
             | RiscOp::Sub
@@ -3801,12 +5128,17 @@ impl HipEmitter {
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::Bitwise(_)
+            | RiscOp::Compare(_)
+            | RiscOp::Logical(_)
+            | RiscOp::Where
+            | RiscOp::GuardedFail { .. }
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::Relu
             | RiscOp::ReluAdjoint
-            | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp
@@ -3820,8 +5152,15 @@ impl HipEmitter {
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round
-            | RiscOp::UniformLike { .. }
-            | RiscOp::Dropout { .. }
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::UniformBoundAdjoint { .. }
+            | RiscOp::KeyFromSeed
+            | RiscOp::Split { .. }
+            | RiscOp::FoldIn
+            | RiscOp::SplitN { .. }
+            | RiscOp::KeySelect
             | RiscOp::Copy
             | RiscOp::Drop
             | RiscOp::Sum { .. }
@@ -3834,6 +5173,7 @@ impl HipEmitter {
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Realize
+            | RiscOp::Reshape { .. }
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
@@ -3851,9 +5191,9 @@ impl HipEmitter {
             // `Shape` materializes a fresh rank-0 scalar (trivially
             // contiguous). It is HIP-rejected before codegen under
             // [05-SHAPE-1], so this arm is only for classification completeness.
-            | RiscOp::Shape { .. } => true,
+            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
             RiscOp::Count { .. } => true,
-            RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
+            RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
             RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => false,
@@ -3928,17 +5268,8 @@ impl HipEmitter {
         out
     }
 
-    fn shape_literal(ty: &TensorType) -> String {
-        let dims: Vec<String> = ty.dims.iter().map(Self::emit_dim_info).collect();
-        if dims.is_empty() {
-            "(int[]){1}".to_string()
-        } else {
-            format!("(int[]){{ {} }}", dims.join(", "))
-        }
-    }
-
     fn ndim(ty: &TensorType) -> usize {
-        if ty.dims.is_empty() { 1 } else { ty.dims.len() }
+        ty.dims.len()
     }
 
     fn known_dim_size(dim: &DimInfo) -> Option<usize> {
@@ -3954,42 +5285,6 @@ impl HipEmitter {
             DimInfo::Lit(n) => n.to_string(),
             DimInfo::Named(_, Some(n)) => n.to_string(),
             DimInfo::Named(name, None) => name.clone(),
-        }
-    }
-
-    fn emit_dim_expr(expr: &DimExpr) -> String {
-        match expr {
-            DimExpr::Concrete(n) => n.to_string(),
-            DimExpr::Sym(name) => name.clone(),
-            DimExpr::Mul(lhs, rhs) => {
-                format!(
-                    "({} * {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
-            DimExpr::Div(lhs, rhs) => {
-                format!(
-                    "({} / {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn total_size(ty: &TensorType) -> usize {
-        if ty.dims.is_empty() {
-            1
-        } else {
-            ty.dims
-                .iter()
-                .map(|dim| {
-                    Self::known_dim_size(dim)
-                        .unwrap_or_else(|| panic!("unsized named dimension in static total_size"))
-                })
-                .product()
         }
     }
 
@@ -4020,63 +5315,73 @@ impl HipEmitter {
             Prim::Int64 => "_i64",
             other => panic!(
                 "HIP kernel suffix not defined for `{}` (active dtype set per \
-                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/int8/int16/int32/int64).",
+                 spec/04-type-system.md §1.1: f32/f64/bf16/f16/bool/i8/i16/i32/i64).",
                 other.name()
             ),
         }
     }
 
-    /// Reject a node whose result is stored at a different width than its
-    /// operands.
-    ///
-    /// [`kernels::cmplt`] and its relatives declare **one** element type and
-    /// use it for both the operand pointers and the result pointer, so the
-    /// emitted kernel writes `result_count * operand_width` bytes into a
-    /// buffer the runtime sized at `result_count * result_width`. That is
-    /// only safe when the two widths agree.
-    ///
-    /// chelis#1360 is what it costs when they stop agreeing silently. `cmplt`
-    /// dispatched on its operand dtype alone and never asked about its bool
-    /// result, which was fine while the HIP runtime stored bool as a four-byte
-    /// `1.0f`/`0.0f` payload. chelis#1308's tagged carrier made bool one byte,
-    /// nothing here noticed, and `x < y` began overrunning its device
-    /// allocation by `3N` bytes while decoding the low bytes of the float
-    /// stream on readback.
-    ///
-    /// Both widths come from [`chelis_vocab::Repr`] rather than a local table,
-    /// so this check cannot drift away from what the allocator actually does.
-    fn require_result_width_matches_operand(
-        node: &DagNode,
-        operand_ty: &TensorType,
-    ) -> Result<(), Unsupported> {
-        let width = |ty: &TensorType| {
-            ty.precision
-                .runtime_dtype()
-                .map(|dtype| dtype.byte_width())
-                .ok()
-        };
-        let (Some(result_width), Some(operand_width)) =
-            (width(&node.output_type), width(operand_ty))
-        else {
-            // A dtype with no runtime representation at all is the ordinary
-            // unsupported-dtype path; let `elem_kind` name it.
-            return Ok(());
-        };
-        if result_width == operand_width {
-            return Ok(());
+    fn comparison_operator(kind: ComparisonKind) -> &'static str {
+        match kind {
+            ComparisonKind::CmpLt | ComparisonKind::Lt => "<",
+            ComparisonKind::Eq => "==",
+            ComparisonKind::Neq => "!=",
+            ComparisonKind::Gt => ">",
+            ComparisonKind::Gte => ">=",
+            ComparisonKind::Lte => "<=",
         }
-        Err(Unsupported::new(
-            UnsupportedKind::Dtype(node.output_type.precision.name().to_string()),
-            "a HIP kernel template that stores its result at the operand width",
-            Stage::Codegen("hip"),
-            chelis_types::unimplemented_rejection!(
-                1364,
-                "this kernel writes its result at the operand's element width, and the \
-                 result dtype is stored at a different width; emitting it would overrun \
-                 the result allocation (chelis#1360). A typed kernel family for the \
-                 result dtype is chelis#1364"
+    }
+
+    fn comparison_value_expressions(precision: Prim) -> (&'static str, &'static str) {
+        match precision {
+            Prim::F16 => ("chelis_f16_to_f32(a[idx_a])", "chelis_f16_to_f32(b[idx_b])"),
+            Prim::Bf16 => (
+                "chelis_bf16_to_f32(a[idx_a])",
+                "chelis_bf16_to_f32(b[idx_b])",
             ),
-        ))
+            _ => ("a[idx_a]", "b[idx_b]"),
+        }
+    }
+
+    fn comparison_value_helpers(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F16 | Prim::Bf16 => kernels::REDUCED_FLOAT_COMPARISON_HELPERS,
+            _ => "",
+        }
+    }
+
+    fn comparison_c_type(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F32 => "float",
+            Prim::F64 => "double",
+            Prim::Bool => "unsigned char",
+            Prim::Int8 => "chelis_i8",
+            Prim::Int16 => "chelis_i16",
+            Prim::Int32 => "chelis_i32",
+            Prim::Int64 => "chelis_i64",
+            Prim::F16 | Prim::Bf16 => "chelis_u16",
+            other => panic!(
+                "HIP comparison type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
+    }
+
+    fn where_storage_c_type(precision: Prim) -> &'static str {
+        match precision {
+            Prim::F16 | Prim::Bf16 => "chelis_u16",
+            Prim::F32 => "chelis_u32",
+            Prim::F64 => "chelis_u64",
+            Prim::Bool => "unsigned char",
+            Prim::Int8 => "chelis_i8",
+            Prim::Int16 => "chelis_i16",
+            Prim::Int32 => "chelis_i32",
+            Prim::Int64 => "chelis_i64",
+            other => panic!(
+                "HIP where storage type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
+                other.name()
+            ),
+        }
     }
 
     /// Resolve the two arithmetic families used by the materialization
@@ -4125,7 +5430,7 @@ impl HipEmitter {
     ///
     /// chelis#730 Phase 1 (census row 5, chelis#689): the former `_ =>
     /// ElemKind::F32` wildcard silently dispatched f32 kernels over
-    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (int64
+    /// non-f32 buffers - runtime-confirmed corrupt on gfx1151 (i64
     /// `neg` read 8-byte lanes as 4-byte floats and left half the output
     /// buffer unwritten). The ops with typed WS-A4 templates
     /// (Add/Mul/Div/FloorDiv/TruncDiv, pad/shrink, i8/i16 sum) never call
@@ -4155,7 +5460,8 @@ impl HipEmitter {
             | Prim::Int16
             | Prim::Int32
             | Prim::Int64
-            | Prim::String => {
+            | Prim::String
+            | Prim::Key => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(ty.precision.name().to_string()),
                     "a HIP kernel family with f32/f64 variants only",
@@ -4195,6 +5501,27 @@ impl HipEmitter {
             other => panic!(
                 "HIP element type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()
+            ),
+        }
+    }
+
+    fn reduced_float_kind(p: Prim) -> Option<kernels::ReducedFloatKind> {
+        match p {
+            Prim::F16 => Some(kernels::ReducedFloatKind::F16),
+            Prim::Bf16 => Some(kernels::ReducedFloatKind::Bf16),
+            _ => None,
+        }
+    }
+
+    fn signed_integer_bounds(p: Prim) -> (&'static str, &'static str) {
+        match p {
+            Prim::Int8 => ("(-127 - 1)", "127"),
+            Prim::Int16 => ("(-32767 - 1)", "32767"),
+            Prim::Int32 => ("(-2147483647 - 1)", "2147483647"),
+            Prim::Int64 => ("(-9223372036854775807LL - 1LL)", "9223372036854775807LL"),
+            _ => panic!(
+                "checked HIP subtraction bounds requested for non-integer dtype {}",
+                p.name()
             ),
         }
     }
@@ -4269,6 +5596,8 @@ impl HipEmitter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn emit_test_dag(
@@ -4285,17 +5614,27 @@ mod tests {
     #[test]
     fn drop_releases_exact_device_descriptor_once() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![source], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![source],
+            TensorType::scalar_f32(),
+            None,
+        );
 
         let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
         assert_eq!(
-            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            source
+                .matches("chelis_device_tensor_release(o_t0);")
+                .count(),
             2,
             "host and device entrypoints each consume the exact verified descriptor once:\n{source}"
         );
@@ -4304,19 +5643,35 @@ mod tests {
     #[test]
     fn borrowed_drop_is_a_logical_discard_without_a_device_release() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let borrowed = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             TensorType::scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::Drop, vec![borrowed], TensorType::scalar_f32(), None);
-        let output = dag.add_node(RiscOp::Copy, vec![borrowed], TensorType::scalar_f32(), None);
+        dag.add_node(
+            decl,
+            RiscOp::Drop,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
+        let output = dag.add_node(
+            decl,
+            RiscOp::Copy,
+            vec![borrowed],
+            TensorType::scalar_f32(),
+            None,
+        );
         dag.add_root(output);
 
         let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
         assert_eq!(
-            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            source
+                .matches("chelis_device_tensor_release(o_t0);")
+                .count(),
             2,
             "the borrowed descriptor may be cleaned up once per host/device entrypoint, but the logical Drop must not add a third release:\n{source}"
         );
@@ -4383,7 +5738,8 @@ mod tests {
                 | Prim::F16
                 | Prim::Bf16
                 | Prim::F8e4m3
-                | Prim::String => {}
+                | Prim::String
+                | Prim::Key => {}
             }
             let runtime_width = prim
                 .runtime_dtype()
@@ -4465,22 +5821,36 @@ mod tests {
     }
 
     #[test]
-    fn integer_abs_is_rejected_before_the_float_unary_template() {
+    fn integer_abs_uses_checked_kernel_and_fused_abs_stays_rejected() {
         let ty = vec_i64(1);
 
         let mut direct = Dag::new();
-        let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
-        let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
+        let direct_decl = direct.declare("test");
+        let x = direct.add_node(
+            direct_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let out = direct.add_node(direct_decl, RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
-        let err = match emit_test_dag(&direct, "integer_abs") {
-            Err(error) => error,
-            Ok(_) => panic!("integer abs must not enter the HIP fabsf template"),
-        };
-        assert!(err.to_string().contains("unsupported: op `Abs`"));
+        let code = emit_test_dag(&direct, "integer_abs").expect("typed integer abs");
+        assert!(code.0.contains("numeric trap: overflow in abs at i64"));
+        assert!(code.0.contains("chelis_record_numeric_failure"));
+        assert!(!code.0.contains("fabsf("));
 
         let mut fused = Dag::new();
-        let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let fused_decl = fused.declare("test");
+        let x = fused.add_node(
+            fused_decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
         let out = fused.add_node(
+            fused_decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Abs,
@@ -4508,27 +5878,16 @@ mod tests {
 
     fn fused_mul_reusable_input_dag() -> Dag {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let scale = dag.add_node(
-            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
             vec![],
             vec_f32(4),
             None,
         );
-        let ops = vec![FusedStep {
-            op: FusedStepOp::Mul,
-            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
-        }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
-        dag.set_reusable_input(fused, x);
-        dag
-    }
-
-    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
-        let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
-        let owned = dag.add_node(RiscOp::Copy, vec![x], vec_f32(4), None);
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -4539,6 +5898,40 @@ mod tests {
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
         let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
+        dag.set_reusable_input(fused, x);
+        dag
+    }
+
+    fn fused_mul_program_owned_reusable_input_dag() -> Dag {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let owned = dag.add_node(decl, RiscOp::Copy, vec![x], vec_f32(4), None);
+        let scale = dag.add_node(
+            decl,
+            RiscOp::synth_const(vec_f32(4).precision, 2.0),
+            vec![],
+            vec_f32(4),
+            None,
+        );
+        let ops = vec![FusedStep {
+            op: FusedStepOp::Mul,
+            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+        }];
+        let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem { ops },
             vec![owned, scale],
             vec_f32(4),
@@ -4552,7 +5945,9 @@ mod tests {
     #[test]
     fn sparse_scatter_add_emits_hip_atomic_kernel() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let target = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "target".into(),
             },
@@ -4561,6 +5956,7 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "indices".into(),
             },
@@ -4569,6 +5965,7 @@ mod tests {
             None,
         );
         let updates = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "updates".into(),
             },
@@ -4577,6 +5974,7 @@ mod tests {
             None,
         );
         let out = dag.add_node(
+            decl,
             RiscOp::ScatterAdd { axis: 0 },
             vec![target, indices, updates],
             mat_f32(3, 2),
@@ -4588,7 +5986,7 @@ mod tests {
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
-        assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
+        assert!(hip.contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);"));
     }
 
     /// A program-owned `Copy` with a terminal fused use receives the shared
@@ -4602,7 +6000,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_3("));
-        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"));
+        assert!(hip.contains("o_t3 = chelis_device_tensor_borrow(plan_t3, d_t1->data,"));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
         assert!(!hip.contains("const float *__restrict__ ext0"));
         // Output must NOT carry __restrict__ — it aliases ext0.
@@ -4620,7 +6018,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !hip.contains("d_t0->data, d_t0->storage_size"),
+            !hip.contains("d_t0->data, (d_t0->byte_capacity / chelis_dtype_size(d_t0->dtype))"),
             "the fused output must not reuse caller-owned input bytes; got:\n{hip}"
         );
     }
@@ -4630,13 +6028,16 @@ mod tests {
     #[test]
     fn fused_in_place_does_not_alias_a_view_of_a_caller_owned_input() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let x = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             mat_f32(2, 2),
             None,
         );
         let flat = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Lit(4)],
             },
@@ -4645,12 +6046,14 @@ mod tests {
             None,
         );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 2.0),
             vec![],
             vec_f32(4),
             None,
         );
         let fused = dag.add_node(
+            decl,
             RiscOp::FusedElem {
                 ops: vec![FusedStep {
                     op: FusedStepOp::Mul,
@@ -4665,7 +6068,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !hip.contains("d_t1->data, d_t1->storage_size"),
+            !hip.contains("d_t1->data, (d_t1->byte_capacity / chelis_dtype_size(d_t1->dtype))"),
             "the fused output must not reuse a caller-owned view's bytes; got:\n{hip}"
         );
     }
@@ -4677,8 +6080,16 @@ mod tests {
     #[test]
     fn fused_without_reusable_input_keeps_non_in_place_kernel_shape() {
         let mut dag = Dag::new();
-        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+        let decl = dag.declare("test");
+        let x = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            vec_f32(4),
+            None,
+        );
         let scale = dag.add_node(
+            decl,
             RiscOp::synth_const(vec_f32(4).precision, 2.0),
             vec![],
             vec_f32(4),
@@ -4688,7 +6099,13 @@ mod tests {
             op: FusedStepOp::Mul,
             input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
         }];
-        let fused = dag.add_node(RiscOp::FusedElem { ops }, vec![x, scale], vec_f32(4), None);
+        let fused = dag.add_node(
+            decl,
+            RiscOp::FusedElem { ops },
+            vec![x, scale],
+            vec_f32(4),
+            None,
+        );
         // No set_reusable_input call — the in-place gate must reject.
         dag.add_root(fused);
 
@@ -4715,7 +6132,9 @@ mod tests {
         // reparses to a different (zero) bit pattern.
         let value = 1e-40_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, value),
             vec![],
             vec_f32(4),
@@ -4749,7 +6168,9 @@ mod tests {
         // 1.0 / 3.0 has no exact decimal form; pin the exact f64 bits.
         let value = 1.0_f64 / 3.0_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let c = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F64, value),
             vec![],
             vec_f64(4),
@@ -4767,6 +6188,57 @@ mod tests {
         );
     }
 
+    /// `uniform_like(key_from_seed(seed), template, low, high)`, whose key
+    /// the HIP lane computes at emission.
+    fn seeded_uniform(
+        dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
+        template: NodeId,
+        ty: TensorType,
+        (low, high): (f64, f64),
+        seed: i64,
+    ) -> NodeId {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let low = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, low),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, high),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::Int64, seed as f64),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![template, low, high, key],
+            ty,
+            None,
+        )
+    }
+
     /// Issue #251 (parallel #248): `uniform_like` `low` / `high` args must
     /// emit through `chelis_f32_from_bits`, not a lossy `{:.8}f` literal.
     /// The reproducer `1e-40` collapses to `0.0f` under `%.8`.
@@ -4775,7 +6247,9 @@ mod tests {
         let low = 1e-40_f64; // denormal f32: lost by `%.8`
         let high = 1.0_f64 / 3.0_f64; // off-by-ULP under `%.8`
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -4783,12 +6257,7 @@ mod tests {
             vec_f32(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::UniformLike { low, high, seed: 7 },
-            vec![like],
-            vec_f32(8),
-            None,
-        );
+        let u = seeded_uniform(&mut dag, decl, like, vec_f32(8), (low, high), 7);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
@@ -4813,8 +6282,441 @@ mod tests {
         // Negative parity: no lossy decimal literal for the collapsed
         // denormal `low`.
         assert!(
-            !hip.contains("float t1_low = 0.00000000f;"),
+            !hip.contains(&format!("float t{}_low = 0.00000000f;", u.0)),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
+        );
+    }
+
+    /// A draw's seed and literal bounds are read only while the draw is
+    /// emitted, so they take no device slot, fill launch or release, and
+    /// every owner and slot an entry point names is one it declares.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At dcc9256c4 the storage plan
+    /// gave the seed a slot and an owner that the emitter never declared, so
+    /// the host entry released an undeclared `o_t` and `chelis_slot`, and
+    /// each bound was filled on the device by `kernel_fill_f32`.
+    #[test]
+    fn seeded_draw_literals_take_no_device_storage() {
+        fn used_and_declared(body: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+            let mut used = BTreeSet::new();
+            let mut declared = BTreeSet::new();
+            let bytes = body.as_bytes();
+            for (start, _) in body.match_indices(prefix) {
+                let identifier_before = start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                let digits = body[start + prefix.len()..]
+                    .bytes()
+                    .take_while(u8::is_ascii_digit)
+                    .count();
+                if identifier_before || digits == 0 {
+                    continue;
+                }
+                let name = &body[start..start + prefix.len() + digits];
+                used.insert(name.to_string());
+                if body[..start].ends_with("chelis_device_tensor_owner *") {
+                    declared.insert(name.to_string());
+                }
+            }
+            (used, declared)
+        }
+        for ty in [vec_f32(8), vec_f64(8)] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let like = dag.add_node(
+                decl,
+                RiscOp::Load {
+                    name: "like".into(),
+                },
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let first = seeded_uniform(&mut dag, decl, like, ty.clone(), (0.0, 1.0), 7);
+            let second = seeded_uniform(&mut dag, decl, first, ty.clone(), (-1.0, 1.0), 7);
+            dag.add_root(second);
+            let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+            let entries = hip.split("extern \"C\" void ").skip(1).collect::<Vec<_>>();
+            assert_eq!(entries.len(), 2, "{hip}");
+            for entry in entries {
+                assert!(!entry.contains("kernel_fill_f32"), "{entry}");
+                for prefix in ["o_t", "chelis_slot"] {
+                    let (used, declared) = used_and_declared(entry, prefix);
+                    assert!(!used.is_empty(), "{entry}");
+                    assert_eq!(used, declared, "{prefix} names in:\n{entry}");
+                }
+            }
+        }
+    }
+
+    /// Whether a draw under a runtime activation draws is decided when the
+    /// graph runs, so the HIP lane refuses an activated draw with its typed
+    /// rejection instead of launching it unconditionally.
+    #[test]
+    fn an_activated_draw_is_refused_on_the_device() {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let like = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let active = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "active".into(),
+            },
+            vec![],
+            rank0(Prim::Bool),
+            None,
+        );
+        let low = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let seed = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::Int64, 7.0),
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let key = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        let draw = dag.add_node(
+            chelis_ir::dag::Owner::new(decl, Some(active)),
+            RiscOp::UniformLike,
+            vec![like, low, high, key],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane computed a key for an activated draw");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("UniformLike".to_string()),
+            "{error}"
+        );
+    }
+
+    /// `uniform_like(0, 1)` of `ty` keyed by the chain `fold_in(split(
+    /// key_from_seed(seed)).1, index)`, every operand a literal.
+    fn derived_uniform(
+        dag: &mut Dag,
+        decl: chelis_ir::dag::DeclId,
+        ty: TensorType,
+        seed: i64,
+        index: i64,
+    ) -> NodeId {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        let i64_const = |dag: &mut Dag, value: i64| {
+            dag.add_node(
+                decl,
+                RiscOp::Const {
+                    value: chelis_types::scalar_from_i64("test", Prim::Int64, value).unwrap(),
+                },
+                vec![],
+                rank0(Prim::Int64),
+                None,
+            )
+        };
+        let like = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let seed = i64_const(dag, seed);
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        let right = dag.add_node(
+            decl,
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Right,
+            },
+            vec![root],
+            rank0(Prim::Key),
+            None,
+        );
+        let left = dag.add_node(
+            decl,
+            RiscOp::Split {
+                branch: chelis_ir::dag::KeyBranch::Left,
+            },
+            vec![root],
+            rank0(Prim::Key),
+            None,
+        );
+        let index = i64_const(dag, index);
+        let folded = dag.add_node(
+            decl,
+            RiscOp::FoldIn,
+            vec![right, index],
+            rank0(Prim::Key),
+            None,
+        );
+        let low = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![like, low, high, folded],
+            ty,
+            None,
+        );
+        // The left half is unused: an affine key may be dropped.
+        let _ = left;
+        draw
+    }
+
+    /// chelis#2413 step 1, oracle (b) on the HIP host path: the lane computes
+    /// a rank-0 key chain at emission and launches the draw with its bits.
+    /// The expected key is `key_ref_ext.py`'s G = fold_in(split(key(-3)).1,
+    /// 9), transcribed from [05-RNG-2], never from `RandomKey`.
+    #[test]
+    fn a_derived_rank0_key_chain_launches_with_the_reference_key() {
+        const G_KEY: u64 = 0x2334_cf03_8b09_85b4;
+        for ty in [vec_f32(8), vec_f64(8)] {
+            let mut dag = Dag::new();
+            let decl = dag.declare("test");
+            let draw = derived_uniform(&mut dag, decl, ty, -3, 9);
+            dag.add_root(draw);
+            let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
+            // Pruning the unused left half renumbers the draw, so match the
+            // key launch argument by its value.
+            let needle = format!("_key = {G_KEY}ULL;");
+            assert!(hip.contains(&needle), "expected `{needle}` in:\n{hip}");
+        }
+    }
+
+    /// The HIP lane derives keys only at emission: a key tensor, a runtime
+    /// seed, and a derived draw with bounds that trap are refused with the
+    /// typed #1192 rejection rather than emitted.
+    #[test]
+    fn key_tensors_runtime_seeds_and_trapping_bounds_are_refused_on_the_device() {
+        let rank0 = |precision| TensorType {
+            dims: vec![],
+            precision,
+        };
+        // A key split produces a key tensor.
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let seed = dag.add_node(
+            decl,
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        let rows = dag.add_node(
+            decl,
+            RiscOp::SplitN {
+                count: RtDim::Lit(3),
+            },
+            vec![root],
+            TensorType {
+                dims: vec![DimInfo::Lit(3)],
+                precision: Prim::Key,
+            },
+            None,
+        );
+        let like = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let low = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![like, low, high, rows],
+            TensorType {
+                dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane emitted a key split");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("split_keys".to_string()),
+            "{error}"
+        );
+        // A runtime seed.
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let seed = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "seed".into(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        let like = dag.add_node(
+            decl,
+            RiscOp::Load {
+                name: "like".into(),
+            },
+            vec![],
+            vec_f32(8),
+            None,
+        );
+        let low = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let high = dag.add_node(
+            decl,
+            RiscOp::synth_const(Prim::F32, 1.0),
+            vec![],
+            rank0(Prim::F32),
+            None,
+        );
+        let draw = dag.add_node(
+            decl,
+            RiscOp::UniformLike,
+            vec![like, low, high, root],
+            vec_f32(8),
+            None,
+        );
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane derived a key from a runtime seed");
+        };
+        assert!(error.context.contains("with a runtime seed"), "{error}");
+        // A key result has no device value.
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let seed = dag.add_node(
+            decl,
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("test", Prim::Int64, 7).unwrap(),
+            },
+            vec![],
+            rank0(Prim::Int64),
+            None,
+        );
+        let root = dag.add_node(
+            decl,
+            RiscOp::KeyFromSeed,
+            vec![seed],
+            rank0(Prim::Key),
+            None,
+        );
+        dag.add_root(root);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane returned a key");
+        };
+        assert!(error.context.contains("a key result"), "{error}");
+        // Bounds that trap under a derived key: the draw validates them.
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let draw = derived_uniform(&mut dag, decl, vec_f32(8), -3, 9);
+        let (low, high) = (
+            dag.get(draw).unwrap().inputs[1],
+            dag.get(draw).unwrap().inputs[2],
+        );
+        dag.node_mut(low).unwrap().op = RiscOp::synth_const(Prim::F32, 2.0);
+        dag.node_mut(high).unwrap().op = RiscOp::synth_const(Prim::F32, 1.0);
+        dag.add_root(draw);
+        let Err(error) = emit_test_dag(&dag, "test_fn") else {
+            panic!("the HIP lane launched a derived draw whose bounds trap");
+        };
+        assert_eq!(
+            *error.what,
+            UnsupportedKind::Op("UniformLike".to_string()),
+            "{error}"
         );
     }
 
@@ -4823,7 +6725,9 @@ mod tests {
         let low = 0.1_f64;
         let high = 0.9_f64;
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let like = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "like".into(),
             },
@@ -4831,22 +6735,13 @@ mod tests {
             vec_f64(8),
             None,
         );
-        let u = dag.add_node(
-            RiscOp::UniformLike {
-                low,
-                high,
-                seed: 17,
-            },
-            vec![like],
-            vec_f64(8),
-            None,
-        );
+        let u = seeded_uniform(&mut dag, decl, like, vec_f64(8), (low, high), 17);
         dag.add_root(u);
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
-        assert!(hip.contains("double t1_low = chelis_f64_from_bits("));
-        assert!(hip.contains("double t1_high = chelis_f64_from_bits("));
+        assert!(hip.contains(&format!("double t{}_low = chelis_f64_from_bits(", u.0)));
+        assert!(hip.contains(&format!("double t{}_high = chelis_f64_from_bits(", u.0)));
         assert!(hip.contains("double low, double high"));
         assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
         assert!(

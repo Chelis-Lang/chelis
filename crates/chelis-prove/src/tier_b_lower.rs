@@ -21,7 +21,8 @@
 //! derived obligation proves with `proof_tier:"smt"` for linear-arithmetic
 //! invariants. A residual irreducible `match` falls to Tier C.
 
-use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
+use chelis_deep::{DeepTag, ExprCarrier};
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
@@ -38,27 +39,31 @@ const MAX_INLINE_DEPTH: usize = 3;
 // ===========================================================================
 
 // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: these two are the
-// whole module's view of a Deep node, and they were `Expr::List`-only. The CLI
-// `chelis prove foo.dp` path hands `run_module_obligations` the stamped exprs
-// from `parse_and_stamp_file` without normalizing, so every read here returned
-// nothing, the obligation could not lower, and `run_one` fell through to
-// Tier C. The same module submitted as `.ch` proved at Tier B: one program,
-// two proof tiers, distinguished only by which spelling was submitted, with
-// both reporting `passed` and exit 0.
+// whole module's view of a Deep node. When they read only the deleted list
+// spelling, the CLI `chelis prove foo.dp` path (stamped exprs from
+// `parse_and_stamp_file`) got nothing back, the obligation could not lower,
+// and `run_one` fell through to Tier C, while the same module submitted as
+// `.ch` proved at Tier B. A node now has one spelling on every ingress.
 
 fn tag(expr: &Expr) -> Option<DeepTag> {
-    match expr {
-        Expr::Node(node, _) => Some(node.tag()),
-        Expr::List(list, _) => list.tag(),
-        _ => None,
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, _, _) => Some(tag),
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
 fn children(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::Node(node, _) => node.children_slice(),
-        Expr::List(list, _) if list.elements.len() >= 2 => &list.elements[2..],
-        _ => &[],
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(_, _, children) => children,
+        ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => &[],
     }
 }
 
@@ -85,14 +90,16 @@ fn app_parts(expr: &Expr) -> Option<(&str, &[Expr])> {
     None
 }
 
-/// The element sequence of an inline-annotated param `(name {type: T})`, on
-/// either carrier it can arrive in: a tagless `Expr::List` on the normalizing
-/// tide route and an `Expr::BareList` on the stamped CLI route.
-fn inline_param_elements(expr: &Expr) -> &[Expr] {
-    match expr {
-        Expr::List(list, _) => &list.elements,
-        Expr::BareList(elements, _) => elements,
-        _ => &[],
+/// The binder of an inline-annotated param `(name {type: T})`, a structural
+/// list with the name atom first.
+fn inline_param_name(expr: &Expr) -> Option<&str> {
+    match expr.carrier() {
+        ExprCarrier::StructuralList(elements) => elements.first().and_then(symbol_text),
+        ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -117,21 +124,18 @@ fn lookup_producer<'a>(exprs: &'a [Expr], name: &str) -> Option<ProducerBody<'a>
                 for p in children(params_node) {
                     // `(name {type: ...})` or bare symbol. chelis#1125 PP7
                     // finding 1: an inline-annotated param is a TAGLESS list,
-                    // so the stamp pass produces `Expr::BareList` rather than
-                    // `Expr::Node`; both spellings put the name atom first.
+                    // so it is an `Expr::BareList` with the name atom first.
                     if let Some(n) = symbol_text(p) {
                         params.push(n.to_string());
-                    } else if let Some(Expr::Atom(Atom::Name(s), _)) =
-                        inline_param_elements(p).first()
-                    {
-                        params.push(s.clone());
+                    } else if let Some(name) = inline_param_name(p) {
+                        params.push(name.to_string());
                     }
                 }
                 let body = fkids.get(1)?;
                 return Some(ProducerBody { params, body });
             }
-            // Descend into a `module` wrapper (or any other decoded form) on
-            // either carrier; `children` drops the tag and metadata for both.
+            // Descend into a `module` wrapper (or any other decoded form);
+            // `children` excludes the tag and metadata.
             if let Some(found) = find(children(expr), name) {
                 return Some(found);
             }
@@ -263,19 +267,10 @@ fn rewrite_opaque_field_access(
             return make_var(&format!("{pname}.{field}"));
         }
     }
-    // chelis#1125 PP7: recurse on BOTH carriers, rebuilding each as itself.
-    // The `Expr::List`-only recursion cloned a stamped `Expr::Node` whole, so
-    // no opaque field access inside it was rewritten and the obligation could
-    // not lower.
+    // chelis#1125 PP7: a recursion that read only the deleted list spelling
+    // cloned a stamped `Expr::Node` whole, so no opaque field access inside
+    // it was rewritten and the obligation could not lower.
     match expr {
-        Expr::List(list, span) => {
-            let elements = list
-                .elements
-                .iter()
-                .map(|e| rewrite_opaque_field_access(e, opaque_params))
-                .collect();
-            Expr::List(chelis_deep::ast::List { elements }, *span)
-        }
         Expr::Node(node, span) => {
             let children = node
                 .children_slice()
@@ -293,7 +288,16 @@ fn rewrite_opaque_field_access(
                 .expect("opaque field-access rewrite preserves every child role");
             Expr::Node(rewritten, *span)
         }
-        other => other.clone(),
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|element| rewrite_opaque_field_access(element, opaque_params))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(_) | Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::Atom(_, _) => {
+            expr.clone()
+        }
     }
 }
 
@@ -312,15 +316,10 @@ pub enum ProducerParamType {
 
 fn make_var(name: &str) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::List;
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), Span::new(0, 0)),
-                Expr::Map(Default::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0)),
-            ],
-        },
+    Expr::node(
+        DeepTag::Var,
+        Default::default(),
+        vec![Expr::Atom(Atom::Name(name.to_string()), Span::new(0, 0))],
         Span::new(0, 0),
     )
 }
@@ -478,7 +477,6 @@ fn reduce(
     depth: usize,
 ) -> Option<Expr> {
     use chelis_deep::Span;
-    use chelis_deep::ast::List;
     // var: substitute if bound, else resolve an in-module constant to a
     // literal (CR-8: a bare `(var hi)` for a value-binding constant
     // `hi = 1.0` was previously returned unchanged, reaching the SMT
@@ -490,7 +488,7 @@ fn reduce(
         if let Some(value) = consts.get(name) {
             // CR2-4: preserve the constant's DECLARED numeric type. The
             // ConstEnv only carries an f64, so an int-typed constant
-            // (`def n() -> int32 = 3`, or the value binding `n = 3`) would
+            // (`def n() -> i32 = 3`, or the value binding `n = 3`) would
             // otherwise be inlined as an f32 literal and silently lower to
             // SmtSort::Real. Read the const def's declared literal type from
             // the module and emit a matching typed literal node.
@@ -510,7 +508,7 @@ fn reduce(
         }
         // Rebuild the access with the reduced target (keeps dotted-var
         // lowering working for binder projections).
-        return Some(rebuild(expr, vec![target, kids.get(1)?.clone()]));
+        return Some(rebuild(DeepTag::Access, vec![target, kids.get(1)?.clone()]));
     }
     // app: inline producer/helper, else reduce args.
     if let Some((name, args)) = app_parts(expr) {
@@ -541,22 +539,17 @@ fn reduce(
                 let kkids = children(kv);
                 let field = kkids.first()?.clone();
                 let val = reduce(kkids.get(1)?, subst, consts, exprs, depth)?;
-                new_children.push(Expr::List(
-                    List {
-                        elements: vec![
-                            Expr::Atom(Atom::Tag(DeepTag::Kv), Span::new(0, 0)),
-                            Expr::Map(Default::default(), Span::new(0, 0)),
-                            field,
-                            val,
-                        ],
-                    },
+                new_children.push(Expr::node(
+                    DeepTag::Kv,
+                    Default::default(),
+                    vec![field, val],
                     Span::new(0, 0),
                 ));
             } else {
                 new_children.push(kv.clone());
             }
         }
-        return Some(rebuild(expr, new_children));
+        return Some(rebuild(DeepTag::Record, new_children));
     }
     // if: reduce children (keep structure for case analysis).
     if tag(expr) == Some(DeepTag::If) {
@@ -564,7 +557,7 @@ fn reduce(
         let c = reduce(kids.first()?, subst, consts, exprs, depth)?;
         let t = reduce(kids.get(1)?, subst, consts, exprs, depth)?;
         let e = reduce(kids.get(2)?, subst, consts, exprs, depth)?;
-        return Some(rebuild(expr, vec![c, t, e]));
+        return Some(rebuild(DeepTag::If, vec![c, t, e]));
     }
     // Other nodes (lits): return as-is.
     Some(expr.clone())
@@ -572,7 +565,7 @@ fn reduce(
 
 /// A typed `(lit {type: (t-prim {} <ty>)} value)` Deep node for an inlined
 /// constant, preserving the constant's DECLARED numeric type (CR2-4 / U2).
-/// An integer-typed constant (int8/int16/int32/int64) inlines as an integer
+/// An integer-typed constant (i8/i16/i32/i64) inlines as an integer
 /// literal so it lowers to `SmtSort::Int`; otherwise it inlines as an f32
 /// literal (CR-8). The declared-type decision is the SINGLE shared resolver
 /// in `crate::opaque` -- the same one the invariant/precondition path
@@ -589,100 +582,50 @@ fn const_lit_node(exprs: &[Expr], name: &str, value: f64) -> Expr {
 /// A typed integer literal Deep node `(lit {type: (t-prim {} <ty>)} value)`
 /// for an inlined int-typed constant (CR2-4).
 fn int_lit_node(value: i64, int_ty: &str) -> Expr {
+    typed_lit_node(Atom::Int(value), int_ty)
+}
+
+/// `(lit {type: (t-prim {} <prim>)} value)`.
+fn typed_lit_node(value: Atom, prim: &str) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{List, MetaMap};
-    let type_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
-                Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
-            ],
-        },
-        Span::new(0, 0),
+    use chelis_deep::ast::Metadata;
+    let span = Span::new(0, 0);
+    let type_node = Expr::node(
+        DeepTag::TPrim,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name(prim.to_string()), span)],
+        span,
     );
-    let mut meta = MetaMap::default();
-    meta.entries.push(("type".to_string(), type_node));
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
-                Expr::Map(meta, Span::new(0, 0)),
-                Expr::Atom(Atom::Int(value), Span::new(0, 0)),
-            ],
-        },
-        Span::new(0, 0),
-    )
+    let mut meta = Metadata::default();
+    meta.replace(M::Type(
+        TypeSyntax::try_new(type_node).expect("primitive type"),
+    ));
+    Expr::node(DeepTag::Lit, meta, vec![Expr::Atom(value, span)], span)
 }
 
 /// A typed f32 literal Deep node `(lit {type: (t-prim {} f32)} value)` for
 /// an inlined constant value (CR-8).
 fn float_lit_node(value: f64) -> Expr {
-    use chelis_deep::Span;
-    use chelis_deep::ast::{List, MetaMap};
-    let type_node = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
-                Expr::Map(MetaMap::default(), Span::new(0, 0)),
-                Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
-            ],
-        },
-        Span::new(0, 0),
-    );
-    let mut meta = MetaMap::default();
-    meta.entries.push(("type".to_string(), type_node));
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), Span::new(0, 0)),
-                Expr::Map(meta, Span::new(0, 0)),
-                Expr::Atom(Atom::Float(value), Span::new(0, 0)),
-            ],
-        },
-        Span::new(0, 0),
-    )
+    typed_lit_node(Atom::Float(value), "f32")
 }
 
-/// Rebuild `template`'s form around new children.
+/// Rebuild a reduced `access`, `record` or `if` node around new children.
 ///
-/// This is the one reader in the PP7 slice that does NOT return the carrier it
-/// was handed: it emits the list form for either template, as it always has,
-/// and the decoded tag is what makes that safe, because `tag` and `children`
-/// read the result on either carrier. The metadata map is dropped for both
-/// carriers alike, which is pre-existing behavior on the list carrier and
-/// inert at all three call sites (`access`, `record`, `if`), none of whose
-/// metadata anything downstream reads. Reconstructing a `Node` here belongs
-/// with the shared total accessor, not with this slice.
-fn rebuild(template: &Expr, new_children: Vec<Expr>) -> Expr {
+/// The caller passes the tag it just matched. The metadata map is dropped, as
+/// it always was, which is inert at all three call sites: nothing downstream
+/// reads their metadata. Every child either kept its runtime position or
+/// replaced a `var` at one, so no metadata bound to a binding or pipe position
+/// moves and the node gate admits the rebuild.
+fn rebuild(tag: DeepTag, new_children: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::List;
-    // chelis#1125 PP7: take the DECODED tag rather than copying element 0,
-    // which exists only on the list carrier. A stamped `Expr::Node` template
-    // fell to the `?` placeholder, and every downstream `tag()` read of the
-    // rebuilt form then failed, so the obligation could not lower. All three
-    // call sites guard on an explicit `tag(expr) == Some(..)` test, so the
-    // placeholder arm below is now unreachable; it is kept as the total
-    // match's other half rather than as a live path.
-    let tag_sym = match tag(template) {
-        Some(decoded) => Expr::Atom(Atom::Tag(decoded), Span::new(0, 0)),
-        None => Expr::Atom(Atom::Name("?".to_string()), Span::new(0, 0)),
-    };
-    let mut elements = vec![tag_sym, Expr::Map(Default::default(), Span::new(0, 0))];
-    elements.extend(new_children);
-    Expr::List(List { elements }, Span::new(0, 0))
+    Expr::node(tag, Default::default(), new_children, Span::new(0, 0))
 }
 
 fn rebuild_app(callee: &str, args: Vec<Expr>) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::List;
-    let mut elements = vec![
-        Expr::Atom(Atom::Tag(DeepTag::App), Span::new(0, 0)),
-        Expr::Map(Default::default(), Span::new(0, 0)),
-        make_var(callee),
-    ];
-    elements.extend(args);
-    Expr::List(List { elements }, Span::new(0, 0))
+    let mut children = vec![make_var(callee)];
+    children.extend(args);
+    Expr::node(DeepTag::App, Default::default(), children, Span::new(0, 0))
 }
 
 // ===========================================================================

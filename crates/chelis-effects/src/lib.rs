@@ -4,8 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::RefCell;
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
-use chelis_deep::{Span, decode_effect_kind};
+use chelis_deep::annotations::{
+    EffectMember, EffectSet as AstEffectSet, MetadataValue, ResourceEffect, Spanned,
+};
+use chelis_deep::ast::{Atom, Expr, Metadata};
+use chelis_deep::{ExprCarrier, Span, decode_effect_kind};
 use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
 use chelis_vocab::EffectKind;
@@ -73,7 +76,7 @@ pub struct EffectError {
 /// This runs the same iterative-fixed-point inference that
 /// [`check_program`] uses internally, but exposes the per-def effect
 /// rows directly instead of folding them into validation. It performs
-/// NO validation — callers that need handler-arity / unhandled-random /
+/// NO validation — callers that need handler-arity /
 /// declared-vs-inferred checks must still call [`check_program`].
 ///
 /// The intended consumer is `chelis check --show-inferred --json`,
@@ -102,7 +105,6 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
 
     let mut errors = Vec::new();
     validate_handlers(&annotated_exprs, &mut errors);
-    validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
@@ -124,8 +126,7 @@ pub fn check_program(program: &CheckedProgram) -> Result<CheckedProgram, Vec<Eff
 /// effect map and the new-code's own iterative fixed-point pass. When new
 /// code calls a library function, the library's effect row is inherited.
 ///
-/// Validation passes (handler arity, unhandled-random roots, declared-vs-
-/// inferred) run ONLY on the new code's annotated expressions. Library
+/// Validation passes (handler arity, declared-vs-inferred) run ONLY on the new code's annotated expressions. Library
 /// validation already happened during the original [`check_program`] call.
 ///
 /// The library's effect map is computed inside this function from
@@ -176,7 +177,6 @@ pub fn check_effects_with_context(
 
     let mut errors = Vec::new();
     validate_handlers(&annotated_exprs, &mut errors);
-    validate_unhandled_random_roots(&annotated_exprs, &effects_by_def, &mut errors);
     validate_declared_vs_inferred(&annotated_exprs, &effects_by_def, &mut errors);
 
     if errors.is_empty() {
@@ -212,9 +212,8 @@ fn type_totality_errors(result: InferResult) -> Vec<EffectError> {
 /// for the requested build target.
 ///
 /// Today this validates:
-///   * resource-region pinning (`with device("gpu:N")` requires
-///     `--target hip` or `--target metal`; CPU pinning requires
-///     `--target c`).
+///   * resource-region pinning (host C admits only exact `cpu`; every other
+///     selector requires a target capability that defines its semantics).
 ///
 /// Per spec/04-type-system.md §1.1.3 the Metal target additionally
 /// rejects FP64 because Apple Silicon GPUs lack FP64 ALUs (software
@@ -233,8 +232,21 @@ pub fn validate_build_target(
     program: &CheckedProgram,
     target: &str,
 ) -> Result<(), Vec<EffectError>> {
+    validate_build_target_expressions(program.annotated_exprs(), target)
+}
+
+/// Check Resource regions in an emission scope selected from checked source.
+///
+/// This shares the whole-program validator's target classification. Callers
+/// selecting an entry must include its transitive source dependencies before
+/// lowering erases the handlers. This validation does not establish that an
+/// arbitrary expression slice is well typed or is the correct emission scope.
+pub fn validate_build_target_expressions(
+    expressions: &[Expr],
+    target: &str,
+) -> Result<(), Vec<EffectError>> {
     let mut errors = Vec::new();
-    for expr in program.annotated_exprs() {
+    for expr in expressions {
         validate_build_target_expr(expr, target, &mut errors);
     }
     if errors.is_empty() {
@@ -301,22 +313,27 @@ fn infer_program_effects_with_context(
 /// Yield each top-level declaration, descending through any `(module {} name
 /// ...)` wrapper. Deep sources produced by Surf `module X` desugaring nest
 /// every def/defsig inside this wrapper; the whole-program effect validators
-/// below compare declared-vs-inferred and hunt unhandled-Random roots over a
-/// flat decl list, so without descent a module-wrapped `.dp` would hide every
+/// below compare declared-vs-inferred over a flat decl list, so without descent a module-wrapped `.dp` would hide every
 /// nested def from them. This mirrors `top_level_decl_items` in chelis-types,
 /// so the effect pass sees the same flattened decl set the type pass does and
 /// the module-wrapped `chelis check` path agrees with the flattened
 /// build/eval path. Descends nested wrappers to any depth.
 fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
     fn push<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
-        if let Some(kids) = stamped_children(expr, DeepTag::Module) {
-            // Module semantic children are `[name, declarations...]`.
-            for child in kids.iter().skip(1) {
-                push(child, out);
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Module, _, children) => {
+                // Module semantic children are `[name, declarations...]`.
+                for child in children.iter().skip(1) {
+                    push(child, out);
+                }
             }
-            return;
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => out.push(expr),
         }
-        out.push(expr);
     }
     let mut out = Vec::new();
     for expr in exprs {
@@ -328,11 +345,18 @@ fn flattened_top_level(exprs: &[Expr]) -> Vec<&Expr> {
 fn top_level_def_bodies(exprs: &[Expr]) -> BTreeMap<String, &Expr> {
     let mut defs = BTreeMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Some(kids) = stamped_children(expr, DeepTag::Def)
-            && kids.len() >= 2
-            && let Some(name) = symbol_name(&kids[0])
-        {
-            defs.insert(name.to_string(), &kids[1]);
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Def, _, children) if children.len() >= 2 => {
+                if let Some(name) = symbol_name(&children[0]) {
+                    defs.insert(name.to_string(), &children[1]);
+                }
+            }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {}
         }
     }
     defs
@@ -346,32 +370,6 @@ fn top_level_callable_names(bodies: &BTreeMap<String, &Expr>) -> BTreeSet<String
         .collect()
 }
 
-fn stamped_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
-    stamped_parts(expr, expected).map(|(_, children)| children)
-}
-
-fn stamped_parts(expr: &Expr, expected: DeepTag) -> Option<(&MetaMap, &[Expr])> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(expected) => {
-            let Expr::Map(meta, _) = list.elements.get(1)? else {
-                return None;
-            };
-            Some((meta, children(list)))
-        }
-        Expr::Node(node, _) if node.tag() == expected => Some((node.meta(), node.children_slice())),
-        _ => None,
-    }
-}
-
-fn shallow_node_list(node: &chelis_deep::node::Node, span: Span) -> List {
-    List {
-        elements: vec![
-            Expr::Atom(Atom::Tag(node.tag()), span),
-            Expr::Map(node.meta().clone(), span),
-        ],
-    }
-}
-
 fn infer_expr_effects(
     expr: &Expr,
     top_level_effects: &BTreeMap<String, EffectSet>,
@@ -379,63 +377,27 @@ fn infer_expr_effects(
     locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
     record_effect_work(|profile| profile.infer_expr_visits += 1);
-    match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => EffectSet::new(),
-        Expr::MetaExpr(meta, _) => {
+    match expr.carrier() {
+        ExprCarrier::Atom(_) | ExprCarrier::MetadataMap(_) => EffectSet::new(),
+        ExprCarrier::MetadataExpression(meta) => {
             infer_expr_effects(&meta.expr, top_level_effects, top_level_callables, locals)
         }
-        Expr::List(list, _) => {
-            let Some(tag) = get_tag(list) else {
-                return infer_children_effects(
-                    &list.elements,
-                    top_level_effects,
-                    top_level_callables,
-                    locals,
-                );
-            };
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
             let handled_effect = (tag == DeepTag::HandleEffect)
-                .then(|| decode_effect_kind(list).ok())
+                .then(|| decode_effect_kind(metadata).ok())
                 .flatten();
             infer_tagged_effects(
                 tag,
-                children(list),
+                children,
                 handled_effect,
                 top_level_effects,
                 top_level_callables,
                 locals,
             )
         }
-        Expr::Node(node, span) => {
-            let handled_effect = if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                decode_effect_kind(&header).ok()
-            } else {
-                None
-            };
-            infer_tagged_effects(
-                node.tag(),
-                node.children_slice(),
-                handled_effect,
-                top_level_effects,
-                top_level_callables,
-                locals,
-            )
+        ExprCarrier::StructuralList(children) | ExprCarrier::UndecodableHead(_, _, children) => {
+            infer_children_effects(children, top_level_effects, top_level_callables, locals)
         }
-        Expr::BareList(elems, _) => elems
-            .iter()
-            .map(|elem| infer_expr_effects(elem, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
-        Expr::UnknownForm(data) => data
-            .children
-            .iter()
-            .map(|child| infer_expr_effects(child, top_level_effects, top_level_callables, locals))
-            .fold(EffectSet::new(), |mut acc, set| {
-                acc.extend(&set);
-                acc
-            }),
     }
 }
 
@@ -512,10 +474,9 @@ fn infer_app_effects(
         ));
     }
 
+    // [05-RNG-1]: a random draw is a pure function of the key it is given,
+    // so `dropout` and `uniform_like` introduce no effect.
     let builtin_name = kids.first().and_then(var_name);
-    if matches!(builtin_name, Some("dropout" | "uniform_like")) {
-        effects.insert(Effect::Random);
-    }
     if matches!(
         builtin_name,
         Some(
@@ -558,22 +519,37 @@ fn infer_let_effects(
     let mut local_scope = locals.clone();
     let mut effects = EffectSet::new();
 
-    if let Some(bind_kids) = stamped_children(&kids[0], DeepTag::Bind) {
-        let mut i = 0;
-        while i + 1 < bind_kids.len() {
-            let value = &bind_kids[i + 1];
-            let value_effects =
-                infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
-            effects.extend(&value_effects);
-            if let Some(name) = symbol_name(&bind_kids[i]) {
-                let binding_effects = if value.tag() == Some(DeepTag::Fn) {
-                    value_effects
-                } else {
-                    EffectSet::new()
-                };
-                local_scope.insert(name.to_string(), binding_effects);
+    match kids[0].carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Bind, _, bind_kids) => {
+            let mut i = 0;
+            while i + 1 < bind_kids.len() {
+                let value = &bind_kids[i + 1];
+                let value_effects =
+                    infer_expr_effects(value, top_level_effects, top_level_callables, &local_scope);
+                effects.extend(&value_effects);
+                if let Some(name) = symbol_name(&bind_kids[i]) {
+                    let binding_effects = if value.tag() == Some(DeepTag::Fn) {
+                        value_effects
+                    } else {
+                        EffectSet::new()
+                    };
+                    local_scope.insert(name.to_string(), binding_effects);
+                }
+                i += 2;
             }
-            i += 2;
+        }
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {
+            effects.extend(&infer_expr_effects(
+                &kids[0],
+                top_level_effects,
+                top_level_callables,
+                &local_scope,
+            ));
         }
     }
 
@@ -593,14 +569,13 @@ fn infer_handle_effects(
     top_level_callables: &BTreeSet<String>,
     locals: &BTreeMap<String, EffectSet>,
 ) -> EffectSet {
-    if kids.len() < 2 {
-        return EffectSet::new();
+    if kids.len() != 2 {
+        return infer_children_effects(kids, top_level_effects, top_level_callables, locals);
     }
     let mut effects = infer_expr_effects(&kids[0], top_level_effects, top_level_callables, locals);
-    let mut body_effects =
-        infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
+    let body_effects = infer_expr_effects(&kids[1], top_level_effects, top_level_callables, locals);
     match handled_effect {
-        Some(EffectKind::Random) => body_effects.remove(&Effect::Random),
+        // A `resource` region places its body; it handles no inferred effect.
         Some(EffectKind::Resource) => {}
         // Validation reports the structural decode error. Inference leaves the
         // body's effects unhandled instead of substituting a known kind.
@@ -620,95 +595,29 @@ fn annotate_effects(
     match expr {
         Expr::Atom(_, _) => expr.clone(),
         Expr::Map(map, span) => Expr::Map(
-            MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_effects(value, top_level_effects, top_level_callables, locals),
-                        )
-                    })
-                    .collect(),
-            },
+            map.map_expressions(&mut |value, _| {
+                annotate_effects(value, top_level_effects, top_level_callables, locals)
+            })
+            .expect("effect annotation preserves metadata payloads"),
             *span,
         ),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
+            chelis_deep::MetaExpr {
                 expr: Box::new(annotate_effects(
                     &meta.expr,
                     top_level_effects,
                     top_level_callables,
                     locals,
                 )),
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_effects(value, top_level_effects, top_level_callables, locals),
-                        )
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |value, _| {
+                        annotate_effects(value, top_level_effects, top_level_callables, locals)
                     })
-                    .collect(),
+                    .expect("effect annotation preserves metadata payloads"),
             },
             *span,
         ),
-        Expr::List(list, span) => {
-            let mut local_scope = locals.clone();
-            let tag = get_tag(list);
-            let kids = children(list);
-            let annotated_children = match tag {
-                Some(DeepTag::Let) if kids.len() >= 2 => annotate_let_children(
-                    kids,
-                    top_level_effects,
-                    top_level_callables,
-                    &mut local_scope,
-                ),
-                _ => kids
-                    .iter()
-                    .map(|kid| {
-                        annotate_effects(kid, top_level_effects, top_level_callables, &local_scope)
-                    })
-                    .collect(),
-            };
-
-            if matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
-                let mut elements = Vec::with_capacity(2 + annotated_children.len());
-                elements.push(list.elements[0].clone());
-                elements.push(list.elements[1].clone());
-                elements.extend(annotated_children);
-                if let Some(meta) = elements.get_mut(1) {
-                    update_effect_metadata(
-                        meta,
-                        expr,
-                        top_level_effects,
-                        top_level_callables,
-                        locals,
-                    );
-                }
-                Expr::List(chelis_deep::ast::List { elements }, *span)
-            } else {
-                Expr::List(
-                    chelis_deep::ast::List {
-                        elements: list
-                            .elements
-                            .iter()
-                            .map(|elem| {
-                                annotate_effects(
-                                    elem,
-                                    top_level_effects,
-                                    top_level_callables,
-                                    locals,
-                                )
-                            })
-                            .collect(),
-                    },
-                    *span,
-                )
-            }
-        }
         Expr::Node(node, span) => {
             let mut local_scope = locals.clone();
             let annotated_children =
@@ -727,13 +636,18 @@ fn annotate_effects(
                         })
                         .collect()
                 };
-            let mut meta = node.meta().clone();
+            let mut meta = node
+                .meta()
+                .map_expressions(&mut |value, _| {
+                    annotate_effects(value, top_level_effects, top_level_callables, locals)
+                })
+                .expect("effect annotation preserves metadata payloads");
             if node.tag() == DeepTag::Fn {
                 let effects =
                     infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
                 if !effects.is_empty() {
                     record_effect_work(|profile| profile.metadata_rewrites += 1);
-                    upsert_meta(&mut meta, "effects", effect_set_expr(&effects));
+                    meta.replace(MetadataValue::Effects(effect_set_metadata(&effects)));
                 }
             }
             Expr::node(node.tag(), meta, annotated_children, *span)
@@ -749,7 +663,12 @@ fn annotate_effects(
         ),
         Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
             head: data.head.clone(),
-            meta: data.meta.clone(),
+            meta: data
+                .meta
+                .map_expressions(&mut |value, _| {
+                    annotate_effects(value, top_level_effects, top_level_callables, locals)
+                })
+                .expect("effect annotation preserves metadata payloads"),
             children: data
                 .children
                 .iter()
@@ -768,21 +687,29 @@ fn annotate_let_children(
     top_level_callables: &BTreeSet<String>,
     local_scope: &mut BTreeMap<String, EffectSet>,
 ) -> Vec<Expr> {
-    let Some(bind_kids) = stamped_children(&kids[0], DeepTag::Bind) else {
-        return vec![
-            annotate_effects(
-                &kids[0],
-                top_level_effects,
-                top_level_callables,
-                local_scope,
-            ),
-            annotate_effects(
-                &kids[1],
-                top_level_effects,
-                top_level_callables,
-                local_scope,
-            ),
-        ];
+    let bind_kids = match kids[0].carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Bind, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => {
+            return vec![
+                annotate_effects(
+                    &kids[0],
+                    top_level_effects,
+                    top_level_callables,
+                    local_scope,
+                ),
+                annotate_effects(
+                    &kids[1],
+                    top_level_effects,
+                    top_level_callables,
+                    local_scope,
+                ),
+            ];
+        }
     };
 
     let mut annotated_bind_kids = Vec::with_capacity(bind_kids.len());
@@ -811,18 +738,13 @@ fn annotate_let_children(
     annotated_bind_kids.extend(bind_kids[index..].iter().cloned());
 
     let annotated_bind = match &kids[0] {
-        Expr::List(bind_list, span) => {
-            let mut elements = vec![bind_list.elements[0].clone(), bind_list.elements[1].clone()];
-            elements.extend(annotated_bind_kids);
-            Expr::List(chelis_deep::ast::List { elements }, *span)
-        }
         Expr::Node(bind_node, span) => Expr::node(
             bind_node.tag(),
             bind_node.meta().clone(),
             annotated_bind_kids,
             *span,
         ),
-        _ => unreachable!("stamped_children accepted only a tagged List or Node"),
+        _ => unreachable!("a decoded Bind carrier is an Expr::Node"),
     };
 
     vec![
@@ -836,25 +758,6 @@ fn annotate_let_children(
     ]
 }
 
-fn update_effect_metadata(
-    meta_expr: &mut Expr,
-    expr: &Expr,
-    top_level_effects: &BTreeMap<String, EffectSet>,
-    top_level_callables: &BTreeSet<String>,
-    locals: &BTreeMap<String, EffectSet>,
-) {
-    let Expr::Map(meta, _) = meta_expr else {
-        return;
-    };
-    if expr.tag() == Some(DeepTag::Fn) {
-        let effects = infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
-        if !effects.is_empty() {
-            record_effect_work(|profile| profile.metadata_rewrites += 1);
-            upsert_meta(meta, "effects", effect_set_expr(&effects));
-        }
-    }
-}
-
 fn validate_handlers(exprs: &[Expr], errors: &mut Vec<EffectError>) {
     for expr in exprs {
         validate_handler_expr(expr, errors);
@@ -862,46 +765,32 @@ fn validate_handlers(exprs: &[Expr], errors: &mut Vec<EffectError>) {
 }
 
 fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
-    match expr {
-        Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::HandleEffect) {
-                validate_handler_kind(decode_effect_kind(list), children(list), errors);
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::HandleEffect {
+                validate_handler_kind(decode_effect_kind(metadata), children, errors);
             }
-            for kid in &list.elements {
+            metadata.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
+            for kid in children {
                 validate_handler_expr(kid, errors);
             }
         }
-        Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                validate_handler_expr(value, errors);
-            }
+        ExprCarrier::MetadataMap(map) => {
+            map.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
-        Expr::MetaExpr(meta, _) => {
+        ExprCarrier::MetadataExpression(meta) => {
             validate_handler_expr(&meta.expr, errors);
-            for (_, value) in &meta.entries {
-                validate_handler_expr(value, errors);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
-        Expr::Atom(_, _) => {}
-        Expr::Node(node, span) => {
-            if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                validate_handler_kind(decode_effect_kind(&header), node.children_slice(), errors);
-            }
-            for (_, value) in &node.meta().entries {
-                validate_handler_expr(value, errors);
-            }
-            for child in node.children_slice() {
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::StructuralList(children) => {
+            for child in children {
                 validate_handler_expr(child, errors);
             }
         }
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                validate_handler_expr(elem, errors);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::UndecodableHead(_, _, children) => {
+            for child in children {
                 validate_handler_expr(child, errors);
             }
         }
@@ -913,17 +802,19 @@ fn validate_handler_kind(
     kids: &[Expr],
     errors: &mut Vec<EffectError>,
 ) {
+    if kids.len() != 2 {
+        errors.push(EffectError {
+            kind: EffectErrorKind::InvalidHandler,
+            message: format!(
+                "`handle-effect` requires exactly two children (handler payload and body), got {}",
+                kids.len()
+            ),
+            suggestions: vec!["Use `(handle-effect {effect: ...} <handler> <body>)`".to_string()],
+        });
+        return;
+    }
+
     match effect_kind {
-        Ok(EffectKind::Random) if kids.first().and_then(int_literal).is_none() => {
-            errors.push(EffectError {
-                kind: EffectErrorKind::InvalidHandler,
-                message: "with seed(...) currently requires an int literal seed".to_string(),
-                suggestions: vec![
-                    "Use `with seed(42i64) { ... }` with an explicit int64-suffixed integer seed"
-                        .to_string(),
-                ],
-            });
-        }
         Ok(EffectKind::Resource) if kids.first().and_then(string_literal).is_none() => {
             errors.push(EffectError {
                 kind: EffectErrorKind::InvalidHandler,
@@ -934,79 +825,57 @@ fn validate_handler_kind(
                 ],
             });
         }
-        Ok(EffectKind::Random) | Ok(EffectKind::Resource) => {}
+        Ok(EffectKind::Resource) => {}
         Err(error) => errors.push(EffectError {
             kind: EffectErrorKind::InvalidHandler,
             message: format!("{error} in `handle-effect`"),
             suggestions: vec![
-                "Use one of the closed effect kinds `random` or `resource`".to_string(),
+                "Use the closed effect kind `resource`; randomness has no handler, \
+                 a random primitive takes an explicit key"
+                    .to_string(),
             ],
         }),
     }
 }
 
-fn validate_unhandled_random_roots(
-    exprs: &[Expr],
-    effects_by_def: &BTreeMap<String, EffectSet>,
-    errors: &mut Vec<EffectError>,
-) {
-    for expr in flattened_top_level(exprs) {
-        if let Some(kids) = stamped_children(expr, DeepTag::Def) {
-            if kids.len() < 2 {
-                continue;
-            }
-            let Some(name) = symbol_name(&kids[0]) else {
-                continue;
-            };
-            if stamped_children(&kids[1], DeepTag::Fn).is_some() {
-                continue;
-            }
-            if effects_by_def
-                .get(name)
-                .is_some_and(|effects| effects.contains(&Effect::Random))
-            {
-                errors.push(EffectError {
-                    kind: EffectErrorKind::UnhandledEffect,
-                    message: format!(
-                        "Function `{name}` has unhandled effect `Random`; `dropout` requires `with seed(...)`"
-                    ),
-                    suggestions: vec![
-                        "Wrap the stochastic region with `with seed(42i64) { ... }`".to_string(),
-                    ],
-                });
-            }
-        }
-    }
-}
-
-/// Extract the effect set declared on a `(defsig name t-fn-with-eff-meta)` expression.
+/// Extract the effect set declared on a
+/// `(defsig name [(binders...)] t-fn-with-eff-meta)` expression.
 /// Returns `None` when there is no explicit effect annotation (i.e., inference-only mode).
 fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
-    // defsig has form: (defsig {} name t-fn-expr)
-    let kids = stamped_children(expr, DeepTag::Defsig)?;
-    let t_fn = kids.get(1)?;
-    let (meta, _) = stamped_parts(t_fn, DeepTag::TFn)?;
-    let (_, eff_expr) = meta.entries.iter().find(|(key, _)| key == "eff")?;
-    // eff_expr is (effects {} sym sym ...)
-    let effect_children = stamped_children(eff_expr, DeepTag::Effects)?;
+    // The type is last in both canonical defsig forms.
+    let kids = match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => children,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return None,
+    };
+    let t_fn = kids.last()?;
+    let meta = match t_fn.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::TFn, metadata, _) => metadata,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => return None,
+    };
+    let effects = meta.eff()?;
     let mut declared = EffectSet::new();
-    for child in effect_children {
-        if let Some(name) = symbol_name(child) {
-            match name {
-                "random" => declared.insert(Effect::Random),
+    for member in effects.values() {
+        match member {
+            EffectMember::Name(name) => match name.value().as_str() {
                 "accum" => declared.insert(Effect::Accum),
                 "io" => declared.insert(Effect::Io),
                 "test" => declared.insert(Effect::Test),
-                // "diff" is currently tracked separately and does not appear in inferred sets.
+                // Diff is tracked separately from the inferred effect row.
                 _ => {}
+            },
+            EffectMember::Resource(resource) => {
+                declared.insert(Effect::Resource(resource.name().value().clone()))
             }
-        } else if let Some(resource_children) = stamped_children(child, DeepTag::Resource)
-            && let Some(device) = resource_children.first().and_then(|expr| match expr {
-                Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
-                _ => None,
-            })
-        {
-            declared.insert(Effect::Resource(device));
         }
     }
     Some(declared)
@@ -1024,13 +893,21 @@ fn validate_declared_vs_inferred(
 ) {
     let mut declared_by_name: BTreeMap<String, EffectSet> = BTreeMap::new();
     for expr in flattened_top_level(exprs) {
-        if let Some(kids) = stamped_children(expr, DeepTag::Defsig) {
-            let Some(name) = kids.first().and_then(symbol_name) else {
-                continue;
-            };
-            if let Some(declared) = declared_effects_from_defsig(expr) {
-                declared_by_name.insert(name.to_string(), declared);
+        match expr.carrier() {
+            ExprCarrier::DecodedNode(DeepTag::Defsig, _, children) => {
+                let Some(name) = children.first().and_then(symbol_name) else {
+                    continue;
+                };
+                if let Some(declared) = declared_effects_from_defsig(expr) {
+                    declared_by_name.insert(name.to_string(), declared);
+                }
             }
+            ExprCarrier::DecodedNode(_, _, _)
+            | ExprCarrier::StructuralList(_)
+            | ExprCarrier::UndecodableHead(_, _, _)
+            | ExprCarrier::Atom(_)
+            | ExprCarrier::MetadataMap(_)
+            | ExprCarrier::MetadataExpression(_) => {}
         }
     }
 
@@ -1071,56 +948,42 @@ fn validate_declared_vs_inferred(
 }
 
 fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<EffectError>) {
-    match expr {
-        Expr::List(list, _) => {
-            if get_tag(list) == Some(DeepTag::HandleEffect) {
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(tag, metadata, children) => {
+            if tag == DeepTag::HandleEffect {
                 validate_build_target_handler(
-                    decode_effect_kind(list),
-                    children(list),
+                    decode_effect_kind(metadata),
+                    children,
                     target,
                     errors,
                 );
             }
-            for kid in &list.elements {
+            metadata.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
+            for kid in children {
                 validate_build_target_expr(kid, target, errors);
             }
         }
-        Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                validate_build_target_expr(value, target, errors);
-            }
+        ExprCarrier::MetadataMap(map) => {
+            map.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
         }
-        Expr::MetaExpr(meta, _) => {
+        ExprCarrier::MetadataExpression(meta) => {
             validate_build_target_expr(&meta.expr, target, errors);
-            for (_, value) in &meta.entries {
-                validate_build_target_expr(value, target, errors);
-            }
+            meta.metadata.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
         }
-        Expr::Atom(_, _) => {}
-        Expr::Node(node, span) => {
-            if node.tag() == DeepTag::HandleEffect {
-                let header = shallow_node_list(node, *span);
-                validate_build_target_handler(
-                    decode_effect_kind(&header),
-                    node.children_slice(),
-                    target,
-                    errors,
-                );
-            }
-            for (_, value) in &node.meta().entries {
-                validate_build_target_expr(value, target, errors);
-            }
-            for child in node.children_slice() {
+        ExprCarrier::Atom(_) => {}
+        ExprCarrier::StructuralList(children) => {
+            for child in children {
                 validate_build_target_expr(child, target, errors);
             }
         }
-        Expr::BareList(elems, _) => {
-            for elem in elems {
-                validate_build_target_expr(elem, target, errors);
-            }
-        }
-        Expr::UnknownForm(data) => {
-            for child in &data.children {
+        ExprCarrier::UndecodableHead(_, _, children) => {
+            for child in children {
                 validate_build_target_expr(child, target, errors);
             }
         }
@@ -1134,23 +997,32 @@ fn validate_build_target_handler(
     errors: &mut Vec<EffectError>,
 ) {
     match effect_kind {
-        Ok(EffectKind::Random) => {}
         Ok(EffectKind::Resource) => {
             if let Some(device) = kids.first().and_then(string_literal) {
                 let ok = match target {
-                    "c" => !device.starts_with("gpu"),
+                    "c" => is_c_host_device_designator(device),
                     "hip" | "metal" => device.starts_with("gpu"),
                     _ => true,
                 };
                 if !ok {
                     errors.push(EffectError {
                         kind: EffectErrorKind::BuildTargetMismatch,
-                        message: format!(
-                            "`chelis build --target {target}` cannot satisfy resource region `{device}`"
-                        ),
+                        message: if target == "c" {
+                            format!(
+                                "`chelis build --target c` cannot satisfy resource region \
+                                 `{device}`: host C accepts only exact `cpu`"
+                            )
+                        } else {
+                            format!(
+                                "`chelis build --target {target}` cannot satisfy resource region \
+                                 `{device}`"
+                            )
+                        },
                         suggestions: match target {
                             "c" => vec![
-                                "Use `with device(\"cpu\") { ... }` or build with `--target hip` or `--target metal`"
+                                "Use `with device(\"cpu\") { ... }` for host execution; \
+                                 accelerator placement is a separate target capability \
+                                 (chelis#2104)"
                                     .to_string(),
                             ],
                             "hip" | "metal" => vec![
@@ -1169,84 +1041,47 @@ fn validate_build_target_handler(
     }
 }
 
-/// Decode-once (chelis#731 Phase 3): both heads here are vocabulary tags
-/// (`DeepTag::Effects`, `DeepTag::Resource`), and this runs AFTER the parser
-/// and the desugarer, so nothing upstream will stamp them. Spelling them
-/// `symbol("effects")` / `symbol("resource")` put raw vocabulary strings back
-/// into the tree, and the typed readers that gate on
-/// `tag(list) == Some(DeepTag::Effects)` reject that form outright
-/// (`declared_effects_from_meta` above; `decompile_effect_suffix_from_type_expr`
-/// and `decompile_effect_set_expr` in chelis-surf).
+/// The host-C selector contract owned by spec/04 [04-EFF-2].
 ///
-/// `chelis_surf::desugar::desugar_effect_set` builds the SAME node shape and
-/// was migrated to the typed constructors; this is its post-check twin and
-/// now matches it exactly. The effect NAMES stay `Atom::Name` deliberately:
-/// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
-///
-/// #908 compatibility: `carries_effect_row` in the runtime matches on
-/// `Expr::List`. `Expr::node()` now produces `Expr::Node` which that
-/// function doesn't detect. Construct as `Expr::List` directly so the
-/// effect-free guard continues to work.
-fn effect_set_expr(effects: &EffectSet) -> Expr {
-    let mut children = Vec::new();
-    for effect in effects.iter() {
-        children.push(match effect {
-            Effect::Random => symbol("random"),
-            Effect::Accum => symbol("accum"),
-            Effect::Io => symbol("io"),
-            Effect::Test => symbol("test"),
-            Effect::Resource(device) => Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Resource), zero_span()),
-                        Expr::Map(MetaMap::default(), zero_span()),
-                        Expr::Atom(Atom::Str(device.clone()), zero_span()),
-                    ],
-                },
-                zero_span(),
-            ),
-        });
-    }
-    let mut elements = Vec::with_capacity(children.len() + 2);
-    elements.push(Expr::Atom(Atom::Tag(DeepTag::Effects), zero_span()));
-    elements.push(Expr::Map(MetaMap::default(), zero_span()));
-    elements.extend(children);
-    Expr::List(List { elements }, zero_span())
+/// This is deliberately a positive host classification. Any new accelerator
+/// spelling therefore fails closed instead of inheriting host execution merely
+/// because it lacks a known prefix.
+fn is_c_host_device_designator(device: &str) -> bool {
+    device == "cpu"
 }
 
-fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
-    if let Some((_, existing)) = meta
-        .entries
-        .iter_mut()
-        .find(|(entry_key, _)| entry_key == key)
-    {
-        *existing = value;
-    } else {
-        meta.entries.push((key.to_string(), value));
-    }
+/// Convert semantic effects to their dedicated AST annotation payload.
+fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
+    let values = effects
+        .iter()
+        .map(|effect| match effect {
+            Effect::Accum => EffectMember::Name(Spanned::new("accum".into(), zero_span())),
+            Effect::Io => EffectMember::Name(Spanned::new("io".into(), zero_span())),
+            Effect::Test => EffectMember::Name(Spanned::new("test".into(), zero_span())),
+            Effect::Resource(device) => EffectMember::Resource(
+                ResourceEffect::new(
+                    Spanned::new(device.clone(), zero_span()),
+                    Metadata::default(),
+                    zero_span(),
+                )
+                .expect("resource effect annotations"),
+            ),
+        })
+        .collect();
+    AstEffectSet::new(Metadata::default(), values, zero_span())
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Var) => {
-            children(list).first().and_then(symbol_name)
+    match expr.carrier() {
+        ExprCarrier::DecodedNode(DeepTag::Var, _, children) => {
+            children.first().and_then(symbol_name)
         }
-        Expr::Node(node, _) if node.tag() == DeepTag::Var => {
-            node.children_slice().first().and_then(symbol_name)
-        }
-        _ => None,
-    }
-}
-
-fn get_tag(list: &List) -> Option<DeepTag> {
-    list.tag()
-}
-
-fn children(list: &List) -> &[Expr] {
-    if list.elements.len() > 2 {
-        &list.elements[2..]
-    } else {
-        &[]
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
 }
 
@@ -1257,34 +1092,27 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn int_literal(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(Expr::Atom(Atom::Int(value), _)) => Some(*value),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 fn string_literal(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(Expr::Atom(Atom::Str(value), _)) => Some(value.as_str()),
-                _ => None,
-            }
+    match expr.carrier() {
+        ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
+        ExprCarrier::DecodedNode(DeepTag::Lit, _, children) => {
+            children.first().and_then(|child| match child.carrier() {
+                ExprCarrier::Atom(Atom::Str(value)) => Some(value.as_str()),
+                ExprCarrier::DecodedNode(_, _, _)
+                | ExprCarrier::StructuralList(_)
+                | ExprCarrier::UndecodableHead(_, _, _)
+                | ExprCarrier::Atom(_)
+                | ExprCarrier::MetadataMap(_)
+                | ExprCarrier::MetadataExpression(_) => None,
+            })
         }
-        _ => None,
+        ExprCarrier::DecodedNode(_, _, _)
+        | ExprCarrier::StructuralList(_)
+        | ExprCarrier::UndecodableHead(_, _, _)
+        | ExprCarrier::Atom(_)
+        | ExprCarrier::MetadataMap(_)
+        | ExprCarrier::MetadataExpression(_) => None,
     }
-}
-
-fn symbol(name: &str) -> Expr {
-    Expr::Atom(Atom::Name(name.to_string()), zero_span())
 }
 
 fn zero_span() -> Span {
@@ -1305,7 +1133,7 @@ mod tests {
 
     fn surf_checked(src: &str) -> CheckedProgram {
         let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("effect check")
     }
@@ -1320,7 +1148,7 @@ mod tests {
         ];
         if flat {
             lines.push(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else {"
                     .to_string(),
             );
@@ -1339,7 +1167,7 @@ mod tests {
                 body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
             }
             lines.push(format!(
-                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                "def st(s: tensor[8, f32], i: i64) -> tensor[8, f32] = \
                  if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
             ));
         }
@@ -1354,7 +1182,7 @@ mod tests {
             .spawn(move || {
                 let source = issue_1205_source(operations, flat);
                 let decls = parse_surf(&source).expect("#1205 surf fixture parses");
-                let deep = desugar_program(&decls);
+                let deep = desugar_program(&decls).expect("Surf fixture must desugar");
                 let typed =
                     chelis_types::check_ir_program(&deep).expect("#1205 fixture type checks");
                 reset_effect_work_profile();
@@ -1402,8 +1230,8 @@ mod tests {
 
     #[test]
     fn effect_annotation_reconstruction_preserves_type_context() {
-        let decls = parse_surf("def add_one(x: int32) -> int32 = add(x, 1)").expect("surf parse");
-        let deep = desugar_program(&decls);
+        let decls = parse_surf("def add_one(x: i32) -> i32 = add(x, 1)").expect("surf parse");
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let typed = chelis_types::check_ir_program(&deep).expect("type check");
         let expected_type_env = typed.type_env().clone();
         let expected_signatures = typed.signature_inference().clone();
@@ -1431,111 +1259,420 @@ mod tests {
     }
 
     #[test]
-    fn stamped_declared_pure_function_rejects_inferred_random() {
+    fn stamped_declared_pure_function_rejects_inferred_io() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
                  (t-fn {eff: (effects {})}
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+                   (t-prim {} string)
+                   (t-prim {} string)))
                (def {} entry
                  (fn {}
-                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                   (app {} (var {} dropout) (var {} x) (lit {} 0.5))))"#,
+                   (params {} (x {type: (t-prim {} string)}))
+                   (app {} (var {} debug) (var {} x))))"#,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
 
-        let errors = check_program(&typed).expect_err("declared-pure Random body must reject");
+        let errors = check_program(&typed).expect_err("declared-pure IO body must reject");
 
         assert!(
-            errors.iter().any(|error| {
-                error.message.contains("entry") && error.message.contains("Random")
-            }),
+            errors
+                .iter()
+                .any(|error| { error.message.contains("entry") && error.message.contains("IO") }),
             "effect diagnostic must name the function and missing effect: {errors:?}"
         );
     }
 
+    fn effect_error_messages(errors: Vec<EffectError>) -> Vec<String> {
+        errors
+            .into_iter()
+            .map(|error| format!("{:?}: {}", error.kind, error.message))
+            .collect()
+    }
+
     #[test]
-    fn stamped_declared_pure_function_rejects_random_local_closure() {
+    fn effects_reader_classes_read_a_recursive_stamped_program() {
+        let successor = chelis_deep::parse_and_stamp_file(
+            r#"(module {} Test
+                 (defsig {} entry
+                   (t-fn {eff: (effects {})} (t-prim {} unit)))
+                 (def {} entry
+                   (fn {}
+                     (params {})
+                     (let {}
+                       (bind {} local
+                         (fn {}
+                           (params {})
+                           (app {} (var {} debug) (lit {} 1))))
+                       (app {} (var {} local))))))"#,
+        )
+        .expect("recursive effects fixture stamps");
+
+        let successor_bodies = top_level_def_bodies(&successor);
+        assert_eq!(successor_bodies.keys().collect::<Vec<_>>(), ["entry"]);
+
+        let (successor_effects, successor_callables) = infer_program_effects(&successor);
+        assert!(
+            successor_effects
+                .get("entry")
+                .is_some_and(|effects| effects.contains(&Effect::Io))
+        );
+
+        let mut successor_errors = Vec::new();
+        validate_declared_vs_inferred(&successor, &successor_effects, &mut successor_errors);
+        assert!(
+            effect_error_messages(successor_errors)
+                .iter()
+                .any(|message| message.contains("`entry`")),
+            "the declared-pure `entry` must be rejected for its local closure's IO"
+        );
+
+        let successor_annotated = successor
+            .iter()
+            .map(|expr| {
+                annotate_effects(
+                    expr,
+                    &successor_effects,
+                    &successor_callables,
+                    &BTreeMap::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            chelis_deep::printer::print_canonical(&successor_annotated).contains("eff"),
+            "the annotated closure carries its inferred effect row"
+        );
+    }
+
+    #[test]
+    fn guarded_var_and_literal_readers_read_decoded_nodes() {
+        let span = Span::new(0, 0);
+        let successor_var = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("value".into()), span)],
+            span,
+        );
+        let successor_lit = Expr::node(
+            DeepTag::Lit,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
+            span,
+        );
+        assert_eq!(var_name(&successor_var), Some("value"));
+        assert_eq!(string_literal(&successor_lit), Some("gpu:0"));
+
+        let wrong_tag = Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Str("gpu:0".into()), span)],
+            span,
+        );
+        assert_eq!(string_literal(&wrong_tag), None);
+        assert_eq!(
+            var_name(&Expr::BareList(
+                vec![Expr::Atom(Atom::Name("value".into()), span)],
+                span,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn undecodable_head_metadata_is_not_traversed_by_handler_validation() {
+        fn stamped_def_body(source: &str) -> Expr {
+            let exprs = chelis_deep::parse_and_stamp(source).expect("fixture stamps");
+            let ExprCarrier::DecodedNode(DeepTag::Def, _, children) = exprs[0].carrier() else {
+                panic!("fixture is a def");
+            };
+            children[1].clone()
+        }
+
+        fn expression_metadata(expr: Expr) -> Metadata {
+            Metadata::from(MetadataValue::PropertySeed(
+                chelis_deep::annotations::RuntimeExpression::try_new(expr)
+                    .expect("handler is a runtime expression"),
+            ))
+        }
+
+        fn unknown_form(metadata: Metadata, span: Span) -> Expr {
+            Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                head: "future-wrapper".into(),
+                meta: metadata,
+                children: Vec::new(),
+                span,
+            }))
+        }
+
+        let span = Span::new(0, 0);
+        let invalid_resource = stamped_def_body(
+            "(def {} x
+               (handle-effect {effect: resource}
+                 (var {} device)
+                 (lit {} 1)))",
+        );
+        let invalid_metadata = expression_metadata(invalid_resource);
+        let mut unknown_errors = Vec::new();
+        validate_handler_expr(&unknown_form(invalid_metadata, span), &mut unknown_errors);
+        assert!(
+            unknown_errors.is_empty(),
+            "UnknownForm metadata was not traversed before the carrier migration: {unknown_errors:?}"
+        );
+
+        let gpu_resource = stamped_def_body(
+            "(def {} x
+               (handle-effect {effect: resource}
+                 (lit {} \"gpu:0\")
+                 (lit {} 1)))",
+        );
+        let resource_metadata = expression_metadata(gpu_resource);
+        let mut unknown_target_errors = Vec::new();
+        validate_build_target_expr(
+            &unknown_form(resource_metadata, span),
+            "c",
+            &mut unknown_target_errors,
+        );
+        assert!(
+            unknown_target_errors.is_empty(),
+            "UnknownForm metadata was not traversed by target validation before migration: \
+             {unknown_target_errors:?}"
+        );
+    }
+
+    #[test]
+    fn let_effect_reader_traverses_every_non_bind_slot_carrier() {
+        let span = Span::new(0, 0);
+        let name = |value: &str| Expr::Atom(Atom::Name(value.into()), span);
+        let io_expr = || {
+            Expr::node(
+                DeepTag::App,
+                Metadata::default(),
+                vec![
+                    Expr::node(DeepTag::Var, Metadata::default(), vec![name("debug")], span),
+                    Expr::node(
+                        DeepTag::Lit,
+                        Metadata::default(),
+                        vec![Expr::Atom(Atom::Int(1), span)],
+                        span,
+                    ),
+                ],
+                span,
+            )
+        };
+        let pure_expr = || {
+            Expr::node(
+                DeepTag::Lit,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Int(0), span)],
+                span,
+            )
+        };
+
+        let carrier_cases = |child: Expr| {
+            [
+                ("structural-list", Expr::BareList(vec![child.clone()], span)),
+                (
+                    "undecodable-head",
+                    Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                        head: "future-bind".into(),
+                        meta: Metadata::default(),
+                        children: vec![child.clone()],
+                        span,
+                    })),
+                ),
+                (
+                    "metadata-expression",
+                    Expr::MetaExpr(
+                        chelis_deep::MetaExpr {
+                            metadata: Metadata::default(),
+                            expr: Box::new(child.clone()),
+                        },
+                        span,
+                    ),
+                ),
+                (
+                    "decoded-non-bind",
+                    Expr::node(DeepTag::Tuple, Metadata::default(), vec![child], span),
+                ),
+            ]
+        };
+        let effectful_cases = carrier_cases(io_expr());
+        assert!(matches!(
+            effectful_cases[0].1.carrier(),
+            ExprCarrier::StructuralList(_)
+        ));
+        assert!(matches!(
+            effectful_cases[1].1.carrier(),
+            ExprCarrier::UndecodableHead(..)
+        ));
+        assert!(matches!(
+            effectful_cases[2].1.carrier(),
+            ExprCarrier::MetadataExpression(_)
+        ));
+        assert!(matches!(
+            effectful_cases[3].1.carrier(),
+            ExprCarrier::DecodedNode(DeepTag::Tuple, ..)
+        ));
+
+        let hidden = effectful_cases
+            .iter()
+            .filter_map(|(label, bind_slot)| {
+                let effects = infer_let_effects(
+                    &[bind_slot.clone(), pure_expr()],
+                    &BTreeMap::new(),
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                );
+                (!effects.contains(&Effect::Io)).then_some(*label)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            hidden.is_empty(),
+            "bind-slot carriers hide effectful content: {hidden:?}"
+        );
+
+        let pure_cases = carrier_cases(pure_expr());
+        let invented = pure_cases
+            .iter()
+            .filter_map(|(label, bind_slot)| {
+                let effects = infer_let_effects(
+                    &[bind_slot.clone(), pure_expr()],
+                    &BTreeMap::new(),
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                );
+                effects.contains(&Effect::Io).then_some(*label)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            invented.is_empty(),
+            "bind-slot carrier traversal invents effects: {invented:?}"
+        );
+    }
+
+    #[test]
+    fn declared_effect_reader_reads_a_decoded_defsig() {
+        let mut parsed = chelis_deep::parse_and_stamp(
+            "(defsig {} entry \
+               (t-fn {eff: (effects {} accum io)} \
+                 (t-prim {} i32) \
+                 (t-prim {} i32)))",
+        )
+        .expect("canonical defsig fixture stamps");
+        let successor = parsed.remove(0);
+
+        let successor_effects =
+            declared_effects_from_defsig(&successor).expect("successor declaration");
+        assert!(successor_effects.contains(&Effect::Accum));
+        assert!(successor_effects.contains(&Effect::Io));
+    }
+
+    #[test]
+    fn declared_effect_reader_declines_nondecoded_carriers() {
+        let span = Span::new(0, 0);
+        for expr in [
+            Expr::BareList(vec![], span),
+            Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+                head: "future-defsig".into(),
+                meta: Metadata::default(),
+                children: vec![],
+                span,
+            })),
+        ] {
+            assert_eq!(declared_effects_from_defsig(&expr), None);
+        }
+    }
+
+    #[test]
+    fn declared_effect_reader_has_no_local_optional_carrier_adapter() {
+        let source = include_str!("lib.rs");
+        let definition = ["fn stamped_", "parts"].concat();
+        assert!(
+            !source.contains(&definition),
+            "E5b requires declared-effect reads to disposition ExprCarrier directly"
+        );
+    }
+
+    #[test]
+    fn stamped_declared_pure_function_rejects_io_local_closure() {
         let deep = chelis_deep::parse_and_stamp(
             r#"(defsig {} entry
                  (t-fn {eff: (effects {})}
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))
-                   (t-tensor {} (d-lit {} 8) (t-prim {} f32))))
+                   (t-prim {} string)
+                   (t-prim {} string)))
                (def {} entry
                  (fn {}
-                   (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
+                   (params {} (x {type: (t-prim {} string)}))
                    (let {}
                      (bind {} step
                        (fn {}
-                         (params {} (y {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                         (app {} (var {} dropout) (var {} y) (lit {} 0.5))))
+                         (params {} (y {type: (t-prim {} string)}))
+                         (app {} (var {} debug) (var {} y))))
                      (app {} (var {} step) (var {} x)))))"#,
         )
         .expect("canonical Deep fixture stamps");
         let typed = chelis_types::check_typed_program(&deep).expect("type check");
 
-        let errors =
-            check_program(&typed).expect_err("declared-pure local Random closure must reject");
+        let errors = check_program(&typed).expect_err("declared-pure local IO closure must reject");
 
         assert!(
-            errors.iter().any(|error| {
-                error.message.contains("entry") && error.message.contains("Random")
-            }),
+            errors
+                .iter()
+                .any(|error| { error.message.contains("entry") && error.message.contains("IO") }),
             "effect diagnostic must name the function and local closure effect: {errors:?}"
         );
     }
 
     #[test]
-    fn literal_random_and_resource_handlers_cross_the_type_effect_boundary() {
-        for source in [
-            r#"(def {} value
-                   (handle-effect {effect: random}
-                     (lit {type: (t-prim {} int64)} 7)
-                     (lit {type: (t-prim {} int32)} 1)))"#,
+    fn literal_resource_handler_crosses_the_type_effect_boundary() {
+        let deep = parse_str(
             r#"(def {} value
                    (handle-effect {effect: resource}
                      (lit {type: (t-prim {} string)} "cpu")
-                     (lit {type: (t-prim {} int32)} 1)))"#,
-        ] {
-            let deep = parse_str(source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
-            check_program(&typed).expect("effects boundary accepts literal handler");
-        }
+                     (lit {type: (t-prim {} i32)} 1)))"#,
+        )
+        .expect("Deep handler fixture parses");
+        let typed = chelis_types::check_ir_program(&deep).expect("type boundary accepts");
+        check_program(&typed).expect("effects boundary accepts literal handler");
     }
 
     #[test]
-    fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
-        for (effect, expected) in [
-            ("random", "requires an int literal seed"),
-            ("resource", "requires a string literal device"),
-        ] {
-            let source = format!(
-                "(def {{}} value (handle-effect {{effect: {effect}}} \
-                 (var {{}} computed_handler) (lit {{type: (t-prim {{}} int32)}} 1)))"
-            );
-            let deep = parse_str(&source).expect("Deep handler fixture parses");
-            let typed = chelis_types::check_ir_program(&deep)
-                .expect("handler payload is owned by the effects gate");
-            let errors = check_program(&typed).expect_err("nonliteral handler must reject");
-            assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
-            assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
-            assert!(errors[0].message.contains(expected), "{errors:?}");
-        }
+    fn nonliteral_resource_handler_is_rejected_once_by_the_effect_owner() {
+        let deep = parse_str(
+            "(def {} value (handle-effect {effect: resource} \
+             (var {} computed_handler) (lit {type: (t-prim {} i32)} 1)))",
+        )
+        .expect("Deep handler fixture parses");
+        let typed = chelis_types::check_ir_program(&deep)
+            .expect("handler payload is owned by the effects gate");
+        let errors = check_program(&typed).expect_err("nonliteral handler must reject");
+        assert_eq!(errors.len(), 1, "one effects owner diagnostic: {errors:?}");
+        assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler);
+        assert!(
+            errors[0]
+                .message
+                .contains("requires a string literal device"),
+            "{errors:?}"
+        );
     }
 
     #[test]
-    fn infers_random_for_dropout_fn() {
+    fn keyed_dropout_introduces_no_effect() {
+        // [05-RNG-1]: a draw is a pure function of its key, so a keyed
+        // `dropout` carries an empty effect row (the `Random` effect was
+        // retired with the counter stream, #2413).
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+             (def {} y (app {} (var {} dropout)
+               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
         let (inferred, _) = infer_program_effects(&exprs);
         assert!(
-            inferred
-                .get("y")
-                .is_some_and(|effects| effects.contains(&Effect::Random))
+            inferred.get("y").is_some_and(|effects| effects.is_empty()),
+            "keyed dropout must infer an empty effect row, got {:?}",
+            inferred.get("y")
         );
     }
 
@@ -1549,7 +1686,7 @@ mod tests {
         let program = surf_checked(
             r#"
 def logged(msg: string) -> string = debug(msg)
-def pure_add(x: int64, y: int64) -> int64 = add(x, y)
+def pure_add(x: i64, y: i64) -> i64 = add(x, y)
 "#,
         );
         let rows = def_effect_rows(&program);
@@ -1565,19 +1702,18 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
     }
 
     #[test]
-    fn rejects_unhandled_dropout_root() {
+    fn keyed_dropout_root_checks_clean() {
+        // The retired unhandled-`Random` root check has no successor: a keyed
+        // draw at a value root needs no handler.
         let exprs = parse_str(
             "(def {} x (lit {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))} 0))
-             (def {} y (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
+             (def {} y (app {} (var {} dropout)
+               (app {} (var {} key_from_seed) (lit {type: (t-prim {} i64)} 7))
+               (var {} x) (lit {type: (t-prim {} f32)} 0.5)))",
         )
         .unwrap();
         let checked = chelis_types::check_ir_program(&exprs).unwrap();
-        let errors = check_program(&checked).unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect)
-        );
+        check_program(&checked).expect("a keyed draw root needs no handler");
     }
 
     #[test]
@@ -1586,7 +1722,7 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
             "(def {} x
                (handle-effect {effect: resource}
                  (lit {type: (t-prim {} string)} \"gpu:0\")
-                 (lit {type: (t-prim {} int32)} 1)))",
+                 (lit {type: (t-prim {} i32)} 1)))",
         );
         let errors = validate_build_target(&program, "c").unwrap_err();
         assert!(
@@ -1597,11 +1733,100 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
     }
 
     #[test]
+    fn c_target_accepts_only_explicit_host_resource_designators() {
+        let program = surf_checked("def main() -> i32 = with device(\"cpu\") { 1 }\n");
+        validate_build_target(&program, "c").expect("exact cpu host region");
+
+        for device in [
+            "cpu:0",
+            "cpu:author-device",
+            "cpu:socket_9",
+            "cpu:HOST_2",
+            "cuda:0",
+            "metal",
+            "rocm",
+            "xpu:1",
+            "Gpu:0",
+            "gpu:0",
+            "host",
+            "",
+            "cpu:",
+            "cpu:two words",
+            "cpu:/0",
+        ] {
+            let program = surf_checked(&format!(
+                "def main() -> i32 = with device(\"{device}\") {{ 1 }}\n"
+            ));
+            let errors = validate_build_target(&program, "c").expect_err(device);
+            assert_eq!(errors.len(), 1, "{device}: {errors:?}");
+            assert_eq!(
+                errors[0].kind,
+                EffectErrorKind::BuildTargetMismatch,
+                "{device}"
+            );
+            assert_eq!(
+                errors[0].message,
+                format!(
+                    "`chelis build --target c` cannot satisfy resource region `{device}`: \
+                     host C accepts only exact `cpu`"
+                ),
+                "{device}"
+            );
+            assert_eq!(
+                errors[0].suggestions,
+                vec![
+                    "Use `with device(\"cpu\") { ... }` for host execution; accelerator \
+                     placement is a separate target capability (chelis#2104)"
+                        .to_string()
+                ],
+                "{device}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_target_checks_each_nested_resource_region() {
+        for source in [
+            r#"def main() -> i32 = with device("cpu") { with device("cuda:0") { 1 } }"#,
+            r#"def main() -> i32 = with device("metal") { with device("cpu") { 1 } }"#,
+            r#"def main() -> i32 = with device("cpu") { with device("cpu:author-device") { 1 } }"#,
+            r#"def main() -> i32 = with device("cpu:socket_9") { with device("cpu") { 1 } }"#,
+        ] {
+            let program = surf_checked(source);
+            let errors = validate_build_target(&program, "c").expect_err(source);
+            assert_eq!(errors.len(), 1, "{source}: {errors:?}");
+            assert_eq!(errors[0].kind, EffectErrorKind::BuildTargetMismatch);
+        }
+
+        let accepted =
+            surf_checked(r#"def main() -> i32 = with device("cpu") { with device("cpu") { 1 } }"#);
+        validate_build_target(&accepted, "c").expect("nested host regions");
+
+        let two_rejected = surf_checked(
+            r#"def main() -> i32 = with device("cpu:author-device") { with device("cpu:socket_9") { 1 } }"#,
+        );
+        let errors = validate_build_target(&two_rejected, "c").expect_err("two rejected regions");
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| error.message.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "`chelis build --target c` cannot satisfy resource region \
+                 `cpu:author-device`: host C accepts only exact `cpu`",
+                "`chelis build --target c` cannot satisfy resource region \
+                 `cpu:socket_9`: host C accepts only exact `cpu`",
+            ]
+        );
+    }
+
+    #[test]
     fn checked_program_does_not_emit_internal_type_override_metadata() {
         let program = checked(
             "(def {} f
-               (fn {} (params {} (x {type: (t-tensor {} (d-lit {} 8) (t-prim {} f32))}))
-                 (app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))))",
+               (fn {} (params {} (x {type: (t-prim {} string)}))
+                 (app {} (var {} debug) (var {} x))))",
         );
         let text = chelis_deep::printer::print_canonical(program.annotated_exprs());
         assert!(
@@ -1618,8 +1843,8 @@ def pure_add(x: int64, y: int64) -> int64 = add(x, y)
     fn map_propagates_io_effect_from_callback() {
         let program = surf_checked(
             r#"
-def emit(x: int64) -> int64 = debug(add(x, cast(1, int64)))
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
+def emit(x: i64) -> i64 = debug(add(x, cast(1, i64)))
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
 ys = map(emit, xs)
 "#,
         );
@@ -1637,8 +1862,8 @@ ys = map(emit, xs)
     fn fold_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+total = fold(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1655,8 +1880,8 @@ total = fold(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs
     fn scan_propagates_io_effect_from_inline_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+totals = scan(fn (acc: i64, x: i64) -> debug(add(acc, x)), cast(0, i64), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1670,28 +1895,21 @@ totals = scan(fn (acc: int64, x: int64) -> debug(add(acc, x)), cast(0, int64), x
     }
 
     #[test]
-    fn partition_propagates_random_effect_to_root() {
-        let decls = parse_surf(
+    fn partition_propagates_io_effect_from_callback() {
+        let program = surf_checked(
             r#"
-def keep(x: tensor[f32]) -> bool = gt(tensor_to_scalar(dropout(x, 0.5)), 0.0)
-xs: List[tensor[f32]] = [
-  trace(pad_sequences_to([[1.0]], cast(1, int64), cast(0.0, f32)), 0, 1),
-  trace(pad_sequences_to([[2.0]], cast(1, int64), cast(0.0, f32)), 0, 1)
-]
+def keep(x: i64) -> bool = gt(debug(x), cast(1, i64))
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
 buckets = partition(keep, xs)
 "#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
-        let errors = check_program(&checked).expect_err("partition should propagate Random effect");
+        );
+        let (inferred, _) = infer_program_effects(program.annotated_exprs());
         assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
+            inferred
+                .get("buckets")
+                .is_some_and(|effects| effects.contains(&Effect::Io)),
+            "expected IO effect on partition result, got {:?}",
+            inferred.get("buckets")
         );
     }
 
@@ -1699,8 +1917,8 @@ buckets = partition(keep, xs)
     fn flat_map_propagates_io_effect_from_callback() {
         let program = surf_checked(
             r#"
-xs: List[int64] = [cast(1, int64), cast(2, int64)]
-ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
+xs: List[i64] = [cast(1, i64), cast(2, i64)]
+ys = flat_map(fn (x: i64) -> debug([x, add(x, cast(10, i64))]), xs)
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1714,37 +1932,11 @@ ys = flat_map(fn (x: int64) -> debug([x, add(x, cast(10, int64))]), xs)
     }
 
     #[test]
-    fn map_propagates_random_effect_to_root() {
-        let decls = parse_surf(
-            r#"
-def step(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-xs: List[tensor[8, f32]] = [
-  (to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]) : tensor[8, f32]),
-  (to_tensor([8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]) : tensor[8, f32])
-]
-ys = map(step, xs)
-"#,
-        )
-        .expect("surf parse");
-        let deep = desugar_program(&decls);
-        let checked = chelis_types::check_ir_program(&deep).expect("type check");
-        let errors = check_program(&checked).expect_err("map should propagate Random effect");
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("Random")),
-            "expected unhandled Random effect, got {:?}",
-            errors
-        );
-    }
-
-    #[test]
     fn file_io_builtins_infer_io_but_mmap_reads_stay_pure() {
         let program = surf_checked(
             r#"
 mapped = mmap_file("dataset.txt")
-prefix = mmap_read(mapped, cast(0, int64), cast(4, int64))
+prefix = mmap_read(mapped, cast(0, i64), cast(4, i64))
 width = mmap_len(mapped)
 contents = read_file("dataset.txt")
 "#,
@@ -1788,7 +1980,7 @@ contents = read_file("dataset.txt")
         let program = surf_checked(
             r#"
 result = process_run("echo", ["hi"])
-pure_value = add(cast(1, int64), cast(2, int64))
+pure_value = add(cast(1, i64), cast(2, i64))
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1870,12 +2062,13 @@ def outer() -> unit = inner()
     }
 
     #[test]
-    fn with_seed_does_not_handle_test_effect() {
-        // `with seed(...)` must remove Random, but must NOT remove Test.
+    fn with_device_does_not_handle_test_effect() {
+        // A `resource` handler handles no inferred effect: `with device(...)`
+        // must NOT remove Test.
         let program = surf_checked(
             r#"
 def sealed() -> unit =
-  with seed(7i64) { test_assert(true, "inside-handler") }
+  with device("cpu") { test_assert(true, "inside-handler") }
 "#,
         );
         let (inferred, _) = infer_program_effects(program.annotated_exprs());
@@ -1883,7 +2076,7 @@ def sealed() -> unit =
             inferred
                 .get("sealed")
                 .is_some_and(|effects| effects.contains(&Effect::Test)),
-            "with seed(...) must not swallow the Test effect, got {:?}",
+            "with device(...) must not swallow the Test effect, got {:?}",
             inferred.get("sealed")
         );
     }
@@ -1898,7 +2091,7 @@ def g() -> unit ! {} = test_assert(true, "leak")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors = check_program(&checked)
             .expect_err("def with `! {}` that calls test_assert must be rejected");
@@ -1921,7 +2114,7 @@ def g() -> unit ! {} = f()
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("transitive caller with `! {}` must be rejected");
@@ -1944,7 +2137,7 @@ def test_ok() -> unit ! {Test} = test_assert(true, "ok")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         check_program(&checked).expect("declared Test should accept test_assert caller");
     }
@@ -1960,7 +2153,7 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
 "#,
         )
         .expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         let checked = chelis_types::check_ir_program(&deep).expect("type check");
         let errors =
             check_program(&checked).expect_err("IO-declared fn must not silently acquire Test");
@@ -1977,45 +2170,21 @@ def leak() -> unit ! {IO} = test_assert(true, "sneak")
     // A `.dp` MODULE wraps its decls in `(module ...)`. The whole-program
     // effect validators must descend into that wrapper so a module-wrapped
     // `chelis check` agrees with the flattened build/eval path. Without the
-    // descent, a declared-pure function whose body performs Random/IO would be
+    // descent, a declared-pure function whose body performs IO would be
     // accepted module-wrapped but rejected flattened.
 
     /// Type-check a module-WRAPPED Deep program (the shape `chelis check` runs
     /// on a `.dp` MODULE), preserving the `(module ...)` wrapper.
     fn typed_module(src: &str) -> CheckedProgram {
         let decls = parse_surf(src).expect("surf parse");
-        let deep = desugar_program(&decls);
+        let deep = desugar_program(&decls).expect("Surf fixture must desugar");
         chelis_types::check_typed_program(&deep).expect("type check")
     }
 
     #[test]
-    fn module_wrapped_declared_pure_body_does_random_is_rejected() {
-        // `entry` is declared pure (`! { }`) but its body calls `noisy`, which
-        // performs Random. Wrapped in `(module ...)`, the declared-vs-inferred
-        // validator must still fire after descending into the wrapper.
-        let checked = typed_module(
-            r#"module Frag.Effect
-export (entry)
-def noisy(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] ! { } = noisy(x)
-"#,
-        );
-        let errors = check_program(&checked)
-            .expect_err("module-wrapped declared-pure body performing Random must be rejected");
-        assert!(
-            errors.iter().any(|error| {
-                error.kind == EffectErrorKind::UnhandledEffect
-                    && error.message.contains("entry")
-                    && error.message.contains("Random")
-            }),
-            "expected UnhandledEffect on entry mentioning Random, got {errors:?}"
-        );
-    }
-
-    #[test]
     fn module_wrapped_declared_pure_body_does_io_is_rejected() {
-        // The IO counterpart: a declared-pure function whose body calls a
-        // file-IO builtin must be rejected module-wrapped, the same as Random.
+        // A declared-pure function whose body calls a file-IO builtin must be
+        // rejected module-wrapped, the same as flattened.
         let checked = typed_module(
             r#"module Frag.Io
 export (entry)
@@ -2035,26 +2204,6 @@ def entry(path: string) -> string ! { } = read_file(path)
     }
 
     #[test]
-    fn module_wrapped_unhandled_random_value_root_is_rejected() {
-        // A value-binding (non-fn) root that performs Random inside a module
-        // wrapper must still be caught by the unhandled-random-roots validator.
-        let checked = typed_module(
-            r#"module Frag.Root
-export (sampled)
-sampled: tensor[8, f32] = dropout(to_tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0.5)
-"#,
-        );
-        let errors = check_program(&checked)
-            .expect_err("module-wrapped unhandled Random value root must be rejected");
-        assert!(
-            errors.iter().any(|error| {
-                error.kind == EffectErrorKind::UnhandledEffect && error.message.contains("Random")
-            }),
-            "expected unhandled Random effect, got {errors:?}"
-        );
-    }
-
-    #[test]
     fn module_wrapped_pure_program_checks_clean() {
         // The negative-parity case: a pure module must still check clean after
         // the descent change (no effects -> no rejection).
@@ -2069,18 +2218,17 @@ def entry(x: f32) -> f32 = helper(mul(x, x))
     }
 
     #[test]
-    fn module_wrapped_honest_random_signature_checks_clean() {
-        // A module-wrapped function that honestly declares `! { Random }` and
-        // handles the effect with `with seed(...)` must check clean: the
-        // descent fix tightens the unsound-accept path only, not honest code.
+    fn module_wrapped_honest_io_signature_checks_clean() {
+        // A module-wrapped function that honestly declares `! { IO }` must
+        // check clean: the descent fix tightens the unsound-accept path only,
+        // not honest code.
         let checked = typed_module(
             r#"module Frag.Honest
 export (entry)
-def entry(x: tensor[8, f32]) -> tensor[8, f32] =
-  with seed(7i64) { dropout(x, 0.5) }
+def entry(path: string) -> string ! { IO } = read_file(path)
 "#,
         );
-        check_program(&checked).expect("handled-Random module-wrapped program must check clean");
+        check_program(&checked).expect("honest IO module-wrapped program must check clean");
     }
 }
 
@@ -2088,60 +2236,82 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] =
 mod decode_once_producer_tests {
     use super::*;
 
-    /// chelis#731 Phase 3, found by the #887 consumption-boundary probe:
-    /// `effect_set_expr` runs after the parser and the desugarer, so its
-    /// heads are never stamped upstream. It spelled them `symbol("effects")`
-    /// / `symbol("resource")`, which put raw vocabulary strings back into the
-    /// tree - the same class as `ty_expr_to_deep` (chelis-ir), and invisible
-    /// to the standing invariant because that is asserted on parsed and
-    /// desugared trees, not on post-check synthesis.
-    ///
-    /// Both polarities: no raw vocabulary tag anywhere in the produced tree,
-    /// AND the typed readers actually see the decoded tags.
     #[test]
-    fn effect_set_expr_carries_no_raw_vocabulary_tag_strings() {
+    fn synthesized_effects_preserve_typed_members_and_decoded_wire_tags() {
         let mut effects = EffectSet::new();
-        effects.insert(Effect::Random);
+        effects.insert(Effect::Accum);
         effects.insert(Effect::Io);
-        effects.insert(Effect::Resource("gpu0".to_string()));
-
-        let expr = effect_set_expr(&effects);
+        effects.insert(Effect::Resource("gpu0".into()));
+        let metadata = Metadata::from(MetadataValue::Effects(effect_set_metadata(&effects)));
+        let mut payload = None;
+        metadata.visit_syntax(&mut |_, value| payload = Some(value.clone()));
+        let expr = payload.unwrap();
         assert_eq!(
             chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
-            None,
-            "a synthesized effect-set node must not carry a raw vocabulary tag string"
+            None
         );
-        assert_eq!(
-            expr.tag(),
-            Some(DeepTag::Effects),
-            "the typed readers gate on `tag() == Some(DeepTag::Effects)`"
-        );
-
-        let Expr::List(list, _) = &expr else {
-            panic!("effect_set_expr produces a list");
+        assert_eq!(expr.tag(), Some(DeepTag::Effects));
+        let Expr::Node(node, _) = expr else {
+            panic!("structural effects node")
         };
-        let resource = children(list)
+        let resource = node
+            .children_slice()
             .iter()
             .find(|child| child.tag() == Some(DeepTag::Resource))
-            .expect("the nested resource node must be stamped too");
+            .unwrap();
         assert_eq!(resource.tag(), Some(DeepTag::Resource));
     }
 
-    /// Negative parity: the effect NAMES are payload, not vocabulary, and
-    /// must stay bare symbols. If they were ever stamped the readers below
-    /// (`symbol_name`) would stop resolving them.
     #[test]
-    fn effect_names_stay_bare_symbols() {
+    fn effect_names_are_payload_not_vocabulary_tags() {
         let mut effects = EffectSet::new();
-        effects.insert(Effect::Random);
-        let expr = effect_set_expr(&effects);
-        let Expr::List(list, _) = &expr else {
-            panic!("effect_set_expr produces a list");
+        effects.insert(Effect::Accum);
+        let payload = effect_set_metadata(&effects);
+        assert!(matches!(payload.values(), [EffectMember::Name(name)] if name.value() == "accum"));
+    }
+
+    #[test]
+    fn effect_annotation_reaches_registered_expressions_and_preserves_data() {
+        let source = "(def {property_seed: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
+        let parsed = chelis_deep::parser::parse_str(source).unwrap();
+        let Expr::Node(node, _) = &parsed[0] else {
+            panic!("stamped declaration")
         };
-        assert_eq!(
-            children(list).first().and_then(symbol_name),
-            Some("random"),
-            "effect names are payload and must remain readable as bare symbols"
-        );
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "custom".into(),
+            meta: node.meta().clone(),
+            children: vec![],
+            span: parsed[0].span(),
+        }));
+        for original in [parsed[0].clone(), unknown] {
+            let rewritten = annotate_effects(
+                &original,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            let metadata = match &rewritten {
+                Expr::Node(node, _) => node.meta(),
+                Expr::UnknownForm(data) => &data.meta,
+                _ => unreachable!(),
+            };
+            assert_eq!(metadata.extensions(), node.meta().extensions());
+            let closure = metadata.property_seed().unwrap().expression();
+            let Expr::Node(closure, _) = closure else {
+                panic!("closure")
+            };
+            assert!(
+                closure
+                    .meta()
+                    .values()
+                    .any(|v| matches!(v, MetadataValue::Effects(_))),
+                "registered expression closure needs inferred effects"
+            );
+            assert_eq!(
+                metadata.source(),
+                node.meta().source(),
+                "preserved source is data"
+            );
+        }
     }
 }

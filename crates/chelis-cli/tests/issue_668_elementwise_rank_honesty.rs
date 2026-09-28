@@ -83,7 +83,7 @@ fn check_deep(source: &str) -> (std::process::ExitStatus, Value) {
 fn rank_divergent_source(rhs: &str) -> String {
     format!(
         "module Repro.RankDivergent\n\
-         sig f: tensor[n, f32] -> tensor[u, f32]\n\
+         sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
          def f(x) = {{\n\
            s = stride(x, 2i64)\n\
            e = insert(x, 0i32, 2i64)\n\
@@ -129,7 +129,7 @@ fn matching_runtime_rank_control_still_checks() {
         status.success(),
         "matching ranks must remain valid: {report}"
     );
-    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["score"], 1.0, "clean control must score perfectly");
     assert_eq!(
         report["errors"],
         serde_json::json!([]),
@@ -177,7 +177,7 @@ fn matching_rank_identity_chain_still_checks() {
         status.success(),
         "matching-rank identity chain failed: {report}"
     );
-    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["score"], 1.0, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
@@ -284,15 +284,15 @@ fn matching_inline_identity_chain_still_checks() {
         status.success(),
         "matching inline ranks must remain valid: {report}"
     );
-    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["score"], 1.0, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
 #[test]
 fn a_lexically_shadowed_floor_div_parameter_keeps_its_declared_type() {
     let source = "module Repro.ShadowedIdentity\n\
-def lift(x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
-def apply(floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]) -> tensor[2, n, f32] = {\n\
+def lift[n](x: tensor[n, f32]) -> tensor[2, n, f32] = insert(x, 0i32, 2i64)\n\
+def apply[n](floor_div: (tensor[n, f32] -> tensor[2, n, f32]), x: tensor[n, f32]) -> tensor[2, n, f32] = {\n\
   s = stride(x, 2i64)\n\
   e = insert(x, 0i32, 2i64)\n\
   add(floor_div(s), e)\n\
@@ -303,7 +303,7 @@ out = apply(lift, to_tensor([1.0, 2.0, 3.0, 4.0]))\n";
         status.success(),
         "a parameter shadowing a builtin name keeps its declared type: {report}"
     );
-    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["score"], 1.0, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
@@ -313,13 +313,13 @@ fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
 def convolve(\n\
   x: tensor[__chelis_rank_only_axis_0, 3, 8, 8, f32],\n\
   k: tensor[8, 3, 3, 3, f32],\n\
-) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv2d(&x, &k, 1i32, 0)\n";
+) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n";
     let (status, report) = check(source);
     assert!(
         status.success(),
         "an unusual authored dimension name is an ordinary name: {report}"
     );
-    assert_eq!(report["score"], 1, "clean control must score perfectly");
+    assert_eq!(report["score"], 1.0, "clean control must score perfectly");
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
@@ -345,15 +345,15 @@ fn authored_deep_type_metadata_cannot_override_the_inferred_rank() {
     (let {}
       (bind {}
         s
-        (app {} (var {} stride) (var {} x) (lit {type: (t-prim {} int64)} 2)))
+        (app {} (var {} stride) (var {} x) (lit {type: (t-prim {} i64)} 2)))
       (let {}
         (bind {}
           e
           (app {}
             (var {} insert)
             (var {} x)
-            (lit {type: (t-prim {} int32)} 0)
-            (lit {type: (t-prim {} int64)} 2)))
+            (lit {type: (t-prim {} i32)} 0)
+            (lit {type: (t-prim {} i64)} 2)))
         (app {} (var {} add) (var {} s) (var {} e))))))
 ";
     let forged = control.replace(
@@ -387,14 +387,14 @@ fn authored_deep_type_metadata_cannot_override_the_inferred_rank() {
 /// rebinding read the earlier binding's rank, and the identity-rank validator
 /// then rejected a valid program (chelis#668 round-6 F1). That consumer is
 /// gone, so this row can no longer go red the way it originally did; the
-/// environment it exercises still feeds the exact-shape `conv2d` validators,
+/// environment it exercises still feeds the exact-shape `conv` validators,
 /// where a stale entry would be the same defect with a different consumer.
 #[test]
 fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
     let source = "module Repro.Rebind\n\
-                  def f(x: tensor[n, f32]) = {\n\
+                  def f[n](x: tensor[n, f32]) = {\n\
                     a = stride(x, 2i64)\n\
-                    a = normalize(insert(x, 0i32, 2i64))\n\
+                    a = relu(insert(x, 0i32, 2i64))\n\
                     b = insert(x, 0i32, 2i64)\n\
                     add(a, b)\n\
                   }\n\
@@ -405,7 +405,7 @@ fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
         "a rebinding must not inherit the previous binding's rank: {report}"
     );
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "a valid rebinding must score perfectly: {report}"
     );
     assert_eq!(
@@ -421,7 +421,7 @@ fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {
 #[test]
 fn rebinding_to_a_derivable_rank_still_rejects_a_genuine_mismatch() {
     let source = "module Repro.RebindNegative\n\
-                  def f(x: tensor[n, f32]) = {\n\
+                  def f[n](x: tensor[n, f32]) = {\n\
                     a = insert(x, 0i32, 2i64)\n\
                     a = stride(x, 2i64)\n\
                     b = insert(x, 0i32, 2i64)\n\
@@ -478,7 +478,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
     let program = |input: &str| {
         format!(
             "module Repro.Issue668Loud\n\
-             sig f: tensor[n, f32] -> tensor[u, f32]\n\
+             sig f[n, u]: tensor[n, f32] -> tensor[u, f32]\n\
              def f(x) = {{\n\
                e = expand(x, 0i32, 3i64)\n\
                s = stride(e, 1i64)\n\
@@ -502,7 +502,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
              check-time one, unless the operand extent is a literal \
              (`spec/05-risc-primitives.md` section 2.4.1): {report}"
         );
-        assert_eq!(report["score"], 1, "{label}: must score perfectly");
+        assert_eq!(report["score"], 1.0, "{label}: must score perfectly");
         assert_eq!(report["errors"], serde_json::json!([]));
     }
 
@@ -534,7 +534,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
         String::from_utf8_lossy(&bad_eval.stdout)
     );
     assert!(
-        bad_stderr.contains("numeric trap: domain in load at int64"),
+        bad_stderr.contains("numeric trap: domain in load at i64"),
         "the [04-NUM-9] rendering, at the extent's own dtype, with the \
          section 4.7 slot for an all-interface guard: {bad_stderr}"
     );
@@ -559,7 +559,7 @@ fn the_expand_built_reproducer_is_loud_at_run_time() {
         "a refuted unit-extent claim must abort on C: {bad_output}"
     );
     assert!(
-        bad_output.contains("numeric trap: domain in load at int64")
+        bad_output.contains("numeric trap: domain in load at i64")
             && bad_output.contains("claimed = 1")
             && bad_output.contains("axis 0 = 2"),
         "the C lane renders the same guard: {bad_output}"

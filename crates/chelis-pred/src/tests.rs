@@ -5,6 +5,8 @@
 //! pre-flight).
 
 use super::*;
+use chelis_deep::Span;
+use chelis_deep::ast::{Metadata, UnknownFormData};
 use chelis_deep::parser::parse_str;
 
 /// Parse a single Deep expression (the predicate fn node).
@@ -259,6 +261,18 @@ fn grammar_rejects_match() {
 }
 
 #[test]
+fn grammar_rejection_names_the_unknown_form_head() {
+    let src = "(fn {} (params {} p) (future_form {} true))";
+    assert_eq!(
+        predicate_in_grammar(&fnnode(src)),
+        Err(PredGrammarError::DisallowedNode(
+            "unknown form `future_form`".to_string()
+        )),
+        "[04-TOT-3] requires the diagnostic to identify the malformed tag"
+    );
+}
+
+#[test]
 fn grammar_rejects_lambda() {
     let src = "(fn {} (params {} p) \
         (fn {} (params {} q) (access {} (var {} q) value)))";
@@ -301,6 +315,178 @@ fn grammar_rejects_non_fn_top() {
 }
 
 #[test]
+fn grammar_reads_constructed_and_parsed_decoded_nodes_identically() {
+    let span = Span::new(3, 9);
+    let constructed = Expr::node(
+        DeepTag::Var,
+        Metadata::default(),
+        vec![Expr::Atom(Atom::Name("value".to_string()), span)],
+        span,
+    );
+    let parsed = fnnode("(var {} value)");
+
+    assert_eq!(check_in_grammar(&constructed), Ok(()));
+    assert_eq!(check_in_grammar(&parsed), Ok(()));
+}
+
+#[test]
+fn grammar_rejects_each_nonexpression_carrier_with_its_exact_role() {
+    let span = Span::new(3, 9);
+    let cases = [
+        (
+            Expr::BareList(vec![Expr::Atom(Atom::Name("item".to_string()), span)], span),
+            "bare list",
+        ),
+        (
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-form".to_string(),
+                meta: Metadata::default(),
+                children: vec![],
+                span,
+            })),
+            "unknown form `future-form`",
+        ),
+        (Expr::Map(Metadata::default(), span), "map"),
+        (
+            Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    metadata: Metadata::default(),
+                    expr: Box::new(Expr::Atom(Atom::Bool(true), span)),
+                },
+                span,
+            ),
+            "meta-expr",
+        ),
+    ];
+
+    for (expr, expected) in cases {
+        assert_eq!(
+            check_in_grammar(&expr),
+            Err(PredGrammarError::DisallowedNode(expected.to_string()))
+        );
+    }
+}
+
+#[test]
+fn unknown_form_parameter_head_does_not_enter_binder_scope() {
+    let span = Span::new(3, 9);
+    let parameter = Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future_parameter".to_string(),
+        meta: Metadata::default(),
+        children: vec![],
+        span,
+    }));
+    assert_eq!(
+        binder_name(&parameter),
+        None,
+        "an UnknownForm head is not an authored parameter binder"
+    );
+
+    let predicate = Expr::node(
+        DeepTag::Fn,
+        Metadata::default(),
+        vec![
+            Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(Atom::Name("future_parameter".to_string()), span)],
+                span,
+            ),
+        ],
+        span,
+    );
+    assert!(fn_parts(&predicate).is_none());
+    assert!(matches!(
+        predicate_in_grammar(&predicate),
+        Err(PredGrammarError::NotAPredicateFn(_))
+    ));
+}
+
+#[test]
+fn annotated_bare_list_parameter_enters_binder_scope() {
+    let span = Span::new(4, 10);
+    let parameter = Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("structural_parameter".to_string()), span),
+            Expr::Map(Metadata::default(), span),
+        ],
+        span,
+    );
+    assert_eq!(
+        binder_name(&parameter),
+        Some("structural_parameter".to_string()),
+        "the stamped annotated-parameter carrier is a legal structural binder"
+    );
+
+    let predicate = Expr::node(
+        DeepTag::Fn,
+        Metadata::default(),
+        vec![
+            Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+            Expr::node(
+                DeepTag::Var,
+                Metadata::default(),
+                vec![Expr::Atom(
+                    Atom::Name("structural_parameter".to_string()),
+                    span,
+                )],
+                span,
+            ),
+        ],
+        span,
+    );
+    assert_eq!(
+        fn_parts(&predicate).map(|(binder, _)| binder),
+        Some("structural_parameter".to_string())
+    );
+    assert_eq!(predicate_in_grammar(&predicate), Ok(()));
+    assert!(predicate_free_vars(&predicate).is_empty());
+    assert_eq!(classify_predicate(&predicate), PredAmenability::Linear);
+}
+
+#[test]
+fn malformed_parameter_carriers_never_mint_binder_scope() {
+    let span = Span::new(5, 11);
+    // A wrong-arity `var` parameter has no in-memory spelling: `Node`
+    // construction rejects it, so the structural list is the one malformed
+    // parameter carrier left.
+    let malformed = [Expr::BareList(
+        vec![
+            Expr::Atom(Atom::Name("structural_parameter".to_string()), span),
+            Expr::Map(Metadata::default(), span),
+            Expr::Atom(Atom::Name("extra".to_string()), span),
+        ],
+        span,
+    )];
+
+    for parameter in malformed {
+        assert_eq!(binder_name(&parameter), None);
+        let predicate = Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(DeepTag::Params, Metadata::default(), vec![parameter], span),
+                Expr::node(
+                    DeepTag::Var,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("external".to_string()), span)],
+                    span,
+                ),
+            ],
+            span,
+        );
+        assert!(fn_parts(&predicate).is_none());
+        assert!(matches!(
+            predicate_in_grammar(&predicate),
+            Err(PredGrammarError::NotAPredicateFn(_))
+        ));
+        assert!(predicate_free_vars(&predicate).is_empty());
+        assert_eq!(classify_predicate(&predicate), PredAmenability::Opaque);
+    }
+}
+
+#[test]
 fn grammar_accepts_sum_over_field() {
     let src = "(fn {} (params {} p) \
         (app {} (var {} gte) \
@@ -334,6 +520,51 @@ fn free_vars_excludes_field_selectors() {
     let vars = predicate_free_vars(&fnnode(POLYNOMIAL));
     assert!(!vars.iter().any(|v| v == "value"));
     assert!(vars.is_empty());
+}
+
+#[test]
+fn free_vars_do_not_read_unknown_form_children() {
+    let span = Span::new(3, 9);
+    let free_var = || {
+        Expr::node(
+            DeepTag::Var,
+            Metadata::default(),
+            vec![Expr::Atom(Atom::Name("external".to_string()), span)],
+            span,
+        )
+    };
+    let predicate = |body| {
+        Expr::node(
+            DeepTag::Fn,
+            Metadata::default(),
+            vec![
+                Expr::node(
+                    DeepTag::Params,
+                    Metadata::default(),
+                    vec![Expr::Atom(Atom::Name("p".to_string()), span)],
+                    span,
+                ),
+                body,
+            ],
+            span,
+        )
+    };
+
+    let successor_unknown = predicate(Expr::UnknownForm(Box::new(UnknownFormData {
+        head: "future-form".to_string(),
+        meta: Metadata::default(),
+        children: vec![free_var()],
+        span,
+    })));
+    assert!(
+        predicate_free_vars(&successor_unknown).is_empty(),
+        "UnknownForm children are not predicate free-variable scope"
+    );
+    // Negative control: the same reference as a direct body is free.
+    assert_eq!(
+        predicate_free_vars(&predicate(free_var())),
+        vec!["external".to_string()]
+    );
 }
 
 #[test]

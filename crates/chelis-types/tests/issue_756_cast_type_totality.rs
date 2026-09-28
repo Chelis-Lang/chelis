@@ -20,8 +20,6 @@
 //! Spec authority: spec/04-type-system.md §10 [04-TOT-2];
 //! spec/design/checker_totality.md §C3.
 
-mod support;
-
 use chelis_deep::Expr;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
@@ -31,13 +29,13 @@ use chelis_types::errors::CheckErrorKind;
 use chelis_types::{FitnessReport, InferResult, check_ir_fitness, check_ir_program};
 
 const ACTIVE_CAST_TARGETS: [&str; 9] = [
-    "f32", "f64", "bf16", "f16", "bool", "int8", "int16", "int32", "int64",
+    "f32", "f64", "bf16", "f16", "bool", "i8", "i16", "i32", "i64",
 ];
 
 fn surf_to_deep(source: &str) -> Vec<Expr> {
     let decls = parse_surf(source).expect("surf parse");
     chelis_macros::expand_program(
-        &desugar_program(&decls),
+        &desugar_program(&decls).expect("Surf fixture must desugar"),
         &chelis_macros::ExpansionOptions::default(),
     )
     .expect("macro expand")
@@ -152,28 +150,13 @@ fn unknown_bare_and_canonical_deep_cast_targets_are_rejected_loudly() {
 
 #[test]
 fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
+    // The stamped `Node` constructor is the only way to build a vocabulary
+    // node, so a wrong-arity canonical type cannot reach the cast resolver.
+    let error = chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32 extra)"))
+        .expect_err("wrong-arity canonical types must be rejected at stamped ingress");
     assert!(
-        chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32 extra)")).is_err(),
-        "wrong-arity canonical types must be rejected at stamped ingress"
-    );
-    let deep = support::parse_unchecked_legacy(&deep_cast_program("(t-prim {} f32 extra)"));
-    let report = check_ir_fitness(&deep);
-    assert!(
-        report.score < 1.0,
-        "malformed canonical target must reduce fitness below 1, got {report:?}"
-    );
-    assert_eq!(
-        report.errors.len(),
-        1,
-        "the cast resolver must own the malformed target without a cascade: {:?}",
-        report.errors
-    );
-    let error = &report.errors[0];
-    assert!(
-        matches!(error.kind, CheckErrorKind::MalformedForm)
-            && error.message.contains("malformed `t-prim` in cast target")
-            && error.message.contains("expected 1 child(ren), got 2"),
-        "unexpected malformed cast-target diagnostic: {error:?}"
+        error.to_string().contains("wrong child count"),
+        "unexpected stamped-ingress diagnostic: {error}"
     );
 }
 

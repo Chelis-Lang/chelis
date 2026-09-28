@@ -62,6 +62,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
 
+#[path = "common/mod.rs"]
+mod common;
+
 /// Pinned compiler version string for fixture manifests.
 const COMPILER_VERSION: &str = chelis_compiler_api::COMPILER_VERSION;
 
@@ -80,28 +83,28 @@ fn write(path: &Path, contents: &str) {
 ///
 /// `dep_body` / `entry_body` supply the two module bodies so tests can vary
 /// them (plain vs macro-bearing). Programs are compiled-lane-friendly
-/// (int32 + the `add` RISC primitive, no host-only builtins, no chelis-std)
+/// (i32 + the `add` RISC primitive, no host-only builtins, no chelis-std)
 /// so `chelis build` emits C cleanly.
 fn stage_dep_fixture(scratch: &Path, dep_body: &str, entry_body: &str) -> PathBuf {
     let root = scratch.join("pseudo-app");
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join("azdep/reef.toml"),
         &format!(
-            "[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
         ),
     );
     write(&root.join("azdep/src/math.ch"), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
         ),
     );
     root.join("src/main.ch")
@@ -110,8 +113,8 @@ fn stage_dep_fixture(scratch: &Path, dep_body: &str, entry_body: &str) -> PathBu
 /// A plain (macro-free) dependency + entry pair that exercises the cache.
 fn plain_bodies() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n",
     )
 }
 
@@ -120,8 +123,8 @@ fn plain_bodies() -> (&'static str, &'static str) {
 /// `v_macro_0` — the name a restarted counter would collide with.
 fn macro_bodies() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (dep_val)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+        "module Azdep.Math\nexport (dep_val)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: i32) -> i32 = dmk(x)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, i32)\n  add(v, a)\n}\n\ndef main_value() ->i32 = {\n  v_macro_0 = dep_val(cast(5, i32))\n  emk(v_macro_0)\n}\n",
     )
 }
 
@@ -237,7 +240,7 @@ fn dependency_edit_misses_and_rebuilds() {
     let dep_path = scratch.path().join("pseudo-app/azdep/src/math.ch");
     fs::write(
         &dep_path,
-        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(y, x)\n",
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(y, x)\n",
     )
     .expect("rewrite dep");
 
@@ -268,7 +271,7 @@ fn entry_only_edit_reuses_dependency_cache() {
     // key is unchanged: a warm dependency hit.
     fs::write(
         &entry,
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(5, int32), cast(6, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(5, i32), cast(6, i32))\n",
     )
     .expect("rewrite entry");
 
@@ -326,8 +329,8 @@ fn dependency_build_writes_library_cache_artifact() {
 /// program.
 fn plain_bodies_with_unused_dep() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32, y: int32) -> int32 = add(add(x, y), y)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef az_unused(x: i32, y: i32) -> i32 = add(add(x, y), y)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n",
     )
 }
 
@@ -338,8 +341,8 @@ fn plain_bodies_with_unused_dep() -> (&'static str, &'static str) {
 /// dependency/entry split identically under pruning.
 fn macro_bodies_with_unused_dep() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
-        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+        "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: i32) -> i32 = dmk(x)\ndef dep_unused(x: i32) -> i32 = dmk(add(x, x))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, i32)\n  add(v, a)\n}\n\ndef main_value() ->i32 = {\n  v_macro_0 = dep_val(cast(5, i32))\n  emk(v_macro_0)\n}\n",
     )
 }
 
@@ -358,17 +361,18 @@ fn pruning_fires_monolithic_vs_layered_build_c_identical() {
     );
 
     // Confirm pruning ACTUALLY fired: `az_unused` is unreachable from the
-    // entry, so its symbol must be absent from the compiled C. The emitted C
-    // carries the un-mangled def name (`az_add` appears), so `az_unused` would
-    // too if pruning had not dropped it — i.e. this fixture genuinely exercises
+    // entry, so its compiler-owned symbol must be absent from the compiled C.
+    // The reachable `az_add` symbol proves this fixture genuinely exercises
     // `pruned_deep_exprs.len() != full_deep_exprs.len()`.
     let layered_c = String::from_utf8_lossy(&layered.0);
+    let reachable = common::authored_c_symbol("pkg__azdep__Azdep__Math__az_add");
+    let unreachable = common::authored_c_symbol("pkg__azdep__Azdep__Math__az_unused");
     assert!(
-        layered_c.contains("az_add"),
+        layered_c.contains(&reachable),
         "sanity: the reachable dependency def must appear in the emitted C"
     );
     assert!(
-        !layered_c.contains("az_unused"),
+        !layered_c.contains(&unreachable),
         "pruning must drop the unused dependency def `az_unused`: this fixture \
          must exercise the pruning-fires path"
     );
@@ -432,8 +436,8 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
 /// pins the FIXPOINT, not just one hop.
 fn eval_only_wrapper_bodies() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, i32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n",
     )
 }
 
@@ -472,8 +476,8 @@ fn eval_only_wrapper_build_accept_reject_parity() {
 /// monolithic fallback produces the diagnostic. Both regimes must REJECT.
 fn unreachable_type_error_bodies() -> (&'static str, &'static str) {
     (
-        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_broken(x: int32) -> int32 = add(x, cast(1, f64))\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef dep_broken(x: i32) -> i32 = add(x, cast(1, f64))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n",
     )
 }
 
@@ -550,14 +554,14 @@ fn build_probe(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> B
 #[test]
 fn differential_cache_parity_sweep() {
     // (label, dependency module body, entry module body). Each dependency has an
-    // UNUSED def so pruning fires. Shapes: int32 scalar, f64 scalar, tensor
+    // UNUSED def so pruning fires. Shapes: i32 scalar, f64 scalar, tensor
     // entry, multi-def entry, macro-bearing, plus the two accept/reject-parity
     // witnesses.
     let cases: &[(&str, &str, &str)] = &[
         (
             "int32_scalar",
-            "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32) -> int32 = add(x, x)\n",
-            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
+            "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: i32, y: i32) -> i32 = add(x, y)\ndef az_unused(x: i32) -> i32 = add(x, x)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n",
         ),
         (
             "f64_scalar",
@@ -571,13 +575,13 @@ fn differential_cache_parity_sweep() {
         ),
         (
             "multi_def_entry",
-            "module Azdep.Math\nexport (d1, d2, az_unused)\n\ndef d1(x: int32, y: int32) -> int32 = add(x, y)\ndef d2(x: int32) -> int32 = add(x, x)\ndef az_unused(x: int32) -> int32 = add(add(x, x), x)\n",
-            "module PseudoApp.Main\nimport Azdep.Math (d1, d2)\n\ndef h(x: int32) -> int32 = d2(x)\ndef main_value() ->int32 = h(d1(cast(1, int32), cast(2, int32)))\n",
+            "module Azdep.Math\nexport (d1, d2, az_unused)\n\ndef d1(x: i32, y: i32) -> i32 = add(x, y)\ndef d2(x: i32) -> i32 = add(x, x)\ndef az_unused(x: i32) -> i32 = add(add(x, x), x)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (d1, d2)\n\ndef h(x: i32) -> i32 = d2(x)\ndef main_value() ->i32 = h(d1(cast(1, i32), cast(2, i32)))\n",
         ),
         (
             "macro_bearing",
-            "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
-            "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\ndef main_value() ->int32 = dep_val(cast(5, int32))\n",
+            "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: i32) -> i32 = dmk(x)\ndef dep_unused(x: i32) -> i32 = dmk(add(x, x))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\ndef main_value() ->i32 = dep_val(cast(5, i32))\n",
         ),
     ];
 
@@ -652,21 +656,21 @@ fn stage_named_dep_fixture(
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join(format!("{dep_name}/reef.toml")),
         &format!(
-            "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
         ),
     );
     write(&root.join(format!("{dep_name}/src/math.ch")), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
         ),
     );
     root.join("src/main.ch")
@@ -685,8 +689,8 @@ fn dependency_after_root_engages_cache_and_matches_monolithic() {
         "PseudoApp",
         "zzdep", // "zzdep" > "pseudo-app": sorts AFTER the root
         "Zzdep",
-        "module Zzdep.Math\nexport (zz_add)\n\ndef zz_add(x: int32, y: int32) -> int32 = add(x, y)\n",
-        "module PseudoApp.Main\nimport Zzdep.Math (zz_add)\n\ndef main_value() ->int32 = zz_add(cast(3, int32), cast(4, int32))\n",
+        "module Zzdep.Math\nexport (zz_add)\n\ndef zz_add(x: i32, y: i32) -> i32 = add(x, y)\n",
+        "module PseudoApp.Main\nimport Zzdep.Math (zz_add)\n\ndef main_value() ->i32 = zz_add(cast(3, i32), cast(4, i32))\n",
     );
     let monolithic = build_c(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
     let _cold = build_c(&entry, &cache_home, &[]);
@@ -736,10 +740,10 @@ fn library_cache_evicts_under_cap_and_protects_stdlib() {
     let (scratch, cache_home) = fresh_cache_home();
     let dep = |i: usize| {
         format!(
-            "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(add(x, y), cast({i}, int32))\n"
+            "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: i32, y: i32) -> i32 = add(add(x, y), cast({i}, i32))\n"
         )
     };
-    let entry = "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n";
+    let entry = "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->i32 = az_add(cast(3, i32), cast(4, i32))\n";
     let td = cache_home.join(".cache").join("typecheck");
 
     // First build (default cap): writes chelis-std + one chelis-lib.
@@ -793,15 +797,19 @@ fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
 
     // Settle reef.lock (the first build resolves + writes it, which fixes the
     // chelis-std set folded into the key) so the compared builds are stable.
-    let _ = build_probe(&entry, &cache_home, &[]);
+    let (settled_ok, settled_error, _) = build_probe(&entry, &cache_home, &[]);
+    assert!(
+        settled_ok,
+        "initial lock settlement failed: {settled_error}"
+    );
 
-    let (mono_ok, _mono_err, mono_c) =
+    let (mono_ok, mono_err, mono_c) =
         build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
-    let (warm_ok, _warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
+    let (warm_ok, warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
 
     assert!(
         mono_ok && warm_ok,
-        "a chelis-std-importing package must build in both cache regimes"
+        "a chelis-std-importing package must build in both cache regimes: monolithic={mono_err:?} warm={warm_err:?}"
     );
     // Confirm the stdlib layer engaged (i.e. real chelis-std was linked and the
     // eval-only drop path ran over it, not the no-chelis-std shortcut).

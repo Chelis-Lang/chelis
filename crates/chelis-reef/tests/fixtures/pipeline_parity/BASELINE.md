@@ -41,3 +41,11 @@ only; `expected_shell.json` and `expected_hashes.txt` are no longer asserted.
 The rejected capture recorded the complete type, effect, and linearity error output.
 Those baselines pin source span offsets, which are deterministic, so the rejected test
 stays active. The files under `rejected/` preserve the exact text and order.
+
+## Effect fixture moved to IO (chelis#2413)
+
+The effect rejection fixture used a keyless `dropout` to perform `Random`. Randomness
+is no longer an effect: a draw takes an explicit key, and a keyless `dropout` is an
+arity error. `rejected/effects.ch` now performs `IO` through `debug`, and
+`rejected/expected_effects.txt` changes only the effect name, `{Random}` to `{IO}`; the
+mangled function name and the sentence are unchanged.

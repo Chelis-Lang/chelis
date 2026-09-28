@@ -10,8 +10,49 @@ permissions:
   contents: write
 
 jobs:
+  # Run the release-notes extraction BEFORE any platform build starts.
+  # publish-release runs the same `changelog.py extract` on the tagged
+  # commit, but only after the three builds and the canary (~35m). The
+  # v0.18.8 tag (run 34782623299) reached that step with two fragments
+  # that had merged to main between the release-branch cut and the
+  # release squash merge, so extract refused, nothing was published, and
+  # the builds had been wasted. Failing the same check here bounds a bad
+  # tag to about a minute. On workflow_dispatch there is no tag to
+  # extract, so the job runs the read-only `changelog.py check` instead:
+  # the job must still succeed on dispatch because every build job
+  # `needs` it, and a skipped job would skip its dependents too.
+  preflight:
+    name: Release notes preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout tagged release notes
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Extract committed release notes (tag push)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: .venv/bin/python scripts/changelog.py extract --version "$RELEASE_VERSION" --output /tmp/release-notes.md
+
+      - name: Validate pending fragments (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: .venv/bin/python scripts/changelog.py check
+
   build-linux-x86_64:
     name: Build chelis (linux-x86_64)
+    needs: [preflight]
     runs-on: ubuntu-latest
     # chelis#1004: a cold cvc5 build measures ~30m here, and the retry
     # wrapper can add a couple of fast-failing fetch attempts on top. This
@@ -52,10 +93,7 @@ jobs:
       # failure still fails on the first attempt, so this job remains the
       # cold-build proof docs/smt_build_setup.md says it is.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
@@ -86,12 +124,18 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
@@ -117,9 +161,11 @@ jobs:
           path: |
             chelis-*-linux-x86_64.tar.gz
             chelis-*-linux-x86_64.tar.gz.sha256
+          retention-days: 7
 
   build-linux-x86_64-glibc231:
     name: Build chelis (linux-x86_64, glibc 2.31)
+    needs: [preflight]
     runs-on: ubuntu-latest
     # Debian 11 ships glibc 2.31. Building inside it caps the binary's glibc
     # verneed records at 2.31, so the tarball loads on Debian 11/12 and
@@ -172,10 +218,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       # WS-B (chelis#164): the bootstrap installer
       # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
@@ -229,12 +272,18 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
@@ -275,9 +324,11 @@ jobs:
             chelisup-linux-x86_64
             chelisup-linux-x86_64.sha256
             chelisup.sh
+          retention-days: 7
 
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
+    needs: [preflight]
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
@@ -309,10 +360,7 @@ jobs:
       # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
       # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt,sealed-runtime
 
       # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
       # bootstrap asset — see the glibc-2.31 job for the convention.
@@ -361,12 +409,18 @@ jobs:
           staging="chelis-${{ steps.version.outputs.version }}-darwin-arm64"
           mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
           cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
+          # Ship the runtime the released chelis carries (spec/08-backends.md §2.1).
+          runtime_export="$(mktemp -d)"
+          ./target/release/chelis runtime export "$runtime_export"
+          cp "$runtime_export/libchelis_runtime.a" "$staging/lib/"
+          # The shipped archive is the sealed export's, byte for byte.
+          python3 -c 'import hashlib, json, sys; receipt = json.load(open(sys.argv[1])); digest = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(); sys.exit(0 if (receipt["mode"], receipt["archive_sha256"]) == ("sealed", digest) else f"shipped runtime {digest} is not the sealed export {receipt}")' "$runtime_export/chelis_runtime.receipt.json" "$staging/lib/libchelis_runtime.a"
+          cp "$runtime_export/chelis_runtime.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_views.h" "$staging/include/"
+          cp "$runtime_export/chelis_runtime_dtype.h" "$staging/include/"
+          cp "$runtime_export/chelis_blas.h" "$staging/include/"
+          cp "$runtime_export/chelis_simd.h" "$staging/include/"
+          cp "$runtime_export/chelis_math.h" "$staging/include/"
           cp README.md "$staging/"
           cp LICENSE "$staging/"
           tar czf "${staging}.tar.gz" "$staging"
@@ -399,16 +453,85 @@ jobs:
             chelis-*-darwin-arm64.tar.gz.sha256
             chelisup-darwin-arm64
             chelisup-darwin-arm64.sha256
+          retention-days: 7
+
+  installed-artifact-canary:
+    name: Installed C callable (${{ matrix.slug }})
+    needs: [preflight, build-linux-x86_64-glibc231, build-darwin-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each artifact holds the toolchain build chelisup installs and the
+          # chelisup built beside it. On Linux that is the glibc-2.31 build
+          # (chelis#2686).
+          - runner: ubuntu-latest
+            slug: linux-x86_64
+            artifact: chelis-linux-x86_64-glibc2.31
+          - runner: macos-latest
+            slug: darwin-arm64
+            artifact: chelis-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source and canary
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+      - name: Download staged toolchain
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: installed-canary-assets/toolchain
+      - name: Download staged installer
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: installed-canary-assets/installer
+      - name: Install verified archive and run shipped callable
+        run: .venv/bin/python scripts/installed_artifact_canary.py --artifacts installed-canary-assets/toolchain --installer-assets installed-canary-assets/installer --source-sha "${{ github.sha }}" --evidence installed-canary-evidence
+      - name: Retain installed-artifact evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-callable-${{ matrix.slug }}
+          path: installed-canary-evidence
+          if-no-files-found: error
+          retention-days: 14
 
   publish-release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64, installed-artifact-canary]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout tagged release notes
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Extract committed release notes
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: .venv/bin/python scripts/changelog.py extract --version "$RELEASE_VERSION" --output release-notes.md
+
       - name: Download staged artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: chelis-*
           path: release-assets
 
       - name: Publish GitHub Release
@@ -422,5 +545,6 @@ jobs:
             release-assets/**/*.tar.gz.sha256
             release-assets/**/chelisup-*
             release-assets/**/chelisup.sh
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           fail_on_unmatched_files: true

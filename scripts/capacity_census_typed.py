@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Typed rustdoc-JSON enumerators for chelis#729's C6 entry legs.
 
-The wire leg enumerates numeric fields of public serialized types in
-`chelis_compiler_api::schema`. The binding leg joins the names of live,
-registered PyO3 functions to their Rust signatures in rustdoc JSON. It does
-not inspect or decide the behavior represented by either surface.
+The wire leg executes the complete covered-root graph, carrier admission and
+codec proof before issuing final authority. The binding leg joins live registered
+PyO3 functions to their Rust signatures. A supplied artifact can be used only
+for binding infrastructure; it never grants wire authority.
 """
 
 from __future__ import annotations
@@ -137,109 +137,6 @@ def numeric_primitives(ty: Any) -> set[str]:
         for value in ty:
             found.update(numeric_primitives(value))
     return found
-
-
-def _impl_ids(item: dict[str, Any]) -> list[int]:
-    inner = item["inner"]
-    if "struct" in inner:
-        return inner["struct"].get("impls", [])
-    if "enum" in inner:
-        return inner["enum"].get("impls", [])
-    return []
-
-
-def _implements(document: dict[str, Any], item: dict[str, Any], trait: str) -> bool:
-    for impl_id in _impl_ids(item):
-        impl = _index(document, impl_id).get("inner", {}).get("impl", {})
-        implemented = impl.get("trait") or {}
-        if implemented.get("path") == trait:
-            return True
-    return False
-
-
-def _field_row(
-    document: dict[str, Any], *, owner: str, field_id: int, fallback_name: str
-) -> dict[str, Any] | None:
-    field = _index(document, field_id)
-    ty = field.get("inner", {}).get("struct_field")
-    primitives = numeric_primitives(ty)
-    if not primitives:
-        return None
-    field_name = field.get("name") or fallback_name
-    flags = ["numeric-field"]
-    if primitives & FLOAT_PRIMITIVES:
-        flags = ["float-carrier"]
-    elif "dtype" in str(field_name).lower() and primitives & INTEGER_PRIMITIVES:
-        flags = ["raw-dtype-int"]
-    return {
-        "kind": "wire-schema-numeric-field",
-        "id": f"{owner}.{field_name}: {canonical_type(ty)}",
-        "flags": flags,
-    }
-
-
-def wire_rows(document: dict[str, Any]) -> list[dict[str, Any]]:
-    """Enumerate public serialized numeric carrier fields in schema.rs."""
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    for item_id, path_record in document.get("paths", {}).items():
-        path = path_record.get("path", [])
-        if (
-            len(path) != 3
-            or path[:2] != ["chelis_compiler_api", "schema"]
-            or path_record.get("kind") not in {"struct", "enum"}
-        ):
-            continue
-        item = _index(document, item_id)
-        span = item.get("span") or {}
-        if item.get("visibility") != "public" or not str(span.get("filename", "")).endswith(
-            "crates/chelis-compiler-api/src/schema.rs"
-        ):
-            continue
-        if not _implements(document, item, "Serialize"):
-            continue
-        candidates.append(("::".join(path), item))
-
-    rows: list[dict[str, Any]] = []
-    for owner, item in candidates:
-        inner = item["inner"]
-        if "struct" in inner:
-            kind = inner["struct"]["kind"]
-            if "plain" in kind:
-                field_ids = kind["plain"].get("fields", [])
-            elif "tuple" in kind:
-                field_ids = kind["tuple"]
-            else:
-                field_ids = []
-            for position, field_id in enumerate(field_ids):
-                row = _field_row(
-                    document,
-                    owner=owner,
-                    field_id=field_id,
-                    fallback_name=f"${position}",
-                )
-                if row:
-                    rows.append(row)
-        else:
-            for variant_id in inner["enum"].get("variants", []):
-                variant = _index(document, variant_id)
-                variant_name = variant.get("name") or f"variant-{variant_id}"
-                kind = variant["inner"]["variant"]["kind"]
-                if "tuple" in kind:
-                    field_ids = kind["tuple"]
-                elif "struct" in kind:
-                    field_ids = kind["struct"].get("fields", [])
-                else:
-                    field_ids = []
-                for position, field_id in enumerate(field_ids):
-                    row = _field_row(
-                        document,
-                        owner=f"{owner}::{variant_name}",
-                        field_id=field_id,
-                        fallback_name=f"${position}",
-                    )
-                    if row:
-                        rows.append(row)
-    return sorted(rows, key=lambda row: (row["kind"], row["id"]))
 
 
 def binding_rows(
@@ -394,7 +291,7 @@ def build_parser() -> argparse.ArgumentParser:
     # the legs back onto separate directories in a form the call-site drift
     # guard in test_capacity_census_typed.py cannot see.
     parser = argparse.ArgumentParser(allow_abbrev=False)
-    parser.add_argument("mode", choices=("wire", "bindings"))
+    parser.add_argument("mode", choices=("wire", "bindings", "bindings-discovery"))
     # Optional, and no caller in the repository passes it: see
     # SHARED_RUSTDOC_TARGET_DIR. It stays accepted for ad-hoc local runs that
     # need an isolated directory (the `target/agents/<name>` convention for
@@ -402,6 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-dir", type=Path, default=None)
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
+    parser.add_argument("--registered-class", action="append", default=[])
+    parser.add_argument("--registered-provenance", type=Path)
     parser.add_argument("--rustdoc-json", type=Path)
     return parser
 
@@ -422,19 +321,46 @@ def resolve_target_dir(root: Path, requested: Path | None) -> Path:
 
 
 def main() -> int:
+    from capacity_census_graph import GraphError
+
     args = parse_args()
     root = Path(__file__).resolve().parent.parent
     target_dir = resolve_target_dir(root, args.target_dir)
     try:
-        if args.rustdoc_json:
+        if args.mode == "wire":
+            if args.rustdoc_json or args.registered or args.registered_method or args.registered_class or args.registered_provenance:
+                raise CensusError("wire authority requires actual artifact and codec execution")
+            from capacity_census_wire_verifier import verify_wire_census
+
+            report = verify_wire_census(root, target_dir).execution_report()
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
+        compiler_json = None
+        native = None
+        if args.mode == "bindings-discovery":
+            if args.rustdoc_json:
+                raise CensusError("binding authority requires current compiled and wire execution")
+            if not args.registered_provenance:
+                raise CensusError("binding discovery requires registration provenance")
+            provenance = json.loads(args.registered_provenance.read_text())
+            # A missing registration is already a rejection. This is only an
+            # early failure check; live descriptor/source/typed ownership still
+            # runs below and no metadata can issue a transport witness.
+            declared = {row.get("python_name") for row in provenance.get("registrations", [])
+                        if row.get("owner") is None}
+            for name in args.registered:
+                if name not in declared:
+                    raise CensusError(f"{name}: missing registration provenance")
+            from capacity_census_compiler_json import verify_compiler_json_bindings
+
+            compiler_json = verify_compiler_json_bindings(root, target_dir)
+            from capacity_census_native_authority import verify_native_bindings
+
+            native = verify_native_bindings(root, target_dir)
+        if compiler_json is not None:
+            document = compiler_json.graph.documents["chelis_python"]
+        elif args.rustdoc_json:
             document = json.loads(args.rustdoc_json.read_text())
-        elif args.mode == "wire":
-            document = generate_rustdoc_json(
-                root=root,
-                package="chelis-compiler-api",
-                crate_name="chelis_compiler_api",
-                target_dir=target_dir,
-            )
         else:
             document = generate_rustdoc_json(
                 root=root,
@@ -442,12 +368,40 @@ def main() -> int:
                 crate_name="chelis_python",
                 target_dir=target_dir,
             )
-        rows = (
-            wire_rows(document)
-            if args.mode == "wire"
-            else binding_rows(document, args.registered, args.registered_method)
-        )
-    except (CensusError, OSError, json.JSONDecodeError) as error:
+        if args.mode == "bindings-discovery":
+            from capacity_census_bindings import discover_bindings
+
+            classes = {}
+            for value in args.registered_class:
+                name, separator, identity = value.partition("=")
+                if not separator or not name or not identity or name in classes:
+                    raise CensusError("invalid or duplicate registered class identity")
+                classes[name] = identity
+            rows = discover_bindings(
+                compiler_json.graph.documents.values(), args.registered,
+                args.registered_method, classes,
+                provenance=provenance,
+                compiler_json=compiler_json,
+                native=native,
+            )
+            legacy = {row["id"]: row["flags"] for row in binding_rows(
+                document, args.registered, args.registered_method
+            )}
+            for row in rows:
+                row["legacy_flags"] = legacy.get(row["id"], row["flags"])
+            receipt = root / "target/capacity-census-compiler-json-execution.json"
+            report = {
+                "version": 2,
+                "rows": rows,
+                "compiler_json": compiler_json.execution_report(),
+                "native": native.execution_report(),
+            }
+            receipt.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
+        else:
+            rows = binding_rows(document, args.registered, args.registered_method)
+    except (CensusError, GraphError, OSError, json.JSONDecodeError) as error:
         print(f"capacity census typed enumerator failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(rows, indent=2, sort_keys=True))
@@ -455,4 +409,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from ci_timing import subprocesses
+    with subprocesses():
+        sys.exit(main())

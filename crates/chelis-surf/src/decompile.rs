@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn verbose_mode_is_canonical_surf_plus_comments() {
         let surf = parse_str("def f(x: f32) -> f32 = x").expect("Surf parses");
-        let deep = desugar_program(&surf);
+        let deep = desugar_program(&surf).expect("Surf fixture must desugar");
 
         let rendered =
             try_decompile_program_with_context(&deep, &DecompileOptions::verbose(), None)
@@ -131,13 +131,13 @@ mod tests {
 
     #[test]
     fn malformed_deep_is_an_error_at_fallible_boundaries() {
-        use chelis_deep::ast::{Atom, MetaMap, UnknownFormData};
+        use chelis_deep::ast::{Atom, Metadata, UnknownFormData};
         use chelis_deep::{Expr, Span};
 
         let span = Span::new(0, 0);
         let deep = vec![Expr::UnknownForm(Box::new(UnknownFormData {
             head: "future-form".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: vec![Expr::Atom(Atom::Name("value".to_string()), span)],
             span,
         }))];
@@ -216,16 +216,18 @@ mod tests {
         for malformed in [
             "(lit {type: (t-prim {} f32)} 7)",
             "(lit {type: (t-prim {} f32), literal_source: integer} 7.0)",
-            "(lit {type: (t-prim {} int32), literal_source: integer} 7)",
+            "(lit {type: (t-prim {} i32), literal_source: integer} 7)",
             "(lit {type: (t-prim {} f32), literal_source: float} 7)",
             "(lit {type: (t-prim {} f32), literal_source: integer, \
              literal_source: integer} 7)",
         ] {
-            let deep = chelis_deep::parser::parse_str(malformed).expect("Deep fixture parses");
-            assert!(
-                try_decompile_program(&deep).is_err(),
-                "malformed literal provenance resugared cleanly: {malformed}"
-            );
+            match chelis_deep::parser::parse_str(malformed) {
+                Ok(deep) => assert!(
+                    try_decompile_program(&deep).is_err(),
+                    "malformed literal provenance resugared cleanly: {malformed}"
+                ),
+                Err(error) => assert!(error.to_string().contains("literal_source")),
+            }
         }
     }
 }

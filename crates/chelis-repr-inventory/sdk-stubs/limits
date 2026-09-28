@@ -1,0 +1,9 @@
+#ifndef CHELIS_STUB_LIMITS
+#define CHELIS_STUB_LIMITS
+namespace std {
+template<class T> class numeric_limits {
+public:
+    static constexpr T max() noexcept { return T(); }
+};
+}
+#endif

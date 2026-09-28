@@ -11,14 +11,14 @@ use chelis_deep::validate::find_raw_vocabulary_tag;
 
 fn desugared(source: &str) -> Vec<chelis_deep::Expr> {
     let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
-    chelis_surf::desugar::desugar_program(&decls)
+    chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar")
 }
 
 #[test]
 fn desugared_trees_carry_no_raw_vocabulary_tag_strings() {
     let source = "module M.Main\n\
-        sig f : tensor[n, f32] -> tensor[n, f32] ! { Random }\n\
-        def f(x: tensor[n, f32]) -> tensor[n, f32] = with seed(42i64) { relu(x) }\n\
+        sig f[n] : tensor[n, f32] -> tensor[n, f32] ! { Resource(\"gpu:0\") }\n\
+        def f(x: tensor[n, f32]) -> tensor[n, f32] = with device(\"gpu:0\") { relu(x) }\n\
         def g(c: bool, x: f32) -> f32 = if c then x else neg(x)\n\
         def h(t: (f32, f32)) -> f32 = t.0\n\
         out = print(g(true, 1.5))\n";

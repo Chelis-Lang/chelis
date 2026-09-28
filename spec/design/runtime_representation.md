@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
-authoritative oracle; Phases 1-5 remain planned. Tracking issue: [#893]. Code
-evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** ACTIVE. Phases 0 and 1 are implemented and enforced by the Phase 1
+composite oracle; Phases 2-5 remain planned. Tracking issue: [#893]. Acceptance
+evidence is commit-bound by the oracle's execution receipts.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], [05-OP-33],
@@ -14,6 +14,14 @@ lane element type can be stated independently, so an unchecked cast or stale
 mirror can make one buffer mean two incompatible things. The end state makes an
 in-repository mismatch unavailable through ordinary APIs and makes a malformed
 foreign carrier fail before data access.
+
+The Phase 1 composite runs in the dedicated
+`runtime-representation-phase0-oracle` job in `heavy-e2e.yml`, daily at 03:17
+UTC and on manual dispatch, with a 145-minute timeout: the 120-minute oracle
+budget plus 25 minutes for cold environment setup. The stable job identity
+predates Phase 1; its display name and command identify the current inherited
+phase. Ordinary PR and main-push CI do not run this full oracle, so a completion
+claim requires a candidate-head dispatch or equivalent clean execution receipt.
 
 ## Summary
 
@@ -29,8 +37,6 @@ Those facts are still optional at their highest-risk consumers:
   can bypass;
 - equal-width representations remain interchangeable to a cast even though
   [04-NUM-8] says their bits have different meanings;
-- `DimExpr::normalized_key` uses saturating products, so two unequal symbolic
-  capacities can compare equal before allocation;
 - Python and the HIP support header independently mirror a fixed-rank,
   int32-sized device tensor whose element pointer is `float *`; and
 - backend element spellings and stores are text selected at call sites, so a
@@ -71,8 +77,9 @@ The class has already survived local repairs:
 3. [#1360] made HIP allocation and element spelling agree for Bool8 and made the
    unsupported kernels fail loudly. The required Bool8 operation family remains
    [#1364]; a width assertion alone cannot prove a kernel writes canonical 0/1.
-4. Host runtime allocation now uses checked metadata, while compiler capacity
-   equivalence still saturates before the runtime sees a value ([#888]).
+4. Host runtime allocation gained checked metadata while compiler capacity
+   equivalence still saturated before the runtime saw a value ([#888]); the
+   exact capacity authority and legacy retirement below remove that path.
 5. `Repr` derives byte width but not [04-NUM-8]'s arithmetic representation
    ([#899]). The missing fact is restated or inferred wherever a lane needs it.
 
@@ -220,10 +227,11 @@ The inventory gains `ArithmeticRepr` variant enumeration. Its six exact
 registered variants and `DTypeContract::byte_width` in the vocabulary owner
 are final forms, justified by this executed contract suite; another variant,
 path, or width-helper owner is not. Existing foundation rows remain unchanged,
-and no new transition debt is authorized. The Phase 0 coverage manifest binds
-these final forms and runs the contract suite; its freeze digest changes for
-that reviewed acceptance addition, not to bless a new debt row. The broader
-Phase 1 command remains unimplemented until its other deliverables are green.
+and no new transition debt is authorized. The code-derived Phase 0 coverage
+manifest names these final forms and the contract suite. The runner verifies
+that manifest against the configuration it executes; this acceptance addition
+does not move the foundation digest. The Phase 1 composite below includes this
+vocabulary contract.
 
 ### C1 runtime element delivery boundary
 
@@ -365,22 +373,81 @@ an exact key rule or return `NotProvenEqual`; it may not add a lossy fallback.
 Memory planners may reuse storage only when both the exact capacity key and the
 exact `Repr` agree. A failure to prove equality loses reuse, never correctness.
 
+#### Legacy capacity authority retirement (#888)
+
+The closeout removes `DimExprKey`, `DimExpr::normalized_key`, and their rational
+normalizer; there is no compatibility alias. The only remaining production
+caller was `specialize::dims_equivalent`, which compared single `DimInfo`
+atoms. It compares resolved literal values or unresolved symbol spellings
+directly through `DimExpr::from`, preserving that local axis-pattern decision.
+It neither proves storage capacity nor manufactures a scoped source identity.
+
+`DimExpr` remains the renderable/evaluable extent carrier. Its finite
+`evaluate` and `as_concrete` projections use checked multiplication, returning
+their existing error and `None` channels on overflow. Exact mathematical
+identity remains exclusively `CapacityKey::prove_equal`.
+
+The old rational-equivalence corpus migrates to the private exact-key tests:
+product-only equivalences remain positive; symbolic cancellation, quotient
+reassociation, and zero/partial-domain erasure become negative controls.
+The original large-product key witness is retained in
+`capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision`;
+the C/HIP `issue_888_capacity_collision` suites continue to prove placement.
+This closeout does not complete Phase 1: #889's mandatory checked runtime
+metadata and the composite Phase 1 oracle still have to land.
+
+The code-derived Phase 0 coverage manifest names the inverted shared-plan
+witness, executes finite-projection overflow controls in release, and adds a
+mutation restoring `DimExpr::normalized_key`. That restored owner must be
+rejected as unclassified even though it existed in the immutable foundation.
+Paired compile-fail/compiling API probes independently prevent the retired key
+and method from returning. The foundation identities remain byte-identical;
+only deleted active debt is removed and current samples are refreshed.
+
 ### C2.2 Runtime metadata types
 
-All host and device allocation/view paths consume privately constructed values:
+`chelis-abi` is the shared owner of checked descriptor metadata. The runtime's
+existing descriptor/count/byte/stride validation moves into that owner; it is
+not copied into a second implementation. Runtime and binding consumers use the
+same checked types. All host and device allocation/view paths consume values
+whose fields are private to this owner and whose public constructors validate:
 
 ```rust
-pub struct ShapeMetadata { /* rank, extents, strides, count */ }
+struct CheckedDomain { /* rank, extents, dtype, count, logical bytes */ }
+pub struct ShapeMetadata { /* one domain, canonical strides */ }
+pub struct StridedMetadata { /* one domain, supplied strides, reachable span */ }
 pub struct ElementCount(i64);
 pub struct ByteCount(i64);
 pub struct AllocationBytes(usize);
 ```
 
-`ShapeMetadata` checks rank/domain agreement, non-negative extents, and checked
-product. Owned contiguous allocation derives checked row-major strides; a view
-retains supplied strides only after proving its reachable maximum byte offset is
-within `byte_capacity`. Rank zero has one element. Any zero extent has zero
-elements. `ByteCount` is checked multiplication of an `ElementCount` and a
+The crate depends only on the standard library and `chelis-vocab`. Metadata
+construction may own shape and stride vectors, but it never owns or allocates
+tensor storage, frees tensor bytes, or performs arithmetic on tensor payloads.
+Runtime-specific execution and iteration consumers may remain in the runtime;
+they consume the shared checked authority instead of deriving another product,
+byte count, stride, or descriptor validity decision. Python does not link the C
+runtime merely to obtain this validation.
+
+One private `CheckedDomain` constructor checks rank/domain agreement,
+non-negative extents, dtype, element product and logical bytes. Existing
+`ShapeMetadata` owns one such domain and derives canonical row-major strides;
+its contiguous runtime indexing and iteration contracts remain unchanged.
+`StridedMetadata` owns one domain, immutable supplied strides and a checked
+reachable span. It does not contain or reconstruct a second `ShapeMetadata`.
+Both layouts reuse `ElementCount` and `ByteCount`; no consumer duplicates their
+product or representation-width validation.
+
+The zero-offset device view API admits nonnegative int64 strides, including
+broadcast stride zero. Negative strides need an explicit base/offset and minimum
+bound model and are rejected by this API; this is not a language restriction.
+All supplied domains are checked before an empty shortcut. Any zero extent has
+zero reachable bytes without computing unused canonical suffix products; rank
+zero has exactly one element. A nonempty view checks the largest reachable
+element offset, its representation bytes and target projection against the
+storage owner's actual byte capacity. Logical count/bytes remain distinct from
+reachable span, so a broadcast view need not own logical-count-many elements.
+`ByteCount` is checked multiplication of an `ElementCount` and a
 `Repr` width. `AllocationBytes` is a checked target-sized projection performed
 only at allocation/copy submission.
 
@@ -394,31 +461,559 @@ Failures occur before allocation or access and retain the owning operation's
 typed `Domain`/`Overflow` behavior. Release and debug builds execute the same
 checked path.
 
+#### Host checked-metadata delivery (#889)
+
+The host slice moves the private metadata authority into `chelis-runtime`'s
+`metadata` module. The opaque tensor stores one `ShapeMetadata` rather than
+independently assignable shape, strides, count, rank, and dtype. Metadata is
+immutable after checked construction; repurpose replaces it atomically after
+the existing uniqueness, provenance, and exact-storage-capacity checks.
+Storage capacity is a validated `ByteCount`. This is metadata privacy, not the
+later descriptor/element-pointer ownership seal.
+
+That module is the source of the Phase 2 extraction into `chelis-abi`, not a
+permanent second owner. The extraction preserves the checked types' behavior
+and error classes. It does not flatten the host tensor's owner graph or change
+its public C ABI.
+
+`ElementCount` owns zero-aware extent products. `ShapeMetadata` additionally
+derives every canonical suffix stride using checked arithmetic: an empty
+`[MAX, MAX, 0]` is valid, while `[0, MAX, MAX]` still has an unrepresentable
+stride. No operation derives its own product from raw tensor extents. Indexed
+movement uses checked metadata indexing and byte-range projection; axis loops
+receive checked decomposition from metadata. Empty operations return before
+requesting irrelevant nonempty iteration spaces. `IterationSpace` owns contraction
+loop extents without inventing storage strides for a domain that has no tensor.
+Scratch entry counts use the same checked count/byte/target projection, but their
+width is the physical Rust entry layout (which may include an accumulator or
+index), not a second interpretation of a Chelis stored representation.
+
+Public host views remain contiguous under [05-OP-31]. This slice introduces no
+new strided-view ABI or device descriptor. Entry borrows validate the declared
+capacity against the checked contiguous range; the physical foreign allocation
+and lifetime remain caller obligations. Allocation and byte-copy submission
+receive `AllocationBytes`, never recompute count times width. Public count and
+shape observation project the validated int64 values without re-evaluation.
+
+Padding preserves its int64 width until checked shape construction, and uses
+metadata-derived offsets. Nested tensor ingress and padding write scalar bits
+through a tensor-and-index boundary that checks representation and byte range,
+not a raw data pointer plus an independently calculated offset.
+
+The host slice's acceptance surface runs `checked_metadata`,
+`checked_metadata_padding`, `metadata_compile`, and the existing
+`exact_tagged_c_abi`, `op33_empty_tensor_axis_decomposition`, and
+`op33_tensor_validation` integration suites in both debug and release, together
+with the dtype-domain matrix, int64 carrier, repurpose, and write-guard controls.
+The int64 carrier's existing greater-than-8-GiB allocation test remains an
+explicitly ignored manual gate owned by #1112; it is not an executed receipt.
+The final Phase 1 command still additionally
+requires generated-C adoption and execution-receipt/mutation integration;
+host-only green does not close #889 or #893.
+
+This delivery extends the code-derived Phase 0 configuration with the private
+`metadata.rs` source and the exact width owners `ElementCount::bytes` (the
+closed representation width) and `ElementCount::scratch_len` (physical scratch
+layout).
+Neither admits another owner, pointer cast, or dtype authority. Both feed checked
+byte construction and allocation projection. Optimized executable mutations must
+reject weakened extent, count, byte, stride, target, capacity, and scratch checks;
+paired compiling/noncompiling callers prove the private construction boundary and
+the field-exposure mutation proves that boundary's test sensitivity. An added
+unregistered width owner in this same module must fail the structural inventory.
+The 358 immutable foundation rows remain byte-identical. Two retired raw-index
+helper rows leave the active debt (345 to 343); no new foundation debt is added.
+The host contract suites run in both profiles through the existing Phase 0
+command and hosted job. Their addition is supporting evidence for this host
+slice, not the final Phase 1 completion oracle.
+
+#### Generated C snapshot and reshape delivery (#889)
+
+Generated DAG snapshots consume `chelis_tensor_stride` and
+`chelis_tensor_byte_count`, projections of the host's private checked metadata.
+The byte count describes the logical copy range, not spare storage capacity.
+The host stride adapter delegates to the same observation. Neither emitter
+reconstructs those values from raw shape and dtype observations.
+
+DAG reshape calls `chelis_tensor_check_reshape` before destination allocation or
+repurpose, transporting the same target shape as that submission through exact
+tagged int64 rank and extent scalars, like the existing repurpose boundary.
+Host reshape delegates
+to `chelis_tensor_reshape`, whose runtime owner validates a flat exact int64 list,
+constructs checked target metadata, checks equal counts, and copies through
+`AllocationBytes` into an independent result. Empty copies submit no null-pointer
+memory operation. All four declarations have exact [05-OP-33] registrations.
+This is a separable adoption of existing checked metadata; it creates no new
+descriptor or Python interface.
+
+The slice's acceptance surface combines `checked_c_metadata` in debug and release,
+optimized generated host/DAG reshape execution with undefined-behavior
+sanitization, and bounded emitter delegation controls. Positive cases include all
+nine representations, exact stored bits, scalar and zero-extent shapes, int64
+metadata above int32, and metadata observation during a write guard. Negative
+cases cover malformed carriers, invalid axes, unequal counts, overflow of count,
+stride or byte size, and data access during a write guard. A mutation that restores
+raw snapshot arithmetic must fail the bounded delegation control. The
+code-derived Phase 0 manifest includes these supporting tests and mutation; its
+358-row immutable foundation inventory is unchanged. The two retired emitter
+spelling owners leave active debt (343 to 341).
+
+#### Generated C shared indexing delivery (#889)
+
+The shared elementwise cohort saves runtime-checked scalar/identity projections
+before allocating or repurposing output storage. `ShapeMetadata` validates a
+tensor-domain projection; `IterationSpace` validates an unmaterialized domain
+without imposing storage bytes or suffix strides. [05-OP-33] owns the two C
+signatures and their exact tagged-int64 boundary. No Python interface changes.
+
+The bounded DAG cohort is `emit_binary`, `emit_floor_div`,
+`emit_floor_div_reduced_f`, `emit_binary_reduced_f`, `emit_binary_func`,
+`emit_cmplt`, `emit_unary`, `emit_integer_abs`, `emit_recip`, `emit_unary_func`,
+`emit_unary_reduced_f`, `emit_recip_reduced_f`, `emit_binary_func_reduced_f`,
+`emit_extrema_adjoint`, `emit_unary_func_reduced_f`, `emit_fused_elem`,
+`emit_realize`, and `emit_cast`. The host cohort is checked cast plus the four
+binary/unary operator/function dispatch arms. Their loops use the checked output
+count and `i * step`; direct-index fast paths additionally require identity
+projections or at most one output element. Cast failure selection retains the
+smallest failing domain index and applies the saved projection when reclassifying
+that input. The host's two coordinate helpers are deleted; its BLAS stride
+observer and the public raw movement/reduction helpers remain.
+
+The supporting acceptance surface is the existing Phase 0 command, extended with
+the runtime `checked_c_indexing` suite in debug and release, the backend's exact
+18+5 cohort control, optimized generated-C sanitizer execution, and the existing
+dtype, cast, and storage-reuse suites. Runtime mutations execute removed shape
+checking and incorrect scalar/identity steps against real owner tests. Emitter
+controls reject restored raw indexing, late validation, unchecked loop bounds,
+and scalar admission to fast paths. The registered `checked_reshape.ch` example
+also exercises ordinary elementwise composition and a checked cast.
+
+This is one shippable slice because the new index projections and their emitter
+consumers establish one shared iteration contract. The code-derived Phase 0
+manifest names these commands and controls; its 358 immutable foundation rows
+remain unchanged. Fifteen retired load/store-template owners leave active debt
+(341 to 326); reduced-float and other surviving obligations keep their rows.
+The Phase 1 composite below includes this supporting execution surface.
+
+The two new emitter projection helpers are exact final metadata owners in the
+inventory, alongside the existing checked runtime owners. Their int64 declarations
+are projections of the registered [05-OP-33] operations. The executable recorder
+compiles those production methods and rejects restored raw calculations, constant
+steps, and weakened identity conditions. This final classification is limited to
+these two methods and `backend-element-spelling`; another numeric or width owner
+still fails the inventory. It adds no foundation or active debt.
+
+#### Generated C permutation and expansion delivery (#889)
+
+The DAG `emit_permute` and `emit_expand` paths validate the exact target metadata
+and movement relationship before their existing storage-plan allocation or
+repurpose. The runtime requires a complete normalized axis bijection for
+permutation, and a unit replacement axis or one inserted axis for expansion;
+every unchanged axis must agree, including on empty tensors. Existing extent
+claim guards and source selection retain their runtime-extents authority.
+
+Their loops transport coordinates as canonical int64 `chelis_scalar` values.
+The runtime's private checked metadata owns unraveling and flattening; the C
+consumer only reorders coordinates or supplies the explicit zero coordinate on
+a replaced unit axis. No per-element heap allocation is needed. These are
+metadata-only operations, so generated producer write guards remain live.
+Element payload access and storage ownership keep their existing mechanisms.
+The four exact [05-OP-33] operations and their census registrations ship with
+these two consumers as one checked coordinate-mapping slice.
+
+Supporting Phase 0 acceptance includes `checked_c_movement` runtime contracts in
+debug and release, the two-method emitter adoption control, and generated C
+execution under optimized ASan/UBSan. Positive and negative cases cover all nine
+representations, scalar/empty/dynamic ranks, exact large metadata, permutation
+bijections, expansion axis relationships, canonical scalar coordinates, and
+linear/coordinate range rejection. Executable mutations must detect unchecked
+coordinates and erased target validation. The immutable 358-row foundation is
+preserved; the two retired movement-template rows reduce active debt from 326
+to 324 without adding an owner exception. The Phase 1 composite below includes these supporting controls.
+
+#### Generated C padding, shrinking, and striding (#889)
+
+This slice routes these three DAG emitters through the private checked shape
+owner. Three metadata-only C operations derive and validate the complete target
+shape before exposing its extents; one affine-coordinate operation checks the
+offset/step map through that same owner. Generated C preserves extent-claim order,
+checks the submitted shape against the computed shape before allocation or reuse,
+and uses checked unraveling and affine indices without per-element allocation.
+Payload copying preserves stored bits; padding uses the existing tagged fill.
+Runtime-bound shrinking retains its existing empty-range rejection, shared with
+Eval; this slice does not change that operation-level admission rule. The metadata
+operations and statically empty C paths retain zero-element shapes.
+
+The bounded acceptance surface is `checked_c_affine` in debug and release,
+the backend movement adoption controls, and optimized generated-C sanitizer
+execution. Controls cover all nine dtypes, scalar/empty/high ranks, exact large
+metadata, invalid bounds and target shapes, arithmetic overflow, and erased/late
+validation. The code-derived Phase 0 coverage manifest adds the runtime suite in
+both profiles without moving the foundation digest. The immutable 358-row
+foundation is preserved, and retiring the three raw movement templates reduces
+active debt from 324 to 321. Checked-add/multiply and bounds mutations execute
+against the private metadata owner. No new inventory identity or owner exception
+is admitted. The Phase 1 composite below includes these controls.
+
+The consumer deliveries below feed the Phase 1 execution receipt/mutation oracle.
+Host-only results do not establish device execution or close #893. Generated host/device descriptors and
+validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
+interfaces and owns their exact discovery and authority registrations.
+
+#### Generated C reductions and Count (#889)
+
+Seven reduction emitter paths obtain a checked `ReductionMetadata` plan before
+allocation or repurpose: materialized Sum, Count, Max (including its reduced-float
+arm), Min/Prod, Argmax/Argmin, and fused Sum/Max. The opaque C plan snapshots the
+input domain, selected axes, checked result metadata, and row-major leaf count.
+A fused domain owns no tensor payload or unused storage strides. Empty results
+have no reachable groups; empty selected domains retain their operation's identity.
+Exact result shapes are checked after the existing ordered extent claims and before
+submission. The plan survives input repurpose or release without retaining storage.
+
+Sum and Count allocate tree scratch through checked runtime tensors, at the actual
+accumulator representation. Scratch bytes and target projection are checked before
+result allocation; each worker owns its scratch tensor and write guard. Sum keeps
+#1299's adjacent-pair tree and integer finalization; Count keeps its original
+row-major leaves, checked int64 pairs, and odd tails. Existing dtype rejection,
+non-Sum arithmetic, and vendor-selection obligations remain separately owned.
+Kernel scratch remains outside the shared planner's distinct DAG-slot bound;
+using checked runtime allocation does not make scratch a planned tensor slot.
+
+This is one shippable adoption slice because result validation, loop bounds, source
+indices, and scratch capacity must agree for the same grouping. Its oracle combines
+`checked_c_reduction` and the private `checked_metadata`/`metadata_compile` controls
+in debug and release, generated native and sanitizer executions, existing fused,
+integer-promotion and exact-tree regressions, and `count_bool_axes.ch` parity.
+The code-derived Phase 0 manifest adds these commands and the grouping/index
+bypass mutations. The 358 foundation identities remain unchanged; no new owner
+exception is admitted. The retired Sum raw-index template leaves active debt
+(314 to 313). This supports the reduction slice only: sparse/BLAS/window
+consumers and the complete Phase 1 execution-receipt oracle remain open. It does
+not close #889 or #893.
+
+
+#### Generated C sparse loops (#889)
+
+Gather, ScatterAdd, ScatterReplace, and ScatterElements share a checked
+`SparseMetadata` domain. Hyperplane operations bind the base prefix/suffix to the
+complete index shape; elementwise replacement binds each index coordinate to its
+base axis. The runtime checks exact updates/result shapes and dtype, and projects
+index slots and selected base indices from this domain. Snapshots retain no payload
+and require no per-index allocation. Generated DAG loops and all three host sparse
+summary paths check the target before allocation or reuse. Scatter copies consume
+checked byte counts, and ascending update positions preserve duplicate-write order.
+
+The seven registered C functions and their opaque plan form one adoption slice with
+the sparse consumers: exact shapes, loop domains, and index maps must agree before
+submission. Arithmetic algorithms and existing backend dtype admission are unchanged.
+The bounded oracle combines runtime `checked_c_sparse`, private metadata and
+construction/mutation controls in debug/release, backend `checked_c_sparse`, native
+`checked_c_sparse_` sanitizer tests, host-summary execution/rejection tests, and
+`checked_sparse_axes.ch` evaluator/C parity. Native controls cover all nine stored
+payload representations on Gather/Replace/Elements, duplicate f32 ScatterAdd,
+nontrailing domains, empty results, and invalid indices; the host Add summary is
+executed directly from IR because it is produced by AD rather than a Surf builtin.
+
+The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
+consumer owners reduces active debt from 313 to 300 without a new exception. The
+code-derived coverage manifest adds these executable suites to the Phase 1
+composite below.
+
+
+#### Generated C BLAS submission metadata (#889)
+
+Already selected internal BLAS nodes and host summaries obtain a `MatmulMetadata`
+plan after explicit batch alignment. Its operand/result snapshots own complete
+shapes, batch counts, per-matrix counts, checked matrix indices, and allocation
+bounds. Required declarations and native link flags follow the selected nodes, including
+when no further specialization was requested. Exact result-shape and vendor-dimension checks precede output allocation
+or reuse. Reduced-float conversion scratch uses checked f32 capacities and runtime
+tensor owners/write guards; one batch loop consumes checked source/result indices.
+Empty results make no vendor call, and zero contraction writes dtype-zero output.
+
+The generated translation unit binds its dimension type to the actual sgemm and
+dgemm function prototypes using C11 type assertions. Accelerate's `__LAPACK_int`,
+OpenBLAS's `blasint`, and Netlib's `CBLAS_INT` declarations select a signed 32- or
+64-bit domain; a missing, unsigned, unsupported-width, or inconsistent declaration
+fails compilation. These declarations are compiler-private, so the published
+Chelis ABI stays configuration invariant. Tagged int64 dimensions are checked
+against that domain before casts at the call. Exact per-matrix f32 scratch bytes
+are checked even when source storage uses f16/bf16.
+
+This is metadata adoption, not algorithm selection. [05-OP-30]'s canonical
+contraction rule still prevents shape-only BLAS specialization; production host
+preparation continues clearing those summaries. Direct internal node and summary
+fixtures exercise the submission boundary without re-enabling a vendor shortcut.
+Operand/accumulator/destination dtype choices and conversion arithmetic stay pinned
+by the existing IR. The bounded oracle combines private metadata/projection and
+construction controls, runtime C plan tests in debug/release, generated native
+sanitizer tests, and actual/fake vendor-header width/prototype controls. It does
+not prove vendor arithmetic equivalent for unrestricted inputs or complete Phase 1.
+The 358-entry foundation is unchanged; five retired BLAS consumer identities reduce
+active debt from 300 to 295 without an owner exception. Coverage adds the matrix
+runtime suite in both profiles, delegation bypass controls, and native submission
+and vendor-prototype execution. Production matrix-index and vendor-range mutations
+must fail with overflow checks disabled; virtual f16 operands demonstrate a fitting
+source allocation whose f32 scratch capacity overflows.
+
+
+#### Generated C window geometry (#889)
+
+`WindowMetadata` snapshots complete source/result shapes and positive trailing
+window/stride lists, checks valid-padding extents, and maps a result position and
+row-major leaf to a checked source index. Seven OP33 entry points expose that
+immutable plan without retaining payload or tensor ownership. Shape and dtype
+validation precede generated forward/gradient allocation, including same-capacity
+wrong shapes. Leading empty axes have no reachable index and no unused window
+product. The generated loops carry int64 positions and use no rank-sized coordinate
+arrays or compiler-computed window-volume product. Forward leaves and serial
+cotangent/leaf updates retain their prior order.
+
+The bounded acceptance surface combines `checked_metadata`, `metadata_compile`,
+`checked_c_window`, native `exec_compile::checked_windows_*`, existing window
+emission/numerical tests, and `parity_checked_window_geometry`. Production
+stride/valid-padding mutations must fail with overflow checks disabled; private
+fields reject outside mutation. Runtime tests cover all nine storage dtypes and
+five diagnostic selectors, invalid tags/axes/indices/targets, source write guards,
+release and repurpose. Native f32 fixtures exercise four forward reducers and
+four gradients, both nonempty and leading-empty, plus incorrect result/cotangent
+shapes under optimized ASan/UBSan. The executable example runs Eval/C parity.
+
+This delivery preserves the existing f32/static-window-output admission and the
+existing accumulation/NaN/tie behavior. #1298 owns window arithmetic remediation;
+these geometry tests do not establish its full normative contract. The 358-row
+foundation stays identical, and the removed gradient coordinate template reduces
+active debt from 295 to 294 without adding an owner exception. The Phase 1 composite below includes this geometry surface; Phase 2
+ABI/Python/DLPack work remains separate.
+
+
+#### Generated C JSON ordering scratch (#889)
+
+Canonical JSON object ordering allocates its int64 index scratch through the
+runtime tensor owner, retains one write guard during ordering, and ends/releases
+it after building the ordered list. The ordering algorithm is unchanged. The
+scratch count comes from the validated list length, and allocation checks its
+int64 product, byte count and target capacity before the first scratch access.
+Empty objects allocate a zero-count owner without entering the ordering loops.
+
+The bounded acceptance surface is `checked_c_json_scratch` for delegation and
+cleanup-tail spelling, plus `issue_1314_json_bigint`'s recursive canonical Unicode,
+reordered and empty object case through Eval/C. The `issue_1314_json_bigint_ledger`
+target's `json_scratch_execution_detects_skipped_cleanup` test requires the CLI's
+`ownership-ledger` feature, so the runtime `chelis build` stages records the private
+ownership ledger. The test links that runtime and executes the emitted ordering
+helper with an explicitly released caller. Empty and two-entry objects leave zero
+live owners/bytes. Output-preserving last-iteration return and omitted-owner-release
+mutations must leave live ownership; omitted guard exit must fail with the active
+write-guard error. The source check alone does not prove control-flow cleanup.
+These execution registrations extend the code-derived Phase 0 manifest without
+moving its immutable foundation. The Phase 1 composite below includes this
+ownership contract; Phase 2 remains separate.
+
+#### Generated C literal ingress (#889)
+
+Tensor literals carry finalized tagged scalar images instead of a raw payload
+array and an unchecked byte-count copy. Two exact OP33 entry points validate the
+complete result rank/shape, zero dtype exemplar and element count before storage
+allocation or reuse, then validate every source carrier before the first guarded
+write. The write preserves each declared storage width and its exact bits; it
+neither converts values nor accumulates. Mismatched IR storage/result dtypes are
+rejected during emission. Empty literals submit a null array with exact zero count.
+
+The C dimension renderer accepts only `DimInfo` leaves; its unused arithmetic
+`DimExpr` renderer is removed, so those callers cannot emit unchecked products or
+divisions through that path.
+
+The bounded execution surface is `checked_c_literal` in debug/release,
+`checked_c_host_metadata` delegation/bypass controls, native
+`exec_compile::checked_literals_*` under optimized ASan/UBSan.
+Literal tests exercise all nine storage representations, rank zero and empty
+domains, exact int64 values above 2^53, floating bit patterns, invalid counts,
+tags/payloads and overflow. A malformed last carrier must trap with canonical
+`const`/int64 identity while every destination element remains unchanged. These
+commands extend the code-derived Phase 0 manifest; removing or reordering
+ingress calls is rejected by the bounded source controls.
+
+The immutable 358-row foundation is unchanged. Removing the literal emitter's raw
+storage/element-spelling templates reduces active debt from 294 to 292 without a
+new identity or owner exception. The Phase 1 composite below includes this
+literal contract; Phase 2 descriptors/bindings remain separate.
+
+#### Immutable movement geometry (#889)
+
+The C permutation, expansion/insertion, padding, shrinking and striding consumers
+snapshot checked input/result metadata into one private movement plan before output
+allocation or reuse. The plan projects each checked row-major index directly;
+rank-sized coordinate arrays and per-element scratch are removed. Its projection
+allocation is checked and cannot grow during construction. Padding iterates the
+source domain and maps into the filled result; the other forms iterate the result
+and map into the source. Empty domains perform no projection or payload access.
+
+The exact eight OP33 APIs bind this metadata contract and preserve every payload
+representation. Closed operation and side enums select the shape policy and
+canonical diagnostic, without carrying numeric data. Plans retain no payload and
+remain valid during source writes and after release/repurpose. The shared IR
+`ExpansionKind` derivation distinguishes rank-preserving expansion from insertion
+on verified static types under spec/10 §3.4; both the C plan selector and local dimension guard use
+that form. No serialized IR or Python binding signature changes.
+
+The bounded acceptance surface combines runtime `checked_c_movement_plans` and
+private `checked_metadata` in debug/release, `metadata_compile`'s field-privacy and
+production step/offset/bijection mutations, the two backend movement source suites,
+`exec_compile::checked_c_movement_*` with optimized ASan/UBSan and exact stored-bit
+maps, `movement_expansion_kind`, the runtime movement CLI suite, and
+`parity_checked_reshape`. The CLI positive/negative pair uses an extent read from a
+locally shortened tensor and checks exact `expand`/`insert` trap identities. Bare
+scalar expansion extents remain outside the admitted CLI surface under #469.
+The code-derived Phase 0 manifest requires these executions; its foundation
+stays fixed, with no new owner exception. The explicit movement receipt
+registrations and their negative controls also enter the Phase 1 composite below.
+Phase 2 descriptors and bindings remain separate. This is one geometry slice because the shared plan, all
+five consumers, semantic authority and executable controls must ship together.
+
+#### Checked C shape observation and allocation (#889)
+
+DAG metadata observation uses the existing checked extent API directly, removing
+per-tensor runtime-rank shape and unused stride arrays from the C stack. Shape
+operations capture their scalar extent before destination submission, so a storage
+transition cannot change the logical metadata being observed. Other extent
+consumers already capture their bounds before allocating or repurposing output.
+The host allocate-like adapter delegates to `chelis_tensor_alloc_like`: checked
+input shape and an explicit zero tagged exemplar determine independently owned,
+zero-filled output at the selected representation. It allocates no C shape scratch.
+No descriptor layout or Python binding changes in this slice.
+
+The bounded oracle includes all 81 input/output dtype pairs at ranks 0, 1, 8 and 9,
+empty shapes with extents above int32, active input guards, released-input
+independence, invalid exemplars and output-byte overflow, in debug and release.
+C execution covers an ordinary shape read and an explicit legal same-capacity
+resubmission fixture; moving the observation after repurpose must fail. The fixture
+does not claim that the current planner reuses a last-use input. Source controls
+reject restored metadata VLAs, raw stride construction and byte multiplication.
+The vmap CLI control preserves the mapped axis shift. Existing cast, movement,
+elementwise and physical-slot lifetime regressions remain required supporting
+coverage. The code-derived Phase 0 manifest adds these named executions and
+negative controls while preserving the immutable foundation and admitting no
+new inventory owner. The Phase 1 composite below includes this shape observation
+contract.
+
 ## C3. One generated host/device descriptor schema
 
-A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
-standard library. It owns a declarative field schema and renderers; it does not
-allocate, free, or interpret tensor values. The schema generates:
+A leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
+standard library. It owns C2.2's checked descriptor metadata, a declarative
+field schema, and renderers. It never owns tensor storage, frees tensor bytes,
+or interprets tensor payloads. The schema generates:
 
-1. the Rust raw host descriptor used by the runtime owner module;
-2. the private host descriptor behind [05-OP-44]'s opaque `chelis_tensor`
-   handle and [05-OP-31]'s exact read/write view layouts;
-3. a Rust raw device descriptor used by Python's private device-entry module;
+1. [05-OP-31]'s exact Rust and C read/write view layouts;
+2. a Rust raw device descriptor used by Python's private device-entry module;
    and
-4. the corresponding internal C/HIP device declaration.
+3. the corresponding internal C/HIP device declaration.
 
-The host and device descriptors share these schema field classes: opaque data
-pointer, dynamic shape/stride pointers, `int64` element count and byte capacity,
-`int32` rank, exact dtype tag, ownership, and reserved bytes. Device ownership
-and address-space behavior remain distinct, so the two descriptors may be
-different named types; their numeric metadata cannot diverge.
+The host tensor retains its private `HeapHeader`, `TensorStorage`, one
+`ShapeMetadata`, access state, and embedded write-guard composition. There is
+no generated flat host record containing independently writable copies of its
+rank, shape, strides, count, or capacity. The opaque [05-OP-44] handle exposes
+no layout, so a C mirror of this private owner graph is neither needed nor
+permitted. Public read/write views are validated projections with the exact
+layout and lifetime from [05-OP-31], not another metadata authority.
+
+Host metadata and the raw device descriptor use the same checked field
+domains: opaque data pointer, dynamic shape/stride pointers, `int64` element
+count and byte capacity, `int32` rank, exact dtype tag, ownership, and reserved
+bytes. A raw device packet is a projection of validated metadata with a live
+owner; it cannot create checked authority. Device ownership and address-space
+behavior remain distinct from the host owner graph. Sharing field domains
+does not require identical internal objects.
 
 The schema macro/renderers expand inside each owning private module. Generated
-Rust fields are private to that module; ordinary consumers receive opaque
-handles or typed views. The checked-in C fragments are generated artifacts with
-byte-for-byte freshness tests. Every published header remains reachable from
-`chelis_runtime.h`; the public-header census sees the same canonical declarations
-in every preprocessing context.
+raw device descriptor fields and checked metadata/storage-owner fields are
+private to their owning modules; ordinary consumers receive opaque handles or
+typed views. The exact public OP31 read/write transport views retain their
+existing public Rust fields; a view is not a validated owner and cannot mint
+descriptor authority. The checked-in C fragments are generated artifacts with
+byte-for-byte freshness tests. Every published host runtime header remains
+reachable from `chelis_runtime.h`. The HIP support root is staged as a complete
+published closure and preprocessed only under the committed Phase-0 SDK stubs.
+Its recursively discovered source-header set selects attributed files before
+row extraction, so nested reached support declarations cannot be removed by a
+basename filter and SDK declarations remain non-published inputs.
+The recursively discovered published Metal header set currently has no
+attributable ABI row and is guarded by an explicit enrollment tripwire instead
+of a vacuous census lane. That tripwire uses the shared C-family lexer, so braces
+inside comments, strings, characters, and raw literals cannot swallow a later
+public declaration. The public-header census sees the same canonical declarations
+in every declared preprocessing context.
+
+`cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
+fragments; without `--write` it checks freshness. The host-view fragment lives
+under `crates/chelis-abi/generated/` and is embedded into the marked generated
+region of `chelis_runtime.h`, so existing standalone header staging stays valid.
+The private device declaration is generated beside the HIP support header.
+Neither artifact may contain a second handwritten field list.
+
+The HIP support root requires the official `hipblas/hipblas.h` from the same
+supported SDK as the linked hipBLAS library. It does not redeclare SDK types or
+functions when that header is missing. Generated helpers use that SDK's actual
+API: a library symbol's spelling does not establish its argument types. The
+header census preprocesses the complete support root with clang on the fixed
+`x86_64-unknown-linux-gnu` target, `-ffreestanding -nostdlibinc`, and the
+committed Phase-0 SDK stubs. Every linemarker path is canonicalized and must
+remain inside the staged published closure, a declared stub root, or clang's
+resource headers. Hardware acceptance separately records the installed header,
+library, and executed numeric behavior. The environment contract and its
+outstanding evidence live in `docs/local_hip_environment.md`.
+
+The opaque [05-OP-33] `chelis_metadata_plan` C adapter owns a closed contiguous
+or strided metadata variant from `chelis-abi`. Tagged rank/extent/stride and
+exemplar inputs follow the existing shape-reduction-plan ingress convention.
+Its immutable projections supply the generated device packet; packet helpers
+never compute a second product or repair strides after construction. The device
+owner retains the plan and proves the supplied allocation capacity. Its caller
+retains the library until that library's finalizer has released the metadata and
+owned device storage.
+The metadata plan allocates no tensor payload and cannot prove a foreign
+allocation's physical bounds merely from its declared capacity.
+
+The device owner is defined only in the separately compiled
+`crates/chelis-backend-hip/runtime/chelis_device_owner.cpp`; the published
+`chelis_device_owner.h` declares its opaque handle and [05-OP-33]'s eight exact
+operations. The support root includes that header and the generated packet
+fragment. No implementation source is included into a published header, and the
+header census receives no C++ privacy exemption. The opaque handle directly
+owns its plan and contains the packet it observes; a packet pointer is never
+cast back to an owner. Python retains the loaded library through owner release. The private owner also
+records actual HIP device identity; its exact observation is the ninth device
+operation. Nonempty pointer attributes and current context must agree, and the
+finalizer selects/restores the owner device. Python never assigns output device
+identity from input zero. Explicit completion of device copies protects source
+owners and host guards even when an SDK transfer can complete asynchronously.
+
+Storage-slot lifetime remains the proof for temporary views: each view owns its
+metadata while borrowing an input or slot retained until its last use. Cleanup
+releases views before slots. Every escaping output calls the independent clone
+operation, which creates a contiguous plan and materializes logical order before
+any source release. This design adds no shared-storage refcount. The checked
+`byte_offset` projection keeps coordinate/stride/width arithmetic in the shared
+metadata authority; companion copying derives a nonempty element width from
+checked logical bytes/count and never introduces a dtype-width table. Empty
+transfers do not divide by count or access data.
+
+Both HIP artifact paths stage `chelis_device_owner.cpp`, its public header and
+the generated descriptor alongside existing runtime headers. The companion is a
+separate compiler input, linked with the same artifact's metadata-plan runtime
+archive. Python's all-C/C++ artifact build includes it exactly once. CLI builds,
+test staging, installed packages, source closure, runtime representation inventory
+and compiler input/cache identity include its bytes and generated dependencies.
+Missing companion/header/runtime symbols are prerequisite failures. ABI2 admission
+rejects ABI1 before these files or a library are consumed; DLPack and unrelated
+wire/cache versions keep their own format contracts. Tests separately exercise
+CPU SDK-fixture copy/lifetime behavior, whole-root HIP and Metal header discovery,
+actual materialization/compile/link, and the unresolved real HIP hardware gate.
+Metal retains its host tensor ABI and private Objective-C buffer ownership rather
+than adopting a ROCm pointer packet. Its support root and complete local include
+closure remain mandatory census inputs, with the generated OP31 host views
+coming from the same runtime header and authority as HIP host transfers.
 
 Python deletes `CHELIS_MAX_DIM`, `[i32; 8]`, int32 `size`/`storage_size`, and
 `*mut f32` from its device carrier. The HIP support header deletes its matching
@@ -426,9 +1021,117 @@ fixed arrays, `int` products, scalar special case that rewrites zero count to
 one, and `float *` view parameter. Rank, shape, count, and capacity cross both
 boundaries at the numbered-spec domains.
 
-This consolidation creates no new public numeric channel. If implementation
-requires a new public callable or field, that is a scope change: author its
-[05-OP-N] rule and capacity registration before modifying this plan.
+The public metadata-callable additions are exactly the eleven
+`chelis_metadata_plan` identities in [05-OP-33]'s normative registry. Their
+executable capacity registrations and positive/negative controls are required
+in the same cutover; neither the generated packet nor this plan grants numeric
+authority. Any further public callable or field requires its owning [05-OP-N]
+rule and exact registration before implementation.
+
+This delivery extends the code-derived Phase 0 source universe without changing
+its immutable 358-row foundation. The universe grows from 74 to 80 files: the
+generated device packet, opaque owner header and C++ companion, Python DLPack
+and native owner modules, and the standalone generated host-view header. The
+C/C++ scanner uses one fixed C++17 lane with the committed HIP/hipBLAS and
+standard-library fixtures; adding a `.cpp` under a backend runtime root is
+covered by the existing unregistered-source mutation.
+
+Exactly 35 new scanner rows are final forms rather than transition debt: the 13
+field/carrier observations of the generated packet, nine private opaque-owner
+operations, four immutable metadata-plan shape/stride projections, six validated
+Python ingress/owner observations, and three HIP emitter projections that consume
+the closed dtype contract. The freeze names every path, kind, and owner; a rename,
+new owner, or additional row remains unclassified. A typed cast of an existing
+descriptor `data` access keeps that access's frozen identity and records the cast
+in its sample instead of manufacturing a second debt class. Forty-six retired
+fixed-rank, narrow, handwritten descriptor and raw-owner identities are deleted
+from the active ledger, leaving 244 active Phase 3/4 rows. Generated-layout
+freshness, metadata/device execution, binding execution, and the backend-header
+capacity census are the executable authority for these final forms.
+
+Typed comparison, bool-only logical operations, and stored-bit `where` add six
+closed backend scanner owners as final typed-lane forms rather than transition
+debt: the element-spelling owners
+`CEmitter::{emit_compare,emit_logical,emit_where}`,
+the `emit_where` load/store template, `HipEmitter::comparison_c_type`,
+and `REDUCED_FLOAT_COMPARISON_HELPERS`. Comparison element spelling and reduced
+float decoding are governed by [05-OP-36], bool-only logical spelling by
+[05-OP-26..28], and stored-bit selection by [05-OP-33]. No owner accepts a bare
+runtime dtype id or creates a public numeric carrier. The Phase 0 manifest binds
+these exact owner identities to the IR semantic/AD suite, compiled C all-dtype
+execution, HIP structural admission, and the ignored real-HIP exact-bit matrix.
+A renamed or additional owner remains unclassified until it independently
+supplies the same final-form authority and execution contract.
+
+The #1281 exact C reduction cutover adds two more closed
+`backend-element-spelling` owners as final forms:
+`CEmitter::emit_mean_nonempty_guard` and
+`CEmitter::emit_reduce_extreme`. The former observes the lowered divisor in
+its declared storage/arithmetic width and enforces [05-OP-11]'s runtime-empty
+Domain trap before division. The latter implements [05-OP-12..13] selection at
+the declared arithmetic width while copying the selected source storage bits,
+including first-NaN and equal-value behavior. Neither owner accepts a raw dtype
+identifier or creates a public numeric carrier. The Phase 0 manifest binds both
+exact identities to the complete compiled-C
+`issue_1281_exact_reductions` suite; Phase 1 freezes that suite's current ten
+test identities, including every admitted storage width and runtime-empty
+negative controls. Renaming or splitting either owner requires a new
+final-authority classification and execution contract rather than transition
+debt.
+
+Integer-weight gradients register four exact `backend-element-spelling`
+final forms: `integer_float::integer_to_float_bits`, HIP
+`cast_integer_to_float`, and Metal `Emitter::{emit_integer_float_cast,emit_expand}`.
+The shared helper constructs target IEEE bits by rounding once in integer space
+under [04-NUM-14]; the device cast owners select exact signed source storage and
+target width from `Prim`. No float intermediary or raw dtype identifier carries
+the operand. Expand checks axis insertion and copies
+stored elements of the unchanged declared dtype under [05-OP-49]. The Phase 0
+manifest binds these identities to the shared generator's native C/UBSan
+exact-bit and invalid-target tests, and HIP/Metal integer-Abs lowering and
+rejection controls. Its manual Metal `integer_abs_guard` command executes exact
+casts, Grad, expansion, empty shapes, and nonempty/MIN trap twins; the registered
+HIP `integer_abs` device command remains a hardware gate, distinct from executed
+CPU kernel shims. Constant-fill load/store retirement follows `ScalarValue` /
+`ElementRef` dispatch; binary/reduction launch-template retirements follow the
+shared buffer-binding emitter, which transports opaque buffers rather than
+reading tensor elements. These registrations and shrink-only retirements do not
+change the frozen foundation or mutation contract.
+
+`NUMERIC_DEVICE_HELPERS` is a separate numeric final-form owner for the
+`uniform_like` sampler governed by [05-OP-8]. Splitting it from the common HIP
+device helpers does not transfer it into the typed-nonnumeric cohort. Its exact
+affine and per-dtype rounding remain bound to the existing ignored real-HIP
+`gpu_correctness` execution lane.
+
+`HostEmitter::assign_uniform_like` joins that cohort with two rows, a
+`backend-element-spelling` and a `load-store-template`, under the same
+[05-OP-8] authority (chelis#2120). It is the C host lane's draw, reached when a
+`uniform_like` template is not constant-foldable and the binding therefore does
+not route to the tensor-DAG lane. Its execution contract is a different lane
+from the device sampler's: the compiled-C parity tests in
+`crates/chelis-cli/tests/issue_2120_uniform_like_runtime_template.rs`, which
+build, link, and run each program and compare it against `chelis eval` on f32
+bits. Those tests cover every active float dtype, because [05-OP-8] admits all
+four and a runtime-derived template is precisely the shape the DAG lane does
+not serve. The two rows are the seams the Phase 0 scanner observes in that
+owner; neither is gratuitous, and dropping either reproduces an unclassified
+inventory hit.
+
+HIP exact direct arithmetic adds four closed typed-lane final forms:
+`binary_elementwise_typed` and `fused_reduced_step_lines` each supply one
+`backend-element-spelling`, while `binary_extrema_reduced` and
+`extrema_adjoint_reduced` each supply one `load-store-template`. They are
+governed by the direct `sub` and extrema atoms and preserve the tagged lane
+contract: f32/f64 arithmetic NaNs finalize to their canonical positive quiet
+NaNs, f16/bf16 arithmetic finalizes once at stored width, extrema compare
+decoded values but copy selected storage bits, and extrema adjoints route the
+complete stored cotangent or exact positive zero. The Phase 0 and frozen Phase
+1 manifests bind these exact owners to the five named `codegen_structure`
+direct-arithmetic controls and the registered ignored real-HIP
+direct-arithmetic command.
+Another owner, spelling, or template remains unclassified; Metal remains the
+separate chelis#2338 capability gap rather than inheriting these HIP forms.
 
 ## C4. Validated typed tensor access
 
@@ -501,6 +1204,24 @@ Python host and DLPack paths use a private validated wrapper. DLPack export may
 release an opaque pointer only together with the exact dtype, shape, stride,
 byte offset, device, and deleter metadata derived from that wrapper.
 
+The native entry's private `CompiledInputs` retains the admitted lane and an
+immutable `Arc<ShapeBindings>`; `execute_checked` carries that same owner into
+`RawOutputs` alongside all output owners and retained Python inputs. Only
+`ShapeBindings::admit` constructs its private name-to-int64 map from explicit
+manifest literals and already checked input metadata. Spec/11 §1.2 and spec/04
+§4.1 govern the equalities: wildcard `*` axes never enter the map. Output
+adoption checks the actual descriptor against those bindings before constructing
+`ValidatedTensor`. No name parser, symbolic-expression evaluator, or guessed
+bijection against the code generator's interface-witness list participates.
+
+The private device handle retains its artifact `Library` through the exact
+opaque-owner finalizer. Input admission proves pointer offset and remaining
+capacity against retained framework storage before importing its checked raw
+packet. Each output's device comes from its own opaque owner and agrees with
+the actual HIP current device. DLPack's validated synchronization request uses
+the retained library's successful device barrier before capsule construction;
+the protocol's explicit no-synchronization request remains distinct.
+
 Delivery is split without weakening this contract. Phase 2 owns the
 Python/device/DLPack wrappers because they depend on the generated device
 descriptor. Phase 3 owns the repository runtime and public C entries and
@@ -565,14 +1286,14 @@ source and classifies every hit into one of these final forms:
 - a foreign-boundary validator that yields only branded indexed foreign access
   before the first operation.
 
-Until Phase 5, a hit may instead match one exact Phase-0 transition-debt
-identity with one owning deletion phase. That frozen manifest is generated
-from the reviewed Phase-0 tree, integrity-digested, and shrink-only: the oracle
-may delete rows, but regeneration cannot bless an addition, rename, signature
-change, relocation, or reclassification. Such a change removes the old
-identity and introduces a new unclassified hit, which fails. At Phase 5 the
-debt set must be empty. This is an explicit migration ledger, not an allow-list
-or a final authority class.
+Until Phase 5, a hit may instead match one exact identity in the
+integrity-digested Phase 0 foundation, with one owning deletion phase, and
+remain in the separately generated active-debt list. The foundation is
+append-only while the active list is shrink-only: regeneration preserves
+retired foundation identities, and an addition, rename, signature change,
+relocation, or reclassification changes the foundation digest and requires
+review. At Phase 5 the debt set must be empty. This is an explicit migration
+ledger, not an allow-list or a final authority class.
 
 Anything neither final nor an unchanged frozen debt identity fails. The
 inventory includes descriptor fields, `data` access, pointer casts,
@@ -585,6 +1306,15 @@ catch, so each variant and each binding is its own row.
 A final-form exception may name a private owner function and reason, but a
 stale or unmatched entry fails and an issue citation does not authorize a raw
 path.
+
+The length-aware UTF-8 string boundary is one such exact final form. The C
+backend owner `runtime_string_literal` emits fixed-width byte escapes and an
+explicit byte count, and the public runtime owner `chelis_string_from_utf8`
+accepts that counted `uint8_t` sequence before constructing a validated Chelis
+string. Those bytes are encoded text, not tensor elements or an untyped numeric
+carrier. Only those two scanner identities receive this disposition; adjacent
+string accessors, constructors, and backend emitters remain unclassified unless
+they independently satisfy a final form.
 
 ### The inventory's universe is a file list
 
@@ -651,12 +1381,13 @@ or dtype variant that carries a seam does. That is the granularity Phases 3 and
 4 delete at, since those phases remove declarations and call sites rather than
 individual bytes.
 
-The two backend runtime headers are inventoried here rather than through the
-capacity census. Their device carrier is a bare `float *data` with fixed-rank
-`int` metadata, which [#1288]'s ratchet gives no citation or override path:
-registering them as a census surface today would produce blocking rows that
-only Phase 2's migration onto the tagged carrier can clear. Phase 2 therefore
-owns adding that census leg, and its exit is not complete until it does.
+Phase 0 inventories both backend runtime headers as structural seam sources.
+Phase 2 separately inventories the HIP support root's public ABI after its
+device packet moves onto the tagged carrier. The recursively discovered
+published Metal header set remains in this structural inventory but not in the
+capacity baseline while it exports only `static inline` definitions; its Phase
+2 enrollment tripwire fails on the first attributable public declaration in any
+published `.h`.
 
 The oracle self-validates with temporary mutations that are restored before it
 returns:
@@ -690,22 +1421,36 @@ execution tests prove its sanctioned replacements work.
 
 ## B1. Freeze points
 
-- Phase 0 freezes the derived inventory, mutation set, current accepted/rejected
-  behavior, and the exact issue-to-phase map. Later phases may reduce raw hits
-  but may not add an exception. The digest binds one canonical object holding
-  both the immutable foundation rows and the executable coverage manifest
-  (enumerator, universe, identity rule, command, success condition, and mutation
-  set); the separately stored active-debt list sits outside that digest so it
-  can only shrink. Each mutation binds a stable witness ID, source path, exact
-  implementation digest, expected failure code and reason, and required command,
-  so a witness cannot be weakened while its manifest entry still claims the old
-  semantics.
+- Phase 0 freezes the immutable `foundation_rows`, including each identity's
+  owning deletion phase, and `source_inventory.mutations`. Each frozen mutation
+  row binds its stable witness ID, exact implementation digest, target source
+  path, expected seam kind, required owners, expected failure code and reason,
+  and required command. Later phases may reduce raw
+  hits but may not add an exception or weaken a witness without a reviewed
+  freeze move. The separately stored active-debt list sits outside the digest
+  so it can shrink, while regeneration preserves retired foundation identities
+  and the reviewed mutation rows. An identity in the frozen foundation but
+  absent from the prior active-debt list is retired; regeneration rejects its
+  reappearance rather than silently restoring it. A genuinely new identity
+  outside the prior foundation may still be emitted with a changed digest for
+  review. `coverage_manifest()` remains code-derived configuration rather than
+  a persisted baseline field: beyond the frozen mutation contract, it adds the
+  source universe, release reproducers, hardware probes, counts, and ordinary execution
+  configuration. At runtime the oracle verifies that live probes match the
+  frozen mutation rows, verifies that the richer manifest is the exact
+  projection of the current configuration, and executes every non-hardware
+  mutation and reproducer. Changes only to live-derived reproducers, hardware
+  probes, counts, or ordinary configuration do not move the freeze.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
-  and checked finite-count types. Later phases consume them without parallel
-  tables.
-- Phase 2 freezes the generated host/device schema and public-layout parity.
-  Later field changes amend [05-OP-31] or [05-OP-44] first when public,
-  regenerate every consumer, and move the freeze in one change.
+  checked finite-count types, and a required test-identity floor. Later phases
+  consume the contracts without parallel tables. Tests newly selected by an
+  existing command execute and appear as additions without weakening or moving
+  that floor.
+- Phase 2 freezes the generated host/device schema, public-layout parity, and a
+  required test-identity floor. Later field changes amend [05-OP-31] or
+  [05-OP-44] first when public, regenerate every consumer, and move the
+  architectural freeze in one change. Newly selected tests execute and are
+  reported without requiring a floor amendment.
 - Phase 3 freezes typed runtime ingress and the private data field. Reopening a
   raw accessor is a design change, not a local optimization.
 - Phase 4 freezes the typed lane renderer and all-lanes representation probes.
@@ -713,15 +1458,177 @@ execution tests prove its sanctioned replacements work.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
   child test substitutes for it.
 
-Moving a freeze requires changing this document, the owning numbered spec when
-semantics move, the oracle's integrity digest, and a mutation that would have
-accepted the forbidden behavior.
+Moving an architectural freeze, adding or changing a Phase 0 foundation row or
+frozen mutation row, or removing, renaming, or intentionally replacing a
+required test identity requires changing this document, the owning numbered
+spec when semantics move, and the oracle's integrity digest. A foundation
+change also requires a mutation that would have accepted the forbidden
+behavior. Adding a test already selected by a frozen command does not move the
+required floor.
 
-The chelis#1286 private ownership-IR boundary extends the Phase 0 source
-universe by eight `chelis-ir/src/ownership/` files without adding or
-reclassifying a representation-seam row. That source-list-only freeze move is
-covered by the existing `unregistered-inventory-source` mutation; no numbered
-representation rule changes with it.
+A Phase 0 source-universe, final-form, reproducer, or hardware registration that
+does not add or change a foundation row or frozen mutation row does not move the
+digest and does not require a B1 amendment paragraph. Its owning change still
+updates code, focused positive and negative tests, and current documentation.
+Adding, removing, renaming, reimplementing, retargeting, or changing the
+expected seam kind, required owners, failure or command of a mutation does move
+the freeze. The runtime
+manifest/configuration equality check, source closure, expected-failure checks,
+and execution of every mutation and reproducer remain mandatory.
+
+The schema 7 mutation-contract amendment freezes the existing full mutation
+manifest projection, adding `path`, `expected_kind`, and `expected_owners` to
+each reviewed row. These fields select the mutated source, the seam kind its
+rejection must identify, and every owner the rejection must name; changing
+them changes the witness's rejection obligation even when its implementation
+is unchanged. The frozen owner list retains the live manifest's exact order
+and duplicates; execution still requires the set of named owners. This
+strengthening preserves all foundation identities, deletion phases, active
+debt, mutation implementations, failure expectations, and commands. It adds
+no representation exception or negative witness and changes no numbered
+language semantics. Live reproducers, hardware probes, source-universe
+configuration, and counts remain outside the freeze.
+
+The checked-extent staged plan registers `chelis-ir/src/host/staged.rs` in
+that source universe. It composes existing tagged values and DAG carriers,
+without adding a representation seam. Borrowing its checked program changes
+seven existing scanner-qualified owners from `LowerCtx::method` to
+`LowerCtx < 'program >::method`. This is an exact one-to-one owner rename:
+each row retains its kind, source path and deletion phase. The foundation digest
+includes those seven successor names; the additional source is code-derived
+configuration. The existing
+unregistered-source, unregistered-subdirectory, direct-data-access and
+normalized-key-arithmetic mutations continue to reject new debt; the rename
+adds no exception or detector admission rule.
+
+The fixed-control host transport extends that same Phase 0 freeze with three
+closed, scanner-visible owners: the single shared C dropout sampler prelude,
+its private host-helper execution witness, and the inherited RNG load/store in
+`CEmitter::emit_preplanned`. The immutable foundation moves from 358 to 361
+rows and active debt from 244 to 247 after the generated-ABI consolidation;
+no classifier, source-universe rule, or
+deletion phase is weakened. The digest binds those exact identities. The
+existing backend-element-spelling and load-store-template controlled mutations
+remain the closed-world negative witnesses: an additional spelling or state
+template still fails as an unclassified identity. This amendment changes no
+public C descriptor, dtype tag, width, or numbered representation semantics.
+
+The staged fixed-control evaluator composes those existing owners without a
+new numeric carrier. Its opaque companion retains exact partition mappings
+and one invocation's Random keys/counters; host sources and checked numeric
+segments execute in their original order. The companion is not serialized,
+and does not change the public legacy stage, kernel, or wire structures.
+
+The opt-in native Random observer registers
+`chelis-backend-c/src/random_observer.rs` in the Phase 0 source universe:
+84 sources (73 Rust, eleven C/C++/Objective-C). Its private invocation parameter
+and C state-observation prelude add two scanner-visible Phase 4 owners:
+`backend-element-spelling` at `host_emit.rs::emit_function`, and
+`load-store-template` at `random_observer.rs::SUPPORT`. The foundation therefore
+extends from 361 to 363 rows and active debt from 247 to 249; every prior row,
+classifier rule and mutation implementation remains unchanged. The foundation
+digest binds those exact additional owners; the source count remains
+code-derived configuration, with no exemption for the opt-in feature. Existing
+backend-element-spelling, load-store-template, unregistered-source and
+subdirectory closure mutations remain the negative witnesses. This amendment
+changes no public descriptor, dtype, width or numbered
+representation semantics.
+
+Complete signature-entry planning registers two typed modules in the source
+universe: `chelis-ir/src/host/signature_entry.rs` and
+`chelis-backend-c/src/host_emit/entry.rs`. They compose existing DAG witnesses
+and project already discharged helper guards. The structural scan finds no new
+representation seam; the universe contains 86 sources (75 Rust and eleven
+C/C++/Objective-C), with no foundation or mutation change.
+
+Invocation-local literal result claims extend the Phase 0 foundation with two
+`load-store-template` owners in `chelis-backend-c/src/host_emit.rs`:
+`HostResultClaim::frame_lines` emits the immutable axis/extent pairs and private
+frame, and `append_host_result_claim_support` reads those pairs at the selected
+producer. These are host metadata templates, with no tensor element access or
+public ABI change. Both retain Phase 4 as their deletion owner. The amendment
+preserves every prior foundation identity, classifier rule, source-universe
+rule and frozen mutation. The existing load-store-template mutation must still
+reject an additional unregistered template; the selected-result eval/C corpus
+checks that the admitted frames execute at the producer with the required
+primitive attribution and effect order. No dtype, width or numbered semantic
+contract changes.
+
+Selected-result aggregate provenance adds two exact private metadata final
+forms in `chelis-backend-c/src/host_emit.rs`:
+`append_host_result_claim_checks` compares declared axes with tensor shape
+metadata, and `append_host_result_interface_origin_support` traverses typed
+List, Tuple, ADT and Option handles to rebuild per-field `load` origins at a
+genuine interface. Neither owner reads tensor element storage or changes a
+public carrier or ABI, so both are final authorities rather than Phase 4
+transition debt. Exact path/kind/owner registration, wrong-path/kind/owner
+negatives and the existing unregistered load/store mutation preserve the
+closed inventory. The Phase 0 execution leg binds them to C claim failures,
+aggregate and Option projection, interface ingress and repeated public-call
+arena lifetime. Nested `Cons` execution additionally requires an O(1)
+invocation-arena suffix view before both cloning and consuming List skips, so
+pattern lowering and direct immutable `skip` preserve the selected child
+without copying each remaining origin array or reading a consumed payload.
+The frozen foundation and
+active-debt rows therefore do not
+grow, and their reviewed digest stays fixed; only the code-derived final-form
+and execution manifest changes.
+
+The captured activation-claim comparison adds the private
+`load-store-template` owner, `CEmitter::emit_runtime_dim_sites` in
+`chelis-backend-c/src/emit.rs`. It reads the captured int64 witness before the
+producer guard and retains the existing tagged tensor storage contract. The
+amendment preserves every previous identity, deletion phase and frozen
+mutation; it adds no public ABI or numeric carrier exception. The
+load-store-template mutations continue to reject any unregistered owner. The
+combined Phase 0 foundation contains 366 rows, including 252 active-debt rows.
+
+Pure-helper result claims add the private
+`CEmitter::emit_inherited_result_guards` load/store owner and move the
+evaluator's existing path-random-counter arithmetic into
+`eval_tensor_internal_with_result_claims`. The append-only foundation extends
+from 366 to 368 rows; replacement of the old evaluator owner plus the new
+emitter owner moves active debt from 252 to 253. Both remain implementation
+internals with no public ABI or carrier change, and the existing mutations
+continue to reject an unregistered successor.
+
+The random-key element dtype (chelis#2413) adds runtime dtype `Key = 9`, whose
+representation `Repr::Word64` is one opaque 64-bit word with no arithmetic
+representation, and its sealed storage marker `KeyWord`. The append-only
+foundation extends from 368 to 372 rows, and active debt from 237 to 241, with
+four `dtype-contract` owners: `RuntimeDType::Key` and `Repr::Word64` in
+`chelis-vocab/src/lib.rs`, and `ElementStorage for KeyWord` and
+`private :: Sealed for KeyWord` in `chelis-runtime/src/element.rs`. The
+numbered semantics move with them: spec/04 §1.1 adds `key`, and [05-OP-31]
+adds `CHELIS_DTYPE_KEY = 9` as a tensor-only tag that no `chelis_scalar`
+carries. The two element owners enter as transition debt, not as final forms
+beside `Bool8`'s, because the final-form list is oracle configuration this
+change does not edit; promoting them is a classification for the #893 owner.
+No classifier, final-form list, source-universe rule or deletion phase changes.
+One frozen mutation is reimplemented: `phase0.mutate_incomplete_dtype` anchored
+on the text of the last variant, `I16 = 8`, which appending `Key` removed, so
+the witness could no longer run. It now anchors on the `RuntimeDType`
+declaration and inserts its unregistered variant before the closing brace, so
+it still follows the last variant and no longer drifts when a dtype is
+appended. Its path, seam kind, owners, failure and command are unchanged; its
+implementation digest and the freeze digest move. The incomplete-dtype,
+incomplete-arithmetic and element-binding mutations remain the negative
+witnesses: a dtype or storage marker without its complete registration still
+fails.
+
+The carried runtime (chelis#1354) registers `chelis-runtime/src/public_headers.rs`
+in the Phase 0 source universe: 87 sources (76 Rust and eleven
+C/C++/Objective-C). It holds the public runtime header texts as `include_str!`
+constants that the CLI stages beside the carried archive. The structural scan
+finds no new representation seam, with no foundation, classifier or mutation
+change.
+
+Development runtime freshness (chelis#1354) registers `chelis-runtime/build.rs`
+and `chelis-runtime/src/build_record.rs`: 89 sources (78 Rust and eleven
+C/C++/Objective-C). The build script hashes the runtime's declared source
+inputs into a text record, and the module exposes that record as an
+`include_str!` constant. The structural scan finds no new representation seam,
+with no foundation, classifier or mutation change.
 
 ## B2. Invariants at every phase boundary
 
@@ -822,30 +1729,153 @@ uv run --managed-python --python 3.11 --no-project python \
 
 Final line: `RUNTIME REPRESENTATION PHASE 1: PASS`.
 
+
+### Phase 1 consumer and execution receipt contract
+
+The Phase 1 implementation is `scripts/runtime_representation_phase1.py`, invoked
+through the command above. `runtime_representation_phase1_tests.json` freezes
+required test-identity floors and commands; its reviewed digest is in the
+implementation. Removing, renaming, or intentionally replacing a required
+identity requires a reviewed manifest amendment. A test newly selected by an
+existing command is an addition: it executes and is reported without changing
+the required floor. Neither a previous receipt nor a regenerated selection is an
+acceptance input.
+
+The integer-unary typed-lane amendment retains both inherited Phase 0 execution
+legs in the Phase 1 manifest: integer-to-float finalization freezes its two
+native C/UBSan positive and invalid-target controls; integer device lowering
+freezes four HIP and seven Metal admission, exact-storage, shape, and rejection
+controls. The initial floors come from freshly built nextest listings in the
+Phase 1 profile. The manifest digest changes with these two added commands and
+13 required identities; every prior command, identity floor, Python floor,
+native control, and planner mutation remains unchanged. Removing either leg or
+losing any selected required identity rejects; altered manifest bytes require a
+reviewed digest. Hardware-only HIP and Metal execution remains registered
+separately and cannot be counted by these active-test receipts. This amendment
+does not change the Phase 0 foundation, mutation contract, or digest.
+
+The host/C consumer audit follows the representation owners and submissions:
+
+| Consumer mechanism | Checked authority | Executed boundary and negative controls |
+| --- | --- | --- |
+| Owned allocation, borrowed ingress, repurpose, read/write views | Private `ShapeMetadata`, `ElementCount`, `ByteCount`, `AllocationBytes`; immutable metadata replaced atomically | `checked_metadata`, `metadata_compile`, `exact_tagged_c_abi`, `op33_tensor_validation`, `tensor_repurpose`, `tensor_write_guard`, both profiles |
+| Host byte copy, fills, reshape and indexed tensor movement | `copy_bytes(AllocationBytes)`, validated tensor metadata/index ranges and checked iteration domains | Padding, empty-domain, dtype-domain, checked C metadata/indexing/affine and movement boundary suites, both profiles |
+| Generated C entry/elementwise/cast/gather/scatter/concat/stack/arange loops | Checked runtime counts and indices, validated read/write views; complete result checks before submission | Named C source-delegation controls, optimized native sanitizer matrices, dtype dispatch/reuse and CLI cast cases |
+| C reductions, Count, sparse, BLAS and windows | Private checked plan domains, physical scratch projections and vendor-width validation | Each registered runtime contract in both profiles; actual emitted native bypass/ownership controls and executable examples |
+| C literal, JSON ordering and snapshot/host shape scratch | Tagged literal preflight, checked tensor scratch owner, descriptor observations before submission, checked allocation-like API | All-dtype literal/shape native controls, JSON cleanup ledger mutation, shape-capture repurpose mutation and vmap axis case |
+| Shared C/HIP storage planning | Private exact `CapacityKey` plus exact `Repr`; opaque linear reuse proof | Key and adapter collision/equivalence/domain tests, all 81 source/result representations through eligible expired slots, private storage proofs, both profiles |
+| Metal storage planning | Typed no-reuse projection; no reusable capability is admitted | `never_reuse_boundary` in both profiles; this is planning evidence, not device execution |
+| Representation vocabulary and runtime element bindings | Closed `DTypeContract` and sealed storage/arithmetic registrations | Positive external consumers, all nine representations and compile-failure/production mutations, both profiles |
+
+Allocation and byte-copy submission signatures consume the private checked
+values; public metadata construction cannot opt out of their validation. The
+C codegen consumers receive validated counts, byte counts or metadata plans,
+and the frozen source inventory continues to reject new arithmetic owners and
+representation seams. The table names the acceptance mechanisms; it does not
+claim that a finite example matrix enumerates every tensor value or shape.
+Element-pointer privacy and backend element-spelling debt remain Phase 3/4,
+and generated descriptor/Python/DLPack adoption remains Phase 2.
+
+The oracle first checks clean committed source bytes/modes, executes its Python
+framework controls, validates the Phase 0 inventory and rejects all its live
+production seam mutations. Each Rust leg then builds and lists current tests,
+requires every nonempty frozen identity while accepting current additions,
+hashes every listed executable, removes any earlier JUnit output, and executes
+the complete current selection with a dedicated nextest profile and zero
+retries. Missing, renamed, duplicate, ignored, skipped, failing or unexecuted
+required identities block. Added identities also block if ignored, skipped,
+failing or unexecuted. Native failure controls and production mutation probes
+retain exact one-for-one selection rather than the cohort-floor rule. The
+isolated JUnit path prevents nested CLI tests from replacing the parent receipt.
+Receipt schema 2 records `required`, current `selected`, exact `additions`, and
+one passing `executed` row per current identity alongside the command, source
+identity and executable digests.
+
+Native execution links the runtime each consumer's own Cargo build carries. The
+Rust harnesses stage it through `chelis-runtime-bundle`, and `chelis build`
+stages it beside its output ([spec/08 §2.1](../08-backends.md)). Both verify the
+written archive against the carried digest and link it by exact path, so no leg
+takes a runtime from the target directory or the environment, and none can be
+substituted. Without `CHELIS_OWNERSHIP_LEDGER_PATH` the ledger records nothing.
+The one leg that sets it, the JSON ownership-ledger mutation test, builds `chelis`
+with its `ownership-ledger` feature, so the runtime `chelis build` stages is the
+instrumented one. The CLI-staged consumer's control names a directory holding an
+empty archive as `CHELIS_RUNTIME_DIR` and must fail with the CLI's rejection before
+linking: honoring the directory would fail at the linker, and ignoring it would
+pass. Five missing-compiler controls prevent native compile checks from
+returning early. Staging, freshness and persisted-artifact admission
+negatives live with `chelis-runtime-bundle` and `chelis-python`; they replace
+the seven empty-archive controls this runner held while it pinned an archive.
+Selected library native cases have no availability exits: parallelism follows
+the configured platform toolchain, and the canonical matmul case executes with
+the BLAS hint without claiming a vendor call. Reduced-float BLAS cases use the
+platform toolchain and must execute. Python fixtures isolate their target
+configuration and prove that an inherited target's execution evidence survives.
+
+Two additional optimized production mutations erase the shared planner's exact
+representation or exact capacity conjunct. Their named behavioral assertions
+must fail, the source is restored byte for byte, and the same cases must then
+pass after rebuilding. Existing private metadata mutations independently weaken
+extent/count/byte/stride/capacity/target/scratch checks. The complete oracle never
+accepts `--skip-mutations` or `--regenerate` as Phase 1 success.
+
+The greater-than-8-GiB allocation test remains the explicitly excluded #1112
+manual gate. It is recorded as unexecuted, while exact wide metadata and target
+projection are exercised without requesting that allocation. Capacity-key public
+compile-fail doctests remain a supporting obligation. No Phase 2 device or native
+Python boundary is admitted through this host/C receipt.
+
+The hosted `runtime-representation` nightly/manual worker and optional full/local
+gates invoke Phase 1; `--fast` remains the pre-push stage and does not run this
+composite. Phase 0 is still directly runnable. A clean local Phase 1 pass is
+supporting evidence until candidate-head hosted acceptance and a compliant fresh
+review pass. #888/#889 closure requires those receipts; this change does not
+close #893 or Phases 2–5.
+
+The CPU HIP entry and owner execution rows require the exact-head runtime archive
+that the Phase 2 runner pins. They are ignored in an ordinary workspace run and
+executed as a complete ignored-only selection inside the Phase 2 oracle; the
+header-only owner contract remains active in the ordinary suite. The equivalent
+developer commands and expected outcomes are registered in
+`docs/manual_gates.md`.
+
 ## Phase 2 — canonical ABI descriptors
 
 **Requires:** Phase 1.
 
 **Delivers:** C3 completely and the binding/device portion of C4: `chelis-abi`,
-generated host/device descriptors, freshness and layout probes, dynamic-rank
+the moved shared metadata authority, generated host views/device descriptors,
+freshness and layout probes, dynamic-rank
 exact metadata plus private validated Python/DLPack wrappers, and the deletion
 of every handwritten mirror. The current [#1289] public ABI and [#1347]
 zero-extent behavior are positive receipts.
+
+Shared extraction and spec-derived tests may be prepared against existing
+checked code while the remaining Phase 1 consumers are in flight. This does
+not satisfy the prerequisite: Phase 2 adoption and landing require the landed
+Phase 1 base and its complete execution/mutation oracle. The callable device
+layout cutover and spec/11's ABI version 2 producer/consumer admission ship
+together; version 1 must fail before metadata interpretation or library loading.
 
 **Issue exit:** [#1345] closes after Python host-to-device, device entry,
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
 preserve `int64` values above `i32::MAX`, reject out-of-domain values before
 copy, and have no fixed array or narrow mirror left.
 
-**Also delivers:** the backend runtime headers' capacity-census leg. Phase 0
-inventories `chelis_hip_runtime.h` and `chelis_metal_runtime.h` as seams rather
-than as a census surface, because their bare `float *` device carrier has no
-citation or override path under [#1288]'s ratchet and would only produce
-blocking rows. Once this phase moves those headers onto the tagged carrier the
-leg becomes both possible and required, so add it here, with its own baseline
-and `coverage_manifest()` entry, reusing the census's existing `preprocess_root`
-enumerator. Phase 2 is not complete while a generated device header carries
-numeric surface no census enumerates.
+**Also delivers:** the backend runtime-header capacity-census leg. The HIP
+support root uses the tagged device packet and is inventoried under a fixed,
+freestanding clang target with the committed Phase-0 SDK stubs and closed
+canonical include attribution. Its recursively discovered support-header set is
+the structural owner selection before row extraction, so every reached nested
+declaration reaches final-authority comparison while SDK rows remain inputs.
+Its ten final rows have their own baseline and `coverage_manifest()` entry. The
+recursively discovered published Metal `.h` set exports only `static inline`
+definitions, so it has no capacity-census row and no fake SDK lane. Instead an
+executable enrollment gate parses every published header with the shared
+C-family lexer, aggregates and sorts raw attributable rows, and fails as soon
+as one gains a public declaration, requiring a hermetic Metal lane and exact
+authority in that change. Phase 2 is not complete while any generated device
+header carries numeric surface no census enumerates.
 
 **Oracle:**
 
@@ -855,6 +1885,28 @@ uv run --managed-python --python 3.11 --no-project python \
 ```
 
 Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
+
+The implementation is `scripts/runtime_representation_phase2.py`.
+`runtime_representation_phase2_tests.json` stores seven required Python contract
+identities and 243 explicit required Rust identities: 33 shared-ABI tests, six
+metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
+Python binding tests, and sixteen backend-header census/enrollment tests. Counts
+and digests are derived summaries, not membership authority. The Python leg names its
+integration binaries and relevant internal ownership tests explicitly rather
+than freezing platform-only package tests. No leg receives a runtime: the HIP
+harnesses stage the runtime their build carries through `chelis-runtime-bundle`,
+chelis-cli legs link what `chelis build` staged, and the Python leg links the
+runtime the extension carries (#1354). The command first obtains a complete
+fresh Phase 1 receipt, then lists and executes each complete current Phase 2
+cohort with zero retries. Every required identity must remain selected,
+nonignored, executed and passing; additions are executed and reported, while a
+removal or rename blocks. Receipt schema 2 distinguishes `required`, current
+`selected`, exact `additions`, and passing `executed` identities, and the runner
+verifies unchanged test artifacts and source identity. The only recorded
+non-execution is the exact HIP hardware command above; CPU SDK-fixture execution
+does not relabel it as hardware evidence. Hosted CI advances the stable
+`runtime-representation-phase0-oracle` job identity to this command and uploads
+both Phase 1 and Phase 2 receipts.
 
 ## Phase 3 — typed host runtime access and the field seal
 

@@ -9,15 +9,15 @@ This test builds its own temp reef project depending on the bundled `chelis-std`
 package plus a sibling library module, so it is dev-compiler-clean and needs no
 network. See the module docstring in `crates/chelis-python/tests/manual_reef_context.rs`
 for the environment prerequisites and the Shoals-specific note (the published
-Shoals 0.23.1 artifact fails HEAD's `with seed(...)` int64 rule — tracked as
-chelis#825).
+Shoals 0.23.1 artifact uses the `with seed(...)` surface, which the explicit-key
+switch retired, chelis#2413 — tracked as chelis#825).
 
 Run (from the repo root, with the bindings installed into `py/.venv` -- the
 same venv the cargo driver in crates/chelis-python/tests/manual_reef_context.rs
 installs into and asserts):
 
     export DYLD_LIBRARY_PATH="$(py/.venv/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-    export CHELIS_RUNTIME_DIR="$PWD/target/agents/<name>/debug"   # dir with libchelis_runtime.a
+    unset CHELIS_RUNTIME_DIR                                       # the extension carries its runtime
     export CHELIS_ORACLE_COMPILER_PIN="=<workspace version>"      # the cargo driver sets this
     py/.venv/bin/python bindings/python/tests/manual_reef_context.py
 """
@@ -95,10 +95,9 @@ def _numpy(out):
 
 
 def _scalar(root_value):
-    """Extract a Python float from an EvaluatedRoot.value (a scalar float or a
-    TensorValue with a `.data` tuple)."""
+    """Extract a Python float from an EvaluatedRoot scalar or TensorValue."""
     data = getattr(root_value, "data", None)
-    if data is not None:
+    if isinstance(data, tuple):
         return float(data[0])
     return float(root_value)
 

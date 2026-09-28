@@ -3,7 +3,7 @@
 **Status:** Active implementation contract. The current branch ships the
 first-class sparse IR/AD/C path, routes tensor-lane Surf `gather` directly to
 that sparse node, recognizes the internal dense §3.5 `OneHot` tag tree, and
-emits HIP sparse gather/scatter-add kernels for f32 payloads with int32/int64
+emits HIP sparse gather/scatter-add kernels for f32 payloads with i32/i64
 indices.
 
 ## Current Branch Status
@@ -27,7 +27,7 @@ The following items remain open and must not be implied as complete:
 - The recognizer intentionally matches the internal `RiscOp::OneHot` tag tree,
   not arbitrary historical `const + eq + expand` encodings that no longer carry
   the original index operand.
-- HIP sparse kernels are f32-payload only in v1 and require int32/int64 index
+- HIP sparse kernels are f32-payload only in v1 and require i32/i64 index
   tensors to be loaded inputs. Non-load integer index producers need broader
   integer HIP codegen before they can feed sparse kernels safely. HIP
   `ScatterAdd` uses `atomicAdd`; f64 scatter-add is rejected with an explicit

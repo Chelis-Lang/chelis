@@ -246,10 +246,12 @@ and to hold a Cargo project so a stale entry cannot survive.
 Dep-info accumulates, and every cargo invocation writes it, not only a
 registered row. A developer who has once built an unregistered configuration in
 that worktree therefore has dep-info for it, and leg 3 would count those files
-as covered. The authoritative reconciliation is consequently the CI one, where
-`Swatinem/rust-cache` prunes workspace-member artifacts before saving and the
-job builds only registered configurations; the local run is a fast
-approximation that can be too generous, never too strict.
+as covered. The accumulated union is therefore supporting completeness evidence:
+it can overstate coverage, and it carries no provenance that can prove a
+nightly-only entry stale. The gate therefore makes no automatic stale inference
+from it. Reviewers own the source-to-feature attribution when the exact residual
+changes; the nightly `--require-complete` run remains the executable proof that
+the named sources are compiled by the nightly matrix.
 
 **Executable controls.** `scripts/test_check_configuration_closure.py` proves
 the two properties the rest rests on, with rustc rather than assertion:
@@ -259,7 +261,8 @@ rustc compiles appears in its dep-info and so in the reconciled set. The
 remaining tests cover dep-info parsing, a member that fails to inherit the lint,
 a workspace that only warns, an uncovered feature, an invented feature, an
 unqualified feature spelling, a run its owner does not issue, an uncompiled
-source, an empty dep-info set, and a stale or ungated exception.
+source, an empty dep-info set, accumulated provenance that cannot prune a
+nightly-only source, and a stale or ungated exception.
 
 **Residual: the host dimension.** Both registered hosts are unix, so
 `#[cfg(not(unix))]` is compiled by no row at any cadence. Eighteen such sites
@@ -276,19 +279,16 @@ The two residuals differ in that the feature one has a nightly `--all-features`
 backstop and this one has none at any cadence. Bringing it in requires a
 supported Windows host, not a further row.
 
-Separately, two of the three per-pull-request rows (`default-features` and
-`solver-free-features`) list macOS among their hosts, but no continuous job
-runs Clippy on macOS. The two macOS jobs in `ci.yml` are
-`macos-workspace-shard`, which inlines `cargo nextest run --workspace --profile
-ci-full` rather than calling the gate, and `smt-build-darwin-arm64`, a release
-build; no step of either runs Clippy, and neither requests the component.
-No macOS job in another workflow runs Clippy either, and the only one of them
-on a push trigger is `build-cvc5.yml`'s `build-darwin-arm64`, which harvests a
-cvc5 artifact. Attribute-form
-`#[cfg(target_os = "macos")]` regions are therefore linted by `python3
-scripts/gate.py --local`, which `AGENTS.md` makes mandatory once per pull
-request on the committed candidate, and not by default CI. The
-`no-default-features` row is Linux-only: `--local` dropped it and kept the
+The Linux per-pull-request rows remain `default-features`,
+`solver-free-features`, and `no-default-features`. Separate macOS nightly rows
+register the first two configurations in `.github/workflows/macos-nightly.yml`.
+Shard 1 of `macos-workspace-shard` installs Clippy and runs both configurations; the
+`macos-smoke` aggregate requires that shard to succeed. Attribute-form
+`#[cfg(target_os = "macos")]` regions therefore receive these two lint
+configurations nightly and on manual dispatch, not on ordinary PRs or main
+pushes. `python3 scripts/gate.py --validation` remains an optional
+local reproduction. The
+`no-default-features` row is Linux-only: `--validation` dropped it and kept the
 other two because the closure check's source-reconciliation leg needs the
 solver-free row on a fresh target (`crates/chelis-prove/src/clarabel_sos.rs`
 is compiled per pull request by that row alone), while the no-default row
@@ -309,10 +309,12 @@ per-pull-request matrix does compile: `NIGHTLY_ONLY_SOURCES` names the whole
 files (`chelis-prove/src/z3_engine.rs` and the two `certify_*_envelope`
 binaries), while leg 3's reconciliation is file-granular and therefore records
 a partly-gated file as covered. The nightly `--all-features` row compiles both
-kinds, and the matrix records that cadence. The list prunes itself: an entry a per-pull-request row
-does compile is reported as stale, an entry whose file is gone is reported as
-stale, and the nightly job runs the reconciliation with `--require-complete`,
-which drops the allowance so a new uncovered file cannot be parked there.
+kinds, and the matrix records that cadence. An entry whose file is gone is
+reported as stale. There is no automatic source-to-feature attribution or
+per-pull-request pruning: neither accumulated dep-info nor a row's resolved
+feature set proves that the row compiled a particular source. The nightly job
+runs the reconciliation with `--require-complete`, which drops the allowance so
+a new uncovered file cannot be parked there.
 `--all-features` is also where a `#[cfg(all(feature = ..., feature = ...))]`
 combination is compiled.
 
@@ -433,11 +435,11 @@ parity, reshape-regression, and fresh-process CLI suites. The legs whose subject
 was the two-candidate settlement are deleted with it, and the runner keeps the
 four that were never about it: the cache-version test, the executable-example and
 eval/C parity rows, and `issue_942_inferred_tensor_cast`. The raw-store
-compile-fail leg is gone from the gate's `lint-and-unit` stage and the `--local`
+compile-fail leg is gone from the gate's `lint-and-unit` stage and the `--validation`
 subset with the store it probed; `scripts/test_gate.py` still locks that
 membership. Phase B's configuration-closure check and named
 cache-byte tests run in its named oracle, and two of its legs also run in the
-gate's `lint-and-unit` stage and the `--local` subset: the closure check,
+gate's `lint-and-unit` stage and the `--validation` subset: the closure check,
 ordered after the Clippy commands that produce the dep-info it reads, and the
 disallowed-type compile-fail fixture. That fixture is the ban's liveness proof.
 Nothing else continuous reads `clippy.toml`, and no workspace source spells the

@@ -20,11 +20,11 @@ fn abi_conversion_accepts_only_resolved_logical_types() {
 #[test]
 fn supported_concrete_types_map_to_exact_c_host_abis() {
     let i8_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int8))
-        .expect("int8 has an exact C-host representation");
+        .expect("i8 has an exact C-host representation");
     assert_eq!(i8_abi.c_type_name(), Some("int8_t"));
 
     let i16_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int16))
-        .expect("int16 has an exact C-host representation");
+        .expect("i16 has an exact C-host representation");
     assert_eq!(i16_abi.c_type_name(), Some("int16_t"));
 
     let f32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::F32))
@@ -38,7 +38,7 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
     }
 
     let i32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int32))
-        .expect("int32 has a C-host representation");
+        .expect("i32 has a C-host representation");
     assert_eq!(i32_abi.c_type_name(), Some("int32_t"));
 
     let tensor_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Tensor(TensorType {
@@ -118,7 +118,7 @@ fn first_class_function_type_has_no_general_c_host_value_abi() {
     // The type RESOLVED; the C target has no ABI for it. That is the
     // `HostAbi` state, never the unresolved `HostType` state (chelis#730
     // Phase 2 red team, finding F5).
-    assert!(matches!(error.what, UnsupportedKind::HostAbi(_)));
+    assert!(matches!(error.what.as_ref(), UnsupportedKind::HostAbi(_)));
     assert!(error.to_string().contains("function value"));
     assert!(!error.to_string().contains("unresolved"));
 }
@@ -246,7 +246,8 @@ fn public_backend_emission_edges_cannot_borrow_raw_payloads() {
 
 fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
     let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects host source");
@@ -297,6 +298,14 @@ fn emitted_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("missing emitted definition for {name}:\n{source}")
 }
 
+fn authored_function_symbol(name: &str) -> String {
+    let mut symbol = "chelis_fn_".to_string();
+    for byte in name.bytes() {
+        symbol.push_str(&format!("{byte:02x}"));
+    }
+    symbol
+}
+
 #[test]
 fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let source = include_str!(
@@ -306,19 +315,20 @@ fn recursive_calls_target_the_consuming_body_not_the_external_clone_adapter() {
     let emitted = crate::codegen_host_program(&verified, "recursive_depth_1")
         .unwrap()
         .c_source;
-    let body = "step__chelis_owned_body";
+    let public = authored_function_symbol("step");
+    let body = format!("{public}__chelis_owned_body");
 
-    assert!(emitted.contains("chelis_tensor* step(chelis_tensor* state"));
+    assert!(emitted.contains(&format!("chelis_tensor* {public}(chelis_tensor* state")));
     assert!(
         emitted.matches(&format!("{body}(")).count() >= 3,
         "declaration, definition, wrapper entry, and recursive body call must retain the internal symbol:\n{emitted}"
     );
     assert_eq!(
-        emitted.matches("= step(").count(),
+        emitted.matches(&format!("= {public}(")).count(),
         0,
         "internal recursion must never re-enter the external cloning adapter:\n{emitted}"
     );
-    let owned_body = emitted_function_body(&emitted, body);
+    let owned_body = emitted_function_body(&emitted, &body);
     let recursive_call = owned_body
         .find(&format!("= {body}("))
         .unwrap_or_else(|| panic!("missing recursive owned-body call:\n{owned_body}"));
@@ -403,7 +413,7 @@ fn user_call_pre_actions_require_one_structural_direct_call_authority() {
 #[test]
 fn selected_if_edges_emit_one_path_local_release_each() {
     let verified = verified_host_from_source(
-        "def choose(flag: bool) -> int64 = {\n\
+        "def choose(flag: bool) -> i64 = {\n\
            dead = \"owned\"\n\
            if flag then 1i64 else string_len(dead)\n\
          }\n\
@@ -412,7 +422,10 @@ fn selected_if_edges_emit_one_path_local_release_each() {
     let emitted = crate::codegen_host_program(&verified, "selected_if_edge_release")
         .unwrap()
         .c_source;
-    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+    let choose = emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol("choose")),
+    );
 
     assert_eq!(
         choose.matches("chelis_string_release(").count(),
@@ -453,7 +466,7 @@ fn manifest_root_clone_terminal_and_consume_emit_in_verified_order_once() {
 fn loop_source_release_is_emitted_after_the_loop_not_on_each_back_edge() {
     let verified = verified_host_from_source(
         "xs = [1i64, 2i64]\n\
-         ys = map(fn (v: int64) -> v, xs)\n",
+         ys = map(fn (v: i64) -> v, xs)\n",
     );
     let emitted = crate::codegen_host_program(&verified, "loop_exit_release")
         .unwrap()
@@ -522,12 +535,19 @@ fn nested_option_match_releases_the_scrutinee_on_both_selected_arms() {
     let emitted = crate::codegen_host_program(&verified, "match_option_fresh_control")
         .expect("verified nested match terminals must survive C emission")
         .c_source;
-    let choose = emitted_function_body(&emitted, "choose__chelis_owned_body");
+    let choose = emitted_function_body(
+        &emitted,
+        &format!("{}__chelis_owned_body", authored_function_symbol("choose")),
+    );
 
+    // Two selected arms, plus the path on which no arm is selected: after
+    // `None` fails, the ordered planner tests `Some(flag)` on its own, and
+    // that test's `None` exit is the no-arm-selected failure ([04-PAT-2],
+    // chelis#2445).
     assert_eq!(
         choose.matches("chelis_option_release(__let_0);").count(),
-        2,
-        "each selected match arm must release the borrowed scrutinee after its final use:\n{choose}"
+        3,
+        "each path out of the match must release the borrowed scrutinee after its final use:\n{choose}"
     );
 }
 
@@ -550,7 +570,8 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         "../../chelis-cli/tests/fixtures/compiled_value_ownership/issue_543_adt_tensor.ch"
     );
     let declarations = chelis_surf::parser::parse_str(source).expect("parse ownership fixture");
-    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let deep =
+        chelis_surf::desugar::desugar_program(&declarations).expect("Surf fixture must desugar");
     let checked = chelis_types::check_typed_program(&deep)
         .unwrap_or_else(|errors| panic!("check fixture: {:?}", errors.errors));
     let checked = chelis_effects::check_program(&checked).expect("effects fixture");
@@ -568,7 +589,9 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         precision: Prim::F32,
     };
     let mut helper_dag = chelis_ir::Dag::new();
+    let helper_dag_decl = helper_dag.declare("test");
     let helper_root = helper_dag.add_node(
+        helper_dag_decl,
         chelis_ir::RiscOp::Load { name: "x".into() },
         Vec::new(),
         helper_ty.clone(),
@@ -624,4 +647,98 @@ fn abi_projection_preserves_exact_verified_site_and_nested_dag_cursors() {
         })
         .expect("aggregate tensor fixture retains its verified nested helper");
     assert!(!helper.dag().is_empty());
+}
+
+/// chelis#2477: an enclosing owner consumed on one branch arm and not the
+/// other reached the join live on one path only, because `moved` is a single
+/// per-unit set and the sibling arm's consume marked it moved everywhere. The
+/// enclosing scope exit then emitted no release for the arm that did not
+/// consume it, and host ownership verification rejected the join.
+///
+/// Both fixtures are the same program at different dtypes. Before the fix the
+/// generic one failed with `inconsistent live owners` naming `result`, while
+/// the concrete one -- byte-identical but for the binder -- verified. The
+/// concrete case is kept as the control so a regression cannot be mistaken for
+/// an environment difference.
+const GENERIC_BRANCH_ARM_RELEASE: &str = "\
+def basis2[prec: Float](k: i64, s: prec) -> tensor[2, prec] = to_tensor(map(fn (i: i64) -> if eq(i, k) then s else cast(0.0, prec), range(cast(0, i64), cast(2, i64))))\n\
+def eye2[prec: Float](s: prec) -> tensor[2, 2, prec] = {\n  \
+  e1 = cast(0, i64) |> basis2(s)\n  \
+  e1b = cast(0, i64) |> basis2(cast(1.0, prec))\n  \
+  o1 = einsum(\"i,j->ij\", e1, e1b)\n  \
+  add(o1, o1)\n\
+}\n\
+def scale[prec: Float](s: prec, m: &tensor[2, 2, prec]) -> tensor[2, 2, prec] = {\n  \
+  diag_s = eye2(s)\n  \
+  matmul(diag_s, m)\n\
+}\n\
+def inv[prec: Float](a: &tensor[2, 2, prec], det: prec) -> tensor[2, 2, prec] = {\n  \
+  one_f = cast(1.0, prec)\n  \
+  bad = lt(det, cast(1e-30, prec))\n  \
+  nan_v = cast(0.0, prec) |> div(cast(0.0, prec))\n  \
+  det_safe = if bad then one_f else det\n  \
+  inv_det = div(one_f, det_safe)\n  \
+  result = scale(inv_det, a)\n  \
+  if bad then eye2(nan_v) else result\n\
+}\n\
+def entry32(a: &tensor[2, 2, f32], d: f32) -> tensor[2, 2, f32] = inv(a, d)\n";
+
+#[test]
+fn issue_2477_generic_branch_arm_releases_the_owner_its_sibling_consumed() {
+    // Fails before the fix with:
+    //   block bN in `entry32` is reached with inconsistent live owners:
+    //   live only on this path: %NNN[result]
+    let verified = verified_host_from_source(GENERIC_BRANCH_ARM_RELEASE);
+    // Assert the release lands, not merely that lowering did not panic: a
+    // change that balances the join some other way must not pass unnoticed.
+    let render = verified.render();
+    assert!(
+        render.contains("drop %"),
+        "the arm that did not consume `result` must carry its drop:\n{render}"
+    );
+}
+
+#[test]
+fn issue_2477_concrete_control_still_verifies() {
+    let concrete = GENERIC_BRANCH_ARM_RELEASE
+        .replace("[prec: Float]", "")
+        .replace("prec", "f32");
+    let _ = verified_host_from_source(&concrete);
+}
+
+/// chelis#2477, second defect, found by review of the first fix: an arm that
+/// itself contains control flow ends in a different block than the one it
+/// started in, because `lower_join_arm` sets the terminator on `self.current`.
+/// Emitting the owed release into the arm's *entry* block put it before that
+/// block's own terminator, so the nested arm's borrow read a released owner
+/// and Phase-2 verification rejected IR the compiler had just built.
+///
+/// The `then` arm consumes `result`; the `else` arm is the one that branches
+/// and borrows it, so this witnesses the `else` call site specifically.
+/// Reverting the `else` call site's argument to the arm's entry block
+/// reproduces `owner %N in \`pick\` bM is not live`; reverting only the `then`
+/// site does not, because for this program the `then` arm has no nested
+/// control flow and its end block IS its entry block.
+///
+/// `result` must be bound from a BLOCK EXPRESSION: that is what keeps
+/// `owner_depth` at the inner block's depth while `resolve_out` projects it as
+/// `Value::Fresh`, which makes `consume` move rather than copy it in the arm.
+/// A plain `result = mk(...)` copies, so nothing is ever owed and the shape
+/// does not reproduce. Concrete `i64` throughout: the class is not about dtype
+/// genericity, which is only how it first reached user code.
+const NESTED_ARM_RELEASE: &str = "\
+def mk(k: i64, s: i64) -> tensor[2, i64] = to_tensor(map(fn (i: i64) -> if eq(i, k) then s else cast(0, i64), range(cast(0, i64), cast(2, i64))))\n\
+def twice(m: &tensor[2, i64]) -> tensor[2, i64] = add(m, m)\n\
+def pick(s: i64, bad: bool, worse: bool) -> tensor[2, i64] = {\n  \
+  result = {\n    \
+    d = mk(cast(0, i64), s)\n    \
+    add(d, d)\n  \
+  }\n  \
+  if bad then result else (if worse then twice(&result) else mk(cast(1, i64), cast(1, i64)))\n\
+}\n\
+def entry(s: i64, b: bool, w: bool) -> tensor[2, i64] = pick(s, b, w)\n";
+
+#[test]
+fn issue_2477_nested_arm_release_lands_on_the_block_that_jumps_to_the_join() {
+    let _ = verified_host_from_source(NESTED_ARM_RELEASE);
 }

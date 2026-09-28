@@ -88,7 +88,10 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::Failed(warning.message));
     }
 
-    let mut parsed = deep::Grammar::parse(deep::Rule::program, source)
+    // [03-META-3]: the sealed data parser owns extension syntax. The
+    // independent program grammar must not impose its expression grammar on it.
+    let structural_source = deep_program_projection(source, &exprs);
+    let mut parsed = deep::Grammar::parse(deep::Rule::program, &structural_source)
         .map_err(|err| ValidationError::Failed(err.to_string()))?;
     let Some(program) = parsed.next() else {
         return Err(ValidationError::Failed("empty Deep program".to_string()));
@@ -145,7 +148,6 @@ fn is_linker_format_name(name: &str) -> bool {
 fn deep_node_parts(expr: &chelis_deep::ast::Expr) -> Option<(DeepTag, &[chelis_deep::ast::Expr])> {
     match expr {
         chelis_deep::ast::Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
-        chelis_deep::ast::Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
         _ => None,
     }
 }
@@ -265,7 +267,8 @@ fn first_duplicate_defsig(exprs: &[chelis_deep::ast::Expr]) -> Option<String> {
 pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
     let decls = chelis_surf::parser::parse_str(source)
         .map_err(|err| ValidationError::Failed(format!("compiler parse failed: {err}")))?;
-    let deep = chelis_surf::desugar::desugar_program(&decls);
+    let deep = chelis_surf::desugar::desugar_program(&decls)
+        .map_err(|err| ValidationError::Failed(format!("desugaring failed: {err}")))?;
     let deep = chelis_macros::expand_program(&deep, &chelis_macros::ExpansionOptions::default())
         .map_err(|err| ValidationError::Failed(format!("macro expansion failed: {err}")))?
         .into_exprs();
@@ -280,6 +283,58 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
 /// so a leading `;` comment is never mistaken for the tag. See issue #167.
 fn is_structural_pair(pair: &Pair<'_, deep::Rule>) -> bool {
     !matches!(pair.as_rule(), deep::Rule::comment | deep::Rule::EOI)
+}
+
+/// Private to the text ingress above: all spans come from this exact source.
+/// Replace opaque values only in the auxiliary validator's view, preserving
+/// every byte offset and newline. The returned AST and source remain untouched.
+fn deep_program_projection(source: &str, exprs: &[chelis_deep::Expr]) -> String {
+    use chelis_deep::{Expr, Metadata};
+    fn metadata(meta: &Metadata, bytes: &mut [u8]) {
+        for (_, data) in meta.extensions().iter() {
+            let span = data.span();
+            let value = &mut bytes[span.offset..span.end()];
+            for byte in value.iter_mut() {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+            value[0] = b'0';
+        }
+        meta.visit_syntax(&mut |_, value| visit(value, bytes));
+    }
+    fn visit(expr: &Expr, bytes: &mut [u8]) {
+        match expr {
+            Expr::Node(node, _) => {
+                metadata(node.meta(), bytes);
+                for child in node.children_slice() {
+                    visit(child, bytes);
+                }
+            }
+            Expr::BareList(items, _) => {
+                for child in items {
+                    visit(child, bytes);
+                }
+            }
+            Expr::Map(meta, _) => metadata(meta, bytes),
+            Expr::MetaExpr(meta, _) => {
+                metadata(&meta.metadata, bytes);
+                visit(&meta.expr, bytes);
+            }
+            Expr::UnknownForm(data) => {
+                metadata(&data.meta, bytes);
+                for child in &data.children {
+                    visit(child, bytes);
+                }
+            }
+            Expr::Atom(..) => {}
+        }
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    for expr in exprs {
+        visit(expr, &mut bytes);
+    }
+    String::from_utf8(bytes).expect("whole lexical values replaced with ASCII")
 }
 
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
@@ -322,6 +377,13 @@ fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError>
             deep::Rule::typed_helper => validate_typed_helper(child.clone())?,
             deep::Rule::bare_list => validate_bare_list(child.clone())?,
             deep::Rule::unit_list | deep::Rule::literal | deep::Rule::bare_name => {}
+            deep::Rule::wildcard if deep_tag == DeepTag::DName => {}
+            deep::Rule::wildcard => {
+                return Err(ValidationError::Failed(format!(
+                    "Deep wildcard `*` at byte {} is only valid as the sole child of `d-name`",
+                    child.as_span().start()
+                )));
+            }
             other => {
                 return Err(ValidationError::Failed(format!(
                     "unexpected Deep child rule {:?} under `{tag}` at byte {}",
@@ -437,6 +499,21 @@ fn validate_tag_shape(
             }
             Ok(())
         }
+        DeepTag::DName => {
+            if child_count != 1 {
+                return Err(wrong_arity("exactly 1 name or wildcard child"));
+            }
+            if matches!(
+                children[0].as_rule(),
+                deep::Rule::bare_name | deep::Rule::wildcard
+            ) {
+                Ok(())
+            } else {
+                Err(ValidationError::Failed(format!(
+                    "Deep tag `d-name` at byte {offset} expects one name or wildcard child"
+                )))
+            }
+        }
         // No additional shape constraint at this validator: these tags'
         // arity/shape rules are owned by the type checker (spec/03
         // §2.5.1/§2.6, §8.2) or by their enclosing form. Listed explicitly
@@ -479,7 +556,6 @@ fn validate_tag_shape(
         | DeepTag::TVar
         | DeepTag::TUnit
         | DeepTag::TTuple
-        | DeepTag::DName
         | DeepTag::DVar
         | DeepTag::DLit
         | DeepTag::DRank
@@ -621,9 +697,57 @@ mod tests {
     fn deep_accepts_rank_polymorphic_borrow_annotation() {
         // `&tensor[..r, f32]` desugars to `(t-ref {} (t-tensor {} (d-rank {} r) ...))`.
         // Both `t-ref` and `d-rank` must be in the vocabulary.
-        let source = "(defsig {} f (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
+        let source = "(defsig {} f (r) (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} f32))) (t-tensor {} (d-rank {} r) (t-prim {} f32))))\n";
         validate_deep(source)
             .expect("validator should accept canonical t-ref / d-rank rank-polymorphic Deep");
+    }
+
+    #[test]
+    fn deep_accepts_the_explicit_d_name_wildcard() {
+        // spec/03-deep-syntax.md §2.6: `*` is the explicit wildcard
+        // spelling for the sole symbol child of `d-name`.
+        let source = "(defsig {} f (t-tensor {} (d-name {} *) (t-prim {} f32)))\n";
+        chelis_deep::parse_and_stamp_file(source)
+            .expect("the stamped compiler ingress accepts the wildcard dimension");
+        validate_deep(source).expect("the independent grammar must accept it too");
+    }
+
+    #[test]
+    fn deep_rejects_wildcards_outside_d_name() {
+        // The wildcard exception is a child-role rule, not an identifier
+        // spelling. In particular it must not become a variable, dimension
+        // variable, rank variable, primitive, binder, or declaration name.
+        for source in [
+            "(def {} f (var {} *))\n",
+            "(defsig {} f (t-tensor {} (d-var {} *) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-rank {} *) (t-prim {} f32)))\n",
+            "(defsig {} f (t-prim {} *))\n",
+            "(def {} * (lit {} 1))\n",
+        ] {
+            let error = validate_deep(source)
+                .expect_err("`*` outside the sole child of `d-name` must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("only valid as the sole child of `d-name`"),
+                "wrong reason for {source:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_rejects_malformed_wildcard_dimensions() {
+        for source in [
+            "(defsig {} f (t-tensor {} (d-name {}) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} * batch) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} **) (t-prim {} f32)))\n",
+            "(defsig {} f (t-tensor {} (d-name {} *foo) (t-prim {} f32)))\n",
+        ] {
+            assert!(
+                validate_deep(source).is_err(),
+                "a wildcard dimension must have exactly one standalone `*` child: {source}"
+            );
+        }
     }
 
     #[test]
@@ -680,7 +804,7 @@ mod tests {
 
     #[test]
     fn surf_accepts_arrow_return_types() {
-        let source = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
+        let source = "def f[n](x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n";
         validate_surf(source).expect("validator should accept arrow return types");
     }
 
@@ -720,6 +844,37 @@ mod tests {
             msg.contains("expression statement must be bound"),
             "diagnostic should carry the parser's #706 reason; got: {msg}"
         );
+    }
+
+    /// chelis#2413: the `with seed(..)` handler and the `Random` effect name
+    /// are retired spellings the compiler parser refuses, so the grammar
+    /// refuses them too, and the validator reports no grammar/parser split.
+    /// `with device(..)` and `! {Diff}` stay admitted.
+    ///
+    /// Evidentiary status: REGRESSION TEST. At `096daea8c` the grammar
+    /// admitted all three retired rows.
+    #[test]
+    fn surf_grammar_refuses_the_retired_randomness_spellings() {
+        use pest::Parser as _;
+        let grammar =
+            |source: &str| super::surf::Grammar::parse(super::surf::Rule::program, source).is_ok();
+        for source in [
+            "def f() = with seed(1) { 1.0 }\n",
+            "def f(x: f32) -> f32 ! {Random} = x\n",
+            "def f(x: f32) -> f32 ! {random} = x\n",
+        ] {
+            assert!(!grammar(source), "the grammar admits {source:?}");
+            let message = validate_surf(source)
+                .expect_err("the compiler parser refuses it")
+                .to_string();
+            assert!(!message.contains("too lenient"), "{message}");
+        }
+        for source in [
+            "def f() = with device(\"cpu\") { 1.0 }\n",
+            "def f(x: f32) -> f32 ! {Diff} = x\n",
+        ] {
+            assert!(grammar(source), "the grammar refuses {source:?}");
+        }
     }
 
     #[test]
@@ -767,6 +922,35 @@ mod tests {
     }
 
     #[test]
+    fn deep_metadata_preserves_arbitrary_macro_argument_syntax() {
+        let source = "(def {source: (macro_name {surf_future: 1, span: 2} ((original_name) ^{:type f32} x))} f (lit {} 1))";
+        validate_deep(source).unwrap();
+        validate_deep("(def {source: 1} f (lit {} 1))").unwrap_err();
+    }
+
+    #[test]
+    fn opaque_data_grammar_is_owned_by_its_parser() {
+        for payload in [
+            "1e-3f32",
+            "{type: false type: (var {}),}",
+            "^{:span 7} (missing_macro x)",
+            "(a-b \"λ\" (lit {} 7i8))",
+        ] {
+            let source = format!("(def {{tool_data: {payload}}} f (lit {{}} 1))");
+            validate_deep(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+        validate_deep("(def {property_quantifiers: (params {tool_data: 7f32})} f (lit {} 1))")
+            .unwrap();
+        for source in [
+            "(def {tool_data: {broken:}} f (lit {} 1))",
+            "(def {type: false} f (lit {} 1))",
+            "(def {tool_data: 1f32} f (var {} x y))",
+        ] {
+            assert!(validate_deep(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn deep_rejects_invalid_effects_children() {
         // chelis#1088: `(effects ...)` is only ever a metadata value in real
         // Deep, never a top-level form, so the fixture now sits where it
@@ -777,7 +961,10 @@ mod tests {
         let source = "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
         let rendered = error.to_string();
-        assert!(rendered.contains("`effects` must contain"), "{rendered}");
+        assert!(
+            rendered.contains("metadata `eff`") && rendered.contains("effects node"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -790,7 +977,7 @@ mod tests {
         let error = validate_deep(source).expect_err("resource arity should fail");
         let rendered = error.to_string();
         assert!(rendered.contains("resource"), "{rendered}");
-        assert!(rendered.contains("wrong child count"), "{rendered}");
+        assert!(rendered.contains("metadata `eff`"), "{rendered}");
     }
 
     #[test]
@@ -958,7 +1145,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} \"foo\"))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
         );
     }
@@ -1108,10 +1295,10 @@ mod tests {
     #[test]
     fn deep_admits_a_map_valued_metadata_key() {
         for source in [
-            "(defsig {dtype_bounds: {p: int}} arange (t-fn {} (t-var {} p) (t-var {} p)))\n",
-            "(defsig {dtype_bounds: {p: float, q: numeric}} f (t-fn {} (t-var {} p) (t-var {} q)))\n",
+            "(defsig {dtype_bounds: {p: int}} arange (p) (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {p: float, q: numeric}} f (p q) (t-fn {} (t-var {} p) (t-var {} q)))\n",
             // The empty map is a legal value, as it is a legal node meta.
-            "(defsig {dtype_bounds: {}} f (t-fn {} (t-var {} p) (t-var {} p)))\n",
+            "(defsig {dtype_bounds: {}} f (p) (t-fn {} (t-var {} p) (t-var {} p)))\n",
         ] {
             validate_deep(source)
                 .unwrap_or_else(|e| panic!("map-valued metadata must validate: {source}\n{e}"));
@@ -1127,7 +1314,7 @@ mod tests {
     fn surf_grammar_admits_the_dtype_family_binder_list() {
         use pest::Parser;
         for source in [
-            "sig arange[p: Int]: p -> p -> tensor[n, p]\n",
+            "sig arange[n, p: Int]: p -> p -> tensor[n, p]\n",
             "sig total[p: Numeric]: p -> p -> p\n",
             "def only_floats[p: Float](x: p) -> p = x\n",
             "def scale[n, p: Float](x: tensor[n, p]) -> tensor[n, p] = x\n",
@@ -1158,19 +1345,24 @@ mod tests {
     /// two implementations that have to agree with that sentence.
     #[test]
     fn deep_admits_the_declared_metadata_key_charset() {
-        for key in [
-            "dtype_bounds",
-            "chelis_role",
-            "surf_path",
-            "_leading",
-            "Upper",
+        for (key, source) in [
+            (
+                "dtype_bounds",
+                "(defsig {dtype_bounds: {p: float}} f (p) (t-var {} p))",
+            ),
+            (
+                "chelis_role",
+                "(def {chelis_role: \"custom\"} f (lit {} 1))",
+            ),
+            ("surf_path", "(module {surf_path: \"M.Path\"} m.path)"),
+            ("_leading", "(def {_leading: x} f (lit {} 1))"),
+            ("Upper", "(def {Upper: x} f (lit {} 1))"),
         ] {
-            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
-            validate_deep(&source)
+            validate_deep(source)
                 .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
         }
         // The no-hyphen rule that keeps Deep symbols portable still holds.
-        validate_deep("(defsig {has-hyphen: x} f (t-var {} p))\n")
+        validate_deep("(defsig {has-hyphen: x} f (p) (t-var {} p))\n")
             .expect_err("a hyphenated metadata key must still be rejected");
     }
 
@@ -1186,8 +1378,9 @@ mod tests {
                       sig planted_pick[p: Numeric]: p -> p -> p\n\
                       def planted_pick(a, b) = a\n";
         let decls = chelis_surf::parser::parse_str(source).expect("bounded Surf parses");
-        let printed =
-            chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+        let printed = chelis_deep::printer::print_canonical(
+            &chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar"),
+        );
         assert!(
             printed.contains("dtype_bounds: {p: numeric}"),
             "the fixture must actually carry a map-valued key: {printed}"

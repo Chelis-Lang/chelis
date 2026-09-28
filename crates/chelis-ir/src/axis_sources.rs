@@ -45,11 +45,46 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
 
+/// The two distinct primitives represented by a verified `RiscOp::Expand`.
+/// Spec/10 section 3.4 selects the form by the verified input/output rank relation;
+/// mutable runtime metadata supplies no source-operation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpansionKind {
+    Expand,
+    Insert,
+}
+impl ExpansionKind {
+    pub fn primitive_name(self) -> &'static str {
+        match self {
+            Self::Expand => "expand",
+            Self::Insert => "insert",
+        }
+    }
+}
+/// An invalid or non-expansion node has no form; verification rejects invalid ranks.
+pub fn expansion_kind(dag: &Dag, id: NodeId) -> Option<ExpansionKind> {
+    let node = dag.get(id)?;
+    if !matches!(node.op, RiscOp::Expand { .. }) {
+        return None;
+    }
+    let input = dag.get(*node.inputs.first()?)?;
+    match node
+        .output_type
+        .dims
+        .len()
+        .checked_sub(input.output_type.dims.len())
+    {
+        Some(0) => Some(ExpansionKind::Expand),
+        Some(1) => Some(ExpansionKind::Insert),
+        _ => None,
+    }
+}
+
 /// Where one realized output axis gets its extent.
 ///
 /// The variant set is C4's, and it is deliberately closed: an extent is a
 /// compile-time literal, an axis of an external `Load`, an axis of one of
-/// this node's own tensor inputs, a rank-0 `int64` scalar input, or a value
+/// this node's own tensor inputs, a rank-0 `i64` scalar input, or a value
 /// the operation computes by its own output-shape rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxisSource {
@@ -59,7 +94,7 @@ pub enum AxisSource {
     ExternalAxis { load: NodeId, axis: usize },
     /// An axis of the tensor in this node's absolute input slot `input`.
     InputAxis { input: usize, axis: RtAxis },
-    /// A rank-0 exact-`int64` extent value in absolute input slot `input`.
+    /// A rank-0 exact-`i64` extent value in absolute input slot `input`.
     ScalarInput { input: usize },
     /// The operation computes this extent by its own output-shape rule, so
     /// it is a fresh extent rather than any input's runtime dimension.
@@ -83,6 +118,35 @@ pub enum AxisSource {
 /// neither name a class nor be located from a sibling.
 fn is_anonymous(name: &str) -> bool {
     name.is_empty() || name == "*"
+}
+
+/// Whether a dimension name was minted by the compiler rather than written in
+/// a signature.
+///
+/// Three minting vocabularies exist and all three name a FRESH extent that no
+/// signature declares: the lowerer's `_rt_<operation>_dim_<node>_<axis>` for
+/// an extent an operation computes, the C emitter's and DAG's
+/// `_anon_dim_<node>_<axis>` for an axis with no name at all, and the
+/// checker's `d<N>` for an unresolved dimension variable. An anonymous
+/// spelling is included, since it is the same fact with no spelling.
+///
+/// The distinction this draws is ownership, not cosmetics. A user-spelled
+/// name on an axis is a claim some signature makes about it, with its own
+/// declaring witness and its own guard; a synthesized name is the compiler's
+/// placeholder for an extent nothing has claimed yet. Consumers that must not
+/// overwrite one signature's claim with another's ask this question.
+///
+/// `d<N>` is the one spelling a user could also write. Nothing distinguishes
+/// them at this layer, so a signature declaring `tensor[d0, f32]` is read as
+/// synthesized. That is the checker's existing display vocabulary rather than
+/// a choice made here.
+pub fn is_synthesized_dim_name(name: &str) -> bool {
+    is_anonymous(name)
+        || name.starts_with("_rt_")
+        || name.starts_with("_anon_dim_")
+        || name
+            .strip_prefix('d')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// An axis of the tensor in `slot`. Ranks are bounded by addressable memory,
@@ -184,6 +248,129 @@ fn shape_preserving(dag: &Dag, node: &DagNode) -> Vec<AxisSource> {
     }
 }
 
+/// Whether this operation semantically produces a result with the shape of
+/// all of its positive-rank operands.
+///
+/// Administrative identity nodes stay outside this set: a `Copy`, `Drop`,
+/// `Realize`, or `Store` forwards an existing value rather than becoming the
+/// primitive named by a declared-result guard. Casts remain in the set because
+/// spec/04 §4.7 gives a cast the placement of its input while retaining the
+/// cast as the primitive that produced the returned value.
+pub fn is_same_shape_result_op(op: &RiscOp) -> bool {
+    matches!(
+        op,
+        RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::FloorDiv
+            | RiscOp::TruncDiv
+            | RiscOp::Mod
+            | RiscOp::Bitwise(_)
+            | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
+            | RiscOp::Relu
+            | RiscOp::ReluAdjoint
+            | RiscOp::Neg
+            | RiscOp::Exp
+            | RiscOp::Log
+            | RiscOp::Sin
+            | RiscOp::Sqrt
+            | RiscOp::Cos
+            | RiscOp::Tan
+            | RiscOp::Atan
+            | RiscOp::Abs
+            | RiscOp::Floor
+            | RiscOp::Ceil
+            | RiscOp::Round
+            | RiscOp::Recip
+            | RiscOp::UniformLike
+            | RiscOp::Dropout
+            | RiscOp::DropoutReplay
+            | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
+            | RiscOp::FusedElem { .. }
+    )
+}
+
+/// The complete positive-rank operand relation for a same-shape result.
+///
+/// Members are node identities rather than input slots. Repeated edges to the
+/// same value therefore form one agreement member, while distinct operand
+/// paths remain distinct. Source order is retained only for deterministic
+/// comparison order; no member is the result claim's semantic owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SameShapeAgreement {
+    members: Vec<NodeId>,
+}
+
+impl SameShapeAgreement {
+    pub fn members(&self) -> &[NodeId] {
+        &self.members
+    }
+}
+
+/// Derive the complete agreement relation for a positive-rank same-shape
+/// result.
+///
+/// `Ok(None)` means the operation is not a same-shape producer, or that its
+/// result is rank zero and therefore has no result axis to observe. A
+/// positive-rank producer must have at least one positive-rank operand, and
+/// every such operand must have the result rank. Returning an error rather
+/// than an empty set prevents a malformed result claim from disappearing.
+pub fn same_shape_result_agreement(
+    dag: &Dag,
+    node: NodeId,
+) -> Result<Option<SameShapeAgreement>, String> {
+    let owner = dag
+        .get(node)
+        .ok_or_else(|| format!("same-shape result references missing node {}", node.0))?;
+    if !is_same_shape_result_op(&owner.op) || owner.output_type.dims.is_empty() {
+        return Ok(None);
+    }
+    let result_rank = owner.output_type.dims.len();
+    let mut members = Vec::new();
+    // A random primitive's data operand is its only same-shape operand. Its
+    // key, controls and activation are shaped like leading parts of the data
+    // (spec/10 §3.2), whose agreement with the data's leading axes the draw
+    // checks itself.
+    let operands = match owner.op {
+        RiscOp::UniformLike | RiscOp::Dropout | RiscOp::DropoutReplay => {
+            &owner.inputs[..owner.inputs.len().min(1)]
+        }
+        _ => &owner.inputs[..],
+    };
+    for input in operands {
+        let operand = dag.get(*input).ok_or_else(|| {
+            format!(
+                "same-shape result at node {} references missing operand {}",
+                node.0, input.0
+            )
+        })?;
+        let operand_rank = operand.output_type.dims.len();
+        if operand_rank == 0 {
+            continue;
+        }
+        if operand_rank != result_rank {
+            return Err(format!(
+                "same-shape result at node {} has positive-rank operand {} of rank {}, expected rank {}",
+                node.0, input.0, operand_rank, result_rank
+            ));
+        }
+        if !members.contains(input) {
+            members.push(*input);
+        }
+    }
+    if members.is_empty() {
+        return Err(format!(
+            "same-shape result at node {} has rank {} but no positive-rank agreement member",
+            node.0, result_rank
+        ));
+    }
+    Ok(Some(SameShapeAgreement { members }))
+}
+
 /// The sources of a node that declares its own shape with no operand to read
 /// it from: `Const` (a uniform fill at positive rank) and `ConstTensor`.
 ///
@@ -238,7 +425,11 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
-        | RiscOp::CmpLt
+        | RiscOp::Mod
+        | RiscOp::Bitwise(_)
+        | RiscOp::Compare(_)
+        | RiscOp::Logical(_)
+        | RiscOp::Where
         | RiscOp::MaxElem
         | RiscOp::MinElem
         | RiscOp::ExtremaAdjoint { .. }
@@ -257,15 +448,48 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Ceil
         | RiscOp::Round
         | RiscOp::Recip
-        | RiscOp::UniformLike { .. }
-        | RiscOp::Dropout { .. }
+        | RiscOp::UniformLike
+        | RiscOp::Dropout
+        | RiscOp::DropoutReplay
         | RiscOp::Copy
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
         | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
-        | RiscOp::Store { .. } => shape_preserving(dag, node),
+        | RiscOp::Store { .. }
+        | RiscOp::KeyFromSeed
+        | RiscOp::Split { .. }
+        | RiscOp::FoldIn
+        | RiscOp::KeySelect => shape_preserving(dag, node),
+
+        // [05-OP-71]: the key's axes pass through and the new last axis is
+        // the count's own typed carrier.
+        RiscOp::SplitN { count } => match input_rank(dag, node, 0) {
+            Some(key_rank) if key_rank + 1 == rank => (0..key_rank)
+                .map(|axis| pass_through(id, 0, axis))
+                .chain(std::iter::once(rt_dim_source(id, key_rank, count)))
+                .collect(),
+            _ => op_computed(id, rank),
+        },
+
+        // Rank-0 result: a bound adjoint is a scalar sum with no axis.
+        RiscOp::UniformBoundAdjoint { .. } => op_computed(id, rank),
+
+        // chelis#1464 / [05-OP-68]: the result IS the fallback, so every
+        // output axis comes from input slot 1.
+        //
+        // Deliberately NOT `shape_preserving`, which picks the FIRST
+        // rank-matching input: under `vmap` the condition is batched to
+        // rank 1 alongside the fallback, so it would select slot 0, the
+        // condition. `schema.rs`'s wire-side axis origin already reads
+        // `inputs.get(1)` directly; this keeps the two in agreement.
+        RiscOp::GuardedFail { .. } => match input_rank(dag, node, 1) {
+            Some(fallback_rank) if fallback_rank == rank => {
+                (0..rank).map(|axis| pass_through(id, 1, axis)).collect()
+            }
+            _ => op_computed(id, rank),
+        },
 
         // --- Reductions: the reduced axis is removed, so output axis `a`
         // maps back to input axis `a` before it and `a + 1` at or after it.
@@ -434,7 +658,10 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Shape query: a rank-0 scalar has no output axis ---
-        RiscOp::Shape { .. } => Vec::new(),
+        RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. } => Vec::new(),
+        RiscOp::CheckedUnitAxis { .. } => (0..rank).map(|axis| pass_through(id, 0, axis)).collect(),
 
         // --- Memory ---
         RiscOp::Const { .. } | RiscOp::ConstTensor { .. } => declared_shape_sources(dag, node),
@@ -504,8 +731,8 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
 ///
 /// C4.1: the derivation must yield exactly the output rank with no omitted
 /// or duplicated axis; `ExternalAxis` must name a real `Load`; `InputAxis`
-/// must validate the tensor slot and its normalized `int32` axis;
-/// `ScalarInput` must validate C2.1's rank-0 exact-`int64` contract. A
+/// must validate the tensor slot and its normalized `i32` axis;
+/// `ScalarInput` must validate C2.1's rank-0 exact-`i64` contract. A
 /// well-typed mapping this resolver cannot yet supply is the registered
 /// chelis#730 typed receipt (C4.3), never the occurrence pass's panic and
 /// never an input extent substituted for the missing one.
@@ -516,6 +743,68 @@ pub fn check_axis_sources(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
     for node in dag.nodes() {
         let sources = output_axis_sources(dag, node.id);
         check_node_axis_sources(dag, node, &sources, stage)?;
+    }
+    Ok(())
+}
+
+/// Every name a lane renders as an identifier resolves to an origin.
+///
+/// This is what replaced the occurrence walk's `panic!` (chelis#665).
+/// [`check_axis_sources`] asks whether each AXIS has a source; this asks
+/// whether each NAME the emitted text mentions has one place that assigns it.
+/// The two are not the same question: a name can be carried by an axis whose
+/// own source is a pass-through into an operand whose axis has none, and the
+/// emitted text would then mention an identifier nothing declares.
+///
+/// Refusing is the whole point. Emitting the name anyway produces C that does
+/// not compile at best and a mis-sized allocation at worst, and guessing an
+/// extent from another axis that happens to share the spelling is the
+/// string-matching defect this module exists to remove.
+///
+/// This is an EMISSION obligation and not a lowering one, which is why it is
+/// not folded into [`check_axis_sources`]. Only a lane that renders a name as
+/// an identifier owes a declaration for it, and a graph can be perfectly
+/// well-formed for ownership, capacity planning or evaluation while carrying
+/// a name no lane has to render: the evaluator computes every extent from
+/// actual values and refuses a name it genuinely needs with its own
+/// missing-binding error.
+///
+/// The C emitter is the only lane that calls this today, and that is a stated
+/// boundary rather than an oversight. HIP declares from the interface
+/// bindings alone and Metal consumes none of this derivation, so neither is
+/// migrated onto origins and neither owes the check yet; adding it to a lane
+/// whose declarations come from elsewhere would refuse programs that lane
+/// emits correctly. Migrating them is the residual, tracked with the rest of
+/// the declaration work.
+///
+/// The scan walks nodes rather than names, so the node the receipt blames is
+/// the carrier the scan found, never a positional fallback: a name reaches
+/// [`unresolved_dim_names`] only by way of a node that carries it, so there
+/// is nothing to fall back to and an empty graph reports nothing.
+pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
+    let unresolved = unresolved_dim_names(dag);
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    for node in dag.nodes() {
+        let carried = node
+            .output_type
+            .dims
+            .iter()
+            .filter_map(|dim| match dim {
+                DimInfo::Named(name, None) => Some(name.clone()),
+                _ => None,
+            })
+            .chain(crate::dag::op_internal_symbolic_dims(&node.op))
+            .find(|name| unresolved.contains(name));
+        if let Some(name) = carried {
+            return Err(receipt(
+                format!("extent `{name}` resolves to no source"),
+                node,
+                stage,
+                true,
+            ));
+        }
     }
     Ok(())
 }
@@ -678,7 +967,7 @@ pub(crate) fn check_node_axis_sources(
                 if source_node.output_type.precision != Prim::Int64 {
                     return Err(receipt(
                         format!(
-                            "output axis {axis} reads a `{}` extent value in input slot {input}, which must be int64",
+                            "output axis {axis} reads a `{}` extent value in input slot {input}, which must be i64",
                             source_node.output_type.precision.name()
                         ),
                         node,
@@ -708,6 +997,250 @@ pub(crate) fn check_node_axis_sources(
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// C4.4's remaining half: where a named extent's value is PRODUCED.
+//
+// `output_axis_sources` answers "what determines this axis", one hop, in the
+// operation's own terms. A declaration consumer needs the terminal answer
+// instead: the emitted C allocates by NAME (`chelis_alloc(1, (int64_t[]){
+// _anon_dim_2_1 })`), so every name it renders needs one place that assigns
+// it. Resolving the one-hop chain to its terminal origin is what lets a
+// declaration come from the axis SOURCE rather than from a search for a
+// `Load` carrying the same string, which is what chelis#665 and chelis#1556
+// both fail.
+// ===========================================================================
+
+/// Where the value of one output axis's extent is PRODUCED, after resolving
+/// every pass-through hop.
+///
+/// This is the terminal form of [`AxisSource`]: `InputAxis` is a hop rather
+/// than an origin (the extent belongs to the operand's axis, which has a
+/// source of its own), and `ClassSupplied` states that the claim supplies the
+/// extent without saying which member produces it. Both resolve here;
+/// everything else is already terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentOrigin {
+    /// A compile-time-constant extent.
+    Literal(i64),
+    /// An axis of an external `Load`, named by the exact declaring node. The
+    /// C and HIP prologues can declare this one from input shape metadata
+    /// before any operation runs.
+    ExternalAxis { load: NodeId, axis: usize },
+    /// A rank-0 exact-`i64` extent value produced by `value`, read by the
+    /// operation at output axis `axis` of `at`. The operation is where a lane
+    /// renders the read, so it is also where a declaration goes; `value`
+    /// names the node the extent comes out of.
+    ScalarInput {
+        value: NodeId,
+        at: NodeId,
+        axis: usize,
+    },
+    /// An extent the operation computes by its own output-shape rule, so it
+    /// exists only once that operation has run and must be declared there.
+    OpComputed { op: NodeId, axis: usize },
+}
+
+/// The origin of `node`'s output axis `axis`, resolving pass-through hops.
+///
+/// `InputAxis { input, Lit(a) }` recurses into the operand in that absolute
+/// input slot at axis `a`: a kept axis's extent IS the operand's, which is
+/// why it is not a witness of its own claim (`derive_dim_witnesses` skips it
+/// for exactly that reason) and why a declaration for it has to come from
+/// wherever the operand's axis is produced.
+///
+/// `ClassSupplied` resolves through the claim's class: the axis is sized by
+/// whatever the class resolves to, so its origin is the origin of the class's
+/// canonical member. A class with no member that resolves anywhere has no
+/// origin, which is a typed receipt rather than a guess.
+///
+/// The walk is bounded by the node count, so a malformed graph cannot spin.
+/// `None` means the axis has no resolvable origin.
+pub fn resolve_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> Option<ExtentOrigin> {
+    resolve_axis_extent_bounded(dag, node, axis, dag.nodes().len())
+}
+
+fn resolve_axis_extent_bounded(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<ExtentOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let source = output_axis_sources(dag, node).into_iter().nth(axis)?;
+    match source {
+        AxisSource::Literal { value } => Some(ExtentOrigin::Literal(value)),
+        AxisSource::ExternalAxis { load, axis } => Some(ExtentOrigin::ExternalAxis { load, axis }),
+        AxisSource::OpComputed { op, axis } => Some(ExtentOrigin::OpComputed { op, axis }),
+        AxisSource::ScalarInput { input } => {
+            let value = *dag.get(node)?.inputs.get(input)?;
+            Some(ExtentOrigin::ScalarInput {
+                value,
+                at: node,
+                axis,
+            })
+        }
+        AxisSource::InputAxis { input, axis } => {
+            let RtAxis::Lit(read_axis) = axis;
+            let operand = *dag.get(node)?.inputs.get(input)?;
+            let read_axis = usize::try_from(read_axis).ok()?;
+            resolve_axis_extent_bounded(dag, operand, read_axis, fuel - 1)
+        }
+        AxisSource::ClassSupplied { op, axis } => {
+            resolve_class_supplied_extent(dag, op, axis, fuel - 1)
+        }
+    }
+}
+
+/// The origin a `ClassSupplied` axis takes from its class.
+///
+/// The axis consumes its claim rather than witnessing it, so its extent is
+/// the extent the class resolves to. Take the first member of that class
+/// whose own origin resolves, in the class's canonical order, skipping the
+/// axis itself so a one-member class cannot recurse into itself.
+fn resolve_class_supplied_extent(
+    dag: &Dag,
+    op: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<ExtentOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let claim = axis_claim(dag.get(op)?.output_type.dims.get(axis)?)?;
+    derive_runtime_dim_classes(dag)
+        .into_iter()
+        .filter(|class| class.claim == claim)
+        .flat_map(|class| class.members)
+        .filter(|member| member.node != op || member.axis != axis)
+        .find_map(|member| resolve_axis_extent_bounded(dag, member.node, member.axis, fuel - 1))
+}
+
+/// Every name a lane RENDERS as a C identifier, with the origin that
+/// produces its value, in first-reference (node-id) order.
+///
+/// Two carriers render a name, and both are here because a declaration
+/// consumer must cover both or emit an undeclared identifier: an unbound
+/// `DimInfo::Named(name, None)` in an output type, which `emit_dim_info`
+/// prints verbatim, and an op-internal reference, which is a `Reshape`
+/// target's `RtDim::Sym` or one of `BlasMatmul`'s dimension expressions. A
+/// statically bound `Named(name, Some(4))` renders as its literal and needs
+/// no declaration, but it is still a CANDIDATE for locating the name's
+/// origin, exactly as the legacy walk's `bind_symbol_from_any_load` accepted
+/// one.
+///
+/// Selection among a name's candidate axes has one rule beyond node order,
+/// and it is ordered by where a lane can actually put the declaration. An
+/// `ExternalAxis` wins outright: it is an input tensor's axis, readable from
+/// shape metadata before any operation runs, so declaring from it dominates
+/// every reference to the name. That is the split the legacy walk made by
+/// asking whether the name was "also Load-carried", and the derivation's
+/// guards still compare it against any operation that stamps the same name on
+/// a fresh axis. An `OpComputed` or `ScalarInput` comes next, because it
+/// names the operation that produces the extent and so names a site. A
+/// `Literal` comes LAST despite being the most certain answer, because it
+/// names no site at all: no lane declares an entry literal today, so choosing
+/// one over an available site would leave the name undeclared.
+///
+/// A name with no resolvable origin is absent here and listed by
+/// [`unresolved_dim_names`] instead, so a consumer fails closed with a
+/// receipt rather than panicking or guessing an extent.
+pub fn dim_extent_origins(dag: &Dag) -> Vec<(String, ExtentOrigin)> {
+    rendered_dim_names(dag)
+        .into_iter()
+        .filter_map(|name| {
+            let origin = resolve_named_dim_origin(dag, &name)?;
+            Some((name, origin))
+        })
+        .collect()
+}
+
+/// Every name a lane renders as a C identifier that [`dim_extent_origins`]
+/// could NOT resolve to an origin. A consumer turns each into a typed
+/// receipt rather than a panic or a guessed extent.
+pub fn unresolved_dim_names(dag: &Dag) -> Vec<String> {
+    rendered_dim_names(dag)
+        .into_iter()
+        .filter(|name| resolve_named_dim_origin(dag, name).is_none())
+        .collect()
+}
+
+/// The names a lane renders as identifiers, deduplicated, in first-reference
+/// node-id order. Within one node the output axes come before the op-internal
+/// references, which is the order the emitter writes them in.
+///
+/// This is the complete set a declaration consumer owes a declaration for,
+/// and the complete set [`crate::dag::bind_symbolic_dims`] can refuse.
+pub fn rendered_dim_names(dag: &Dag) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for node in dag.nodes() {
+        let axis_names = node.output_type.dims.iter().filter_map(|dim| match dim {
+            DimInfo::Named(name, None) => Some(name.clone()),
+            _ => None,
+        });
+        for name in axis_names.chain(crate::dag::op_internal_symbolic_dims(&node.op)) {
+            if !is_anonymous(&name) && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+impl ExtentOrigin {
+    /// The `(node, axis)` where a lane renders this extent, for an origin the
+    /// function entry cannot supply. `None` means the entry supplies it: a
+    /// literal, or an input tensor's axis the prologue reads from shape
+    /// metadata before any operation runs.
+    pub fn local_site(&self) -> Option<(NodeId, usize)> {
+        match self {
+            ExtentOrigin::Literal(_) | ExtentOrigin::ExternalAxis { .. } => None,
+            ExtentOrigin::OpComputed { op, axis } => Some((*op, *axis)),
+            ExtentOrigin::ScalarInput { at, axis, .. } => Some((*at, *axis)),
+        }
+    }
+}
+
+/// The origin of one name, over every output axis that carries it, in the
+/// preference order [`dim_extent_origins`] documents.
+fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
+    let mut local: Option<ExtentOrigin> = None;
+    let mut literal: Option<ExtentOrigin> = None;
+    // A guarded restating axis claims the name without declaring it; its
+    // forwarded extent is what the name's guard compares, and so is every
+    // axis that forwards it further. It supplies the value only when nothing
+    // else carries the name. An unguarded restamp, alone in its scope,
+    // declares the name as any other first occurrence does.
+    let mut restated: Option<ExtentOrigin> = None;
+    let guarded_restamps = guarded_restamp_axes(dag);
+    for node in dag.nodes() {
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            if !matches!(dim, DimInfo::Named(other, _) if other == name) {
+                continue;
+            }
+            let Some(origin) = resolve_axis_extent(dag, node.id, axis) else {
+                continue;
+            };
+            if forwards_a_guarded_restamp(dag, node.id, axis, &guarded_restamps) {
+                restated = restated.or(Some(origin));
+                continue;
+            }
+            match origin {
+                ExtentOrigin::ExternalAxis { .. } => return Some(origin),
+                ExtentOrigin::Literal(_) if literal.is_none() => literal = Some(origin),
+                ExtentOrigin::OpComputed { .. } | ExtentOrigin::ScalarInput { .. }
+                    if local.is_none() =>
+                {
+                    local = Some(origin)
+                }
+                _ => {}
+            }
+        }
+    }
+    local.or(literal).or(restated)
 }
 
 /// The stamped extent claim a class groups by.
@@ -788,7 +1321,7 @@ pub struct RuntimeDimClass {
 ///
 /// "A `cast` takes the placement of the value it casts" (section 4.7, same
 /// paragraph), so the walk looks through `Cast`/`CastTrunc` to the value cast:
-/// an `int32` parameter reaching an extent through `cast(m, int64)` lands its
+/// an `i32` parameter reaching an extent through `cast(m, i64)` lands its
 /// carrier at the Cast, not at the `Load`, and classifying by the immediate
 /// producer would place one claim two ways depending on a width conversion.
 /// The walk is bounded by the node count, so a malformed graph cannot spin.
@@ -829,58 +1362,16 @@ pub(crate) fn load_through_casts(dag: &Dag, node: NodeId, slot: usize) -> Option
 }
 
 impl RuntimeDimClass {
-    /// C1.3's placement for this class.
-    ///
-    /// `spec/04-type-system.md` section 4.7: "A guard whose operands are all
-    /// interface values (an input tensor's axis, a scalar parameter, or a
-    /// literal) is evaluated at function entry". Every other class compares
-    /// at least one locally computed value and takes the source position of
-    /// the operation that introduces the guarded extent.
+    /// Named classes compare their declaring witnesses. A literal result
+    /// class instead constrains each produced axis, so its ownership must
+    /// agree with an explicit literal-result token on the same axis (§4.7).
     pub fn placement(&self, dag: &Dag) -> GuardPlacement {
-        // Section 4.7 keys on the guard's OPERANDS, not on whether the axis
-        // belongs to a `Load`: "a guard whose operands are all interface
-        // values (an input tensor's axis, a scalar parameter, or a literal)
-        // is evaluated at function entry", against "a guard that compares a
-        // locally computed value (checked integer arithmetic, a
-        // user-function result, or an extent an operation computes)".
-        //
-        // So a folded `shape(y, k)` read is an INTERFACE value: `spec/05`
-        // section 2.4.1 admits `InputAxis` as an `expand` extent read
-        // "directly from that tensor's shape metadata", so the quantity the
-        // guard compares is an input tensor's axis, exactly the first item in
-        // section 4.7's list. Treating only `ExternalAxis` as interface
-        // confused "is this axis a `Load`'s own" with "is this operand an
-        // input's axis", and made every folded cross-tensor read a local
-        // guard.
-        // `ScalarInput` straddles section 4.7's line: it records only WHICH
-        // SLOT holds the extent, and that slot is either a scalar PARAMETER
-        // (interface) or the arithmetic that produced one (locally computed).
-        // The DAG keeps the difference - the slot names a node and that node
-        // has an op - so this is decided by reading it, not by adding a
-        // second representation to carry it.
-        // A slot holds an interface value only when its producer is a `Load`.
-        // Section 4.7's list says "an input TENSOR's axis" and "a scalar
-        // PARAMETER": a folded read of a COMPUTED tensor's axis, like a
-        // computed scalar, does not exist until its producer runs, so its
-        // guard cannot be evaluated at entry "before any other operation of
-        // the function".
-        // "A `cast` takes the placement of the value it casts" (section 4.7,
-        // the same paragraph as the interface list). A cast is how a scalar
-        // parameter of the wrong width reaches an extent - an `int32`
-        // parameter `m` in `reshape(x, [cast(m, int64)])` lands its
-        // `RtDim::Node` at the Cast, not at the `Load` - so classifying by
-        // the slot's IMMEDIATE producer would place the same claim two
-        // different ways depending on a width conversion. Look through the
-        // cast to the value cast: a cast of a parameter is interface, a cast
-        // of arithmetic is local.
-        //
-        // The walk is bounded by the node count, so a malformed graph cannot
-        // spin here.
-        if self
-            .members
-            .iter()
-            .all(|member| member_is_interface(dag, member))
-        {
+        if self.members.iter().all(|member| match self.claim {
+            DimClaim::Literal(_) => {
+                literal_result_interface_observation(dag, member.node, member.axis).is_some()
+            }
+            DimClaim::Name(_) => member_is_interface(dag, member),
+        }) {
             GuardPlacement::Entry
         } else {
             GuardPlacement::Local
@@ -892,11 +1383,13 @@ impl RuntimeDimClass {
 /// value.
 ///
 /// Extracted from [`RuntimeDimClass::placement`] rather than copied, because
-/// two derivations now ask it: the equality classes above and the unit-extent
-/// claims below. The reasoning is the block comment in `placement`, and it
-/// stays there; splitting it in two is how the four instances of one defect
-/// that `member_load_axis` records came about.
+/// named witness classes and operand unit-extent claims both ask it. Literal
+/// result classes use their output owner's interface observation instead:
+/// an available operand does not turn its consumer into an interface value.
 fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
+    if restamps_input_axis(dag, member.node, member.axis) {
+        return false;
+    }
     match member.source {
         AxisSource::Literal { .. } => true,
         AxisSource::ExternalAxis { .. } | AxisSource::InputAxis { .. } => {
@@ -920,30 +1413,160 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 ///
 /// Both lowering paths land on this one key. `lower_fn` registers parameter
 /// `Load`s in declared order, so first occurrence IS declared signature
-/// order there; the subexpression path pre-creates them in a deliberately
-/// name-sorted order and declares no signature, so the ABI branch governs and
-/// that order is the assigned one. It is also exactly what the C emitter's
-/// `input_labels` assigns, so a guard's order here and its slot there cannot
+/// order there. Helpers extracted from a declared function receive that same
+/// parameter order. Only signatureless subexpressions assign name-sorted
+/// slots, so the ABI branch governs those entries. This is also what the C
+/// emitter's `input_labels` assigns, so a guard's order here and its slot there cannot
 /// disagree.
+pub fn ordered_interface_loads(nodes: &[DagNode]) -> Vec<&DagNode> {
+    let mut seen = Vec::new();
+    let mut loads = Vec::new();
+    for node in nodes {
+        if let RiscOp::Load { name } = &node.op
+            && !seen.contains(&name.as_str())
+        {
+            seen.push(name.as_str());
+            loads.push(node);
+        }
+    }
+    loads
+}
+
+/// Locate a witness in the single ordered interface-input set.
 fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
     let name = match &dag.get(load)?.op {
         RiscOp::Load { name } => name.as_str(),
         _ => return None,
     };
-    let mut slot = 0usize;
-    let mut seen: Vec<&str> = Vec::new();
-    for node in dag.nodes() {
-        if let RiscOp::Load { name: other } = &node.op {
-            if other.as_str() == name {
-                return Some(slot);
-            }
-            if !seen.contains(&other.as_str()) {
-                seen.push(other.as_str());
-                slot += 1;
-            }
-        }
+    ordered_interface_loads(dag.nodes())
+        .iter()
+        .position(|node| matches!(&node.op, RiscOp::Load { name: other } if other.as_str() == name))
+}
+
+/// Whether a pass-through output axis restates its input's axis under a
+/// different claim: a same-shape `neg` from `[n]` stamped `[m]`
+/// (chelis#2512). Nothing in the interface relates the two extents; the
+/// equality comes from that operation alone, so spec/04 section 4.7 makes it
+/// a guard the operation owns, at its own source position. A forwarded axis
+/// whose input carries no claim, or the same claim, restates nothing.
+///
+/// Surf lowering reaches this: an inlined callee's result binder stamped on a
+/// compiler-inserted `Copy` over a runtime reshape axis, or an `expand`'s kept
+/// axis over a runtime stride extent, restates its input's claim. The class
+/// then gains a local guard at that operation.
+fn restamps_input_axis(dag: &Dag, node: NodeId, axis: usize) -> bool {
+    let Some(owner) = dag.get(node) else {
+        return false;
+    };
+    if sets_axis(&owner.op, axis) {
+        return false;
     }
-    None
+    let Some(claim @ DimClaim::Name(_)) = owner.output_type.dims.get(axis).and_then(axis_claim)
+    else {
+        return false;
+    };
+    let Some(AxisSource::InputAxis {
+        input,
+        axis: RtAxis::Lit(read),
+    }) = output_axis_sources(dag, node).get(axis).cloned()
+    else {
+        return false;
+    };
+    owner
+        .inputs
+        .get(input)
+        .and_then(|input| dag.get(*input))
+        .and_then(|input| input.output_type.dims.get(usize::try_from(read).ok()?))
+        .and_then(axis_claim)
+        .is_some_and(|input_claim| input_claim != claim)
+}
+
+/// The restamping axes that a runtime-dimension class guards: those whose
+/// class has another member in the same scope. A restamp alone in its scope
+/// has nothing to compare against.
+fn guarded_restamp_axes(dag: &Dag) -> Vec<(NodeId, usize)> {
+    if !dag.nodes().iter().any(|node| {
+        (0..node.output_type.dims.len()).any(|axis| restamps_input_axis(dag, node.id, axis))
+    }) {
+        return Vec::new();
+    }
+    derive_runtime_dim_classes(dag)
+        .into_iter()
+        .flat_map(|class| class.members)
+        .filter(|member| restamps_input_axis(dag, member.node, member.axis))
+        .map(|member| (member.node, member.axis))
+        .collect()
+}
+
+/// The nodes whose declared extent rests on a claim checked under their
+/// activation ([`crate::dag::TrapSeeds::is_claim_sized`]): the node each local
+/// guard site claims an extent of ([`GuardActivation::claimed`]), whatever
+/// the claim (a call's or a callee's result claim, a local ascription, an
+/// extent an operation computes or a carrier sets, a restamp, a unit
+/// extent), and every [`RiscOp::CheckedUnitAxis`], whose unit extent rests on
+/// its witness's requirement. Where its activation holds in no row such a
+/// node checks nothing and produces zeros of its declared type, each claimed
+/// axis taking the claim's extent, rather than reading an operand whose
+/// extent need not be the one it declares.
+///
+/// Only a node with an activation is gated, so a graph with none has no
+/// member worth deriving.
+pub fn claim_sized_nodes(dag: &Dag) -> Result<std::collections::BTreeSet<NodeId>, String> {
+    if dag
+        .nodes()
+        .iter()
+        .all(|node| node.owner.activation.is_none())
+    {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let mut nodes = local_dim_guard_sites(dag)?
+        .into_iter()
+        .map(|(_, claim)| claim.activation.claimed())
+        .collect::<std::collections::BTreeSet<_>>();
+    nodes.extend(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::CheckedUnitAxis { .. }))
+            .map(|node| node.id),
+    );
+    Ok(nodes)
+}
+
+/// Whether `(node, axis)` is a guarded restamp or forwards one unchanged
+/// through pass-through axes.
+fn forwards_a_guarded_restamp(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    guarded: &[(NodeId, usize)],
+) -> bool {
+    if guarded.is_empty() {
+        return false;
+    }
+    let (mut node, mut axis) = (node, axis);
+    for _ in 0..dag.len() {
+        if guarded.contains(&(node, axis)) {
+            return true;
+        }
+        let Some(owner) = dag.get(node) else {
+            return false;
+        };
+        if sets_axis(&owner.op, axis) {
+            return false;
+        }
+        let Some(AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(read),
+        }) = output_axis_sources(dag, node).get(axis).cloned()
+        else {
+            return false;
+        };
+        let (Some(next), Ok(read)) = (owner.inputs.get(input), usize::try_from(read)) else {
+            return false;
+        };
+        (node, axis) = (*next, read);
+    }
+    false
 }
 
 /// The claim stamped on one output axis, or `None` when the axis carries no
@@ -1001,11 +1624,11 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// evaluator answer a question the derivation had already answered, and it got
 /// a unit-extent site wrong, because that site's node is the operand and its
 /// operation carries no such axis. The derivation states the answer now, which
-/// is what C2.7 asks for.
+/// is what C2.5 asks for.
 ///
 /// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
-fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
+pub(crate) fn expand_or_reshape_carrier(op: &RiscOp, axis: usize) -> Option<&RtDim> {
     let carrier = match op {
         RiscOp::Expand { axis: set, size } if axis == *set => size,
         RiscOp::Reshape { new_shape } => new_shape.get(axis)?,
@@ -1125,13 +1748,75 @@ fn root_reach(dag: &Dag) -> Vec<u128> {
                 continue;
             }
             *slot |= bit;
+            // Every dependency, the owner's activation included: a restamp
+            // (`restamps_input_axis`) that feeds only an activation is in its
+            // consumer's scope and owes that scope's guard.
             if let Some(node) = dag.get(id) {
-                stack.extend(node.inputs.iter().copied());
-                stack.extend(node.shape_deps.iter().copied());
+                stack.extend(node.dependencies());
             }
         }
     }
     reach
+}
+
+/// Every node's SCOPE index, where two nodes share a scope when one root
+/// reaches both of them, transitively through any node a chain of roots shares.
+/// `None` marks a node no root reaches.
+///
+/// This is the node-level form of C2.4's scoping, over the same `root_reach`
+/// masks [`split_by_scope`] buckets a claim's members with. It is deliberately
+/// COARSER than that bucketing wherever two roots share a node, and it has to
+/// be: a node two roots reach cannot carry a different dimension name per root,
+/// so a consumer that RENAMES per scope may only split scopes that share
+/// nothing. Scopes are numbered by their lowest node id, so the numbering is a
+/// property of the graph rather than of iteration order.
+pub fn node_scopes(dag: &Dag) -> Vec<Option<usize>> {
+    let reach = root_reach(dag);
+    let mut masks: Vec<u128> = Vec::new();
+    for &mask in &reach {
+        if mask == 0 {
+            continue;
+        }
+        let mut merged = mask;
+        let mut kept: Vec<u128> = Vec::new();
+        for existing in masks.drain(..) {
+            if existing & merged != 0 {
+                merged |= existing;
+            } else {
+                kept.push(existing);
+            }
+        }
+        kept.push(merged);
+        masks = kept;
+    }
+    let mut ranked: Vec<(usize, usize)> = masks
+        .iter()
+        .enumerate()
+        .map(|(index, mask)| {
+            let first = reach
+                .iter()
+                .position(|node| *node != 0 && node & mask != 0)
+                .unwrap_or(usize::MAX);
+            (first, index)
+        })
+        .collect();
+    ranked.sort_unstable();
+    let mut rank = vec![0usize; masks.len()];
+    for (position, (_, index)) in ranked.into_iter().enumerate() {
+        rank[index] = position;
+    }
+    reach
+        .iter()
+        .map(|&mask| {
+            if mask == 0 {
+                return None;
+            }
+            masks
+                .iter()
+                .position(|scope| scope & mask != 0)
+                .map(|index| rank[index])
+        })
+        .collect()
 }
 
 /// Split each claim's members by SCOPE, so a name spelled by two signatures
@@ -1161,7 +1846,15 @@ fn split_by_scope(
             let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
             for entry in members {
                 let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
-                let mut merged: Vec<OrderedMember> = vec![entry];
+                // Absorb every intersecting bucket, then append the new entry,
+                // so a merged bucket stays in derivation order. Pushing the
+                // entry first and appending the buckets after it REVERSED the
+                // group, which the sort below could not undo through a tie:
+                // three axes of one node came out [2, 1, 0]. The sort key now
+                // carries the axis, so this no longer decides anything on its
+                // own, and it is kept order-preserving because the next tie to
+                // be introduced would silently inherit the reversal.
+                let mut merged: Vec<OrderedMember> = Vec::new();
                 let mut merged_mask = mask;
                 buckets.retain_mut(|(bucket_mask, bucket)| {
                     if *bucket_mask & merged_mask != 0 {
@@ -1172,6 +1865,7 @@ fn split_by_scope(
                         true
                     }
                 });
+                merged.push(entry);
                 buckets.push((merged_mask, merged));
             }
             buckets
@@ -1210,18 +1904,14 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
                 continue;
             }
             let claim = DimClaim::Name(name.clone());
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1259,25 +1949,64 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
 /// axis claiming a literal already owes a guard.
 /// The sort key C2.4 rule 1 defines: interface members before local ones,
 /// interface members by assigned ABI input slot, every remaining tie by node
-/// position.
-type OrderKey = (bool, Option<usize>, usize);
+/// position and then by the member's own axis.
+///
+/// The axis component is not decoration. `slot` is `Some` only for an
+/// [`AxisSource::ExternalAxis`] member, and it already carries that member's
+/// axis; every OTHER kind sorts with `slot = None`, so two axes of ONE node
+/// tied on `(true, None, node)`. Measured before it was added: a `shrink`
+/// whose two axes both claim `n` produced members `[(node, 1), (node, 0)]`,
+/// and a `reshape` with three such axes produced `[2, 1, 0]` - the canonical
+/// member of the class was the LAST axis, and the guards ran in reverse
+/// declaration order, which `spec/04-type-system.md` section 4.7 fixes:
+/// "Guards ready at the same source position are evaluated in declaration
+/// order."
+type OrderKey = (bool, Option<(usize, usize)>, usize, usize);
 
 /// A member together with the key that orders it.
 ///
-/// `slot` is the declaring `Load`'s assigned ABI input slot for an interface
+/// `slot` is the declaring `Load`'s assigned ABI input slot and axis for an interface
 /// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
-/// node)` puts every interface member ahead of every local one, orders the
-/// interface group by assigned slot, and breaks every remaining tie by node
-/// position. That is C2.4 rule 1 in one key.
+/// node, axis)` puts every interface member ahead of every local one, orders
+/// the interface group by assigned slot, and breaks every remaining tie by
+/// node position and then by declaration order within that node. That is C2.4
+/// rule 1 in one key.
 struct OrderedMember {
-    slot: Option<usize>,
+    slot: Option<(usize, usize)>,
     node: usize,
     member: ClassMember,
 }
 
 impl OrderedMember {
+    fn new(dag: &Dag, member: ClassMember) -> Self {
+        // A named class takes its canonical value from an axis declaring
+        // that name, not from a foreign value that merely claims equality.
+        let slot = match member.source {
+            AxisSource::ExternalAxis { load, axis } => {
+                abi_input_slot(dag, load).map(|slot| (slot, axis))
+            }
+            _ => None,
+        };
+        Self {
+            slot,
+            node: member.node.0,
+            member,
+        }
+    }
+
+    fn literal_guard_key(&self, dag: &Dag) -> OrderKey {
+        // A literal result claim follows its output owner, even when the
+        // extent's value can be read from an earlier interface witness.
+        let input_axis =
+            literal_result_interface_observation(dag, self.member.node, self.member.axis)
+                .and_then(|observation| observation.entry_axis(dag));
+        let slot =
+            input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
+        (slot.is_none(), slot, self.node, self.member.axis)
+    }
+
     fn key(&self) -> OrderKey {
-        (self.slot.is_none(), self.slot, self.node)
+        (self.slot.is_none(), self.slot, self.node, self.member.axis)
     }
 }
 
@@ -1295,21 +2024,19 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             let Some(source) = sources.get(axis) else {
                 continue;
             };
-            if !is_member(&node.op, axis, &claim, source) {
+            if !is_member(&node.op, axis, &claim, source)
+                && !restamps_input_axis(dag, node.id, axis)
+            {
                 continue;
             }
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1319,19 +2046,49 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
 
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
     for (claim, mut members) in split_by_scope(dag, grouped) {
-        members.sort_by_key(OrderedMember::key);
+        let order_key = |member: &OrderedMember| match claim {
+            DimClaim::Literal(_) => member.literal_guard_key(dag),
+            DimClaim::Name(_) => member.key(),
+        };
+        members.sort_by_key(order_key);
         // A `Name` class needs two witnesses: one has nothing to disagree
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
         // runtime-sourced axis claiming a literal already owes a guard.
+        //
+        // One `Name` class needs only one, and for the same reason the
+        // `Literal` rule gives: a RESOLVED claim is its own canonical value.
+        // A single member whose source is `OpComputed` and whose dim carries
+        // `Named(_, Some(v))` has both a number to compare against and an
+        // extent the operation computes to compare, so it is a complete guard
+        // with nothing missing. chelis#1800 is the case: `f(w: tensor[n, f32],
+        // x) -> tensor[n, f32]` called with a graph-fixed `w` puts `Lit(v)` on
+        // the declaring axis, which belongs to the `Literal(v)` class rather
+        // than to `n`'s, leaving `n` with the op-computed member alone;
+        // lowering resolves that member's claim so the number travels with it.
+        //
+        // The rule is deliberately this narrow. An unresolved single member
+        // still forms no class, because nothing supplies its canonical value,
+        // and a resolved member with any OTHER source is not admitted: an
+        // entry class resolved this way would mint a guard for every
+        // literal-shaped input, which is the mint `is_member`'s `ExternalAxis`
+        // rule exists to prevent.
         let needed = match claim {
-            DimClaim::Name(_) => 2,
+            DimClaim::Name(_) => {
+                let resolved_op_computed = members.len() == 1
+                    && matches!(members[0].member.source, AxisSource::OpComputed { .. })
+                    && dag
+                        .get(members[0].member.node)
+                        .and_then(|node| node.output_type.dims.get(members[0].member.axis))
+                        .is_some_and(|dim| matches!(dim, DimInfo::Named(_, Some(_))));
+                if resolved_op_computed { 1 } else { 2 }
+            }
             DimClaim::Literal(_) => 1,
         };
         if members.len() < needed {
             continue;
         }
-        let order = members[0].key();
+        let order = order_key(&members[0]);
         classes.push((
             order,
             RuntimeDimClass {
@@ -1340,8 +2097,8 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             },
         ));
     }
-    // Classes run in their canonical members' order, so an all-interface
-    // class's entry guards fire in assigned-slot order.
+    // Class order preserves canonical witness identity. Individual entry
+    // comparisons are scheduled separately by `entry_extent_guards`.
     classes.sort_by_key(|(order, _)| *order);
     classes.into_iter().map(|(_, class)| class).collect()
 }
@@ -1477,6 +2234,479 @@ pub fn derive_unit_extent_claims(dag: &Dag) -> Vec<UnitExtentClaim> {
     claims
 }
 
+/// One interface comparison, independent of the class that established its
+/// witnesses. Both host lanes consume this schedule without regrouping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryExtentGuard {
+    /// Compare two actual input axes from the same scoped claim.
+    Named {
+        claim: String,
+        canonical: (NodeId, usize),
+        observed: (NodeId, usize),
+    },
+    /// Compare an actual input axis with its literal claim or unit precondition.
+    Literal {
+        required: usize,
+        observed: (NodeId, usize),
+    },
+}
+
+/// One ordered entry check, shared by the DAG evaluator and direct C emitter.
+/// Input metadata checks precede every read of that input's elements. Extent
+/// comparisons retain the independent witness schedule from §4.7.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryValidationStep {
+    DType {
+        load: NodeId,
+    },
+    Rank {
+        load: NodeId,
+    },
+    LiteralAxis {
+        load: NodeId,
+        axis: usize,
+        required: usize,
+    },
+    Extent(EntryExtentGuard),
+}
+
+/// The named witness claims an entry guard already checks, as
+/// `(witness node, claim index)`.
+///
+/// chelis#1374 gave `ExtentWitness` named claims so a declared result's named
+/// extent and a binder repeated across parameters are checked in every form:
+/// an inlined root has no `Load` for [`entry_extent_guards`] to group, and a
+/// declared-but-unread parameter has no class member until its witness is
+/// retained. Where both witnesses DO read `Load`s, the class derivation
+/// reaches the same pair and the entry schedule is the better owner: it runs
+/// ahead of the evaluator's symbolic-dim binding, in assigned ABI-slot order.
+/// `spec/04-type-system.md` §4.7 evaluates each guard "exactly once", so the
+/// witness yields there and its claim is left carrying only the retention
+/// that keeps the interface witness, and its ABI slot, alive.
+pub fn entry_covered_witness_claims(dag: &Dag) -> Vec<(NodeId, usize)> {
+    let observed_pair = |node: &crate::dag::DagNode| {
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, node.id, 0).or_else(|| node.inputs.first().copied())?;
+        Some((load, usize::try_from(axis).ok()?))
+    };
+    let guards = entry_extent_guards(dag);
+    let mut covered = Vec::new();
+    for node in dag.nodes() {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed_pair(node) else {
+            continue;
+        };
+        for (index, (recorded, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+            let Some(there) = dag.get(*edge).and_then(observed_pair) else {
+                continue;
+            };
+            if guards.iter().any(|guard| {
+                matches!(guard,
+                    EntryExtentGuard::Named { claim, canonical, observed }
+                        if claim == &recorded.claim
+                            && ((*canonical == here && *observed == there)
+                                || (*canonical == there && *observed == here)))
+            }) {
+                covered.push((node.id, index));
+            }
+        }
+    }
+    covered
+}
+
+/// Is this `ExtentWitness` retained purely as an ENTRY OBLIGATION - that is,
+/// does no node ever read its VALUE?
+///
+/// `LowerCtx::retain_invocation_witnesses` keeps a claim-bearing witness alive
+/// by listing it in a `Copy` carrier's `shape_deps`, never by feeding it to
+/// anything, so a witness minted for a declared-but-unread parameter or for a
+/// binder repeated across parameters carries an obligation without carrying a
+/// number anyone computes with. Section 4.7 discharges such an obligation at
+/// function entry, which is host work on every target.
+///
+/// The one data edge that does NOT count is a claim requirement: a witness's
+/// inputs after the first are the earlier witnesses its named claims compare
+/// against, and reading the requirement is part of discharging the same entry
+/// obligation rather than a device computation.
+///
+/// A witness that IS read - the runtime `shape` value read of
+/// `insert(b, 0, shape(y, 0))` - is not an entry obligation, and the HIP
+/// target still refuses it under [05-SHAPE-1].
+pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
+    if !matches!(
+        dag.get(id).map(|node| &node.op),
+        Some(RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller
+                | crate::dag::ExtentWitnessSite::LocalExpand,
+            ..
+        })
+    ) {
+        // A producer-owned ResultClaim is not itself an entry witness. Target
+        // adapters may still lower the complete producer relation to a host
+        // guard when every observation is available from interface metadata.
+        return false;
+    }
+    if dag.roots().contains(&id) {
+        return false;
+    }
+    dag.nodes().iter().all(|node| {
+        node.inputs.iter().enumerate().all(|(index, input)| {
+            *input != id || (index > 0 && matches!(node.op, RiscOp::ExtentWitness { .. }))
+        })
+    })
+}
+
+/// One record inside a [04-NUM-9] extent diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentRecord {
+    /// `claimed = N`, the compile-time side of a literal requirement.
+    Claimed(i64),
+    /// `<parameter> axis <axis> = <runtime shape>`, read off an input tensor.
+    Read {
+        load: NodeId,
+        axis: usize,
+        parameter: String,
+    },
+}
+
+/// One section 4.7 obligation carried by an entry-obligation `ExtentWitness`,
+/// reduced to input reads so a host prologue can render it from ABI slots
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessEntryObligation {
+    /// The label between backticks: a binder for a named claim, the decimal
+    /// extent for a literal requirement.
+    pub label: String,
+    /// The two records in [04-NUM-9] order, declaring side first.
+    pub records: (ExtentRecord, ExtentRecord),
+    /// The operation the `Domain` trap names: `load` or `expand`.
+    pub operation: &'static str,
+}
+
+/// Every obligation an entry-obligation witness owes, or `None` when one of
+/// them cannot be rendered from input reads.
+///
+/// `None` is the fail-closed answer. A target whose device lane cannot host a
+/// witness ([05-SHAPE-1] on HIP) may discharge the witness in its host
+/// prologue only when every obligation reduces to input tensors; otherwise it
+/// refuses, exactly as it did before the witness carried claims.
+///
+/// Claims that [`entry_covered_witness_claims`] already names are omitted:
+/// the entry schedule owns them on every lane, and section 4.7 evaluates each
+/// guard exactly once.
+pub fn witness_entry_obligations(
+    dag: &Dag,
+    witness: NodeId,
+) -> Option<Vec<WitnessEntryObligation>> {
+    let node = dag.get(witness)?;
+    let RiscOp::ExtentWitness {
+        site,
+        requirements,
+        claims,
+        ..
+    } = &node.op
+    else {
+        return None;
+    };
+    let operation = match site {
+        crate::dag::ExtentWitnessSite::Caller => "load",
+        crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+        crate::dag::ExtentWitnessSite::ResultClaim { .. }
+        | crate::dag::ExtentWitnessSite::LiteralResultClaim
+        | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. } => return None,
+    };
+    let read_for = |id: NodeId| -> Option<ExtentRecord> {
+        let observed = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            parameter,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = &observed.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, id, 0)?;
+        abi_input_slot(dag, load)?;
+        Some(ExtentRecord::Read {
+            load,
+            axis: usize::try_from(*axis).ok()?,
+            parameter: parameter.clone(),
+        })
+    };
+    let here = read_for(witness)?;
+    let covered = entry_covered_witness_claims(dag);
+    let mut obligations = Vec::new();
+    for required in requirements {
+        let required = required.as_i64_exact()?;
+        obligations.push(WitnessEntryObligation {
+            label: required.to_string(),
+            records: (ExtentRecord::Claimed(required), here.clone()),
+            operation,
+        });
+    }
+    for (index, (claim, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+        if covered.contains(&(witness, index)) {
+            continue;
+        }
+        let there = read_for(*edge)?;
+        let records = if claim.requirement_declares {
+            (there, here.clone())
+        } else {
+            (here.clone(), there)
+        };
+        obligations.push(WitnessEntryObligation {
+            label: claim.claim.clone(),
+            records,
+            operation,
+        });
+    }
+    Some(obligations)
+}
+
+/// Section 4.7's individual entry checks in assigned input-slot/axis order.
+/// A named check becomes due at the later of its two witnesses; its canonical
+/// witness remains the declaring one even when that declaration is later.
+/// Literal and unit checks become due at the observed input. Equal-position
+/// checks retain derivation order. Exact duplicate comparisons are emitted once.
+pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
+    let position = |(load, axis)| {
+        (
+            abi_input_slot(dag, load).expect("entry witness is an input"),
+            axis,
+        )
+    };
+    let mut guards = Vec::new();
+    // An authored literal result whose extent is an exact parameter witness
+    // is ready at that witness's signature position. The token identifies
+    // the obligation; a matching physical dimension is not ownership proof.
+    for (_, source, required) in literal_result_interface_claims(dag) {
+        let Some(observed) = source.entry_axis(dag) else {
+            continue;
+        };
+        guards.push(EntryExtentGuard::Literal {
+            required: usize::try_from(required.as_i64_exact().expect("literal requirement"))
+                .expect("nonnegative literal requirement"),
+            observed,
+        });
+    }
+    // This is the same interface projection used by symbolic bindings: local
+    // members do not prevent two input witnesses from disagreeing at entry.
+    for class in derive_dim_witnesses(dag) {
+        let DimClaim::Name(claim) = class.claim else {
+            continue;
+        };
+        let mut reads = class
+            .members
+            .iter()
+            .filter_map(|member| member_load_axis(dag, member));
+        let Some(canonical) = reads.next() else {
+            continue;
+        };
+        for observed in reads {
+            if position(canonical) != position(observed) {
+                guards.push(EntryExtentGuard::Named {
+                    claim: claim.clone(),
+                    canonical,
+                    observed,
+                });
+            }
+        }
+    }
+    for class in derive_runtime_dim_classes(dag) {
+        let DimClaim::Literal(required) = class.claim else {
+            continue;
+        };
+        for member in &class.members {
+            let observed = literal_result_interface_observation(dag, member.node, member.axis)
+                .and_then(|observation| observation.entry_axis(dag))
+                .or_else(|| {
+                    // A body result cannot invent an input obligation. Keep
+                    // the independent input check only when that input's own
+                    // declaration already states this exact literal.
+                    let (load, axis) = member_load_axis(dag, member)?;
+                    let declared = dag.get(load)?.output_type.dims.get(axis)?;
+                    matches!(declared,
+                        DimInfo::Lit(value) | DimInfo::Named(_, Some(value))
+                            if *value == required
+                    )
+                    .then_some((load, axis))
+                });
+            if let Some(observed) = observed {
+                guards.push(EntryExtentGuard::Literal { required, observed });
+            }
+        }
+    }
+    for claim in derive_unit_extent_claims(dag) {
+        if claim.placement(dag) == GuardPlacement::Entry
+            && let Some(observed) = member_load_axis(dag, &claim.member())
+        {
+            guards.push(EntryExtentGuard::Literal {
+                required: 1,
+                observed,
+            });
+        }
+    }
+    // Physical dimension classes establish the comparison, while a typed
+    // result claim identifies which observation declared its requirement.
+    // A foreign producer can precede that declaring parameter. Preserve this
+    // exact edge's diagnostic orientation without changing the comparison's
+    // readiness position or joining any additional dimension classes.
+    let witness_axis = |id: NodeId| {
+        let node = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        Some((load_through_casts(dag, id, 0)?, usize::try_from(axis).ok()?))
+    };
+    for guard in &mut guards {
+        let EntryExtentGuard::Named {
+            claim,
+            canonical,
+            observed,
+        } = guard
+        else {
+            continue;
+        };
+        let declaring_pair = dag.nodes().iter().find_map(|node| {
+            let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                return None;
+            };
+            let here = witness_axis(node.id)?;
+            claims
+                .iter()
+                .zip(node.inputs.iter().skip(1))
+                .find_map(|(recorded, edge)| {
+                    let there = witness_axis(*edge)?;
+                    (recorded.claim == *claim
+                        && ((here == *canonical && there == *observed)
+                            || (there == *canonical && here == *observed)))
+                        .then_some(if recorded.requirement_declares {
+                            (there, here)
+                        } else {
+                            (here, there)
+                        })
+                })
+        });
+        if let Some((declaring, producing)) = declaring_pair {
+            *canonical = declaring;
+            *observed = producing;
+        }
+    }
+    guards.sort_by_key(|guard| match guard {
+        EntryExtentGuard::Named {
+            canonical,
+            observed,
+            ..
+        } => position(*canonical).max(position(*observed)),
+        EntryExtentGuard::Literal { observed, .. } => position(*observed),
+    });
+    let mut unique = Vec::new();
+    for guard in guards {
+        if !unique.contains(&guard) {
+            unique.push(guard);
+        }
+    }
+    unique
+}
+
+/// Validate interface inputs in their assigned ABI slot order (authored
+/// signature order when one exists), then by axis within each input. A named
+/// comparison is due at the later witness, exactly as `entry_extent_guards`
+/// orders it; this plan interleaves that schedule with dtype/rank and literal
+/// shape admission rather than regrouping checks by kind or label.
+pub fn entry_validation_plan(dag: &Dag) -> Vec<EntryValidationStep> {
+    entry_validation_plan_for_resolved_loads(dag, &[])
+}
+
+/// Eval can select a later occurrence of a name when an earlier Load belongs
+/// only to an unselected root. Keep the name's ABI slot, but validate the
+/// declaration that actually supplied the selected value.
+pub fn entry_validation_plan_for_resolved_loads(
+    dag: &Dag,
+    resolved_loads: &[NodeId],
+) -> Vec<EntryValidationStep> {
+    let due = |guard: &EntryExtentGuard| match guard {
+        EntryExtentGuard::Named {
+            canonical,
+            observed,
+            ..
+        } => {
+            let position = |(load, axis): (NodeId, usize)| {
+                (
+                    abi_input_slot(dag, load).expect("entry witness is an input"),
+                    axis,
+                )
+            };
+            position(*canonical).max(position(*observed))
+        }
+        EntryExtentGuard::Literal { observed, .. } => (
+            abi_input_slot(dag, observed.0).expect("entry witness is an input"),
+            observed.1,
+        ),
+    };
+    let guards = entry_extent_guards(dag);
+    let mut steps = Vec::new();
+    for (slot, first) in ordered_interface_loads(dag.nodes()).into_iter().enumerate() {
+        let RiscOp::Load { name } = &first.op else {
+            unreachable!()
+        };
+        let load = resolved_loads
+            .iter()
+            .filter_map(|id| dag.get(*id))
+            .find(|node| matches!(&node.op, RiscOp::Load { name: resolved } if resolved == name))
+            .unwrap_or(first);
+        steps.push(EntryValidationStep::DType { load: load.id });
+        steps.push(EntryValidationStep::Rank { load: load.id });
+        for (axis, dim) in load.output_type.dims.iter().enumerate() {
+            if let DimInfo::Lit(required) | DimInfo::Named(_, Some(required)) = dim
+                && !guards.iter().any(|guard| {
+                    matches!(guard, EntryExtentGuard::Literal { required: claim, observed }
+                        if claim == required && *observed == (load.id, axis))
+                })
+            {
+                steps.push(EntryValidationStep::LiteralAxis {
+                    load: load.id,
+                    axis,
+                    required: *required,
+                });
+            }
+            steps.extend(
+                guards
+                    .iter()
+                    .filter(|guard| due(guard) == (slot, axis))
+                    .cloned()
+                    .map(EntryValidationStep::Extent),
+            );
+        }
+        // A scalar interface witness has no tensor axis to enumerate. Its
+        // due comparison still runs after the input's dtype and rank check.
+        steps.extend(
+            guards
+                .iter()
+                .filter(|guard| {
+                    let (guard_slot, axis) = due(guard);
+                    guard_slot == slot && axis >= load.output_type.dims.len()
+                })
+                .cloned()
+                .map(EntryValidationStep::Extent),
+        );
+    }
+    steps
+}
+
 /// A local guard's position: the node that introduces the extent, and the
 /// output axis carrying the claim.
 pub type LocalGuardSite = (usize, usize);
@@ -1500,6 +2730,8 @@ pub enum CanonicalExtent {
     /// extent and the value actually observed, and the entry path already
     /// emits exactly that for a `Literal` claim (chelis#1377).
     Resolved(usize),
+    /// The exact declaring activation's rank-0 i64 observation.
+    Witness(NodeId),
 }
 
 impl std::fmt::Display for CanonicalExtent {
@@ -1511,19 +2743,20 @@ impl std::fmt::Display for CanonicalExtent {
         match self {
             CanonicalExtent::Binder(binder) => f.write_str(binder),
             CanonicalExtent::Resolved(value) => write!(f, "{value}"),
+            CanonicalExtent::Witness(node) => write!(f, "extent witness {}", node.0),
         }
     }
 }
 
 /// How a consumer reads the extent a local guard observes.
 ///
-/// The derivation states it, because C2.7 puts one answer to one question in
+/// The derivation states it, because C2.5 puts one answer to one question in
 /// one place. The two kinds of local claim observe different quantities: an
 /// equality class compares the extent an operation is ABOUT TO produce, read
 /// from the carrier it was given, and a unit-extent claim compares the extent
 /// its operand ALREADY produced, read from that operand's realized shape. A
 /// consumer that re-derives which of those to read from the site's own `op`
-/// can only get one of them right, which is exactly the divergence C2.7
+/// can only get one of them right, which is exactly the divergence C2.5
 /// forbids.
 ///
 /// The variants also fix WHEN each is readable, and that is not incidental.
@@ -1542,6 +2775,321 @@ pub enum LocalGuardObservation {
     /// Read the site node's realized output extent at the site's axis, after
     /// that node runs.
     RealizedExtent,
+    /// Compute the extent the site's node is ABOUT to produce, from that
+    /// node's own bounds, before it runs.
+    ///
+    /// This is the third quantity, and it is neither of the first two. An
+    /// [`AxisSource::OpComputed`] axis has no carrier: no `RtDim` on the
+    /// operation states the extent, because the operation derives it from its
+    /// own output-shape rule. [`Self::RealizedExtent`] does state it, but only
+    /// after the node has run, and for an op-computed axis the node IS the
+    /// allocation - C2.5 rejects that read in terms: "An extent computed by
+    /// the operation must be computed/validated before its first
+    /// shape-dependent allocation/access, not recovered from a tensor
+    /// allocated using the unvalidated claim. Merely checking after a wrong
+    /// allocation is not a conforming implementation of C1.3."
+    ///
+    /// So the derivation states HOW to compute it, once, and both lanes read
+    /// that one answer rather than each asking the operation again.
+    ComputedExtent(ComputedAxisExtent),
+    /// Validate every distinct positive-rank operand shape, then read this
+    /// axis from their one agreed shape.
+    ///
+    /// The relation is complete and nonempty by construction. It is observed
+    /// before the producer runs: operand disagreement is reported first, and
+    /// only an agreed result extent reaches the producer-owned claim.
+    SameShapeAgreement(SameShapeAgreement),
+    /// A malformed same-shape producer is retained as an explicit failed
+    /// observation instead of degrading to `RealizedExtent` or disappearing.
+    /// Verification rejects it before execution; raw evaluator entrypoints
+    /// still return this reason if handed an unverified graph.
+    MalformedSameShapeAgreement(String),
+}
+
+/// The extent an admitted [`AxisSource::OpComputed`] axis will produce,
+/// expressed from the operation's own carriers.
+///
+/// One variant per admitted owner, because the arithmetic is the owner's own
+/// output-shape rule and there is no rule shared across owners to factor out.
+/// `spec/04-type-system.md` section 4.7's movement paragraph makes `shrink`
+/// the owner whose symbolic axes "always mint fresh extents"; a `pad` with
+/// non-zero padding and a `stride` with a non-unit step mint fresh extents
+/// under the same sentence.
+///
+/// The admission test is whether the extent is readable BEFORE the owner
+/// runs, which is what C2.5 requires of a computed-extent observation: "An
+/// extent computed by the operation must be computed/validated before its
+/// first shape-dependent allocation/access". Every admitted owner passes it
+/// from their own carriers and the operand's realized shape, and both of
+/// those are the owner's producers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputedAxisExtent {
+    /// `shrink`'s half-open span on one axis: the extent is `end - start`
+    /// (`spec/05-risc-primitives.md` section 2.4).
+    ///
+    /// `RtDim::ToEnd` resolves to the OPERAND's realized extent at
+    /// `operand_axis`, which is readable before the shrink runs because the
+    /// operand is one of the shrink's producers. `operand_axis` is carried
+    /// rather than re-derived from the site key, so a consumer reading this
+    /// variant needs nothing but the variant.
+    ///
+    /// A span whose `start` is not below its `end` computes no extent. The
+    /// operation's own domain rejection owns that failure on both lanes and
+    /// runs first (the C runtime's movement plan rejects it before the guard
+    /// site is reached), so the guard yields nothing rather than comparing a
+    /// fabricated number.
+    ShrinkSpan {
+        start: RtDim,
+        end: RtDim,
+        operand_axis: usize,
+    },
+    /// `pad`'s widened axis: the extent is the operand's extent at
+    /// `operand_axis` plus `before` plus `after`
+    /// (`spec/05-risc-primitives.md` section 2.4).
+    ///
+    /// Every `pad` bound is readable before the pad runs. `RtDim::ToEnd` is a
+    /// `Shrink` `end` only, so a padding bound is a literal, a rank-0 integer
+    /// input of this node, or a folded read of one of its inputs' shape
+    /// metadata, and all three are this node's own producers. `operand_axis`
+    /// is carried rather than re-derived, as [`Self::ShrinkSpan`] carries it,
+    /// so a consumer reading this variant needs nothing but the variant;
+    /// `pad` preserves rank, so it equals the output axis.
+    ///
+    /// chelis#1837 is why this owner is admitted. `concat` has no `RiscOp`:
+    /// `tensor_concat_from_nodes` lowers a Pad+Add cascade, and the first Pad
+    /// of that cascade is the origin of the result's concat axis. Without an
+    /// admission here a declared concat-axis extent had no guard site on the
+    /// DAG path, so `def main() -> tensor[100, 3, f32] = probe(...)` returned
+    /// eight rows at exit zero on both host lanes.
+    ///
+    /// A sum that does not fit a host extent computes no extent. The owner's
+    /// own allocation owns that failure, so the guard yields rather than
+    /// comparing a wrapped number.
+    ///
+    /// There is deliberately NO `> 0` filter here, where [`Self::ShrinkSpan`]
+    /// has one, and the asymmetry is the two quantities rather than an
+    /// oversight. A shrink span of zero selects nothing and computes no
+    /// extent, so the operation's own domain rejection owns it; a pad extent
+    /// of zero is a real extent, and a claim of some other number over it is
+    /// a mismatch the guard still owes. Filtering it would be a silent hole
+    /// rather than parity.
+    ///
+    /// Measured, and the zero extent is REACHABLE, which is what decides it.
+    /// A runtime bound resolving to zero is guarded correctly today:
+    /// `pad(x, [[sub(shape(y, 0i32), shape(y, 0i32)), 1i64]], 0.0f32)` over
+    /// three elements reports `pad axis 0 = 4`. A zero pad EXTENT is reached by
+    /// giving that spelling both bounds and an empty operand, and it behaves
+    /// correctly on both lanes: a declared `tensor[2, f32]` traps
+    /// ``extent `2`: claimed = 2, pad axis 0 = 0``, and a declared
+    /// `tensor[0, f32]` returns `shape=[0]` at exit zero. A `> 0` filter would
+    /// silence the first of those, so it would introduce a defect rather than
+    /// close one.
+    ///
+    /// An earlier version of this comment called the zero extent unreachable,
+    /// on the strength of one spelling the checker refuses (`to_tensor([])`
+    /// needs a resolved element dtype, which a typed parameter position
+    /// supplies). Round 1's verification measured it; the decision is unchanged
+    /// and its reason is now the measurement rather than an absence.
+    PadSpan {
+        before: RtDim,
+        after: RtDim,
+        operand_axis: usize,
+    },
+    /// `stride`'s narrowed axis: the extent is
+    /// `ceil(operand_extent / step)` (`spec/05-risc-primitives.md` section
+    /// 2.4.1).
+    ///
+    /// The signed runtime step is retained as its exact carrier so each lane
+    /// can validate it before converting to an unsigned host extent or
+    /// performing this division. A literal step of one is an identity and
+    /// therefore never produces this variant; a runtime carrier remains
+    /// op-computed even when its realized value is one.
+    StrideSpan { step: RtDim, operand_axis: usize },
+}
+
+/// The op-computed origin a declared result axis reaches through
+/// PASS-THROUGH hops alone, as `(node, axis)`.
+///
+/// This answers "which operation introduces the extent this axis carries",
+/// which is the question `spec/04-type-system.md` section 4.7 asks when it
+/// places a local guard at "the source position of the operation that
+/// introduces the guarded extent". [`resolve_axis_extent`] answers a
+/// different one, "where does this axis's VALUE come from", and the two
+/// diverge on exactly the axes C2.4 separates: a set axis and a forwarded
+/// axis both carry [`AxisSource::InputAxis`], and only the forwarded one
+/// passes an extent through.
+///
+/// Measured, which is why the distinction is drawn here rather than left to
+/// the value resolver. `expand(x, 0i32, shape(small, 0i32))` under a declared
+/// `tensor[3, f32]`, with `small` a runtime `shrink`, has an `InputAxis`
+/// source on the axis the `expand` SETS. The value resolver walks that hop
+/// into the `shrink` and reports an op-computed origin there; a claim stamped
+/// on it moves the guard off the `expand`, whose own axis is the class
+/// witness [`is_member`] admits, and the trap renames itself from `expand` to
+/// `shrink`. `issue_616_runtime_movement_c_parity`'s identity row measures
+/// that rename.
+///
+/// So the walk crosses a hop only where [`is_member`] would refuse the axis
+/// as a pass-through, and stops at the first axis the operation sets, whose
+/// own claim is the one its guard checks. The walk is bounded by the node
+/// count, so a malformed graph cannot spin.
+pub fn op_computed_axis_origin(dag: &Dag, node: NodeId, axis: usize) -> Option<(NodeId, usize)> {
+    op_computed_axis_origin_bounded(dag, node, axis, dag.nodes().len())
+}
+
+fn op_computed_axis_origin_bounded(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<(NodeId, usize)> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    if is_same_shape_result_op(&owner.op) {
+        return None;
+    }
+    match output_axis_sources(dag, node).into_iter().nth(axis)? {
+        AxisSource::OpComputed {
+            op: origin,
+            axis: computed,
+        } => Some((origin, computed)),
+        AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(read),
+        } if !sets_axis(&owner.op, axis) => {
+            let operand = *owner.inputs.get(input)?;
+            op_computed_axis_origin_bounded(dag, operand, usize::try_from(read).ok()?, fuel - 1)
+        }
+        _ => None,
+    }
+}
+
+/// The computed extent of `axis`, when `op` is an admitted op-computed owner.
+///
+/// ONE admission answer for two callers: [`local_dim_guard_sites`], which
+/// turns it into a guard site, and lowering's declared-result stamp, which
+/// may write a claim onto an op-computed result axis only where this function
+/// produces the guard that enforces it. Splitting the two would let a claim
+/// be stamped with no site to check it, which is a silently wrong shape on
+/// the evaluator and the legacy movement failure on C.
+pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisExtent> {
+    match op {
+        RiscOp::Shrink { bounds } => {
+            bounds
+                .get(axis)
+                .map(|(start, end)| ComputedAxisExtent::ShrinkSpan {
+                    start: start.clone(),
+                    end: end.clone(),
+                    operand_axis: axis,
+                })
+        }
+        RiscOp::Pad { padding, .. } => {
+            padding
+                .get(axis)
+                .map(|(before, after)| ComputedAxisExtent::PadSpan {
+                    before: before.clone(),
+                    after: after.clone(),
+                    operand_axis: axis,
+                })
+        }
+        RiscOp::Stride { strides } => match strides.get(axis)? {
+            RtDim::Lit(0 | 1) => None,
+            RtDim::Lit(_) | RtDim::Node(_) => Some(ComputedAxisExtent::StrideSpan {
+                step: strides[axis].clone(),
+                operand_axis: axis,
+            }),
+            RtDim::ToEnd | RtDim::Sym(_) | RtDim::InputAxis { .. } => None,
+        },
+        _ => None,
+    }
+}
+
+/// The extent an admitted op-computed axis produces, when every quantity its
+/// output-shape rule reads is a compile-time constant.
+///
+/// `None` means the extent is a runtime value, which is the case
+/// `spec/04-type-system.md` §4.7.2's guard exists for: it conditions the check
+/// on a claim "that is not statically proven equal to `size`".
+///
+/// `Some(v)` means the operation's own rule PROVES the extent, so a
+/// declaration claiming a different value is statically refuted rather than
+/// runtime-checkable, and the graph cannot state it: [`crate::verify`]'s
+/// per-owner static size check compares the same arithmetic and rejects an
+/// output dim that disagrees. Measured, which is why this exists.
+/// `concat([v, v], 0i32)` over four concrete rows under a declared
+/// `tensor[100, 3, f32]` lowers to a Pad+Add cascade whose pads state
+/// `Lit(8)`; stamping `Lit(100)` onto the origin produced
+/// `pad at node 1: output axis 0 has size 100, expected 8` and
+/// `binary op at node 3 has mismatched dimension at axis 0: Lit(100) vs
+/// Lit(8)`, refusing the build on the C lane while the DAG evaluator, which
+/// does not run the verifier, trapped at run time. A lane divergence with a
+/// refused build on one side is not a repair.
+///
+/// So a statically refuted claim is not stamped: it is REJECTED. Lowering
+/// does have an error channel - `LowerDiagnostic::fatal`, raised through
+/// `lower::raise_fatal_lowering_error` and forwarded on both lanes by
+/// `host::try_lower_compiled_program_with_lane_overrides` - and
+/// `lower::LowerCtx::reject_refuted_result_axis` uses it, so a declaration
+/// this function proves wrong ends the program before anything executes,
+/// identically on eval and on C. That is the numbered spec's own division
+/// reaching its conclusion rather than stopping short of one: §4.4 and §4.5
+/// make a statically refuted declared result a type error and §4.7.2 makes an
+/// unprovable one a runtime guard, and the checker reaches the first verdict
+/// wherever it can see the extent. An extent that becomes literal only when a
+/// call is inlined is one the checker cannot see, which is why the rejection
+/// sits here as well (chelis#1837, chelis#1930).
+pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> Option<usize> {
+    let owner = dag.get(node)?;
+    let operand_extent = |operand_axis: usize| -> Option<usize> {
+        let operand = *owner.inputs.first()?;
+        match dag.get(operand)?.output_type.dims.get(operand_axis)? {
+            DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+            DimInfo::Named(_, None) => None,
+        }
+    };
+    match op_computed_axis_extent(&owner.op, axis)? {
+        ComputedAxisExtent::ShrinkSpan {
+            start,
+            end,
+            operand_axis,
+        } => {
+            let extent = operand_extent(operand_axis);
+            let start = static_bound(&start, extent)?;
+            let end = static_bound(&end, extent)?;
+            end.checked_sub(start)
+        }
+        ComputedAxisExtent::PadSpan {
+            before,
+            after,
+            operand_axis,
+        } => {
+            let extent = operand_extent(operand_axis)?;
+            let before = static_bound(&before, Some(extent))?;
+            let after = static_bound(&after, Some(extent))?;
+            extent.checked_add(before)?.checked_add(after)
+        }
+        ComputedAxisExtent::StrideSpan { step, operand_axis } => {
+            let extent = operand_extent(operand_axis)?;
+            let step = static_bound(&step, Some(extent))?;
+            (step > 0).then(|| extent.div_ceil(step))
+        }
+    }
+}
+
+/// A movement bound's compile-time value, or `None` when only run time has it.
+///
+/// `RtDim::ToEnd` resolves to the operand's extent, which is a compile-time
+/// constant exactly when that extent is. Every other runtime carrier - a
+/// rank-0 node, a folded shape read, a symbol bound at entry - is a value no
+/// compile-time arithmetic has.
+fn static_bound(bound: &RtDim, operand_extent: Option<usize>) -> Option<usize> {
+    match bound {
+        RtDim::Lit(value) => Some(*value),
+        RtDim::ToEnd => operand_extent,
+        RtDim::Node(_) | RtDim::Sym(_) | RtDim::InputAxis { .. } => None,
+    }
 }
 
 /// What a local guard reports, what it compares against, and how it reads the
@@ -1556,24 +3104,624 @@ pub struct LocalGuardClaim {
     pub op: &'static str,
     /// How to read the extent this guard observes.
     pub observed: LocalGuardObservation,
+    /// The activation the guard is checked under, derived from the owner of
+    /// the node whose extent it claims ([`GuardActivation`]).
+    pub activation: GuardActivation,
+    /// The declaring parameter axis of a caller's named result claim, which
+    /// the context names beside the binder (spec/04 section 4.7). `None`
+    /// renders the canonical value as `claimed = N`.
+    pub source: Option<ClaimSource>,
 }
 
-/// Whether a class member's own output dim carries an extent the checker
-/// already resolved.
+/// The activation a local guard is checked under (spec/10 section 3.2, a
+/// node whose activation is false checks nothing), and the node whose
+/// declared extent rests on the claim it checks.
 ///
-/// For a LOCAL member that is the compiler's own proof: the extent is produced
-/// inside this function and the resolved size is what it was produced to be.
-/// For an INTERFACE member it is a claim about what the caller must pass and
-/// proves nothing, which is why `chelis#1377`'s input axis is guarded rather
-/// than exempted. [`RuntimeDimClass::placement`] is a property of the whole
-/// CLASS, so its `Local` verdict does not establish that a given member is
-/// local; callers pair this with [`member_load_axis`] to ask that per member.
-fn member_dim_is_statically_resolved(dag: &Dag, member: &ClassMember) -> bool {
-    matches!(
-        dag.get(member.node)
-            .and_then(|node| node.output_type.dims.get(member.axis)),
-        Some(DimInfo::Named(_, Some(_))) | Some(DimInfo::Lit(_))
-    )
+/// Its constructors read the claimed node's [`crate::dag::Owner`], and it
+/// has no other: a guard's activation is derived from the node it guards,
+/// never stamped beside it, so a site cannot run a check its claimed node
+/// does not make. A check that runs unconditionally derives it from a node
+/// whose owner has no activation. Where the activation holds in no row, the
+/// claimed node checks nothing and produces zeros of its declared type
+/// ([`claim_sized_nodes`]).
+#[derive(Debug, Clone, Copy)]
+pub struct GuardActivation {
+    claimed: NodeId,
+    sized_axis: Option<usize>,
+    activation: Option<NodeId>,
+}
+
+/// Two sites checked under one activation are one check, whichever node
+/// each claim sizes: two `expand`s claiming one operand axis is unit are
+/// discharged by one comparison.
+impl PartialEq for GuardActivation {
+    fn eq(&self, other: &Self) -> bool {
+        self.activation == other.activation
+    }
+}
+
+impl Eq for GuardActivation {}
+
+impl GuardActivation {
+    /// A claim stating `claimed`'s own extent at `axis`, checked under
+    /// `claimed`'s activation.
+    pub fn sizing(dag: &Dag, claimed: NodeId, axis: usize) -> Result<Self, String> {
+        Self::derive(dag, claimed, Some(axis))
+    }
+
+    /// A claim about an extent `claimed` reads rather than states (a unit
+    /// claim, about the operand of the `expand` making it), checked under
+    /// `claimed`'s activation.
+    pub fn reading(dag: &Dag, claimed: NodeId) -> Result<Self, String> {
+        Self::derive(dag, claimed, None)
+    }
+
+    fn derive(dag: &Dag, claimed: NodeId, sized_axis: Option<usize>) -> Result<Self, String> {
+        let node = dag
+            .get(claimed)
+            .ok_or_else(|| format!("claimed node {} is missing", claimed.0))?;
+        Ok(Self {
+            claimed,
+            sized_axis,
+            activation: node.owner.activation,
+        })
+    }
+
+    /// The rank-0 Bool (one per row under `vmap`) the guard is checked
+    /// under; `None` when the claimed node runs unconditionally.
+    pub fn node(self) -> Option<NodeId> {
+        self.activation
+    }
+
+    /// The node whose declared extent rests on the claim.
+    pub fn claimed(self) -> NodeId {
+        self.claimed
+    }
+
+    /// The axis of [`Self::claimed`] whose extent the claim states; `None`
+    /// for a claim about an extent it reads ([`Self::reading`]).
+    pub fn sized_axis(self) -> Option<usize> {
+        self.sized_axis
+    }
+}
+
+/// A named claim's binder and the parameter axis whose extent it requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSource {
+    pub claim: String,
+    pub parameter: String,
+    pub axis: usize,
+}
+
+/// A returned axis and the operation where its inherited claim becomes ready.
+/// This is derived from the current graph, never serialized or attached to a
+/// tensor's physical shape. Each caller supplies its own literal obligations.
+#[derive(Clone, Debug)]
+pub struct ResultExtentSite {
+    output_axis: RtAxis,
+    producer: NodeId,
+    producer_axis: RtAxis,
+    observation: LocalGuardObservation,
+    runtime_carrier_origin: Option<(NodeId, RtAxis)>,
+    operation: &'static str,
+}
+
+impl ResultExtentSite {
+    pub fn output_axis(&self) -> RtAxis {
+        self.output_axis
+    }
+    pub fn producer(&self) -> NodeId {
+        self.producer
+    }
+    pub fn producer_axis(&self) -> RtAxis {
+        self.producer_axis
+    }
+    pub fn observation(&self) -> &LocalGuardObservation {
+        &self.observation
+    }
+    /// The operation/axis that introduced a runtime extent carrier, before
+    /// any later forwarding. A pure pass-through from an input has none.
+    pub fn runtime_carrier_origin(&self) -> Option<(NodeId, RtAxis)> {
+        self.runtime_carrier_origin
+    }
+    pub fn operation(&self) -> &'static str {
+        self.operation
+    }
+}
+
+/// Follow the same typed axis relation used for observation. Stop at an
+/// introducing carrier instead of resolving through it to input metadata:
+/// the carrier's producer owns its declared result even when its size is
+/// available at entry. No new DAG annotation or execution dependency is made.
+fn runtime_carrier_origin(
+    dag: &Dag,
+    mut node: NodeId,
+    mut axis: usize,
+) -> Option<(NodeId, RtAxis)> {
+    for _ in 0..dag.len() {
+        let producer = dag.get(node)?;
+        if expand_or_reshape_carrier(&producer.op, axis).is_some() {
+            return Some((node, RtAxis::Lit(i32::try_from(axis).ok()?)));
+        }
+        match output_axis_sources(dag, node).get(axis)? {
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            } => {
+                node = *producer.inputs.get(*input)?;
+                axis = usize::try_from(*read).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Locate inherited result checks without changing graph or execution identity.
+/// A graph's own declaration guards remain separate obligations.
+pub fn result_extent_sites(dag: &Dag, root: NodeId) -> Vec<ResultExtentSite> {
+    let Some(result) = dag.get(root) else {
+        return Vec::new();
+    };
+    (0..result.output_type.dims.len())
+        .map(|output_axis| {
+            // Copy is administrative; an actual conversion still owns the
+            // returned value's diagnostic. §4.7 gives a cast the placement of
+            // its input, independently of that primitive attribution.
+            let mut attributed = root;
+            while let Some(node) = dag.get(attributed) {
+                if !matches!(node.op, RiscOp::Copy) {
+                    break;
+                }
+                let Some(input) = node.inputs.first() else {
+                    break;
+                };
+                attributed = *input;
+            }
+            let mut producer = attributed;
+            while let Some(node) = dag.get(producer) {
+                if !matches!(
+                    node.op,
+                    RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+                ) {
+                    break;
+                }
+                let Some(input) = node.inputs.first() else {
+                    break;
+                };
+                producer = *input;
+            }
+            let axis = output_axis;
+            let node = dag.get(producer).expect("result source belongs to graph");
+            let attributed_node = dag
+                .get(attributed)
+                .expect("result producer belongs to graph");
+            let observation = match same_shape_result_agreement(dag, producer) {
+                Ok(Some(agreement)) => LocalGuardObservation::SameShapeAgreement(agreement),
+                Err(reason) => LocalGuardObservation::MalformedSameShapeAgreement(reason),
+                Ok(None) => {
+                    if let Some(carrier) = expand_or_reshape_carrier(&node.op, axis) {
+                        LocalGuardObservation::Carrier(carrier.clone())
+                    } else if let Some(computed) = op_computed_axis_extent(&node.op, axis) {
+                        LocalGuardObservation::ComputedExtent(computed)
+                    } else if let Some(AxisSource::InputAxis { input, axis }) =
+                        output_axis_sources(dag, producer).get(axis)
+                    {
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: *input,
+                            axis: *axis,
+                        })
+                    } else {
+                        LocalGuardObservation::RealizedExtent
+                    }
+                }
+            };
+            ResultExtentSite {
+                output_axis: RtAxis::Lit(i32::try_from(output_axis).expect("rank fits i32")),
+                producer,
+                producer_axis: RtAxis::Lit(i32::try_from(axis).expect("rank fits i32")),
+                observation,
+                runtime_carrier_origin: runtime_carrier_origin(dag, producer, axis),
+                operation: expansion_kind(dag, attributed).map_or_else(
+                    || crate::grad::risc_op_name(&attributed_node.op),
+                    ExpansionKind::primitive_name,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Check the exact axis relationship before following administrative edges.
+/// Raw evaluator graphs can reach this derivation before ownership verification;
+/// a missing axis, missing input or cyclic alias must be an error, not a panic.
+fn checked_result_extent_site(
+    dag: &Dag,
+    root: NodeId,
+    axis: usize,
+) -> Result<ResultExtentSite, String> {
+    let invalid = || format!("missing or invalid producer axis {axis} at node {}", root.0);
+    let mut current = root;
+    loop {
+        let node = dag.get(current).ok_or_else(invalid)?;
+        if axis >= node.output_type.dims.len() {
+            return Err(invalid());
+        }
+        if !matches!(
+            node.op,
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+        ) {
+            break;
+        }
+        let [input] = node.inputs.as_slice() else {
+            return Err(invalid());
+        };
+        if input.0 >= current.0 {
+            return Err(invalid());
+        }
+        current = *input;
+    }
+    let output_axis = i32::try_from(axis).map_err(|_| invalid())?;
+    result_extent_sites(dag, root)
+        .into_iter()
+        .find(|site| site.output_axis == RtAxis::Lit(output_axis))
+        .ok_or_else(invalid)
+}
+
+/// Nodes any producer-owned extent claim requires semantic rewrites to preserve.
+///
+/// Named `ResultClaim`, authored `LiteralResultClaim`, and local
+/// `LocalAscriptionClaim` tokens make their owner potentially trapping.
+/// Claims can be attached to an administrative Copy/Cast carrier while §4.7
+/// attribution remains at the primitive behind that carrier, so the protected
+/// set includes that complete administrative chain.
+///
+/// Every rewrite that can replace, merge, fold, fuse, specialize, or eliminate
+/// a producer consumes this one classification. Keeping the token forms behind
+/// this API prevents a new rewrite from accidentally protecting only one.
+pub(crate) fn claimed_producers(dag: &Dag) -> Vec<bool> {
+    claim_producers_matching(dag, directly_owns_producer_claim)
+}
+
+/// Literal-only ownership carriers are a lowering representation detail, not
+/// the semantic rewrite barrier. Sparse helper recognition uses this narrower
+/// query only to peel those exact administrative carriers.
+pub(crate) fn literal_result_claim_producers(dag: &Dag) -> Vec<bool> {
+    claim_producers_matching(dag, directly_owns_literal_result_claim)
+}
+
+fn claim_producers_matching(dag: &Dag, directly_owns: impl Fn(&Dag, NodeId) -> bool) -> Vec<bool> {
+    let mut protected = vec![false; dag.len()];
+    let mut pending = dag
+        .nodes()
+        .iter()
+        .filter(|owner| directly_owns(dag, owner.id))
+        .map(|owner| owner.id)
+        .collect::<Vec<_>>();
+
+    while let Some(current) = pending.pop() {
+        let Some(slot) = protected.get_mut(current.0) else {
+            continue;
+        };
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        let Some(node) = dag.get(current) else {
+            continue;
+        };
+        if matches!(
+            node.op,
+            RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+        ) && let Some(input) = node.inputs.first()
+        {
+            pending.push(*input);
+        }
+    }
+
+    protected
+}
+
+pub(crate) fn directly_owns_producer_claim(dag: &Dag, owner: NodeId) -> bool {
+    dag.get(owner).is_some_and(|node| {
+        node.shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .any(|dependency| {
+                matches!(
+                    dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::ResultClaim { .. }
+                            | crate::dag::ExtentWitnessSite::LiteralResultClaim
+                            | crate::dag::ExtentWitnessSite::LocalAscriptionClaim { .. },
+                        ..
+                    })
+                )
+            })
+    })
+}
+
+pub(crate) fn directly_owns_literal_result_claim(dag: &Dag, owner: NodeId) -> bool {
+    dag.get(owner).is_some_and(|node| {
+        node.shape_deps
+            .iter()
+            .chain(&node.result_claim_deps)
+            .any(|dependency| {
+                matches!(
+                    dag.get(*dependency).map(|node| &node.op),
+                    Some(RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        ..
+                    })
+                )
+            })
+    })
+}
+
+/// The latest `Caller` witness at or before `not_after` that reads this exact
+/// tensor axis.
+///
+/// A returned value can be passed to another invocation later in the DAG.
+/// Such a downstream witness observes the same physical quantity but does not
+/// own the earlier result claim, so the upper bound is part of the identity.
+fn caller_witness_for_axis(
+    dag: &Dag,
+    tensor: NodeId,
+    axis: usize,
+    not_after: NodeId,
+) -> Option<NodeId> {
+    dag.nodes().iter().rev().find_map(|node| {
+        let RiscOp::ExtentWitness {
+            site: crate::dag::ExtentWitnessSite::Caller,
+            axis: RtAxis::Lit(observed),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        (node.id.0 <= not_after.0
+            && usize::try_from(observed).ok() == Some(axis)
+            && node.inputs.first() == Some(&tensor))
+        .then_some(node.id)
+    })
+}
+
+/// Whether `owner`'s `axis` is an ABI input axis read through administrative
+/// carriers only, with no invocation witness observing it and no claim of its
+/// own declaration (a wildcard or anonymous extent). Such an axis has no body
+/// producer: a literal result claim on it is an interface-entry obligation of
+/// that input (spec/04-type-system.md section 4.7), and no other owner exists
+/// to carry it. An input axis that declares a claim already has its entry
+/// check; the checker has made the result literal agree with it.
+pub(crate) fn result_axis_is_unwitnessed_input_axis(dag: &Dag, owner: NodeId, axis: usize) -> bool {
+    let Some(LiteralResultInterfaceObservation::InputAxis {
+        load,
+        axis: input_axis,
+    }) = literal_result_interface_observation(dag, owner, axis)
+    else {
+        return false;
+    };
+    LiteralResultInterfaceObservation::InputAxis {
+        load,
+        axis: input_axis,
+    }
+    .entry_axis(dag)
+    .is_some()
+        && dag
+            .get(load)
+            .and_then(|node| node.output_type.dims.get(input_axis))
+            .is_some_and(|dim| axis_claim(dim).is_none())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiteralResultInterfaceObservation {
+    Witness(NodeId),
+    InputAxis { load: NodeId, axis: usize },
+}
+
+impl LiteralResultInterfaceObservation {
+    fn entry_axis(self, dag: &Dag) -> Option<(NodeId, usize)> {
+        match self {
+            Self::Witness(witness) => {
+                let node = dag.get(witness)?;
+                let RiscOp::ExtentWitness { parameter, .. } = &node.op else {
+                    return None;
+                };
+                let observed = interface_witness_axis(dag, witness)?;
+                let RiscOp::Load { name } = &dag.get(observed.0)?.op else {
+                    return None;
+                };
+                (parameter == name.as_str()).then_some(observed)
+            }
+            Self::InputAxis { load, axis } => {
+                abi_input_slot(dag, load)?;
+                Some((load, axis))
+            }
+        }
+    }
+}
+
+/// The exact parameter observation supplying a returned axis, when the
+/// output shape directly reads it.
+///
+/// This intentionally follows the one-hop [`AxisSource`] path instead of the
+/// terminal [`ExtentOrigin`]. Resolving to an origin loses which invocation's
+/// witness supplied an `InputAxis`, which changed alias diagnostics and could
+/// select the wrong parameter when two inputs had the same runtime extent.
+/// Only an actual parameter or its administrative copy/cast is an interface
+/// result. A body operation owns its result claim even when its extent can be
+/// read from parameter metadata before that operation runs (spec/04 §4.7).
+fn literal_result_interface_observation(
+    dag: &Dag,
+    owner: NodeId,
+    axis: usize,
+) -> Option<LiteralResultInterfaceObservation> {
+    fn walk(
+        dag: &Dag,
+        node_id: NodeId,
+        axis: usize,
+        not_after: NodeId,
+        remaining: usize,
+    ) -> Option<LiteralResultInterfaceObservation> {
+        if remaining == 0 {
+            return None;
+        }
+        if let Some(witness) = caller_witness_for_axis(dag, node_id, axis, not_after) {
+            return Some(LiteralResultInterfaceObservation::Witness(witness));
+        }
+        let node = dag.get(node_id)?;
+        match output_axis_sources(dag, node_id).get(axis)? {
+            AxisSource::ExternalAxis { load, axis } => {
+                caller_witness_for_axis(dag, *load, *axis, not_after)
+                    .map(LiteralResultInterfaceObservation::Witness)
+                    .or(Some(LiteralResultInterfaceObservation::InputAxis {
+                        load: *load,
+                        axis: *axis,
+                    }))
+            }
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            } if matches!(
+                node.op,
+                RiscOp::Copy | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+            ) =>
+            {
+                walk(
+                    dag,
+                    *node.inputs.get(*input)?,
+                    usize::try_from(*read).ok()?,
+                    not_after,
+                    remaining - 1,
+                )
+            }
+            AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. } => None,
+            AxisSource::Literal { .. }
+            | AxisSource::OpComputed { .. }
+            | AxisSource::ClassSupplied { .. } => None,
+        }
+    }
+
+    walk(dag, owner, axis, owner, dag.len())
+}
+
+fn interface_witness_axis(dag: &Dag, witness: NodeId) -> Option<(NodeId, usize)> {
+    let node = dag.get(witness)?;
+    let RiscOp::ExtentWitness {
+        axis: RtAxis::Lit(axis),
+        ..
+    } = node.op
+    else {
+        return None;
+    };
+    let load = load_through_casts(dag, witness, 0)?;
+    abi_input_slot(dag, load)?;
+    Some((load, usize::try_from(axis).ok()?))
+}
+
+/// A named equality can discharge a literal restatement only when its exact
+/// other observation is fixed by the graph. An ABI shape promise is still
+/// an obligation, not such a proof (the #1782 distinction).
+fn literal_result_is_entailed(dag: &Dag, witness: NodeId, required: i64) -> bool {
+    let fixed = |id: NodeId| {
+        let node = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        match resolve_axis_extent(dag, *node.inputs.first()?, usize::try_from(axis).ok()?)? {
+            ExtentOrigin::Literal(value) => Some(value),
+            _ => None,
+        }
+    };
+    dag.nodes().iter().any(|node| {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            return false;
+        };
+        claims
+            .iter()
+            .zip(node.inputs.iter().skip(1))
+            .any(|(_, edge)| {
+                (node.id == witness && fixed(*edge) == Some(required))
+                    || (*edge == witness && fixed(node.id) == Some(required))
+            })
+    })
+}
+
+fn literal_result_interface_claims(
+    dag: &Dag,
+) -> Vec<(
+    NodeId,
+    LiteralResultInterfaceObservation,
+    chelis_types::ScalarValue,
+)> {
+    let mut claims = Vec::new();
+    for owner in dag.nodes() {
+        for token in owner.shape_deps.iter().chain(&owner.result_claim_deps) {
+            let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: RtAxis::Lit(axis),
+                        requirements,
+                        ..
+                    },
+                ..
+            }) = dag.get(*token)
+            else {
+                continue;
+            };
+            let Some(observed) =
+                literal_result_interface_observation(dag, owner.id, *axis as usize)
+            else {
+                continue;
+            };
+            let required = requirements[0];
+            let entailed = match observed {
+                LiteralResultInterfaceObservation::Witness(witness) => literal_result_is_entailed(
+                    dag,
+                    witness,
+                    required.as_i64_exact().expect("literal requirement"),
+                ),
+                LiteralResultInterfaceObservation::InputAxis { .. } => false,
+            };
+            if !entailed {
+                claims.push((*token, observed, required));
+            }
+        }
+    }
+    claims
+}
+
+/// Literal result obligations executed at an invocation's exact parameter
+/// witness.
+///
+/// A witness retains the callee parameter identity even when it reads an ABI
+/// `Load`: two calls can pass different outer parameters through the same
+/// inner name. Collapsing it into the outer entry schedule loses that identity
+/// and also moves an invocation-local obligation ahead of the call that owns
+/// it. Only a raw input-axis observation with no witness enters the common
+/// entry schedule above.
+///
+/// Every witness's obligations, keyed by witness, in claim order, derived in
+/// one walk of the graph. It is a whole-graph derivation, so a pass reads it
+/// once ([`crate::dag::Dag::trap_seeds`] holds it for the trap seed, the
+/// activation gate and the lanes' witness checks) rather than once per
+/// witness, which made every seed query quadratic in the graph.
+pub fn literal_result_witness_requirements(
+    dag: &Dag,
+) -> std::collections::BTreeMap<NodeId, Vec<chelis_types::ScalarValue>> {
+    let mut requirements = std::collections::BTreeMap::<NodeId, Vec<_>>::new();
+    for (_, observed, required) in literal_result_interface_claims(dag) {
+        if let LiteralResultInterfaceObservation::Witness(witness) = observed
+            && observed.entry_axis(dag).is_none()
+        {
+            requirements.entry(witness).or_default().push(required);
+        }
+    }
+    requirements
 }
 
 /// C1.3's local guard sites: `(node id, axis)` paired with the claim each
@@ -1583,58 +3731,312 @@ fn member_dim_is_statically_resolved(dag: &Dag, member: &ClassMember) -> bool {
 /// introduces the guarded extent" (`spec/04-type-system.md` section 4.7), so
 /// unlike the entry classes these are keyed by node.
 ///
-/// Two lanes read this one function, which is what C2.7's single derivation
+/// Two lanes read this one function, which is what C2.5's single derivation
 /// point means for a local guard: the C emitter places its guard at the
 /// operation it names, and the DAG evaluator checks the same site when that
 /// node produces its value. A second answer computed in either lane could
 /// disagree with the first, and the point of deriving it here is that it
 /// cannot.
-pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)> {
+pub fn local_dim_guard_sites(dag: &Dag) -> Result<Vec<(LocalGuardSite, LocalGuardClaim)>, String> {
     let mut sites = Vec::new();
+    // Explicit result obligations have graph identity, independently of any
+    // labels the checked caller retains on its result. Their producer owns
+    // the observation and their dependency owns the canonical value.
+    for node in dag.nodes() {
+        for required in node.shape_deps.iter().chain(&node.result_claim_deps) {
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                                claim,
+                                axis: RtAxis::Lit(axis),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                let axis = usize::try_from(*axis)
+                    .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
+                let site = checked_result_extent_site(dag, node.id, axis)?;
+                let activation = claim_carrier_activation(dag, node.id)?;
+                // The guard runs at the producer only when the producer can
+                // read both the claim and the activation and runs under that
+                // activation; a value produced before either (before its
+                // arm, say) is checked at the carrier, which reads the same
+                // extent from its input.
+                let (producer, observed) =
+                    if producer_reads(dag, *required, activation, site.producer) {
+                        (site.producer, site.observation)
+                    } else {
+                        (
+                            node.id,
+                            LocalGuardObservation::Carrier(RtDim::InputAxis {
+                                tensor: 0,
+                                axis: RtAxis::Lit(axis as i32),
+                            }),
+                        )
+                    };
+                sites.push((
+                    (producer.0, axis),
+                    LocalGuardClaim {
+                        claim: claim.clone(),
+                        canonical: CanonicalExtent::Witness(*required),
+                        op: site.operation,
+                        observed,
+                        activation: GuardActivation::sizing(dag, node.id, axis)?,
+                        source: None,
+                    },
+                ));
+                continue;
+            }
+            if let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                        axis: RtAxis::Lit(axis),
+                        requirements,
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            {
+                let axis = usize::try_from(*axis)
+                    .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
+                if literal_result_interface_observation(dag, node.id, axis).is_some() {
+                    // This exact token is an entry obligation or a proven
+                    // named restatement, never a second local producer guard.
+                    continue;
+                }
+                let site = checked_result_extent_site(dag, node.id, axis)?;
+                // The call's claim is checked under its carrier's owner
+                // activation, as a local ascription's is: a callee inlined
+                // into an untaken arm claims nothing.
+                let activation = claim_carrier_activation(dag, node.id)?;
+                // A claim captured after an existing value's production, or
+                // under an activation computed after it, belongs to this
+                // invocation's carrier; never add a backward dependency.
+                let (producer, observed) =
+                    if producer_reads(dag, *required, activation, site.producer) {
+                        (site.producer, site.observation)
+                    } else {
+                        (
+                            node.id,
+                            LocalGuardObservation::Carrier(RtDim::InputAxis {
+                                tensor: 0,
+                                axis: RtAxis::Lit(axis as i32),
+                            }),
+                        )
+                    };
+                let literal = requirements[0]
+                    .as_i64_exact()
+                    .expect("verified literal requirement");
+                sites.push((
+                    (producer.0, axis),
+                    LocalGuardClaim {
+                        claim: literal.to_string(),
+                        canonical: CanonicalExtent::Witness(*required),
+                        op: site.operation,
+                        observed,
+                        activation: GuardActivation::sizing(dag, node.id, axis)?,
+                        source: None,
+                    },
+                ));
+                continue;
+            }
+            let Some(crate::dag::DagNode {
+                op:
+                    RiscOp::ExtentWitness {
+                        site:
+                            crate::dag::ExtentWitnessSite::ResultClaim {
+                                claim,
+                                axis: RtAxis::Lit(axis),
+                            },
+                        ..
+                    },
+                ..
+            }) = dag.get(*required)
+            else {
+                continue;
+            };
+            let axis = usize::try_from(*axis)
+                .map_err(|_| format!("invalid producer axis {axis} at node {}", node.id.0))?;
+            let site = checked_result_extent_site(dag, node.id, axis)?;
+            // Checked under the carrier's owner activation, as above. The
+            // producer is the carrier or sits behind its `Copy`/`Cast` chain,
+            // which keeps every axis, so a producer that precedes the
+            // activation is observed through the carrier's input instead.
+            let activation = claim_carrier_activation(dag, node.id)?;
+            let (producer, producer_axis, observed) =
+                if producer_reads(dag, *required, activation, site.producer) {
+                    let RtAxis::Lit(producer_axis) = site.producer_axis;
+                    let producer_axis =
+                        usize::try_from(producer_axis).expect("verified result producer axis");
+                    (site.producer, producer_axis, site.observation)
+                } else {
+                    (
+                        node.id,
+                        axis,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(axis as i32),
+                        }),
+                    )
+                };
+            sites.push((
+                (producer.0, producer_axis),
+                LocalGuardClaim {
+                    claim: claim.clone(),
+                    canonical: CanonicalExtent::Witness(*required),
+                    op: site.operation,
+                    observed,
+                    activation: GuardActivation::sizing(dag, node.id, axis)?,
+                    source: None,
+                },
+            ));
+        }
+    }
+    // A physical literal annotation can restate an explicit token. Coalesce
+    // only the exact comparison at the same producer and observation; another
+    // required value or a named obligation remains independent.
+    let explicit_literals = sites
+        .iter()
+        .filter_map(|(site, claim)| {
+            let CanonicalExtent::Witness(witness) = claim.canonical else {
+                return None;
+            };
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                requirements,
+                ..
+            } = &dag.get(witness)?.op
+            else {
+                return None;
+            };
+            Some((
+                *site,
+                claim.observed.clone(),
+                requirements.first()?.as_i64_exact()?,
+            ))
+        })
+        .collect::<Vec<_>>();
     for class in derive_runtime_dim_classes(dag) {
         if class.placement(dag) != GuardPlacement::Local {
             continue;
         }
-        let DimClaim::Name(name) = &class.claim else {
-            continue;
-        };
-        // The class's canonical VALUE. C2.4 makes a literal claim its own
-        // canonical value; a `Name` the checker resolved to a literal is the
-        // same situation reached by a different spelling, so the comparison is
-        // against that literal rather than against a variable no lane
-        // declares.
-        let resolved = class.members.iter().find_map(|member| {
-            match dag.get(member.node)?.output_type.dims.get(member.axis)? {
-                DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(*value),
-                DimInfo::Named(_, None) => None,
+        // A numeric result annotation supplies the required value, never
+        // evidence that the operation's independent carrier produces it.
+        // Literal classes need no binder witness; resolved named classes keep
+        // their existing class identity and compare against the required number.
+        let (name, resolved) = match &class.claim {
+            DimClaim::Literal(value) => (value.to_string(), Some(*value)),
+            DimClaim::Name(name) => {
+                let required = class.members.iter().find_map(|member| {
+                    match dag.get(member.node)?.output_type.dims.get(member.axis)? {
+                        DimInfo::Named(_, Some(value)) | DimInfo::Lit(value) => Some(*value),
+                        DimInfo::Named(_, None) => None,
+                    }
+                });
+                (name.clone(), required)
             }
-        });
+        };
         for member in &class.members {
-            // C2.7 puts "does this site owe a guard" in the derivation rather
-            // than in an emitter, so a lane cannot answer it a second way.
-            //
-            // A LOCAL member's extent is produced by the compiler inside this
-            // function, so a resolved static size on its own dim is the
-            // checker's proof and the comparison would be a value against the
-            // literal it was produced from - a self-check that can only catch
-            // a compiler bug, which C2.4 already declines for a literal claim
-            // matching a literal size. This keys on PROVENANCE, the same axis
-            // section 4.7 uses to place a guard at entry or at the introducing
-            // operation: an INTERFACE member's resolved size is a caller claim
-            // and is guarded (chelis#1377), never exempted.
-            // Narrowed to LOCAL members. `placement` is a property of the
-            // whole class - `Entry` only when every member is an interface
-            // value - so one local member makes a MIXED class Local, and
-            // applying the proof to every member of it would exempt an
-            // interface member whose resolved size is a caller claim.
-            // Measured: the caller's obligation on such a member survives on
-            // the ABI static-dim check, because b2.4's narrowing of that check
-            // is built from `entry_dim_classes()` alone and never fires for a
-            // member of a Local class. The predicate is narrowed anyway, so
-            // the comment and the code say the same thing.
-            if member_load_axis(dag, member).is_none()
-                && member_dim_is_statically_resolved(dag, member)
-            {
+            if let DimClaim::Literal(value) = class.claim {
+                let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                if explicit_literals
+                    .iter()
+                    .any(|(key, observation, required)| {
+                        *key == (site.producer.0, member.axis)
+                            && *observation == site.observation
+                            && usize::try_from(*required).ok() == Some(value)
+                    })
+                {
+                    continue;
+                }
+            }
+
+            // Captured named tokens and these physical/literal contracts
+            // are additive. One agreeing requirement cannot discharge another.
+            // Only the independent extent source can discharge a claim.
+            // Runtime carriers remain observable even when result metadata
+            // contains a number. Literal-source proofs were handled by
+            // is_member; unsupported observation kinds remain outside this
+            // carrier consumer.
+            // An op-computed axis is the third observation kind, and it is
+            // admitted HERE rather than by widening the carrier filter below,
+            // because it has no carrier: the operation derives the extent from
+            // its own output-shape rule. [`op_computed_axis_extent`] is the one
+            // admission answer, shared with lowering's declared-result stamp so
+            // a claim cannot be stamped onto an axis with no site to check it.
+            if let AxisSource::OpComputed { axis: computed, .. } = &member.source {
+                let Some(node) = dag.get(member.node) else {
+                    continue;
+                };
+                // `OpComputed` names this node and this axis (C4.1 rejects any
+                // other pairing), so the member's axis IS the axis to compute.
+                let Some(observed) = op_computed_axis_extent(&node.op, *computed) else {
+                    // An unadmitted owner - `pad` with non-zero padding,
+                    // `stride` with a non-unit step, a `reshape` binding a
+                    // symbol it does not compute - keeps the disposition it
+                    // had: no site before this arm existed and none after.
+                    continue;
+                };
+                sites.push((
+                    (member.node.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        canonical: match resolved {
+                            Some(value) => CanonicalExtent::Resolved(value),
+                            None => CanonicalExtent::Binder(name.clone()),
+                        },
+                        op: crate::grad::risc_op_name(&node.op),
+                        observed: LocalGuardObservation::ComputedExtent(observed),
+                        activation: GuardActivation::sizing(dag, member.node, member.axis)?,
+                        source: None,
+                    },
+                ));
+                continue;
+            }
+            if restamps_input_axis(dag, member.node, member.axis) {
+                // The restating operation observes the extent it forwards,
+                // before it allocates, and names itself. It is checked under
+                // its own owner activation (spec/10 section 3.2), as a claim
+                // token's carrier is: a restamp in an untaken arm checks
+                // nothing. A producer a `Copy` restamp attributes the extent
+                // to that runs before that activation is observed through the
+                // restamping node's input instead, which keeps every axis.
+                let site = checked_result_extent_site(dag, member.node, member.axis)?;
+                let activation = claim_carrier_activation(dag, member.node)?;
+                let (producer, observed) = if activation
+                    .is_none_or(|activation| activation.0 < site.producer.0)
+                    && owner_activation(dag, site.producer)? == activation
+                {
+                    (site.producer, site.observation)
+                } else {
+                    (
+                        member.node,
+                        LocalGuardObservation::Carrier(RtDim::InputAxis {
+                            tensor: 0,
+                            axis: RtAxis::Lit(member.axis as i32),
+                        }),
+                    )
+                };
+                sites.push((
+                    (producer.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        canonical: match resolved {
+                            Some(value) => CanonicalExtent::Resolved(value),
+                            None => CanonicalExtent::Binder(name.clone()),
+                        },
+                        op: site.operation,
+                        observed,
+                        activation: GuardActivation::sizing(dag, member.node, member.axis)?,
+                        source: None,
+                    },
+                ));
                 continue;
             }
             if !matches!(
@@ -1657,13 +4059,9 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // both members and no site existed to compare them, so the
                 // claim executed unguarded on every lane.
                 //
-                // The two sources that stay out are not omissions. An
-                // `ExternalAxis` member IS the declaration each lane reads the
-                // canonical value from, so guarding it would compare a value
-                // against itself. An `OpComputed` member's guard needs the
-                // derivation narrowed first, because a claim over a statically
-                // determined operation output - a matmul's `Literal(64)` axis -
-                // would guard a value against the literal it was produced from.
+                // External declarations retain their existing entry checks.
+                // OpComputed sources are admitted by the arm above, which
+                // supplies the independent observation these carriers cannot.
                 continue;
             }
             let Some(node) = dag.get(member.node) else {
@@ -1688,6 +4086,16 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             // [04-NUM-9]'s `<op>` names the operation that introduces the
             // guarded extent, in the same vocabulary every other trap on this
             // lane uses.
+            let op = if matches!(node.op, RiscOp::Expand { .. }) {
+                // A malformed unverified node supplies no operation claim. The
+                // verifier owns rejecting it; every executable node has a form.
+                let Some(kind) = expansion_kind(dag, member.node) else {
+                    continue;
+                };
+                kind.primitive_name()
+            } else {
+                crate::grad::risc_op_name(&node.op)
+            };
             sites.push((
                 (member.node.0, member.axis),
                 LocalGuardClaim {
@@ -1696,8 +4104,10 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         Some(value) => CanonicalExtent::Resolved(value),
                         None => CanonicalExtent::Binder(name.clone()),
                     },
-                    op: crate::grad::risc_op_name(&node.op),
+                    op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
+                    activation: GuardActivation::sizing(dag, member.node, member.axis)?,
+                    source: None,
                 },
             ));
         }
@@ -1718,13 +4128,26 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // extent", which is the `expand` making the claim, not whichever operation
     // happened to produce the operand.
     //
-    // It is derived HERE rather than in the ownership view because C2.7 puts
+    // It is derived HERE rather than in the ownership view because C2.5 puts
     // the local site derivation in one place that both lanes read. S2b added
     // this loop beside the class loop when both lived in the view; the loop is
     // unchanged, and it moves with the function it was appended to.
     for claim in derive_unit_extent_claims(dag) {
         if claim.placement(dag) != GuardPlacement::Local {
             continue;
+        }
+        // The claim is the `expand`'s, so it is checked under the `expand`'s
+        // activation, read where the operand's extent is: an activation the
+        // operand runs before has no site that reads both.
+        let activation = GuardActivation::reading(dag, claim.node)?;
+        if let Some(node) = activation.node()
+            && node.0 > claim.operand.0
+        {
+            return Err(format!(
+                "the unit-extent claim of `expand` node {} is checked under activation {}, which \
+                 its operand {} runs before: no guard site reads both (unimplemented chelis#2413)",
+                claim.node.0, node.0, claim.operand.0
+            ));
         }
         sites.push((
             (claim.operand.0, claim.axis),
@@ -1738,10 +4161,55 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // shape, which is why the read instruction is data rather than
                 // something a consumer infers from the site's `op`.
                 observed: LocalGuardObservation::RealizedExtent,
+                activation,
+                source: None,
             },
         ));
     }
-    sites
+    Ok(sites)
+}
+
+/// The activation a claim token's guard is checked under: the owner
+/// activation of the node carrying the token (spec/10 section 3.2, a node
+/// whose activation is false checks nothing). A path-local ascription's
+/// claims, a call's named result claim and a callee's literal result claim
+/// all read it.
+///
+/// It is the carrier's [`crate::dag::Owner`], not a second record, so it
+/// cannot disagree with the activation the node itself runs under. Lowering
+/// stamps the carrier with the claim's position: the ascription's, or the
+/// call's, whose inlined callee runs under the caller's activation; inside a
+/// `grad` or `vmap` body spliced into a runtime `if` arm that is the call
+/// site's activation. `vmap` batches it per row, and an extent every row
+/// shares is checked when any row is active.
+fn claim_carrier_activation(dag: &Dag, carrier: NodeId) -> Result<Option<NodeId>, String> {
+    dag.get(carrier)
+        .map(|carrier| carrier.owner.activation)
+        .ok_or_else(|| "claim carrier is missing".to_string())
+}
+
+fn owner_activation(dag: &Dag, node: NodeId) -> Result<Option<NodeId>, String> {
+    dag.get(node)
+        .map(|node| node.owner.activation)
+        .ok_or_else(|| format!("claim producer {} is missing", node.0))
+}
+
+/// Whether a claim's guard can sit at its `producer`: the producer runs
+/// after the claim's canonical token and after its activation, so both are
+/// available there, and under that activation, so the guard's activation
+/// ([`GuardActivation`], the producer's own) is the claim's. Otherwise the
+/// guard sits at the carrier.
+fn producer_reads(
+    dag: &Dag,
+    required: NodeId,
+    activation: Option<NodeId>,
+    producer: NodeId,
+) -> bool {
+    required.0 < producer.0
+        && activation.is_none_or(|activation| activation.0 < producer.0)
+        && dag
+            .get(producer)
+            .is_some_and(|producer| producer.owner.activation == activation)
 }
 
 #[cfg(test)]
@@ -1754,15 +4222,108 @@ mod tests {
     }
 
     #[test]
+    fn claimed_producers_cover_named_literal_local_and_the_owned_admin_chain() {
+        let mut dag = Dag::new();
+        let decl = dag.declare("test");
+        let tensor = ty(vec![DimInfo::Lit(4)], Prim::F32);
+        let input = dag.add_node(
+            decl,
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor.clone(),
+            None,
+        );
+        let producer = dag.add_node(decl, RiscOp::Mul, vec![input, input], tensor.clone(), None);
+        let cast = dag.add_node(
+            decl,
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![producer],
+            tensor.clone(),
+            None,
+        );
+        let claim = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LiteralResultClaim,
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let owner = dag.add_node(decl, RiscOp::Copy, vec![cast], tensor.clone(), None);
+        dag.add_shape_dep(owner, claim);
+        let named_claim = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::ResultClaim {
+                    claim: "n".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![input],
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let named_owner = dag.add_node(decl, RiscOp::Add, vec![input, input], tensor.clone(), None);
+        dag.add_result_claim_dep(named_owner, named_claim);
+        let local_claim = dag.add_node(
+            decl,
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::LocalAscriptionClaim {
+                    ascription_id: 0,
+                    binding: "local".into(),
+                    claim: "4".into(),
+                    axis: RtAxis::Lit(0),
+                },
+                parameter: String::new(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![chelis_types::scalar_from_i64("test", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
+            },
+            Vec::new(),
+            ty(Vec::new(), Prim::Int64),
+            None,
+        );
+        let local_owner = dag.add_node(decl, RiscOp::Exp, vec![input], tensor.clone(), None);
+        dag.add_shape_dep(local_owner, local_claim);
+        let unrelated = dag.add_node(decl, RiscOp::Copy, vec![input], tensor, None);
+
+        let protected = claimed_producers(&dag);
+        assert!(protected[owner.0]);
+        assert!(protected[cast.0]);
+        assert!(protected[producer.0]);
+        assert!(protected[named_owner.0]);
+        assert!(protected[local_owner.0]);
+        assert!(!protected[input.0]);
+        assert!(!protected[claim.0]);
+        assert!(!protected[named_claim.0]);
+        assert!(!protected[local_claim.0]);
+        assert!(!protected[unrelated.0]);
+    }
+
+    #[test]
     fn a_sym_reshape_target_is_the_operations_own_extent() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let reshaped = dag.add_node(
+            decl,
             RiscOp::Reshape {
                 new_shape: vec![RtDim::Sym("n".into())],
             },
@@ -1782,13 +4343,16 @@ mod tests {
     #[test]
     fn a_permute_reads_the_permuted_input_axis_not_the_output_index() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let permuted = dag.add_node(
+            decl,
             RiscOp::Permute { axes: vec![1, 0] },
             vec![operand],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(2)], Prim::F32),
@@ -1812,7 +4376,9 @@ mod tests {
     #[test]
     fn a_gather_composes_both_operands_shapes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let values = dag.add_node(
+            decl,
             RiscOp::Load { name: "v".into() },
             vec![],
             ty(
@@ -1822,12 +4388,14 @@ mod tests {
             None,
         );
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let gathered = dag.add_node(
+            decl,
             RiscOp::Gather { axis: 1 },
             vec![values, indices],
             ty(
@@ -1861,7 +4429,9 @@ mod tests {
         use crate::dag::DimExpr;
 
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let lhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(
@@ -1871,6 +4441,7 @@ mod tests {
             None,
         );
         let rhs = dag.add_node(
+            decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(
@@ -1880,6 +4451,7 @@ mod tests {
             None,
         );
         let product = dag.add_node(
+            decl,
             RiscOp::BlasMatmul {
                 batch_dims: vec![DimExpr::Concrete(2)],
                 m: DimExpr::Concrete(4),
@@ -1916,19 +4488,23 @@ mod tests {
 
         // Negative parity: an unbatched matmul has no pass-through axis.
         let mut flat = Dag::new();
+        let flat_decl = flat.declare("test");
         let lhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "a".into() },
             vec![],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let rhs = flat.add_node(
+            flat_decl,
             RiscOp::Load { name: "b".into() },
             vec![],
             ty(vec![DimInfo::Lit(3), DimInfo::Lit(5)], Prim::F32),
             None,
         );
         let product = flat.add_node(
+            flat_decl,
             RiscOp::BlasMatmul {
                 batch_dims: Vec::new(),
                 m: DimExpr::Concrete(4),
@@ -1958,13 +4534,16 @@ mod tests {
     #[test]
     fn a_shape_dep_sibling_supplies_an_input_less_nodes_wildcard_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let sibling = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Named("n".into(), None)], Prim::F32),
             None,
         );
         let mask = dag.add_node(
+            decl,
             RiscOp::synth_const(Prim::F32, 1.0),
             vec![],
             ty(vec![DimInfo::Named("*".into(), None)], Prim::F32),
@@ -1990,13 +4569,16 @@ mod tests {
     #[test]
     fn a_duplicated_or_misdirected_source_vector_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![operand],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -2037,13 +4619,16 @@ mod tests {
     #[test]
     fn an_external_axis_source_must_name_a_real_load_and_a_real_axis() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -2092,13 +4677,16 @@ mod tests {
     #[test]
     fn an_input_axis_source_must_be_a_normalized_in_range_axis_of_a_real_slot() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let negated = dag.add_node(
+            decl,
             RiscOp::Neg,
             vec![source],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -2138,7 +4726,9 @@ mod tests {
     #[test]
     fn a_scalar_input_source_must_be_a_rank_zero_int64_outside_slot_zero() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let value = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "value".into(),
             },
@@ -2147,6 +4737,7 @@ mod tests {
             None,
         );
         let extent = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "extent".into(),
             },
@@ -2155,6 +4746,7 @@ mod tests {
             None,
         );
         let tensor = dag.add_node(
+            decl,
             RiscOp::Load {
                 name: "tensor".into(),
             },
@@ -2163,6 +4755,7 @@ mod tests {
             None,
         );
         let expanded = dag.add_node(
+            decl,
             RiscOp::Expand {
                 axis: 0,
                 size: RtDim::Node(1),
@@ -2202,7 +4795,9 @@ mod tests {
     #[test]
     fn a_negative_literal_extent_is_rejected() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let source = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2)], Prim::F32),
@@ -2231,13 +4826,16 @@ mod tests {
     #[test]
     fn a_reduce_window_passes_leading_axes_and_computes_the_windowed_ones() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let operand = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let windowed = dag.add_node(
+            decl,
             RiscOp::ReduceWindow {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -2267,19 +4865,23 @@ mod tests {
     #[test]
     fn a_reduce_window_grad_restores_the_forward_inputs_shape() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let forward_input = dag.add_node(
+            decl,
             RiscOp::Load { name: "x".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(3)], Prim::F32),
             None,
         );
         let cotangent = dag.add_node(
+            decl,
             RiscOp::Load { name: "g".into() },
             vec![],
             ty(vec![DimInfo::Lit(2), DimInfo::Lit(2)], Prim::F32),
             None,
         );
         let adjoint = dag.add_node(
+            decl,
             RiscOp::ReduceWindowGrad {
                 reducer: crate::dag::ReduceWindowKind::Sum,
                 window_shape: vec![2],
@@ -2309,13 +4911,16 @@ mod tests {
     #[test]
     fn a_one_hot_appends_the_vocab_literal_to_the_index_axes() {
         let mut dag = Dag::new();
+        let decl = dag.declare("test");
         let indices = dag.add_node(
+            decl,
             RiscOp::Load { name: "i".into() },
             vec![],
             ty(vec![DimInfo::Lit(4)], Prim::Int64),
             None,
         );
         let dense = dag.add_node(
+            decl,
             RiscOp::OneHot { vocab: 5 },
             vec![indices],
             ty(vec![DimInfo::Lit(4), DimInfo::Lit(5)], Prim::F32),
@@ -2342,7 +4947,9 @@ mod tests {
             RiscOp::ScatterElements { axis: 1 },
         ] {
             let mut dag = Dag::new();
+            let decl = dag.declare("test");
             let target = dag.add_node(
+                decl,
                 RiscOp::Load { name: "t".into() },
                 vec![],
                 ty(
@@ -2352,12 +4959,14 @@ mod tests {
                 None,
             );
             let indices = dag.add_node(
+                decl,
                 RiscOp::Load { name: "i".into() },
                 vec![],
                 ty(vec![DimInfo::Lit(4)], Prim::Int64),
                 None,
             );
             let updates = dag.add_node(
+                decl,
                 RiscOp::Load { name: "u".into() },
                 vec![],
                 ty(
@@ -2367,6 +4976,7 @@ mod tests {
                 None,
             );
             let scattered = dag.add_node(
+                decl,
                 op.clone(),
                 vec![target, indices, updates],
                 ty(

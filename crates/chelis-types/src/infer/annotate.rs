@@ -5,6 +5,265 @@
 
 use super::*;
 
+/// Explicit annotation-time declaration context. The declared signature map
+/// belongs to one annotation unit; `current_type_binders` is narrowed to the
+/// `def` whose children are being annotated and is passed through every
+/// recursive annotation call.
+#[derive(Clone, Copy)]
+pub(super) struct AnnotationResolutionContext<'a> {
+    declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>,
+}
+
+impl<'a> AnnotationResolutionContext<'a> {
+    pub(super) fn root(declared_signatures: &'a UnordMap<String, DeclaredSigMetadata>) -> Self {
+        Self {
+            declared_signatures,
+        }
+    }
+
+    pub(super) fn declared_signature(self, name: &str) -> Option<&'a DeclaredSigMetadata> {
+        self.declared_signatures.get(name)
+    }
+}
+
+/// Semantic role of one tagged Deep node's child in checker-owned type
+/// stamping. This is deliberately distinct from the child's syntactic tag:
+/// a `lit` is a runtime expression under `app`, but the same shape is selector
+/// syntax in `tuple-get`, `grad`, or `vmap`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChildStampRole {
+    /// Traversed by ordinary expression inference.
+    RuntimeExpr,
+    /// Compiler/source syntax which is preserved verbatim.
+    Syntax,
+    /// A field, axis, projection, or transform selector.
+    Selector,
+    /// Handler payload syntax whose literal-form contract is owned by
+    /// `chelis-effects`, not expression inference.
+    EffectHandler,
+    /// A declaration, parameter, or binding name.
+    Binder,
+    /// Type/dimension syntax resolved by its owning type consumer.
+    Type,
+    /// Traversed by a dedicated inference owner rather than `infer_expr` on
+    /// the structural parent (module declarations, patterns, helper nodes,
+    /// and synthesized pipe stages).
+    ExplicitInferenceBypass,
+}
+
+/// Exhaustive child-role table for the canonical closed Deep vocabulary.
+///
+/// Returning `None` is a loud version-skew signal, never permission to treat
+/// an unknown child as a runtime expression. The completeness test below
+/// iterates `chelis_deep::validate::VALID_TAGS`, the grammar's single source
+/// of truth, so adding a tag requires an explicit ownership decision here.
+pub(super) fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStampRole {
+    use ChildStampRole::{
+        Binder, EffectHandler, ExplicitInferenceBypass, RuntimeExpr, Selector, Syntax, Type,
+    };
+
+    match tag {
+        // Module wrappers are not inferred as one expression. Their
+        // declarations each own a separate inference epoch.
+        DeepTag::Module => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Import | DeepTag::ImportAll | DeepTag::Export => Syntax,
+
+        // Declarations.
+        DeepTag::Def => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Defsig => match (index, _arity) {
+            (0, _) => Binder,
+            (1, 3..) => Syntax,
+            _ => Type,
+        },
+        DeepTag::Deftype | DeepTag::Typealias => {
+            if index == 0 {
+                Binder
+            } else if index == 1 {
+                Syntax
+            } else {
+                Type
+            }
+        }
+        DeepTag::Variant | DeepTag::Field => {
+            if index == 0 {
+                Binder
+            } else {
+                Type
+            }
+        }
+        DeepTag::Defdim => Binder,
+
+        // Expressions and their structural helper positions.
+        DeepTag::Fn => {
+            if index == 0 {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::App
+        | DeepTag::If
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::Par
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Copy
+        | DeepTag::Borrow
+        | DeepTag::Unquote
+        | DeepTag::Splice => RuntimeExpr,
+        DeepTag::HandleEffect => {
+            if index == 0 {
+                EffectHandler
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Let => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Match => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Arm => {
+            if index == 0 {
+                ExplicitInferenceBypass
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Var | DeepTag::Lit => Syntax,
+        DeepTag::Record => {
+            if index == 0 {
+                Type
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::Access => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Pipe => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::TupleGet => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::RecordUpdate => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Pattern nodes are consumed by the primary pattern traversal.
+        DeepTag::PatVar => Binder,
+        DeepTag::PatLit => Syntax,
+        DeepTag::PatCtor | DeepTag::PatRecord => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+        DeepTag::PatTuple => ExplicitInferenceBypass,
+        DeepTag::PatWild => Syntax,
+        DeepTag::PatAs => {
+            if index == 0 {
+                Binder
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+
+        // Type and dimension nodes are owned recursively by DeepTypeResolver,
+        // never by expression annotation.
+        DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TRef
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank => Type,
+
+        // Transform-specific selector/type positions.
+        DeepTag::Grad | DeepTag::Vmap => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Selector
+            }
+        }
+        DeepTag::Cast => {
+            if index == 0 {
+                RuntimeExpr
+            } else {
+                Type
+            }
+        }
+
+        // Quoted children and effect/resource payloads are syntax data.
+        DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
+
+        // Structural helper nodes. `kv` is also used by pattern records, so
+        // its value/pattern slot is an explicit owning traversal in both
+        // contexts; canonical runtime values still record their normal stamp.
+        DeepTag::Params => Binder,
+        DeepTag::Bind => {
+            if index.is_multiple_of(2) {
+                Binder
+            } else {
+                RuntimeExpr
+            }
+        }
+        DeepTag::Kv => {
+            if index == 0 {
+                Selector
+            } else {
+                ExplicitInferenceBypass
+            }
+        }
+    }
+}
+
 pub(super) fn annotate_ir_program(
     exprs: &[deep::Expr],
     product: &InferenceProduct,
@@ -55,6 +314,8 @@ pub(super) fn annotate_expr_with_scope(
     // Bail value is the identity (unannotated) expr: annotation is a
     // best-effort pass and the entry boundary fails the check anyway.
     stack_guard!("annotate_expr_with_scope", expr, expr.clone());
+    // An exhaustive representation-preserving transformer: every arm
+    // rebuilds the same carrier it received.
     match expr {
         deep::Expr::Atom(_, _) => expr.clone(),
         // Metadata values are source/compiler context, not runtime children
@@ -68,138 +329,53 @@ pub(super) fn annotate_expr_with_scope(
                     annotation_context,
                     errors,
                 )),
-                entries: meta.entries.clone(),
+                metadata: meta.metadata.clone(),
             },
             *span,
         ),
-        deep::Expr::List(list, span) => {
-            if !matches!(list.elements.get(1), Some(deep::Expr::Map(_, _))) {
-                return deep::Expr::List(
-                    deep::List {
-                        elements: list
-                            .elements
-                            .iter()
-                            .map(|element| {
-                                annotate_expr_with_scope(
-                                    element,
-                                    product,
-                                    annotation_context,
-                                    errors,
-                                )
-                            })
-                            .collect(),
-                    },
-                    *span,
-                );
-            }
-
-            let tag = get_tag(list);
-            let def_name = (tag == Some(DeepTag::Def))
-                .then(|| children(list).first().and_then(symbol_name))
-                .flatten();
-            let declared_sig =
-                def_name.and_then(|name| annotation_context.declared_signature(name));
-            let (annotated_children, fn_ty_override) = match tag {
-                Some(DeepTag::Fn) => {
-                    let (kids, fn_ty) =
-                        annotate_fn_children(list, expr, product, None, annotation_context, errors);
-                    (kids, Some(fn_ty))
-                }
-                // `(def name (fn ...))`: when the def has a separate
-                // `defsig`, its declared parameter type expressions
-                // (captured verbatim in `annotation_context`)
-                // preserve `&` borrow wrappers that neither the bare
-                // `fn` literal nor the inferred function type carry.
-                // Stamp those onto the def's `(params ...)` node so a
-                // standalone-lowered borrowed param keeps its borrow
-                // and IR lowering sees a non-rank-0 type. Defs without
-                // a `defsig` are absent from the map and fall through
-                // to the plain recursion (bare params, owned by
-                // `infer_signature_metadata`).
-                Some(DeepTag::Def) => {
-                    let kids = children(list);
-                    let declared_param_types =
-                        declared_sig.map(|metadata| metadata.param_types.as_slice());
-                    let annotated: Vec<deep::Expr> = kids
-                        .iter()
-                        .enumerate()
-                        .map(|(index, child)| {
-                            let role = child_stamp_role(DeepTag::Def, index, kids.len());
-                            if let (
-                                ChildStampRole::RuntimeExpr,
-                                Some(declared),
-                                deep::Expr::List(fn_list, fn_span),
-                            ) = (role, declared_param_types.as_ref(), child)
-                                && get_tag(fn_list) == Some(DeepTag::Fn)
-                            {
-                                let (fn_kids, fn_ty) = annotate_fn_children(
-                                    fn_list,
-                                    child,
-                                    product,
-                                    Some(declared),
-                                    annotation_context,
-                                    errors,
-                                );
-                                let mut elements = vec![
-                                    fn_list.elements[0].clone(),
-                                    annotated_meta_map_with_override(
-                                        fn_list,
-                                        child,
-                                        product,
-                                        Some(fn_ty),
-                                        errors,
-                                    ),
-                                ];
-                                elements.extend(fn_kids);
-                                deep::Expr::List(deep::List { elements }, *fn_span)
-                            } else {
-                                annotate_child_for_role(
-                                    DeepTag::Def,
-                                    index,
-                                    kids.len(),
-                                    child,
-                                    product,
-                                    annotation_context,
-                                    errors,
-                                )
-                            }
-                        })
-                        .collect();
-                    (annotated, None)
-                }
-                Some(tag) => (
-                    annotate_children_by_role(tag, list, product, annotation_context, errors),
-                    None,
-                ),
-                None => (children(list).to_vec(), None),
-            };
-
-            let mut elements = vec![
-                list.elements[0].clone(),
-                annotated_meta_map_with_override(list, expr, product, fn_ty_override, errors),
-            ];
-            elements.extend(annotated_children);
-            deep::Expr::List(deep::List { elements }, *span)
-        }
         deep::Expr::Node(node, span) => {
             let tag = node.tag();
             let children = node.children_slice();
             let fn_ty_override = (tag == DeepTag::Fn)
                 .then(|| product.owner_type(expr, "function node", errors))
                 .flatten();
+            let declared_param_types = (tag == DeepTag::Def)
+                .then(|| {
+                    children
+                        .first()
+                        .and_then(symbol_name)
+                        .and_then(|name| annotation_context.declared_signature(name))
+                        .map(|metadata| metadata.param_types.as_slice())
+                })
+                .flatten();
             let annotated_children = children
                 .iter()
                 .enumerate()
                 .map(|(index, child)| {
-                    annotate_child_for_role(
-                        tag,
-                        index,
-                        children.len(),
-                        child,
-                        product,
-                        annotation_context,
-                        errors,
-                    )
+                    let role = child_stamp_role(tag, index, children.len());
+                    if let (DeepTag::Def, ChildStampRole::RuntimeExpr, Some(declared)) =
+                        (tag, role, declared_param_types)
+                        && let Some(annotated) = annotate_declared_fn_child(
+                            child,
+                            expr,
+                            declared,
+                            product,
+                            annotation_context,
+                            errors,
+                        )
+                    {
+                        annotated
+                    } else {
+                        annotate_child_for_role(
+                            tag,
+                            index,
+                            children.len(),
+                            child,
+                            product,
+                            annotation_context,
+                            errors,
+                        )
+                    }
                 })
                 .collect();
             let meta = annotated_node_meta_with_override(
@@ -224,30 +400,6 @@ pub(super) fn annotate_expr_with_scope(
             deep::Expr::UnknownForm(data.clone())
         }
     }
-}
-
-pub(super) fn annotate_children_by_role(
-    tag: DeepTag,
-    list: &deep::List,
-    product: &InferenceProduct,
-    annotation_context: AnnotationResolutionContext<'_>,
-    errors: &mut DiagnosticSink<'_>,
-) -> Vec<deep::Expr> {
-    let kids = children(list);
-    kids.iter()
-        .enumerate()
-        .map(|(index, child)| {
-            annotate_child_for_role(
-                tag,
-                index,
-                kids.len(),
-                child,
-                product,
-                annotation_context,
-                errors,
-            )
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -275,21 +427,20 @@ pub(super) fn annotate_child_for_role(
     }
 }
 
-/// True for the `(t-var _)` placeholder that `desugar_fun_def` emits
-/// in a synthesized sig for a parameter that had no declared type.
+/// True for a whole-slot inference hole in a signature or parameter annotation.
 pub(super) fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
     // chelis#1107 amendment: carrier-preserving read.
     matches!(stamped_parts(expr), Some((DeepTag::TVar, _, kids))
-        if kids.first().and_then(symbol_name) == Some("_"))
+        if matches!(kids, [name] if symbol_name(name) == Some("_")))
 }
 
 /// Rebuild a `(params ...)` node so every previously-bare parameter
 /// symbol carries a `{type: ...}` metadata entry, using the declared
 /// signature's parameter type *expressions* (`declared_param_type_exprs`).
 ///
-/// The desugarer only attaches type metadata to parameters with an
-/// inline annotation (`def f(x: T)`); parameters whose types come from
-/// a separate `sig` declaration desugar to bare symbols. IR lowering's
+/// Inline annotations now leave whole-slot holes on parameters, with the
+/// actual types in the signature. Standalone signatures can have bare
+/// parameters. Both forms need the declared type here. IR lowering's
 /// `lower_fn` reads param types straight off this node, so without this
 /// step a standalone-lowered def's params fall back to a rank-0
 /// `default_type()` and any shape-sensitive op on them panics in
@@ -300,34 +451,24 @@ pub(super) fn is_wildcard_tvar_expr(expr: &deep::Expr) -> bool {
 /// function type drops them, which would make the linearity checker
 /// treat a borrowed param as owned).
 ///
-/// Parameters that already carry a type annotation are left untouched.
+/// Real annotations remain untouched. Only whole-slot holes receive the
+/// corresponding declared type, with all other binder metadata intact.
 pub(super) fn annotate_params_node(
     params_expr: &deep::Expr,
     declared_param_type_exprs: &[deep::Expr],
 ) -> deep::Expr {
-    // chelis#1107 amendment: accept both carriers. A stamped `(params ...)`
-    // arrives as `Expr::Node`, and the `List`-only read this replaced returned
-    // it unchanged -- so no parameter ever received its declared-type metadata
-    // on the stamped ingress.
-    //
-    // The bridge is materialized into a local rather than handled by
-    // re-entering this function: a self-recursive walk here would owe a
-    // `stack_guard!` (see `tests/stack_guard_coverage.rs`) for a recursion
-    // that is only ever one level deep.
-    let bridged;
-    let (list, span) = match params_expr {
-        deep::Expr::List(list, span) => (list, span),
-        deep::Expr::Node(node, span) if node.tag() == DeepTag::Params => {
-            bridged = node.to_list(*span);
-            (&bridged, span)
-        }
-        _ => return params_expr.clone(),
+    // A newly annotated name-headed binder is a structural `BareList`.
+    let (metadata, children) = match params_expr.carrier() {
+        deep::ExprCarrier::DecodedNode(DeepTag::Params, metadata, children) => (metadata, children),
+        deep::ExprCarrier::DecodedNode(_, _, _)
+        | deep::ExprCarrier::StructuralList(_)
+        | deep::ExprCarrier::UndecodableHead(_, _, _)
+        | deep::ExprCarrier::Atom(_)
+        | deep::ExprCarrier::MetadataMap(_)
+        | deep::ExprCarrier::MetadataExpression(_) => return params_expr.clone(),
     };
-    if get_tag(list) != Some(DeepTag::Params) {
-        return params_expr.clone();
-    }
-    let mut elements = vec![list.elements[0].clone(), list.elements[1].clone()];
-    for (index, param) in children(list).iter().enumerate() {
+    let mut annotated_children = Vec::with_capacity(children.len());
+    for (index, param) in children.iter().enumerate() {
         match param {
             deep::Expr::Atom(deep::Atom::Name(name), atom_span) => {
                 // A synthesized sig from `desugar_fun_def` uses
@@ -340,29 +481,69 @@ pub(super) fn annotate_params_node(
                     .filter(|expr| !is_wildcard_tvar_expr(expr));
                 match declared {
                     Some(type_expr) => {
-                        elements.push(deep::Expr::List(
-                            deep::List {
-                                elements: vec![
-                                    deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
-                                    deep::Expr::Map(
-                                        deep::MetaMap {
-                                            entries: vec![("type".to_string(), type_expr.clone())],
-                                        },
-                                        *atom_span,
+                        let elements = vec![
+                            deep::Expr::Atom(deep::Atom::Name(name.clone()), *atom_span),
+                            deep::Expr::Map(
+                                deep::Metadata::from(
+                                    chelis_deep::annotations::MetadataValue::Type(
+                                        chelis_deep::annotations::TypeSyntax::try_new(
+                                            type_expr.clone(),
+                                        )
+                                        .expect("declared parameter type syntax"),
                                     ),
-                                ],
-                            },
-                            *atom_span,
-                        ));
+                                ),
+                                *atom_span,
+                            ),
+                        ];
+                        annotated_children.push(deep::Expr::BareList(elements, *atom_span));
                     }
-                    None => elements.push(param.clone()),
+                    None => annotated_children.push(param.clone()),
                 }
             }
-            // Already-typed params (MetaExpr / List forms) are left as-is.
-            _ => elements.push(param.clone()),
+            _ => annotated_children.push(
+                match declared_param_type_exprs
+                    .get(index)
+                    .filter(|ty| !is_wildcard_tvar_expr(ty))
+                {
+                    Some(declared) => annotate_parameter_hole(param, declared),
+                    None => param.clone(),
+                },
+            ),
         }
     }
-    deep::Expr::List(deep::List { elements }, *span)
+
+    deep::Expr::node(
+        DeepTag::Params,
+        metadata.clone(),
+        annotated_children,
+        params_expr.span(),
+    )
+}
+
+fn annotate_parameter_hole(param: &deep::Expr, declared: &deep::Expr) -> deep::Expr {
+    let mut annotated = param.clone();
+    // Producer-side carrier preservation: this mutates a private clone and
+    // returns the same representation. It does not decide whether an input
+    // carrier is semantically readable.
+    let metadata = match &mut annotated {
+        deep::Expr::MetaExpr(meta, _) => Some(&mut meta.metadata),
+        deep::Expr::BareList(elements, _) => match elements.get_mut(1) {
+            Some(deep::Expr::Map(meta, _)) => Some(meta),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(metadata) = metadata
+        && metadata
+            .ty()
+            .is_some_and(|ty| is_wildcard_tvar_expr(ty.expression()))
+    {
+        metadata.replace(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(declared.clone())
+                .expect("declared parameter type syntax"),
+        ));
+    }
+    annotated
 }
 
 /// Annotate the children of a `(fn ...)` node.
@@ -373,20 +554,21 @@ pub(super) fn annotate_params_node(
 /// wrappers verbatim. `fn` literals with no declared signature pass
 /// `None` and keep bare params.
 pub(super) fn annotate_fn_children(
-    list: &deep::List,
-    owner_expr: &deep::Expr,
+    fn_expr: &deep::Expr,
     product: &InferenceProduct,
     declared_param_type_exprs: Option<&[deep::Expr]>,
     annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> (Vec<deep::Expr>, Type) {
-    let kids = children(list);
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, _, kids) = fn_expr.carrier() else {
+        return (vec![], Type::Unit);
+    };
     if kids.is_empty() {
         return (vec![], Type::Unit);
     }
 
     let resolved_fn_ty = product
-        .owner_type(owner_expr, "function node", errors)
+        .owner_type(fn_expr, "function node", errors)
         .unwrap_or(Type::Unit);
     // Issue #319/#773: declared parameter syntax is copied from the owning
     // `sig` so borrow wrappers and shared symbolic variables remain exact.
@@ -424,52 +606,55 @@ pub(super) fn annotate_fn_children(
     (result, resolved_fn_ty)
 }
 
-pub(super) fn annotated_meta_map_with_override(
-    list: &deep::List,
-    expr: &deep::Expr,
+fn annotate_declared_fn_child(
+    child: &deep::Expr,
+    declaration_expr: &deep::Expr,
+    declared_param_type_exprs: &[deep::Expr],
     product: &InferenceProduct,
-    precomputed_ty: Option<Type>,
+    annotation_context: AnnotationResolutionContext<'_>,
     errors: &mut DiagnosticSink<'_>,
-) -> deep::Expr {
-    let meta_span = match list.elements.get(1) {
-        Some(deep::Expr::Map(_, span)) => *span,
-        _ => span_of_expr(expr),
+) -> Option<deep::Expr> {
+    let deep::ExprCarrier::DecodedNode(DeepTag::Fn, metadata, _) = child.carrier() else {
+        return None;
     };
-    let mut entries = get_meta(list)
-        .map(|meta| meta.entries.clone())
-        .unwrap_or_default();
+    let (annotated_children, inferred_fn_ty) = annotate_fn_children(
+        child,
+        product,
+        Some(declared_param_type_exprs),
+        annotation_context,
+        errors,
+    );
+    // The declaration owner's completed type retains the authored result
+    // claim; the body owner remains the independent inferred type used to
+    // check that claim.
+    let fn_ty = product
+        .owner_type(declaration_expr, "declared function", errors)
+        .unwrap_or(inferred_fn_ty);
 
-    let ty_for_meta = if let Some(tag) = get_tag(list) {
-        match (tag, precomputed_ty) {
-            (DeepTag::Fn, Some(ty)) => Some(ty),
-            (DeepTag::PatVar | DeepTag::PatAs, _) => {
-                product.owner_type(expr, "pattern binding", errors)
-            }
-            (t, _) if should_attach_type_metadata(t) => {
-                product.owner_type(expr, "metadata-eligible expression", errors)
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    if let Some(ty) = ty_for_meta {
-        write_type_metadata_monotone(&mut entries, ty, type_to_legacy_deep_expr);
-    }
-
-    deep::Expr::Map(deep::MetaMap { entries }, meta_span)
+    Some(deep::Expr::node(
+        DeepTag::Fn,
+        annotated_node_meta_with_override(
+            DeepTag::Fn,
+            metadata,
+            child,
+            Some(fn_ty),
+            product,
+            errors,
+        ),
+        annotated_children,
+        child.span(),
+    ))
 }
 
 pub(super) fn annotated_node_meta_with_override(
     tag: DeepTag,
-    meta: &deep::MetaMap,
+    meta: &deep::Metadata,
     expr: &deep::Expr,
     precomputed_ty: Option<Type>,
     product: &InferenceProduct,
     errors: &mut DiagnosticSink<'_>,
-) -> deep::MetaMap {
-    let mut entries = meta.entries.clone();
+) -> deep::Metadata {
+    let mut metadata = meta.clone();
     let ty_for_meta = match (tag, precomputed_ty) {
         (DeepTag::Fn, Some(ty)) => Some(ty),
         (DeepTag::PatVar | DeepTag::PatAs, _) => {
@@ -482,39 +667,30 @@ pub(super) fn annotated_node_meta_with_override(
     };
 
     if let Some(ty) = ty_for_meta {
-        write_type_metadata_monotone(&mut entries, ty, type_to_deep_expr);
+        write_type_metadata_monotone(&mut metadata, ty, type_to_deep_expr);
     }
 
-    deep::MetaMap { entries }
+    metadata
 }
 
 /// Write checker-owned metadata only when doing so preserves or increases
 /// information (#783). An unresolved, error, or partially resolved candidate
 /// never replaces existing metadata; a safe resolved candidate may refresh it.
 fn write_type_metadata_monotone(
-    entries: &mut Vec<(String, deep::Expr)>,
+    metadata: &mut deep::Metadata,
     ty: Type,
     encode: fn(&Type) -> deep::Expr,
 ) {
-    let existing = entries.iter().position(|(key, _)| key == "type");
-    let safe = type_is_safe_annotation_stamp(&ty);
-    match existing {
-        // An unresolved/error/partial candidate is strictly less informative
-        // than authored concrete metadata. Preserve the existing expression
-        // byte-for-byte instead of recreating #783's silent degradation.
-        Some(_) if !safe => {}
-        Some(index) => {
-            // A resolved owner may refine a generated wildcard or refresh
-            // stale derived metadata. Both remain ordinary checker writeback.
-            entries[index].1 = encode(&ty);
-        }
-        None if !matches!(ty, Type::Error(_)) => {
-            // Generalized functions and symbolic results legitimately carry
-            // variables when there was no more-informative annotation to
-            // protect. That is not a degradation.
-            entries.push(("type".to_string(), encode(&ty)));
-        }
-        None => {}
+    let write = if metadata.ty().is_some() {
+        type_is_safe_annotation_stamp(&ty)
+    } else {
+        !matches!(ty, Type::Error(_))
+    };
+    if write {
+        metadata.replace(chelis_deep::annotations::MetadataValue::Type(
+            chelis_deep::annotations::TypeSyntax::try_new(encode(&ty))
+                .expect("checker emits valid type syntax"),
+        ));
     }
 }
 
@@ -627,10 +803,15 @@ mod monotone_writeback_tests {
             TensorPrec::Concrete(Prim::F32),
         );
         let original = type_to_deep_expr(&concrete);
-        let mut entries = vec![("type".to_string(), original.clone())];
+        let mut metadata = deep::Metadata::default();
+        metadata
+            .insert(chelis_deep::annotations::MetadataValue::Type(
+                chelis_deep::annotations::TypeSyntax::try_new(original.clone()).unwrap(),
+            ))
+            .unwrap();
 
         write_type_metadata_monotone(
-            &mut entries,
+            &mut metadata,
             Type::Tensor(
                 vec![Dim::Var(DimVar(9001)), Dim::Lit(4)],
                 TensorPrec::Concrete(Prim::F32),
@@ -639,8 +820,8 @@ mod monotone_writeback_tests {
         );
 
         assert_eq!(
-            entries,
-            vec![("type".to_string(), original)],
+            metadata.ty().map(|ty| ty.expression()),
+            Some(&original),
             "an unresolved dimension is less informative than an existing concrete shape"
         );
     }
@@ -651,12 +832,12 @@ mod monotone_writeback_tests {
             vec![Dim::Var(DimVar(9002)), Dim::Lit(4)],
             TensorPrec::Concrete(Prim::F32),
         );
-        let mut entries = Vec::new();
+        let mut metadata = deep::Metadata::default();
 
-        write_type_metadata_monotone(&mut entries, candidate, type_to_deep_expr);
+        write_type_metadata_monotone(&mut metadata, candidate, type_to_deep_expr);
 
         assert_eq!(
-            entries.len(),
+            metadata.values().count(),
             1,
             "symbolic inferred metadata still has an owner"
         );

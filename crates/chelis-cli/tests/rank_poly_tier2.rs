@@ -147,9 +147,9 @@ fn assert_rank_rejected(json: &Value, label: &str) {
 #[test]
 fn identity_rank_poly_def_callable_at_ranks_1_and_2() {
     let json = check_json(
-        "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
-         def use_rank1(x: &tensor[n, f32]) -> tensor[n, f32] = relu_forward(x)\n\
-         def use_rank2(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n",
+        "def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def use_rank1[n](x: &tensor[n, f32]) -> tensor[n, f32] = relu_forward(x)\n\
+         def use_rank2[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n",
     );
     assert_clean(&json, "identity rank-poly callable at rank 1 and rank 2");
 }
@@ -167,9 +167,9 @@ fn identity_rank_poly_def_callable_at_ranks_1_and_2() {
 fn same_name_rank_distinct_def_overloads_rejected_as_duplicate() {
     let json = check_json(
         "module ReproOverload\n\
-         sig relu_forward: &tensor[a, f32] -> tensor[a, f32]\n\
+         sig relu_forward[a]: &tensor[a, f32] -> tensor[a, f32]\n\
          def relu_forward(x) = relu(x)\n\
-         sig relu_forward: &tensor[a, b, f32] -> tensor[a, b, f32]\n\
+         sig relu_forward[a, b]: &tensor[a, b, f32] -> tensor[a, b, f32]\n\
          def relu_forward(x) = relu(x)\n",
     );
     assert_rejected_with(
@@ -193,9 +193,9 @@ fn same_name_rank_distinct_def_overloads_rejected_as_duplicate() {
 #[test]
 fn identity_rank_poly_def_callable_at_ranks_3_and_4() {
     let json = check_json(
-        "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
-         def r3(x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
-         def r4(x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n",
+        "def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def r3[a, b, c](x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
+         def r4[a, b, c, d](x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n",
     );
     assert_clean(&json, "identity rank-poly callable at rank 3 and rank 4");
 }
@@ -209,11 +209,11 @@ fn identity_rank_poly_def_callable_at_ranks_3_and_4() {
 #[test]
 fn multi_arg_rank_poly_def_callable_at_ranks_1_through_4() {
     let json = check_json(
-        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
-         def use1(x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
-         def use2(x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
-         def use3(x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
-         def use4(x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n",
+        "def add2[r](x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def use1[n](x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
+         def use2[a, b](x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
+         def use3[a, b, c](x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
+         def use4[a, b, c, d](x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n",
     );
     assert_clean(&json, "multi-arg shared ..r callable at ranks 1-4");
 }
@@ -225,8 +225,8 @@ fn multi_arg_rank_poly_def_callable_at_ranks_1_through_4() {
 #[test]
 fn multi_arg_rank_poly_def_rank_mismatch_rejected() {
     let json = check_json(
-        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
-         def bad(x: &tensor[n, f32], y: &tensor[a, b, f32]) -> tensor[n, f32] = add2(x, y)\n",
+        "def add2[r](x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def bad[n, a, b](x: &tensor[n, f32], y: &tensor[a, b, f32]) -> tensor[n, f32] = add2(x, y)\n",
     );
     assert_rejected(&json, "multi-arg ..r with rank-1 vs rank-2 args");
 }
@@ -239,7 +239,7 @@ fn multi_arg_rank_poly_def_rank_mismatch_rejected() {
 #[test]
 fn multi_arg_rank_poly_def_dim_mismatch_rejected() {
     let json = check_json(
-        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+        "def add2[r](x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
          def bad(x: &tensor[two, three, f32], y: &tensor[three, two, f32]) -> tensor[two, three, f32] = add2(x, y)\n",
     );
     assert_rejected(&json, "multi-arg ..r with [two,three] vs [three,two] args");
@@ -249,8 +249,9 @@ fn multi_arg_rank_poly_def_dim_mismatch_rejected() {
 /// stays clean — composition of elementwise ops preserves the shape.
 #[test]
 fn composed_identity_builtins_in_rank_poly_body_clean() {
-    let json =
-        check_json("def my_silu(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n");
+    let json = check_json(
+        "def my_silu[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n",
+    );
     assert_clean(&json, "composed identity builtins (mul + sigmoid)");
 }
 
@@ -262,7 +263,7 @@ fn composed_identity_builtins_in_rank_poly_body_clean() {
 #[test]
 fn permute_in_rank_poly_body_rejected() {
     let json =
-        check_json("def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, 1, 0)\n");
+        check_json("def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, 1, 0)\n");
     assert_body_discipline_rejected(&json, "permute", "permute in ..r body");
 }
 
@@ -273,7 +274,7 @@ fn permute_in_rank_poly_body_rejected() {
 #[test]
 fn positional_reduce_on_sole_spread_rejected() {
     let json =
-        check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
+        check_json("def bad[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, i32))\n");
     assert_rejected_with(
         &json,
         "positional axes require a concrete-rank operand",
@@ -285,7 +286,7 @@ fn positional_reduce_on_sole_spread_rejected() {
 #[test]
 fn reshape_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
+        "def bad[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
     );
     assert_body_discipline_rejected(&json, "reshape", "reshape in ..r body");
 }
@@ -301,8 +302,8 @@ fn reshape_in_rank_poly_body_rejected() {
 #[test]
 fn vmap_transform_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def inner(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner)\n",
+        "def inner[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
+         def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner)\n",
     );
     assert_rank_rejected(&json, "vmap transform in ..r body");
 }
@@ -311,8 +312,8 @@ fn vmap_transform_in_rank_poly_body_rejected() {
 #[test]
 fn grad_transform_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def loss(x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, int32))\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = grad(loss)(x)\n",
+        "def loss[a](x: &tensor[a, f32]) -> tensor[f32] = sum(x, cast(0, i32))\n\
+         def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = grad(loss)(x)\n",
     );
     assert_rank_rejected(&json, "grad transform in ..r body");
 }
@@ -321,8 +322,8 @@ fn grad_transform_in_rank_poly_body_rejected() {
 #[test]
 fn user_fn_call_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def helper(x: &tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = helper(x)\n",
+        "def helper[a](x: &tensor[a, f32]) -> tensor[a, f32] = relu(x)\n\
+         def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = helper(x)\n",
     );
     assert_rank_rejected(&json, "user-fn call in ..r body");
 }
@@ -330,20 +331,21 @@ fn user_fn_call_in_rank_poly_body_rejected() {
 // ── Tier-3 supersedes the old parse boundary ────────────────────────────
 
 /// `..r` adjacent to a concrete dim is now valid Tier-3 syntax: a rank-poly
-/// identity over `tensor[..r, k]` checks clean. The Tier-2/Tier-3 boundary
+/// identity over `tensor[..r, 3]` checks clean. The Tier-2/Tier-3 boundary
 /// moved from parse time to unification, where an *undetermined* split between
 /// two adjacent spreads is rejected (see `rank_poly_tier3`).
 #[test]
 fn rank_var_adjacent_to_concrete_dim_now_checks_clean() {
-    let json = check_json("def f(x: &tensor[..r, k, f32]) -> tensor[..r, k, f32] = relu(x)\n");
-    assert_clean(&json, "tensor[..r, k] adjacency now valid (Tier-3)");
+    let json = check_json("def f[r](x: &tensor[..r, 3, f32]) -> tensor[..r, 3, f32] = relu(x)\n");
+    assert_clean(&json, "tensor[..r, 3] adjacency now valid (Tier-3)");
 }
 
 /// Control: the same activation written WITHOUT `..r` (concrete rank) still
 /// checks clean — the feature does not regress ordinary tensor defs.
 #[test]
 fn concrete_rank_activation_still_clean() {
-    let json = check_json("def relu2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu(x)\n");
+    let json =
+        check_json("def relu2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu(x)\n");
     assert_clean(&json, "concrete-rank activation control");
 }
 
@@ -354,8 +356,8 @@ fn concrete_rank_activation_still_clean() {
 #[test]
 fn shadowing_builtin_name_in_rank_poly_body_rejected() {
     let json = check_json(
-        "def relu(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n",
+        "def relu[a, b](x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
+         def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n",
     );
     assert_rank_rejected(&json, "user `relu` shadowing the builtin in a ..r body");
 }
@@ -412,7 +414,7 @@ fn build_compile_run(source: &str, name: &str) -> String {
         .arg("-O2")
         .args(&toolchain.compile_flags)
         .arg(&c_source)
-        .args(["-L.", "-lchelis_runtime"])
+        .arg("libchelis_runtime.a")
         .args(&toolchain.link_flags)
         .args(["-o", bin.to_str().unwrap()]);
     let link = cc.status().expect("host compiler runs");
@@ -492,11 +494,11 @@ fn parse_printed_tensors(stdout: &str) -> Vec<(String, Vec<usize>, Vec<f64>)> {
 /// eval-vs-backend agreement).
 #[test]
 fn rank_poly_identity_builds_and_runs_at_ranks_1_through_4() {
-    let source = "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
-         def r1(x: &tensor[n, f32]) -> tensor[n, f32] = relu_forward(x)\n\
-         def r2(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n\
-         def r3(x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
-         def r4(x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n\
+    let source = "def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n\
+         def r1[n](x: &tensor[n, f32]) -> tensor[n, f32] = relu_forward(x)\n\
+         def r2[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = relu_forward(x)\n\
+         def r3[a, b, c](x: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = relu_forward(x)\n\
+         def r4[a, b, c, d](x: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = relu_forward(x)\n\
          out1 = r1(to_tensor([-1.0, 2.0, -3.0, 4.0]))\n\
          out2 = r2(to_tensor([[-1.0, 2.0], [3.0, -4.0]]))\n\
          out3 = r3(to_tensor([[[-1.0, 2.0]], [[3.0, -4.0]]]))\n\
@@ -556,11 +558,11 @@ fn rank_poly_identity_builds_and_runs_at_ranks_1_through_4() {
 /// agreement). The §"identity `R` shared across two args" backend acceptance.
 #[test]
 fn multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4() {
-    let source = "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
-         def r1(x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
-         def r2(x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
-         def r3(x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
-         def r4(x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n\
+    let source = "def add2[r](x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n\
+         def r1[n](x: &tensor[n, f32], y: &tensor[n, f32]) -> tensor[n, f32] = add2(x, y)\n\
+         def r2[a, b](x: &tensor[a, b, f32], y: &tensor[a, b, f32]) -> tensor[a, b, f32] = add2(x, y)\n\
+         def r3[a, b, c](x: &tensor[a, b, c, f32], y: &tensor[a, b, c, f32]) -> tensor[a, b, c, f32] = add2(x, y)\n\
+         def r4[a, b, c, d](x: &tensor[a, b, c, d, f32], y: &tensor[a, b, c, d, f32]) -> tensor[a, b, c, d, f32] = add2(x, y)\n\
          out1 = r1(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))\n\
          out2 = r2(to_tensor([[1.0, 2.0], [3.0, 4.0]]), to_tensor([[10.0, 20.0], [30.0, 40.0]]))\n\
          out3 = r3(to_tensor([[[1.0, 2.0]], [[3.0, 4.0]]]), to_tensor([[[10.0, 20.0]], [[30.0, 40.0]]]))\n\
@@ -616,8 +618,8 @@ fn multi_arg_rank_poly_builds_and_runs_at_ranks_1_through_4() {
 /// elementwise ops stays rank-monomorphizable.
 #[test]
 fn rank_poly_composed_identity_builds_and_runs() {
-    let source = "def my_silu(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n\
-         def use2d(x: &tensor[a, b, f32]) -> tensor[a, b, f32] = my_silu(x)\n\
+    let source = "def my_silu[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, sigmoid(x))\n\
+         def use2d[a, b](x: &tensor[a, b, f32]) -> tensor[a, b, f32] = my_silu(x)\n\
          out = use2d(to_tensor([[0.0, 1.0], [-1.0, 2.0]]))\n";
     let backend = build_compile_run(source, "rank_poly_silu");
     let tensors = parse_printed_tensors(&backend);
@@ -650,8 +652,8 @@ fn rank_poly_composed_identity_builds_and_runs() {
 /// asserted on the compiled binary and against the evaluator oracle.
 #[test]
 fn grad_over_rank_poly_callee_builds_runs_and_matches_oracle() {
-    let source = "def sq(x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, x)\n\
-         def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, int32)))\n\
+    let source = "def sq[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = mul(x, x)\n\
+         def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(sq(&x), cast(0, i32)))\n\
          def dloss(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)\n\
          out = dloss(to_tensor([1.0, 2.0, 3.0]))\n";
 
@@ -706,7 +708,7 @@ fn grad_over_rank_poly_callee_builds_runs_and_matches_oracle() {
 #[test]
 fn rank_poly_shape_rewriting_body_still_rejected_at_typecheck() {
     let json =
-        check_json("def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, 1, 0)\n");
+        check_json("def evil[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = permute(x, 1, 0)\n");
     assert_body_discipline_rejected(
         &json,
         "permute",
@@ -726,7 +728,7 @@ fn rank_poly_shape_rewriting_body_still_rejected_at_typecheck() {
 /// text still type-checks clean. This locks the `(d-rank)` ↔ `..r` round-trip.
 #[test]
 fn rank_poly_def_survives_fmt_round_trip() {
-    let src = "def relu_forward(x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n";
+    let src = "def relu_forward[r](x: &tensor[..r, f32]) -> tensor[..r, f32] = relu(x)\n";
     let formatted = fmt_stdout(src);
 
     // The spread marker survives in both the param and the result type.
@@ -759,7 +761,7 @@ fn rank_poly_def_survives_fmt_round_trip() {
 #[test]
 fn multi_arg_rank_poly_def_survives_fmt_round_trip() {
     let src =
-        "def add2(x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n";
+        "def add2[r](x: &tensor[..r, f32], y: &tensor[..r, f32]) -> tensor[..r, f32] = add(x, y)\n";
     let formatted = fmt_stdout(src);
     assert_eq!(
         formatted.matches("..r").count(),

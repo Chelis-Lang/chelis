@@ -39,6 +39,8 @@
 // introduced. Their mangled names share a terminal exactly as two
 // packages' do, so the same defect reached lowering by a second route.
 
+mod common;
+
 use assert_cmd::Command;
 use chelis_compiler_api::COMPILER_VERSION;
 use std::fs;
@@ -91,11 +93,25 @@ impl Built {
             .ok()
     }
 
-    /// Link the emitted unit against a driver that calls `entry_symbol`
+    /// Link the emitted unit against a driver that calls `entry_source_name`
     /// and prints its `f32` result, run it, and return stdout. `None`
     /// when no host compiler is available.
-    fn compile_and_run(&self, entry_symbol: &str) -> Option<String> {
+    fn compile_and_run(&self, entry_source_name: &str) -> Option<String> {
         let source = self.source();
+        let unit_header = self.unit.replace(".c", ".h");
+        let header = fs::read_to_string(self.out_dir.join(&unit_header))
+            .expect("generated declaration header");
+        let declarations =
+            chelis_backend_c::GeneratedHeader::parse(&header).expect("generated header metadata");
+        declarations
+            .validate_source(source)
+            .expect("generated header must agree with generated source");
+        let entry_symbol = declarations
+            .declaration(entry_source_name)
+            .unwrap_or_else(|| {
+                panic!("generated header has no declaration for `{entry_source_name}`")
+            })
+            .symbol();
         let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
             chelis_backend_c::toolchain::CodegenRequirements {
                 wants_openmp: true,
@@ -116,7 +132,6 @@ impl Built {
             )
             .expect("rename generated observation driver for the ABI probe");
         }
-        let unit_header = self.unit.replace(".c", ".h");
         write_file(
             &self.out_dir.join("driver.c"),
             &format!(
@@ -135,7 +150,7 @@ impl Built {
         command.args(&toolchain.compile_flags);
         command.arg(&self.unit);
         command.arg("driver.c");
-        command.args(["-L.", "-lchelis_runtime"]);
+        command.arg("libchelis_runtime.a");
         command.args(&toolchain.link_flags);
         command.args(["-o", "prog"]);
         let compiled = command.output().expect("host compiler should run");
@@ -285,18 +300,35 @@ fn build_app(
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     // The public symbol is now the [04-LIN-7] borrowing adapter. Constructor
     // layout and projection are emitted in the consuming implementation body.
-    let (prefix, params) = signature
+    let (prefix, _params) = signature
         .split_once('(')
         .expect("test signature contains parameter list");
-    let signature = format!("{prefix}__chelis_owned_body({params}");
-    let start = source
-        .find(&format!("{signature} {{"))
-        .unwrap_or_else(|| panic!("emitted C has no `{signature}` definition:\n{source}"));
-    let rest = &source[start..];
+    let (_return_type, name) = prefix
+        .rsplit_once(' ')
+        .expect("test signature contains a return type and function name");
+    // chelis#1820: located by NAME, not by the full signature. chelis#1799
+    // added a `chelis_rng_state` parameter to every host body, and the old
+    // full-signature needle then missed the definition and failed before this
+    // row read anything. The parameter list is not what the row asserts.
+    let name = format!("{}__chelis_owned_body", common::authored_c_symbol(name));
+    let rest = common::host_body_definition(source, &name);
     let end = rest
         .find("\n}\n")
-        .unwrap_or_else(|| panic!("`{signature}` definition is unterminated:\n{rest}"));
+        .unwrap_or_else(|| panic!("`{name}` definition is unterminated:\n{rest}"));
     &rest[..end]
+}
+
+/// The field index of every `chelis_adt_get_field` read in an emitted body,
+/// in order. Reading the index rather than a whole call keeps the row off the
+/// emitter's temporary numbering, which says nothing about field layout.
+fn adt_field_reads(body: &str) -> Vec<&str> {
+    body.match_indices("chelis_adt_get_field(")
+        .map(|(start, _)| {
+            let call = &body[start..];
+            let args = &call[..call.find(')').expect("field read is closed")];
+            args.rsplit_once(", ").expect("field read has an index").1
+        })
+        .collect()
 }
 
 /// `chelis check` must keep scoring the app 1.0 with no errors in both
@@ -346,7 +378,7 @@ fn assert_app_checks_clean(collider: Option<&Package<'_>>, library: &Package<'_>
         .expect("run chelis check");
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("check output must be json");
-    assert_eq!(json["score"], 1, "app must check clean: {json}");
+    assert_eq!(json["score"], 1.0, "app must check clean: {json}");
     assert!(
         json["errors"].as_array().expect("errors array").is_empty(),
         "app must check with no errors: {json}"
@@ -469,8 +501,9 @@ fn match_destructuring_binds_the_authored_packages_field_index() {
         function_body(solo.source(), signature),
         "a match arm must bind the authored declaration's field index"
     );
-    assert!(
-        body.contains("chelis_adt_get_field(__adt_0, 1)"),
+    assert_eq!(
+        adt_field_reads(body),
+        ["1"],
         "`amount` is field 1 in the authored declaration; emitted body was:\n{body}"
     );
 }
@@ -707,8 +740,9 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         "`amount` is field 0 in Demo.Alpha; emitted body was:\n{alpha}"
     );
     let beta = function_body(source, "float pkg__demo__Demo__Beta__value(chelis_adt* w)");
-    assert!(
-        beta.contains("chelis_adt_get_field(__adt_0, 1)"),
+    assert_eq!(
+        adt_field_reads(beta),
+        ["1"],
         "`amount` is field 1 in Demo.Beta; emitted body was:\n{beta}"
     );
 
@@ -725,7 +759,10 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         .expect("run chelis check");
     let report: serde_json::Value =
         serde_json::from_slice(&checked.stdout).expect("check output must be json");
-    assert_eq!(report["score"], 1, "the package must check clean: {report}");
+    assert_eq!(
+        report["score"], 1.0,
+        "the package must check clean: {report}"
+    );
 
     let evaluated = Command::cargo_bin("chelis")
         .expect("binary")

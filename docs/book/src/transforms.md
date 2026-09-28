@@ -6,6 +6,41 @@ After expansion the program contains only RISC primitives. A transform must alwa
 applied; a bare `grad` with no function is a parse error. Transforms compose. The
 authoritative source is `spec/06-transformations.md`.
 
+## Chelis 0.19 core-transform fence
+
+For the remaining 0.19 core-transform fence, write `vmap` targets and
+`grad` targets without an explicit `wrt` selector against a direct,
+unshadowed top-level function declaration, such as `grad(loss)` or
+`vmap(process)`. Those forms reject aliases of a top-level function at either
+module or local scope, and a local binding that shadows a top-level target,
+rather than silently selecting a different callable. The normative named
+`grad(..., wrt=...)` selector follows the callable-origin contract described
+below, but the current core fence still rejects an alias target before selector
+processing; named selectors are currently admitted on direct, unshadowed
+declarations and the other supported target forms. An inline or locally bound
+`vmap` lambda remains supported when every parameter has explicit structure
+wherever `vmap` inserts the mapped axis. A whole type hole such as `_`, a type hole
+nested through a reference or tuple, and a Deep rank hole are not explicit
+mapped structure: they could bind to the unsliced input rather than the mapped
+slice. Fixed-rank tensor dimension and precision variables remain supported
+because the tensor constructor and axis insertion are already determined;
+named type and rank variables remain governed by their ordinary binder rules.
+Surf uses `*` for a dynamic tensor extent and rejects `_` in tensor dimension,
+precision, or rank-spread slots. An unsupported lambda is rejected through
+module or local aliases and transparent value flow, including block results,
+direct tuple projections, tuple destructuring, match-pattern binding, and
+match results. Structural pattern, result, and projection flow follows only
+the corresponding tuple component, and lexical shadowing replaces the earlier
+value.
+
+These are current supported-fragment fences, not changes to the language
+semantics in the numbered specification. The related launch rows are
+[#1887](https://github.com/Chelis-Lang/chelis/issues/1887),
+[#1952](https://github.com/Chelis-Lang/chelis/issues/1952), and
+[#1954](https://github.com/Chelis-Lang/chelis/issues/1954), with the
+local-lambda fence completed by
+[#2109](https://github.com/Chelis-Lang/chelis/issues/2109).
+
 ## grad
 
 `grad(f)` is reverse-mode differentiation. It produces a new function from `f`'s arguments to
@@ -28,6 +63,11 @@ parameter in the order listed. Apply the gradient function to get the values:
 ```chelis-surf-fragment
 (dw, db) = grad(loss_fn, wrt=(w, b))(w, b)
 ```
+
+Named selectors follow the callable's immutable origin through aliases and
+through tuple, ADT constructor, and record patterns. The executable
+`examples/illustrative/grad_selector_provenance.ch` demonstrates nested constructor and
+record payloads while checking both direct calls and `grad(..., wrt=w)`.
 
 `grad` returns gradients only, not the forward value alongside them. It composes with
 itself for higher derivatives: `grad(grad(f))` is the second derivative.
@@ -83,7 +123,7 @@ def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f
 ```
 
 ```chelis-deep-fragment
-(vmap {} (var {} process) (lit {type: (t-prim {} int32)} 0))
+(vmap {} (var {} process) (lit {type: (t-prim {} i32)} 0))
 ```
 
 Each tensor argument of the wrapped function gains the batch dimension; non-tensor arguments

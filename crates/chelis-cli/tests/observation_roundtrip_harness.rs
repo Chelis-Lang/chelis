@@ -18,7 +18,7 @@
 //!
 //! * **tier 1 - intra-lane exit agreement** (§C2.2): every exit of one lane
 //!   decodes to the same bits. Used alone where the lanes' STORED value is
-//!   known to diverge from the constructed one (eval's f64-backed int64
+//!   known to diverge from the constructed one (eval's f64-backed i64
 //!   tensors above 2^53, chelis#684).
 //! * **tier 2 - absolute faithfulness**: the decoded bits equal the
 //!   constructed value's bits. Used where construction is
@@ -64,7 +64,7 @@
 //! Everything else is green by contract; a new red here is a new
 //! faithful-observation bug (file it, per §B2.5).
 //!
-//! The wire's capacity limits (JSON cannot carry NaN/inf as numbers; int64
+//! The wire's capacity limits (JSON cannot carry NaN/inf as numbers; i64
 //! above 2^53 in `Vec<f64>` tensor data) are [#729]/[#686] storage decisions
 //! recorded at the schema (§C2.4), so the wire rows here cover the
 //! in-capacity set only.
@@ -73,6 +73,11 @@
 //! Red cells: append `-- --ignored`.
 
 #![allow(clippy::uninlined_format_args)]
+
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
+use chelis_compiler_api::schema::ExecutionValue;
 
 use assert_cmd::Command;
 use tempfile::tempdir;
@@ -582,71 +587,71 @@ struct IRow {
 /// ingress question ([#729]) this harness does not take a position on.
 const INT_ROWS: &[(&str, &[IRow])] = &[
     (
-        "int8",
+        "i8",
         &[
             IRow {
                 label: "i8-max",
-                elem: "cast(127, int8)",
+                elem: "cast(127, i8)",
                 value: 127,
             },
             IRow {
                 label: "i8-neg-max",
-                elem: "cast(-127, int8)",
+                elem: "cast(-127, i8)",
                 value: -127,
             },
             IRow {
                 label: "i8-zero",
-                elem: "cast(0, int8)",
+                elem: "cast(0, i8)",
                 value: 0,
             },
         ],
     ),
     (
-        "int16",
+        "i16",
         &[
             IRow {
                 label: "i16-max",
-                elem: "cast(32767, int16)",
+                elem: "cast(32767, i16)",
                 value: 32767,
             },
             IRow {
                 label: "i16-neg-max",
-                elem: "cast(-32767, int16)",
+                elem: "cast(-32767, i16)",
                 value: -32767,
             },
         ],
     ),
     (
-        "int32",
+        "i32",
         &[
             IRow {
                 label: "i32-max",
-                elem: "cast(2147483647, int32)",
+                elem: "cast(2147483647, i32)",
                 value: 2147483647,
             },
             IRow {
                 label: "i32-neg-max",
-                elem: "cast(-2147483647, int32)",
+                elem: "cast(-2147483647, i32)",
                 value: -2147483647,
             },
         ],
     ),
     (
-        "int64",
+        "i64",
         &[
             IRow {
                 label: "i64-2p53",
-                elem: "cast(9007199254740992, int64)",
+                elem: "cast(9007199254740992, i64)",
                 value: 9007199254740992,
             },
             IRow {
                 label: "i64-neg-2p53",
-                elem: "cast(-9007199254740992, int64)",
+                elem: "cast(-9007199254740992, i64)",
                 value: -9007199254740992,
             },
             IRow {
                 label: "i64-small",
-                elem: "cast(750, int64)",
+                elem: "cast(750, i64)",
                 value: 750,
             },
         ],
@@ -894,7 +899,7 @@ fn eval_int_tensor_exits_round_trip() {
     }
 }
 
-/// int64 ABOVE 2^53: tier 1 only. Pre-chelis#729 the f64-backed storage
+/// i64 ABOVE 2^53: tier 1 only. Pre-chelis#729 the f64-backed storage
 /// collapsed 2^53+1 before ANY exit rendered it (green by uniform
 /// wrongness); chelis#729 Phase 1 made the host-lane exits exact with
 /// the tensor-lane labeled root still collapsing through the f64 DAG
@@ -904,10 +909,7 @@ fn eval_int_tensor_exits_round_trip() {
 /// tier-2 version of this row is the chelis#723 ignored test below.
 #[test]
 fn eval_int64_above_2p53_exits_agree_within_lane() {
-    let program = exits_program(
-        "tensor[1, int64]",
-        "to_tensor([cast(9007199254740993, int64)])",
-    );
+    let program = exits_program("tensor[1, i64]", "to_tensor([cast(9007199254740993, i64)])");
     let out = eval_stdout(&program).expect("eval");
     let mut decoded: Vec<i64> = Vec::new();
     for line in tensor_lines(&out) {
@@ -919,7 +921,7 @@ fn eval_int64_above_2p53_exits_agree_within_lane() {
     assert_eq!(decoded.len(), 5, "five exit renders expected:\n{out}");
     assert!(
         decoded.windows(2).all(|w| w[0] == w[1]),
-        "eval exits disagree on one stored int64 tensor: {decoded:?}\n{out}"
+        "eval exits disagree on one stored i64 tensor: {decoded:?}\n{out}"
     );
 }
 
@@ -969,10 +971,10 @@ fn eval_scalar_exits_round_trip() {
         }
     }
     let int_rows: &[(&str, i64)] = &[
-        ("cast(9223372036854775807, int64)", i64::MAX),
-        ("cast(-9223372036854775807, int64)", -i64::MAX),
-        ("cast(9007199254740993, int64)", 9007199254740993),
-        ("cast(2147483647, int32)", 2147483647),
+        ("cast(9223372036854775807, i64)", i64::MAX),
+        ("cast(-9223372036854775807, i64)", -i64::MAX),
+        ("cast(9007199254740993, i64)", 9007199254740993),
+        ("cast(2147483647, i32)", 2147483647),
     ];
     for (expr, value) in int_rows {
         let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
@@ -1012,7 +1014,7 @@ fn scalar_render_lines(stdout: &str, expected_renders: usize) -> Vec<String> {
 }
 
 /// GREEN regression (chelis#684, [#729] value layer; surfaced by PR
-/// #792's red team, F1): an int64 SCALAR ROOT above 2^53 stays exact at
+/// #792's red team, F1): an i64 SCALAR ROOT above 2^53 stays exact at
 /// the labeled root, agreeing with print and to_string of the same def.
 /// The interpreter's rank-0 f64 realization used to collapse the value
 /// BEFORE the renderer saw it, which made this a stored-value defect
@@ -1023,7 +1025,7 @@ fn scalar_render_lines(stdout: &str, expected_renders: usize) -> Vec<String> {
 #[test]
 fn eval_int64_scalar_root_above_2p53_renders_exact() {
     let program = "module M.Main\n\
-         def run() -> int64 = cast(9007199254740993, int64)\n\
+         def run() -> i64 = cast(9007199254740993, i64)\n\
          shown = print(run())\n\
          sroot = run()\n";
     let out = eval_stdout(program).expect("eval");
@@ -1042,7 +1044,7 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         .unwrap_or_else(|| panic!("no sroot line in:\n{out}"));
     assert_eq!(
         root, "sroot = 9007199254740993",
-        "the labeled root must carry the exact stored int64; [05-OBS-1] \
+        "the labeled root must carry the exact stored i64; [05-OBS-1] \
          intra-lane exit agreement is broken by the rank-0 realization"
     );
 }
@@ -1201,7 +1203,7 @@ fn c_suffixed_f32_literal_widens_from_its_stored_width() {
 /// the rank-0 `tensor(shape=[], data=[..])` wrapper appears at no exit.
 /// Values are chosen exactly representable at their dtype so the [#684]
 /// storage collapse (a value bug, not a rendering one - its above-2^53
-/// int64 face is the ignored red cell directly above) cannot blur the
+/// i64 face is the ignored red cell directly above) cannot blur the
 /// row; the C lane's conformance for the same repro is locked by
 /// `c_def_call_scalar_root_emitted_issue_750` below.
 #[test]
@@ -1209,8 +1211,8 @@ fn eval_scalar_value_roots_render_bare() {
     let rows: &[(&str, &str, &str)] = &[
         ("f64", "cast(0.1, f64)", "0.1"),
         ("f32", "0.5", "0.5"),
-        ("int64", "cast(750, int64)", "750"),
-        ("int32", "7", "7"),
+        ("i64", "cast(750, i64)", "750"),
+        ("i32", "7", "7"),
         ("bool", "and(true, true)", "true"),
     ];
     for (ret, expr, expected) in rows {
@@ -1297,9 +1299,9 @@ fn eval_unit_valued_sole_print_root_keeps_its_name_issue_862() {
             "shown = ()",
         ),
         (
-            "int32-scalar-root-distinct-name",
+            "i32-scalar-root-distinct-name",
             "module M.Main\n\
-             def run() -> int32 = 7\n\
+             def run() -> i32 = 7\n\
              whatever = print(run())\n"
                 .to_string(),
             "whatever = ()",
@@ -1343,11 +1345,11 @@ fn eval_exit_grammar_locks() {
     let cases: &[(&str, &str)] = &[
         // Integers print as integers in tensor data ([05-OBS-2]).
         (
-            "print(to_tensor([cast(127, int8), cast(-127, int8), cast(0, int8)]))",
+            "print(to_tensor([cast(127, i8), cast(-127, i8), cast(0, i8)]))",
             "tensor(shape=[3], data=[127, -127, 0])",
         ),
         (
-            "print(to_tensor([cast(9007199254740992, int64)]))",
+            "print(to_tensor([cast(9007199254740992, i64)]))",
             "tensor(shape=[1], data=[9007199254740992])",
         ),
         // bool tensor data prints true/false (chelis#726's eval half).
@@ -1530,7 +1532,7 @@ fn c_int_tensor_exits_round_trip() {
     }
 }
 
-/// The C lane's int64 to_list exit is EXACT above 2^53 (the audit's proof
+/// The C lane's i64 to_list exit is EXACT above 2^53 (the audit's proof
 /// instrument for chelis#723; mirrors the sum-based lock in
 /// reduction_and_bitwise_matrix.rs without moving it). Print of the same
 /// tensor is the chelis#723 ignored test below.
@@ -1541,8 +1543,8 @@ fn c_int64_to_list_is_exact_above_2p53() {
         return;
     }
     let program = "module M.Main\n\
-         def mk() -> tensor[2, int64] = to_tensor([cast(9007199254740993, int64), \
-         cast(9223372036854775807, int64)])\n\
+         def mk() -> tensor[2, i64] = to_tensor([cast(9007199254740993, i64), \
+         cast(9223372036854775807, i64)])\n\
          shown = print(to_list(mk()))\n\
          lroot = to_list(mk())\n";
     let out = c_stdout(program, "obs_i64_list").expect("C lane");
@@ -1619,11 +1621,11 @@ fn c_scalar_exits_round_trip() {
         }
     }
     let int_rows: &[(&str, i64)] = &[
-        ("cast(9223372036854775807, int64)", i64::MAX),
-        ("cast(9007199254740993, int64)", 9007199254740993),
+        ("cast(9223372036854775807, i64)", i64::MAX),
+        ("cast(9007199254740993, i64)", 9007199254740993),
     ];
     for (i, (expr, value)) in int_rows.iter().enumerate() {
-        let program = format!("module M.Main\ndef run() -> int64 = {expr}\nshown = print(run())\n");
+        let program = format!("module M.Main\ndef run() -> i64 = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_i{i}")).expect("C lane");
         for line in scalar_render_lines(&out, 2) {
             assert_eq!(
@@ -1653,7 +1655,7 @@ fn c_scalar_exits_round_trip() {
 // to a direct-construction root of the same value.
 // ===========================================================================
 
-/// chelis#750 (tensor): the issue's exact int8 repro. The def-call value
+/// chelis#750 (tensor): the issue's exact i8 repro. The def-call value
 /// root `troot = mk()` was silently dropped by the compiled lane; it is
 /// now emitted with the exact stored values (127 / -127 / 0). Since
 /// chelis#732 Phase 2 BOTH lanes render integers as integers ([05-OBS-2]),
@@ -1667,8 +1669,8 @@ fn c_def_call_tensor_root_matches_eval_issue_750() {
         return;
     }
     let program = "module M.Main\n\
-         def mk() -> tensor[3, int8] = \
-         to_tensor([cast(127, int8), cast(-127, int8), cast(0, int8)])\n\
+         def mk() -> tensor[3, i8] = \
+         to_tensor([cast(127, i8), cast(-127, i8), cast(0, i8)])\n\
          shown = print(mk())\n\
          troot = mk()\n";
     let eval_out = eval_stdout(program).expect("eval");
@@ -1762,7 +1764,7 @@ fn fn_typed_top_level_binding_emits_no_root_issue_750() {
     let program = "module M.Main\n\
          def add1(x: f64) -> f64 = add(x, cast(1.0, f64))\n\
          shown = print(add1(cast(2.0, f64)))\n\
-         troot = to_tensor([cast(1, int8), cast(2, int8)])\n\
+         troot = to_tensor([cast(1, i8), cast(2, i8)])\n\
          myfn = add1\n";
     let eval_out = eval_stdout(program).expect("eval");
     let c_out = c_stdout(program, "issue750_fnroot").expect("C lane");
@@ -1828,21 +1830,21 @@ fn c_defcall_root_rescued_beside_direct_root_issue_750() {
 
 /// The wire exit: `ExecutionValue`/`TensorValue` serialize numeric payloads
 /// through serde_json. Finite f64 and full-range i64 must round-trip
-/// bit-exactly. Out-of-capacity cells (NaN/inf have no JSON number form;
-/// int64 above 2^53 cannot ride `TensorValue`'s `Vec<f64>`) are [#729]/[#686]
-/// storage decisions recorded at the schema (§C2.4) - deliberately no
-/// assertion pins them here.
+/// bit-exactly through the stored-value codec in spec/10 §3.2.
 #[test]
 fn wire_execution_value_rendering_round_trips() {
     use chelis_compiler_api::schema::{ExecutionValue, TensorValue};
 
     let finite: Vec<f64> = F64_ROWS.iter().map(|r| r.value).collect();
     for &v in &finite {
-        let json = serde_json::to_string(&ExecutionValue::Float64 { value: v }).expect("serialize");
+        let json = serde_json::to_string(&wire_values::scalar_f64(v)).expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
         match back {
-            ExecutionValue::Float64 { value } => assert_eq!(
-                value.to_bits(),
+            ExecutionValue::Scalar { value } => assert_eq!(
+                match value.get().element_ref() {
+                    chelis_types::ElementRef::F64(value) => value.to_bits(),
+                    other => panic!("expected f64, got {other:?}"),
+                },
                 v.to_bits(),
                 "wire f64 {v:?} did not round-trip through `{json}`"
             ),
@@ -1852,8 +1854,8 @@ fn wire_execution_value_rendering_round_trips() {
 
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
-            shape: vec![finite.len()],
-            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(finite.clone()),
+            shape: vec![i64::try_from(finite.len()).unwrap()],
+            data: wire_values::storage_f64(finite.clone()),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
@@ -1868,11 +1870,20 @@ fn wire_execution_value_rendering_round_trips() {
     }
 
     for v in [i64::MAX, -i64::MAX, 9007199254740993_i64, 0] {
-        let json = serde_json::to_string(&ExecutionValue::Int64 { value: v }).expect("serialize");
+        let json = serde_json::to_string(&wire_values::scalar_integer(
+            chelis_types::types::Prim::Int64,
+            v,
+        ))
+        .expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
         match back {
-            ExecutionValue::Int64 { value } => {
-                assert_eq!(value, v, "wire i64 {v} did not round-trip through `{json}`")
+            ExecutionValue::Scalar { value } => {
+                assert_eq!(value.get().prim(), chelis_types::types::Prim::Int64);
+                assert_eq!(
+                    value.get().as_i64_exact().unwrap(),
+                    v,
+                    "wire i64 {v} did not round-trip through `{json}`"
+                )
             }
             other => panic!("wire round-trip changed the variant: {other:?}"),
         }
@@ -1903,14 +1914,12 @@ type Probability = | Probability { value: f32 }
 def make(x: f32) -> Probability = Probability { value: x }
 "#;
     let decls = chelis_surf::parser::parse_str(SRC).expect("surf parse");
-    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let exprs = chelis_surf::desugar::desugar_program(&decls).expect("Surf fixture must desugar");
 
     for violating in [2.5_f64, -0.5_f64] {
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float32 {
-                value: violating as f32,
-            }],
+            fields: vec![wire_values::scalar_f32(violating as f32)],
         };
         let err = try_decode_adt_value(&exprs, &payload)
             .expect_err("out-of-band probability must be rejected");
@@ -2073,7 +2082,7 @@ fn c_f16_bf16_to_list_completes_per_dtype() {
 }
 
 /// chelis#723, green since chelis#732 Phase 2 (un-ignored per §B2.3): the
-/// generated helper prints int64 elements through `long long` printf, all
+/// generated helper prints i64 elements through `long long` printf, all
 /// digits exact, never through double.
 #[test]
 fn c_int64_tensor_print_round_trips_above_2p53() {
@@ -2081,8 +2090,8 @@ fn c_int64_tensor_print_round_trips_above_2p53() {
         panic!("needs a host C toolchain");
     }
     let program = exits_program(
-        "tensor[2, int64]",
-        "to_tensor([cast(9007199254740993, int64), cast(9223372036854775807, int64)])",
+        "tensor[2, i64]",
+        "to_tensor([cast(9007199254740993, i64), cast(9223372036854775807, i64)])",
     );
     let out = c_stdout(&program, "obs_i64_print").expect("C lane");
     let expected = [9007199254740993_i64, i64::MAX];
@@ -2092,7 +2101,7 @@ fn c_int64_tensor_print_round_trips_above_2p53() {
             let got = text_int_lenient(text).unwrap_or_else(|e| panic!("print exit: {e}"));
             assert_eq!(
                 got, *want,
-                "the printed int64 tensor must carry the exact stored value; got `{text}`"
+                "the printed i64 tensor must carry the exact stored value; got `{text}`"
             );
         }
     }
@@ -2166,10 +2175,10 @@ fn c_print_format_selection_preserves_small_and_17_digit_values() {
 
 /// DISCOVERY chelis#749 (§B2.5): tensors rendered INSIDE a
 /// list go through the runtime's `tensor_to_string` (chelis-runtime
-/// lib.rs:3730), a SECOND hand-written dtype funnel: int64 read `as f64`
+/// lib.rs:3730), a SECOND hand-written dtype funnel: i64 read `as f64`
 /// (chelis#723's shape at a different site), f16/bf16 through the `_ =>`
 /// f32 fallback (chelis#716's shape), and a 10-element truncation with NO
-/// marker. This row pins the int64 case at the value level. Green since
+/// marker. This row pins the i64 case at the value level. Green since
 /// chelis#732 Phase 2 (un-ignored per §B2.3): `tensor_to_string` renders
 /// per dtype through the shared runtime formatter, and its truncation is
 /// the [05-OBS-5] 32-with-marker rule
@@ -2180,7 +2189,7 @@ fn c_nested_tensor_in_list_renders_int64_faithfully() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def mk() -> tensor[1, int64] = to_tensor([cast(9007199254740993, int64)])\n\
+         def mk() -> tensor[1, i64] = to_tensor([cast(9007199254740993, i64)])\n\
          out = print([mk()])\n";
     let out = c_stdout(program, "obs_i64_nested").expect("C lane");
     let line = out
@@ -2190,12 +2199,12 @@ fn c_nested_tensor_in_list_renders_int64_faithfully() {
     let got = text_int_lenient(&tensor_elems(line)[0]).expect("nested elem");
     assert_eq!(
         got, 9007199254740993,
-        "the nested tensor render must carry the exact stored int64: {line}"
+        "the nested tensor render must carry the exact stored i64: {line}"
     );
 }
 
-/// The int32 face of the same nested-in-list exit (census row C4). The
-/// runtime's element decoder read NATIVE int32 storage through the f32
+/// The i32 face of the same nested-in-list exit (census row C4). The
+/// runtime's element decoder read NATIVE i32 storage through the f32
 /// view, so this exit rendered `5i32` as `7.006492321624085e-45`,
 /// `i32::MAX` (`0x7FFFFFFF`, a NaN pattern) as `NaN`, and `i32::MIN`
 /// (`0x80000000`, `-0.0`) as a plausible-looking `0` - while `to_list`
@@ -2204,10 +2213,10 @@ fn c_nested_tensor_in_list_renders_int64_faithfully() {
 /// exit agreement) and §C2.3 (cross-lane byte identity, since eval was
 /// correct) failing together.
 ///
-/// The cell hid because the harness's int32 rows are driven by
+/// The cell hid because the harness's i32 rows are driven by
 /// `c_int_tensor_exits_round_trip`, which exercises the GENERATED print
 /// helper; `tensor_to_string` is a different exit, reached only through
-/// the nested-value renderer (int64-only coverage until now) and through
+/// the nested-value renderer (i64-only coverage until now) and through
 /// the now-removed zero-emitter `chelis_print_f32`. A Phase 0 census gap
 /// against its own deliverable, not a misread oracle - and the shape the
 /// known-red ledger cannot catch, because the ledger polices DECLARED
@@ -2220,8 +2229,8 @@ fn c_nested_int32_tensor_in_list_decodes_natively() {
         panic!("needs a host C toolchain");
     }
     let program = "module M.Main\n\
-         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
-         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         def mk() -> tensor[3, i32] = to_tensor([cast(5, i32), \
+         cast(2147483647, i32), cast(-2147483648, i32)])\n\
          nested = print([mk()])\n\
          listed = print(to_list(mk()))\n";
     let out = c_stdout(program, "obs_i32_nested").expect("C lane");
@@ -2232,7 +2241,7 @@ fn c_nested_int32_tensor_in_list_decodes_natively() {
     assert_eq!(
         tensor_elems(nested),
         ["5", "2147483647", "-2147483648"],
-        "the nested int32 render must decode native two's-complement \
+        "the nested i32 render must decode native two's-complement \
          storage ([05-OBS-2]); an f32 view yields 7.006492321624085e-45 / \
          NaN / 0: {nested}"
     );
@@ -2252,15 +2261,15 @@ fn c_nested_int32_tensor_in_list_decodes_natively() {
     // §C2.3: eval holds identical bits and must emit identical bytes.
     let eval_out = eval_stdout(
         "module M.Main\n\
-         def mk() -> tensor[3, int32] = to_tensor([cast(5, int32), \
-         cast(2147483647, int32), cast(-2147483648, int32)])\n\
+         def mk() -> tensor[3, i32] = to_tensor([cast(5, i32), \
+         cast(2147483647, i32), cast(-2147483648, i32)])\n\
          nested = print([mk()])\n\
          listed = print(to_list(mk()))\n",
     )
     .expect("eval");
     assert_eq!(
         eval_out, out,
-        "§C2.3: the nested int32 exit must be byte-identical across lanes:\n\
+        "§C2.3: the nested i32 exit must be byte-identical across lanes:\n\
          --- eval ---\n{eval_out}\n--- c ---\n{out}"
     );
 }
@@ -2317,8 +2326,8 @@ fn c_scalar_to_string_matches_print_exit_across_dtypes() {
             "0.30000000000000004",
         ),
         ("f64-integral", "cast(6.0, f64)", "6.0"),
-        ("int64", "cast(9007199254740993, int64)", "9007199254740993"),
-        ("int32", "cast(2147483647, int32)", "2147483647"),
+        ("i64", "cast(9007199254740993, i64)", "9007199254740993"),
+        ("i32", "cast(2147483647, i32)", "2147483647"),
         ("bool", "and(true, true)", "true"),
     ];
     for (label, expr, expected) in rows {
@@ -2379,8 +2388,8 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
         return;
     }
     let programs: &[(&str, String)] = &[
-        ("int8-exits", int_table_program("int8", INT_ROWS[0].1)),
-        ("int64-exits", int_table_program("int64", INT_ROWS[3].1)),
+        ("i8-exits", int_table_program("i8", INT_ROWS[0].1)),
+        ("i64-exits", int_table_program("i64", INT_ROWS[3].1)),
         (
             "bool-exits",
             exits_program("tensor[2, bool]", "to_tensor([true, false])"),

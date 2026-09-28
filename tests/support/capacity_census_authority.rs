@@ -95,6 +95,13 @@ pub fn classify_final_authority<'a>(
     }
     for registration in registries.tagged_transports {
         if registration.matches(surface) {
+            if surface.family == "wire-schema" {
+                return Err(
+                    "wire-schema transport requires verified wire carrier admission; \
+                     a static descriptor cannot supply artifact, codec or execution evidence"
+                        .to_string(),
+                );
+            }
             matches.push(FinalAuthority::TaggedTransport);
         }
     }
@@ -289,6 +296,25 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_static_wire_descriptor_cannot_supply_verified_transport_authority() {
+        let descriptor = StaticSurfaceDescriptor::new(
+            "wire-schema",
+            "wire-schema-numeric-field",
+            "schema::DiagnosticSpan::Point.offset: u64",
+            &["numeric-field"],
+        );
+        let surface = SurfaceDescriptor::new(
+            descriptor.family,
+            descriptor.kind,
+            descriptor.id,
+            descriptor.flags,
+        );
+        let error = classify_final_authority(&surface, registries(&[], &[descriptor], &[]), SPEC)
+            .expect_err("an exact static descriptor is not a verified wire carrier");
+        assert!(error.contains("verified wire"), "{error}");
     }
 
     #[test]

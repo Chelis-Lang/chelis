@@ -5,30 +5,67 @@
 
 use super::*;
 
+/// Recover the exact Surf source range stamped onto a desugared Deep node.
+///
+/// Ordinary desugared expressions retain a zero structural span, while their
+/// authored range travels in canonical `surf:<start>..<end>` metadata.
+/// Programmatic or non-Surf Deep inputs fall back to the structural span.
+fn surf_source_span(expr: &deep::Expr) -> Span {
+    let structural_span = expr.span();
+    let Some((_, meta, _)) = stamped_parts(expr) else {
+        return structural_span;
+    };
+    let Some(span_id) = meta.span_id() else {
+        return structural_span;
+    };
+    let Some(range) = span_id.value().strip_prefix("surf:") else {
+        return structural_span;
+    };
+    let Some((start, end)) = range.split_once("..") else {
+        return structural_span;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+        return structural_span;
+    };
+    let Some(len) = end.checked_sub(start) else {
+        return structural_span;
+    };
+    Span::new(start, len)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_fn(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.is_empty() {
-        return malformed_form(list, "fn", "parameters and a body", errors);
+        return malformed_form(node, "fn", "parameters and a body", errors);
     }
 
     // kids[0] = (params {} x1 ... xn)
     // kids[1] = body
-    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
+    let params = extract_params_with_ownership(
+        &kids[0],
+        &DefParameterAnnotationOwnership::independent(),
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+        declaration_diagnostic_owner,
+    );
     let mut param_types = Vec::new();
     let mut fn_env = env.clone();
 
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
-        product.note_shape_lambda_param(&ty);
+        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a parameter is a fresh runtime binding with no
         // size provenance. Clear any entry inherited (through the derived
@@ -57,10 +94,11 @@ pub(super) fn infer_fn(
         }
     }
 
+    subst.protect_dimensions(declared_dvars.iter().copied());
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
-        return malformed_form(list, "fn", "a body expression", errors);
+        return malformed_form(node, "fn", "a body expression", errors);
     };
     let body_ty = infer_expr(body, &mut fn_env, vg, subst, adt_reg, errors, product);
 
@@ -71,12 +109,118 @@ pub(super) fn infer_fn(
     // dimension variable. So this call cannot currently reach a named
     // collapse, and passing an empty map renders the internal id rather
     // than inventing a name.
-    check_declared_dvars_rigid(&declared_dvars, &UnordMap::new(), subst, errors);
+    check_declared_dvars_rigid(None, &declared_dvars, &UnordMap::new(), subst, errors);
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
 
     Type::Fn(resolved_params, Box::new(resolved_body))
+}
+
+/// Whether one annotated `def` parameter is an independent contract or a
+/// structurally verified copy of its adjacent signature slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DefParameterSlotOwnership {
+    Independent,
+    VerifiedSignatureCopy,
+}
+
+/// Position-aligned ownership for the supplied parameters of one `def`.
+///
+/// An absent entry is independent. That makes a malformed outer carrier fail
+/// closed, while an arity disagreement cannot revoke ownership already proved
+/// for another canonical parameter position.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct DefParameterAnnotationOwnership {
+    slots: Vec<DefParameterSlotOwnership>,
+}
+
+impl DefParameterAnnotationOwnership {
+    fn independent() -> Self {
+        Self::default()
+    }
+
+    fn is_verified_signature_copy(&self, index: usize) -> bool {
+        self.slots.get(index) == Some(&DefParameterSlotOwnership::VerifiedSignatureCopy)
+    }
+}
+
+/// Classify generated property copies from their raw Deep syntax.
+///
+/// Source spans are deliberately excluded, while semantic metadata remains
+/// part of equality. Any malformed or noncanonical carrier stays independent.
+pub(super) fn classify_property_parameter_annotations(
+    body: &deep::Expr,
+    declared_param_types: &[deep::Expr],
+) -> DefParameterAnnotationOwnership {
+    let Some((DeepTag::Fn, _, fn_children)) = stamped_parts(body) else {
+        return DefParameterAnnotationOwnership::independent();
+    };
+    let Some(params) = fn_children.first().and_then(canonical_parameter_elements) else {
+        return DefParameterAnnotationOwnership::independent();
+    };
+    let slots = params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let verified = declared_param_types.get(index).is_some_and(|declared| {
+                parameter_type_syntax(param).is_some_and(|annotation| {
+                    chelis_deep::metadata::same_semantic_type_syntax(annotation, declared)
+                })
+            });
+            if verified {
+                DefParameterSlotOwnership::VerifiedSignatureCopy
+            } else {
+                DefParameterSlotOwnership::Independent
+            }
+        })
+        .collect();
+    DefParameterAnnotationOwnership { slots }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_declared_def_body(
+    body: &deep::Expr,
+    decl_ty: &Type,
+    declaration_meta: &deep::Metadata,
+    declared_signature: Option<&DeclaredSigMetadata>,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
+) -> Type {
+    let property_has_quantifier_carriers = declaration_meta
+        .chelis_role()
+        .is_some_and(|role| role.value() == "property")
+        && declaration_meta.property_quantifiers().is_some();
+    let parameter_annotation_ownership = if property_has_quantifier_carriers {
+        declared_signature.map_or_else(DefParameterAnnotationOwnership::independent, |signature| {
+            classify_property_parameter_annotations(body, &signature.param_types)
+        })
+    } else {
+        DefParameterAnnotationOwnership::independent()
+    };
+    let inferred = infer_def_body_with_sig(
+        body,
+        decl_ty,
+        &parameter_annotation_ownership,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        declaration_diagnostic_owner,
+    );
+    product.record_bypass(
+        body,
+        inferred.clone(),
+        "declared-signature function inference",
+    );
+    inferred
 }
 
 /// WS-A7: infer a `def`'s body when a declared signature is available, seeding
@@ -87,56 +231,71 @@ pub(super) fn infer_fn(
 /// (e.g. `add: (&t, &t) -> t`) into the same equivalence class.
 ///
 /// Falls back to the standard `infer_expr` path when the body is not a
-/// `(fn ...)` or the declared type is not a `Fn` of matching arity. Already-
-/// annotated params are not overridden.
+/// `(fn ...)` or the declared type is not a `Fn`. The post-body unification
+/// reports arity disagreements. Real parameter annotations are not overridden.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_def_body_with_sig(
     body: &deep::Expr,
     decl_ty: &Type,
+    parameter_annotation_ownership: &DefParameterAnnotationOwnership,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Type {
     // Match: body is `(fn (params ...) body-expr)` AND decl is `Fn(args, ret)`.
     let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
-        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
+        return infer_expr_with_declaration_diagnostic_owner(
+            body,
+            env,
+            vg,
+            subst,
+            adt_reg,
+            errors,
+            product,
+            declaration_diagnostic_owner,
+        );
     };
     let (decl_args, decl_ret) = match decl_ty {
         Type::Fn(args, ret) => (args, ret.as_ref()),
         _ => {
-            return infer_expr(body, env, vg, subst, adt_reg, errors, product);
+            return infer_expr_with_declaration_diagnostic_owner(
+                body,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                product,
+                declaration_diagnostic_owner,
+            );
         }
     };
 
-    if kids.len() < 2 {
-        // chelis#1107 amendment (justified-safe, not routed): reached only
-        // when the `fn` has fewer than two children. `arity_contract(Fn)` is
-        // `Fixed(2)` and `Node::validate` enforces it at construction, so a
-        // stamped `Node` is never short -- only a legacy `List` carrier can
-        // land here.
-        let deep::Expr::List(fn_list, _) = body else {
-            unreachable!("validated Node::Fn satisfies its arity contract")
-        };
-        return malformed_form(fn_list, "fn", "parameters and a body", errors);
-    }
-    let params = extract_params(&kids[0], vg, adt_reg, errors, annotation_binder_mode(env));
-    if params.len() != decl_args.len() {
-        // Arity mismatch between params and sig: fall back so the post-body
-        // unify produces a clear ArityMismatch diagnostic.
-        return infer_expr(body, env, vg, subst, adt_reg, errors, product);
-    }
-
+    let params = extract_params_with_ownership(
+        &kids[0],
+        parameter_annotation_ownership,
+        vg,
+        adt_reg,
+        errors,
+        annotation_binder_mode(env),
+        declaration_diagnostic_owner,
+    );
     let mut param_types = Vec::with_capacity(params.len());
     let mut fn_env = env.clone();
-    for ((pname, ty_ann), decl_arg) in params.iter().zip(decl_args.iter()) {
-        // Annotated params keep their annotation; bare params get seeded with
-        // the declared sig type. The post-body unify still validates each
-        // path in the standard way.
-        let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
-        product.note_shape_lambda_param(&ty);
+    for (index, (pname, ty_ann)) in params.iter().enumerate() {
+        // Resolve each annotation once, even when arities disagree. Existing
+        // slots seed bare/hole parameters. An extra parameter has no declared
+        // slot, so its body determines its type. Post-body unification still
+        // reports the arity mismatch instead of replaying the function.
+        let ty = ty_ann
+            .clone()
+            .or_else(|| decl_args.get(index).cloned())
+            .unwrap_or_else(|| vg.fresh_type());
+        product.record_inferred_contract(&format!("function parameter `{pname}`"), &ty, env, subst);
         fn_env.bind_lexical(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).
@@ -154,6 +313,9 @@ pub(super) fn infer_def_body_with_sig(
     // `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
     // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
     // it. Running it only at the caller also avoids double-reporting.
+    // Annotated parameters have their own fresh resolution IDs; protecting
+    // only the separate defsig instantiation would be too late for the body.
+    subst.protect_dimensions(param_types.iter().flat_map(crate::env::free_dvars));
     let body_expr = &kids[1];
     let body_ty = infer_expr_with_expected(
         body_expr,
@@ -172,22 +334,48 @@ pub(super) fn infer_def_body_with_sig(
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
 
+fn canonical_parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
+        _ => None,
+    }
+}
+
+fn parameter_elements(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+    match expr {
+        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => Some(node.children_slice()),
+        deep::Expr::BareList(elements, _) => Some(elements.as_slice()),
+        _ => None,
+    }
+}
+
+fn parameter_type_syntax(expr: &deep::Expr) -> Option<&deep::Expr> {
+    match expr {
+        deep::Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|value| value.expression()),
+        deep::Expr::BareList(elements, _) => elements.get(1).and_then(|meta| {
+            let deep::Expr::Map(meta, _) = meta else {
+                return None;
+            };
+            meta.ty().map(|value| value.expression())
+        }),
+        _ => None,
+    }
+}
+
 /// Extract parameter names (and optional type annotations) from (params {} x1 ... xn).
 /// Each param can be a bare symbol, a metadata-annotated symbol, or a legacy
 /// `(name {type: T})` helper pair.
-pub(super) fn extract_params(
+fn extract_params_with_ownership(
     expr: &deep::Expr,
+    ownership: &DefParameterAnnotationOwnership,
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     binder_mode: BinderMode<'_>,
+    declaration_diagnostic_owner: Option<&DeclarationDiagnosticOwner>,
 ) -> Vec<(String, Option<Type>)> {
-    let elems = match expr {
-        deep::Expr::Node(node, _) if node.tag() == DeepTag::Params => node.children_slice(),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Params) => children(list),
-        deep::Expr::List(list, _) => list.elements.as_slice(),
-        deep::Expr::BareList(elements, _) => elements.as_slice(),
-        _ => return vec![],
+    let Some(elems) = parameter_elements(expr) else {
+        return Vec::new();
     };
     let mut resolver = DeepTypeResolver::new(
         TypeUseSite::Annotation,
@@ -195,10 +383,17 @@ pub(super) fn extract_params(
         adt_reg.resolution_env(),
         vg,
         errors,
-    );
+    )
+    .with_declaration_diagnostic_owner(declaration_diagnostic_owner);
+    let mut resolve_annotation =
+        |annotation: &deep::Expr| match resolver.resolve_parameter(annotation) {
+            Ok(ty) => ty.map(|ty| ty.into_type()),
+            Err(witness) => Some(propagate(&witness)),
+        };
     let mut params = Vec::with_capacity(elems.len());
 
-    for expr in elems {
+    for (index, expr) in elems.iter().enumerate() {
+        let verified_copy = ownership.is_verified_signature_copy(index);
         match expr {
             deep::Expr::Atom(deep::Atom::Name(name), _) => {
                 params.push((name.to_string(), None));
@@ -207,50 +402,28 @@ pub(super) fn extract_params(
                 let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     continue;
                 };
-                let annotation =
-                    meta.entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        });
+                let annotation = (!verified_copy)
+                    .then(|| {
+                        meta.metadata
+                            .ty()
+                            .and_then(|value| resolve_annotation(value.expression()))
+                    })
+                    .flatten();
                 params.push((name.to_string(), annotation));
             }
-            deep::Expr::List(param_list, _) => {
-                // Typed param: (name {type: T}) — elements[0] is the name symbol,
-                // elements[1] is the metadata map with type annotation.
-                let Some(name) = param_list.elements.first().and_then(symbol_name) else {
-                    continue;
-                };
-                let annotation = match param_list.elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        }),
-                    _ => None,
-                };
-                params.push((name.to_string(), annotation));
-            }
+            // Typed param: (name {type: T}).
             deep::Expr::BareList(elements, _) => {
                 let Some(name) = elements.first().and_then(symbol_name) else {
                     continue;
                 };
-                let annotation = match elements.get(1) {
-                    Some(deep::Expr::Map(meta, _)) => meta
-                        .entries
-                        .iter()
-                        .find(|(key, _)| key == "type")
-                        .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => ty.into_type(),
-                            Err(witness) => propagate(&witness),
-                        }),
-                    _ => None,
-                };
+                let annotation = (!verified_copy)
+                    .then(|| match elements.get(1) {
+                        Some(deep::Expr::Map(meta, _)) => meta
+                            .ty()
+                            .and_then(|value| resolve_annotation(value.expression())),
+                        _ => None,
+                    })
+                    .flatten();
                 params.push((name.to_string(), annotation));
             }
             _ => {}
@@ -268,7 +441,7 @@ pub(super) fn extract_params(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_let(
-    list: &deep::List,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -276,9 +449,9 @@ pub(super) fn infer_let(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 2 {
-        return malformed_form(list, "let", "bindings and a body", errors);
+        return malformed_form(node, "let", "bindings and a body", errors);
     }
 
     // kids[0] = (bind {} x1 e1 x2 e2 ...)
@@ -293,7 +466,29 @@ pub(super) fn infer_let(
                 let rhs_expr = &bind_children[i + 1];
                 let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
-                let mut rhs_type_metadata_resolution = None;
+                let literal_pattern_checkpoint = product.deferred_literal_pattern_checkpoint();
+                let contract_checkpoint = product.admission_contract_checkpoint();
+                let mut rhs_type_metadata_resolution = stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| {
+                        let authored = meta
+                            .surf_binding_type()
+                            .is_none_or(|origin| *origin.value() == BindingTypeOrigin::Explicit);
+                        authored.then(|| meta.ty().map(|value| value.expression()))?
+                    })
+                    .map(|declared_ty_expr| {
+                        match resolve_deep_type_with_diagnostic_owner(
+                            declared_ty_expr,
+                            vg,
+                            adt_reg,
+                            TypeUseSite::Annotation,
+                            annotation_binder_mode(&let_env),
+                            let_env.type_resolution_diagnostic_owner(),
+                            errors,
+                        ) {
+                            Ok(ty) => OwnedTypeMetadataResolution::Resolved(ty),
+                            Err(witness) => OwnedTypeMetadataResolution::Failed(witness),
+                        }
+                    });
                 let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
                     &mut let_env,
@@ -304,7 +499,20 @@ pub(super) fn infer_let(
                     product,
                     None,
                     Some(&mut rhs_type_metadata_resolution),
+                    None,
                 );
+                let rhs_type_before_ascription = subst.apply(&expr_ty);
+                let local_ascription_origin = match stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| meta.surf_binding_type())
+                    .map(|origin| *origin.value())
+                {
+                    Some(BindingTypeOrigin::Explicit) => {
+                        Some(LocalTensorAscriptionOrigin::SurfExplicit)
+                    }
+                    Some(BindingTypeOrigin::Inferred) => None,
+                    None => Some(LocalTensorAscriptionOrigin::DeepTypeMetadata),
+                };
+                let mut checked_local_ascription = None;
 
                 // chelis#159: block-scoped `let name: T = expr` desugars
                 // inject the declared type `T` as a `"type"` metadata
@@ -315,13 +523,9 @@ pub(super) fn infer_let(
                 // and the ascription was silently dropped. Unify the
                 // inferred RHS type against the declared type so the
                 // ascription propagates into downstream sig calls.
-                let final_ty = if let Some(declared_ty_expr) =
-                    stamped_parts(rhs_expr).and_then(|(_, meta, _)| {
-                        meta.entries
-                            .iter()
-                            .find(|(k, _)| k == "type")
-                            .map(|(_, v)| v)
-                    }) {
+                let final_ty = if let Some(declared_ty_expr) = stamped_parts(rhs_expr)
+                    .and_then(|(_, meta, _)| meta.ty().map(|v| v.expression()))
+                {
                     let declared_ty = match &rhs_type_metadata_resolution {
                         // A root metadata-aware RHS consumer records the exact
                         // result it owns. Reuse that result here so the same
@@ -331,30 +535,48 @@ pub(super) fn infer_let(
                         // No ownership record means any `expr_ty` error came
                         // from the RHS itself. Resolve the ascription as its
                         // own root so two independent failures both surface.
-                        None => match resolve_deep_type(
+                        None => match resolve_deep_type_with_diagnostic_owner(
                             declared_ty_expr,
                             vg,
                             adt_reg,
                             TypeUseSite::Annotation,
                             annotation_binder_mode(&let_env),
+                            let_env.type_resolution_diagnostic_owner(),
                             errors,
                         ) {
                             Ok(ty) => ty,
                             Err(witness) => propagate(&witness),
                         },
                     };
-                    if let Err(e) = unify(&expr_ty, &declared_ty, subst) {
-                        errors.push(CheckError::new(
-                            check_error_kind_from_type_error_kind(&e.kind),
-                            format!(
-                                "let-binding `{name}` ascription does not match RHS: {}",
-                                e.message
-                            ),
-                            vec![format!(
-                                "Declared type for `{name}` is {declared_ty}; \
-                                 RHS inferred to {expr_ty}"
-                            )],
-                        ));
+                    match unify(&expr_ty, &declared_ty, subst) {
+                        Ok(()) if local_ascription_origin.is_some() => {
+                            checked_local_ascription = Some((
+                                local_ascription_origin.expect("checked above"),
+                                declared_ty_expr.clone(),
+                                declared_ty.clone(),
+                            ));
+                        }
+                        Ok(()) => {}
+                        Err(e) => {
+                            let mut diagnostic = CheckError::new(
+                                check_error_kind_from_type_error_kind(&e.kind),
+                                format!(
+                                    "let-binding `{name}` ascription does not match RHS: {}",
+                                    e.message
+                                ),
+                                vec![format!(
+                                    "Declared type for `{name}` is {declared_ty}; \
+                                     RHS inferred to {expr_ty}"
+                                )],
+                            );
+                            if let Some(location) =
+                                TypeDiagnosticLocation::from_expr(declared_ty_expr)
+                                    .or_else(|| TypeDiagnosticLocation::from_expr(rhs_expr))
+                            {
+                                diagnostic = location.attach(diagnostic);
+                            }
+                            errors.push(diagnostic);
+                        }
                     }
                     // On unify failure, bind `name` to the declared
                     // type rather than the inferred RHS type. This
@@ -373,17 +595,36 @@ pub(super) fn infer_let(
                 } else {
                     expr_ty
                 };
+                if let Some((origin, authored_type, declared_type)) = checked_local_ascription {
+                    product.record_local_tensor_ascription(
+                        origin,
+                        name,
+                        bind_children[i].span(),
+                        authored_type.span(),
+                        surf_source_span(rhs_expr),
+                        authored_type,
+                        declared_type,
+                        &rhs_type_before_ascription,
+                        errors,
+                    );
+                }
 
                 subst.leave_level(rhs_level, vg);
 
-                let scheme = if product.has_pending_shape_check_since(shape_checkpoint) {
-                    // Bind-on-first-use (PP1): semantic shape obligations
-                    // retain the exact inference variables captured by this
-                    // lambda until its first application supplies types.
+                let scheme = if product.has_pending_shape_check_since(shape_checkpoint)
+                    || product.has_pending_literal_pattern_since(literal_pattern_checkpoint, subst)
+                    || product.has_pending_admission_contract_since(contract_checkpoint, subst)
+                    || subst.has_generalizable_pending_gate(&final_ty)
+                {
+                    // [04-INF-1]: semantic shape, literal-pattern and operand
+                    // gate obligations retain the exact inference variables
+                    // captured by this lambda until its first application.
                     subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {
-                    let_env.generalize(&final_ty, subst)
+                    let scheme = let_env.generalize(&final_ty, subst);
+                    subst.name_generic_parameters(&scheme, name, &UnordMap::new());
+                    scheme
                 };
                 // chelis#397/#469: record the size provenance of this binding
                 // BEFORE binding it (so `classify_expand_size` resolves it
@@ -396,7 +637,7 @@ pub(super) fn infer_let(
                 // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
                 // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
                 // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
-                match classify_expand_size(rhs_expr, &let_env) {
+                match classify_expand_size(rhs_expr, &let_env, adt_reg, subst) {
                     SizeClass::Static => {
                         if let Some(value) =
                             fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
@@ -425,9 +666,34 @@ pub(super) fn infer_let(
     infer_expr(&kids[1], &mut let_env, vg, subst, adt_reg, errors, product)
 }
 
+/// The obligation every condition position owes: an `if` condition and a
+/// `match` arm guard each require a `bool`, discharged by unifying with it.
+///
+/// chelis#2444: the guard used to apply the substitution and require the
+/// result to already be `bool`, so a condition whose type was still pending
+/// (an `eq` over a dtype-binder operand, which could yet be a `bool` scalar or
+/// a `bool` tensor) was rejected as a guard and accepted as an `if` condition.
+/// One function makes the two positions one rule; only the position named in
+/// the diagnostic differs.
+pub(super) fn require_bool_condition(
+    cond_ty: &Type,
+    position: &str,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) {
+    if unify(cond_ty, &Type::Prim(Prim::Bool), subst).is_err() {
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!("{position} must be bool, got {}", subst.apply(cond_ty)),
+            vec![],
+        ));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_if(
-    list: &deep::List,
+    expr: &deep::Expr,
+    node: &DeepNode,
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
@@ -435,10 +701,10 @@ pub(super) fn infer_if(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    let kids = children(list);
+    let kids = node.children_slice();
     if kids.len() < 3 {
         return malformed_form(
-            list,
+            node,
             "if",
             "a condition, a then-branch, and an else-branch",
             errors,
@@ -446,15 +712,7 @@ pub(super) fn infer_if(
     }
 
     let cond_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-
-    // Condition should be bool (or tensor[D, bool])
-    if let Err(_te) = unify(&cond_ty, &Type::Prim(Prim::Bool), subst) {
-        errors.push(CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!("if condition must be bool, got {}", subst.apply(&cond_ty)),
-            vec![],
-        ));
-    }
+    require_bool_condition(&cond_ty, "if condition", subst, errors);
 
     let then_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
     let else_ty = infer_expr(&kids[2], env, vg, subst, adt_reg, errors, product);
@@ -463,11 +721,11 @@ pub(super) fn infer_if(
         Ok(()) => subst.apply(&then_ty),
         Err(te) => {
             let mut e: CheckError = te.into();
-            if let Some(id) = list_span_id(list) {
+            if let Some(id) = node_span_id(node) {
                 e.span_offset = parse_span_offset(id);
                 e.span_id = Some(id.to_string());
             } else {
-                let off = span_of_list(list).offset;
+                let off = expr.span().offset;
                 if off > 0 {
                     e.span_offset = Some(off);
                 }

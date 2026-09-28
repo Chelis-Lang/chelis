@@ -22,7 +22,6 @@
 mod support;
 use chelis_ir::dag::{Dag, DimExpr, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -101,13 +100,16 @@ fn f16_matmul_with_explicit_f16_accumulator_is_rejected_by_ir() {
 #[test]
 fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::Bf16).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::synth_const(matrix(2, 3, Prim::F32).precision, 1.0),
         vec![],
         matrix(2, 3, Prim::F32),
@@ -115,7 +117,13 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
     );
     // Output dtype is intentionally one of the operand dtypes; the
     // validator's job is to spot the input mismatch regardless.
-    let _add = dag.add_node(RiscOp::Add, vec![a, b], matrix(2, 3, Prim::Bf16), None);
+    let _add = dag.add_node(
+        decl,
+        RiscOp::Add,
+        vec![a, b],
+        matrix(2, 3, Prim::Bf16),
+        None,
+    );
 
     let errors = chelis_ir::verify::verify(&dag);
     assert!(
@@ -139,13 +147,16 @@ fn bf16_plus_f32_add_is_rejected_by_ir_validation() {
 #[should_panic(expected = "operand promotion to `f64`")]
 fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -160,7 +171,7 @@ fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
         Prim::F64,
     )
     .expect("bf16+f64 accumulator constructs (wider than default = §5.7.1 admissible)");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     // Should panic inside emit_blas_matmul with the WS-A2-routing
@@ -175,13 +186,16 @@ fn bf16_matmul_with_explicit_f64_accumulator_panics_at_codegen() {
 #[test]
 fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -195,7 +209,7 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs with default accumulator");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_bf16_default").unwrap();
@@ -219,13 +233,16 @@ fn bf16_matmul_default_accumulator_emits_bf16_gemm_wrapper() {
 #[test]
 fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F16),
@@ -239,7 +256,7 @@ fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
         Prim::F16,
     )
     .expect("f16 matmul constructs with default accumulator");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_f16_default").unwrap();
@@ -265,13 +282,16 @@ fn f16_matmul_default_accumulator_emits_f16_gemm_wrapper() {
 #[test]
 fn f32_matmul_does_not_emit_bf16_or_f16_gemm_wrapper() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F32),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F32),
@@ -285,7 +305,7 @@ fn f32_matmul_does_not_emit_bf16_or_f16_gemm_wrapper() {
         Prim::F32,
     )
     .expect("f32 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F32), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F32), None);
     dag.add_root(out);
 
     let result = codegen_hip(&dag, "ws_a3_f32_baseline").unwrap();
@@ -320,64 +340,6 @@ fn write_temp_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
 
 fn hip_runtime_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(chelis_backend_hip::runtime_dir())
-}
-
-fn cpu_runtime_include_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include")
-}
-
-fn cpu_runtime_library_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../target/debug/deps"),
-        manifest_dir.join("../../target/release/deps"),
-    ];
-    if let Ok(dir) = env::var("CHELIS_RUNTIME_DIR") {
-        let candidate_dir = PathBuf::from(dir);
-        if let Some(path) = fs::read_dir(&candidate_dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    for dir in candidates {
-        if let Some(path) = fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.flatten().map(|entry| entry.path()).find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.starts_with("libchelis_runtime") && name.ends_with(".a"))
-                    .unwrap_or(false)
-            })
-        }) {
-            return path;
-        }
-    }
-    panic!("could not locate libchelis_runtime.a for backend-hip manual tests");
-}
-
-fn copy_runtime_artifacts(dst: &Path) {
-    let include_dir = cpu_runtime_include_dir();
-    for header in &[
-        "chelis_runtime.h",
-        "chelis_runtime_dtype.h",
-        "chelis_blas.h",
-        "chelis_simd.h",
-        "chelis_math.h",
-    ] {
-        write_temp_file(
-            dst,
-            header,
-            &fs::read_to_string(include_dir.join(header))
-                .unwrap_or_else(|_| panic!("read {header}")),
-        );
-    }
-    fs::copy(cpu_runtime_library_path(), dst.join("libchelis_runtime.a"))
-        .expect("copy rust runtime library");
 }
 
 fn require_hipcc() {
@@ -618,7 +580,8 @@ fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
         "chelis_hip_runtime.h",
         &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
     );
-    copy_runtime_artifacts(tmp.path());
+    let staged = chelis_runtime_bundle::stage(tmp.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     write_temp_file(tmp.path(), "model.cpp", &result.c_source);
     write_temp_file(
         tmp.path(),
@@ -637,8 +600,7 @@ fn compile_and_run(dag: &Dag, func_name: &str, case: &ExecCase) -> Vec<f32> {
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
-    compile_cmd.arg(format!("-L{}", tmp.path().display()));
-    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg(&staged.archive);
     compile_cmd.arg("-lpthread");
     compile_cmd.arg("-ldl");
     compile_cmd.args(&result.link_flags);
@@ -730,13 +692,16 @@ fn assert_within_relative_tolerance(actual: &[f32], expected: &[f32], rel_tol: f
             as of 2026-05-11)"]
 fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::Bf16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::Bf16),
@@ -750,7 +715,7 @@ fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
         Prim::Bf16,
     )
     .expect("bf16 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::Bf16), None);
     dag.add_root(out);
 
     let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -779,13 +744,16 @@ fn bf16_matmul_with_default_f32_accumulator_within_tolerance() {
             as of 2026-05-11)"]
 fn f16_matmul_with_default_f32_accumulator_within_tolerance() {
     let mut dag = Dag::new();
+    let decl = dag.declare("test");
     let a = dag.add_node(
+        decl,
         RiscOp::Load { name: "a".into() },
         vec![],
         matrix(2, 3, Prim::F16),
         None,
     );
     let b = dag.add_node(
+        decl,
         RiscOp::Load { name: "b".into() },
         vec![],
         matrix(3, 4, Prim::F16),
@@ -799,7 +767,7 @@ fn f16_matmul_with_default_f32_accumulator_within_tolerance() {
         Prim::F16,
     )
     .expect("f16 matmul constructs");
-    let out = dag.add_node(matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
+    let out = dag.add_node(decl, matmul, vec![a, b], matrix(2, 4, Prim::F16), None);
     dag.add_root(out);
 
     let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];

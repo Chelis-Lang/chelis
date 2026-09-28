@@ -55,7 +55,7 @@ pub(super) fn parse_csv_text(text: &str) -> Result<RuntimeValue, String> {
                 .collect(),
         ));
     }
-    Ok(RuntimeValue::List(rows))
+    Ok(RuntimeValue::List(rows.into()))
 }
 
 fn parse_records(text: &str) -> Result<Vec<CsvRecord>, String> {
@@ -278,11 +278,10 @@ fn parse_f64_cell(builtin: &str, text: &str) -> Result<f64, String> {
 
 fn parse_int_cell(builtin: &str, text: &str) -> Result<i64, String> {
     let trimmed = text.trim_matches([' ', '\t']);
-    let len = json_number_token_len(trimmed.as_bytes()).map_err(|(_, reason)| {
-        format!("{builtin}: cell `{text}` is not an exact int64: {reason}")
-    })?;
+    let len = json_number_token_len(trimmed.as_bytes())
+        .map_err(|(_, reason)| format!("{builtin}: cell `{text}` is not an exact i64: {reason}"))?;
     if len != trimmed.len() {
-        return Err(format!("{builtin}: cell `{text}` is not an exact int64"));
+        return Err(format!("{builtin}: cell `{text}` is not an exact i64"));
     }
     if trimmed.contains(['.', 'e', 'E']) {
         return Err(format!(
@@ -291,7 +290,7 @@ fn parse_int_cell(builtin: &str, text: &str) -> Result<i64, String> {
     }
     trimmed
         .parse::<i64>()
-        .map_err(|_| format!("{builtin}: cell `{text}` overflows int64"))
+        .map_err(|_| format!("{builtin}: cell `{text}` overflows i64"))
 }
 
 pub(super) fn csv_cols_of(value: &RuntimeValue) -> Result<Vec<String>, String> {
@@ -304,7 +303,7 @@ pub(super) fn csv_cols_of(value: &RuntimeValue) -> Result<Vec<String>, String> {
 
 pub(super) fn csv_nrows_of(value: &RuntimeValue) -> Result<i64, String> {
     i64::try_from(csv_table("csv_nrows", value)?.rows.len())
-        .map_err(|_| "csv_nrows: row count overflows int64".to_string())
+        .map_err(|_| "csv_nrows: row count overflows i64".to_string())
 }
 
 pub(super) fn csv_strs_at(value: &RuntimeValue, column: &str) -> Result<Vec<String>, String> {
