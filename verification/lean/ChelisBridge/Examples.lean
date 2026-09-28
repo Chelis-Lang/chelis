@@ -191,8 +191,9 @@ def loweredDirectives (dag : Model.Dag) : Option (List Directive) :=
   (lowered dag).map OwnershipPlan.directives
 
 /-- Combined acceptance of the actual production pipeline (`acceptLowered_sound`): the
-extracted AD, the extracted ownership lowering of its returned DAG, the decoders and the
-reference checks; the witnesses are searched outside the trusted base. -/
+extracted AD, the extracted ownership lowering of its returned DAG, the extracted
+`verify_ownership` sealing the returned program, the decoders and the reference checks; the
+witnesses are searched outside the trusted base. -/
 def acceptsLowered (forward : Model.Dag) (output : Nat) (wrt : List Nat) : Bool :=
   match extractedResult (Model.gradDagChecked forward (usize output) (slice (wrt.map usize))),
       decodeSource .f64 forward wrt output with
@@ -309,5 +310,16 @@ def scopeDropSwapped : Option ExtractedOwnership.LoweredPlan :=
 #guard (scopeDropSwapped.bind (Ownership.decodeOwned .f64 [some 0] [[2]] [[2]])).map
   (fun c => c.check (LaCaDiLECore.Ownership.initial 1)) == some true
 #guard scopeDropSwapped.map verifies == some false
+
+/-- Whether the extracted public `verify_ownership` seals the DAG program of a plan. -/
+def seals (pl : ExtractedOwnership.LoweredPlan) : Bool :=
+  match Model.verifyOwnership (Model.dagProgram pl.dag pl.plan) with
+  | .ok (.Ok _) => true
+  | _ => false
+
+-- The extracted `verify_ownership` seals the lowered program and refuses the swapped one.
+#guard (lowered twoDrops).map seals == some true
+#guard (lowered rootsDag).map seals == some true
+#guard scopeDropSwapped.map seals == some false
 
 end ChelisBridge.Examples

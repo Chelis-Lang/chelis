@@ -112,32 +112,120 @@ theorem lowerDagOwnership_sound {dag : Model.Dag} {supply : Model.CapacityScopeS
           (∀ i, i < Γ.length → ended.ended.count i = 0)) :=
   ⟨loweredPlan_spec hl, decodeOwned_sound hd⟩
 
+/-! ## The public verifier `verify_ownership` (theorem (b))
+
+Production seals every ownership program with `chelis_ir::ownership::verify_ownership`, the only
+constructor of `VerifiedOwnershipProgram`. At the DAG payload (`Model.verifyOwnership`) it
+dispatches on the program's private proof: a DAG proof is checked by the private
+`DagOwnershipPlan::verify` (`Model.dagPlanVerify`) against the program's own payload DAG; a host
+proof under a DAG payload is rejected (`LoweringInvariant`, "payload specialization does not
+match its private proof"). -/
+
+/-- **Theorem (b): the extracted `verify_ownership` on a DAG program.** It accepts exactly
+when the program carries a DAG proof whose plan the extracted DAG verifier accepts against the
+program's own payload DAG, and it then returns the consumed program itself, unchanged, sealed
+with the DAG verification proof (`VerifiedOwnershipProgram(program, VerificationProof::Dag)`). -/
+theorem verifyOwnership_ok_iff (prog : Model.DagOwnershipProgram) (v : Model.VerifiedDagProgram) :
+    Model.verifyOwnership prog = .ok (.Ok v) ↔
+      ∃ d plan, Model.dagProgramParts prog = some (d, plan) ∧
+        Model.dagPlanVerify plan d = .ok (.Ok ()) ∧ v = (prog, .Dag) := by
+  obtain ⟨⟨dag⟩, proof⟩ := prog
+  cases proof with
+  | Host p s n =>
+    simp only [Model.verifyOwnership, chelis_ir.ownership.verify_ownership,
+      chelis_ir.ownership.DagEmissionPayload.Insts.Chelis_irOwnershipSealedSealed.payload_ref,
+      bind_tc_ok, Model.dagProgramParts]
+    constructor
+    · intro h
+      exfalso
+      revert h
+      cases alloc.string.ToStringBlanket.to_string core.fmt.DisplayStr (toStr "ownership-boundary") <;>
+        cases alloc.string.ToStringBlanket.to_string core.fmt.DisplayStr
+          (toStr "payload specialization does not match its private proof") <;> simp
+    · rintro ⟨d, plan, h, -⟩
+      cases h
+  | Dag plan =>
+    simp only [Model.verifyOwnership, chelis_ir.ownership.verify_ownership,
+      chelis_ir.ownership.DagEmissionPayload.Insts.Chelis_irOwnershipSealedSealed.payload_ref,
+      bind_tc_ok, Model.dagProgramParts, Model.dagPlanVerify, Option.some.injEq, Prod.mk.injEq]
+    cases h : chelis_ir.ownership.DagOwnershipPlan.verify plan dag with
+    | ok r =>
+      cases r with
+      | Ok u =>
+        cases u
+        simp [h, core.result.TryResult.branch, eq_comm]
+      | Err e =>
+        simp [h, core.result.TryResult.branch, core.result.FromResidualResult.from_residual, pure]
+    | fail e => simp [h]
+    | div => simp [h]
+
+/-- A rejection by the extracted DAG verifier is returned by `verify_ownership` unchanged. -/
+theorem verifyOwnership_rejects {prog : Model.DagOwnershipProgram} {d : Model.Dag}
+    {plan : Model.DagOwnershipPlan} {e : Model.OwnershipError}
+    (hp : Model.dagProgramParts prog = some (d, plan))
+    (hv : Model.dagPlanVerify plan d = .ok (.Err e)) :
+    Model.verifyOwnership prog = .ok (.Err e) := by
+  obtain ⟨⟨dag⟩, proof⟩ := prog
+  cases proof with
+  | Host p s n => simp [Model.dagProgramParts] at hp
+  | Dag plan' =>
+    simp only [Model.dagProgramParts, Option.some.injEq, Prod.mk.injEq] at hp
+    obtain ⟨rfl, rfl⟩ := hp
+    simp only [Model.dagPlanVerify] at hv
+    simp [Model.verifyOwnership, chelis_ir.ownership.verify_ownership,
+      chelis_ir.ownership.DagEmissionPayload.Insts.Chelis_irOwnershipSealedSealed.payload_ref, hv,
+      core.result.TryResult.branch, core.result.FromResidualResult.from_residual, pure]
+
+/-- The program a successful extracted lowering returns is sealed by `verify_ownership`
+exactly when the extracted DAG verifier accepts its plan against the lowered DAG; the sealed
+program is the returned program itself. -/
+theorem verifyOwnership_lowered {dag : Model.Dag} {supply supply' : Model.CapacityScopeSupply}
+    {prog : Model.DagOwnershipProgram}
+    (h : Model.lowerDagOwnership dag supply = .ok (.Ok prog, supply')) :
+    ∃ plan, Model.dagProgramParts prog = some (dag, plan) ∧
+      (Model.verifyOwnership prog = .ok (.Ok (prog, .Dag)) ↔
+        Model.dagPlanVerify plan dag = .ok (.Ok ())) := by
+  obtain ⟨plan, hp⟩ := Model.lowerDagOwnership_ok h
+  refine ⟨plan, hp, ?_⟩
+  rw [verifyOwnership_ok_iff]
+  constructor
+  · rintro ⟨d, plan', hp', hv, -⟩
+    rw [hp] at hp'
+    simp only [Option.some.injEq, Prod.mk.injEq] at hp'
+    obtain ⟨rfl, rfl⟩ := hp'
+    exact hv
+  · intro hv
+    exact ⟨dag, plan, hp, hv, rfl⟩
+
 /-- Proof-producing acceptance of the actual production pipeline: run the extracted
 `grad_dag_checked forward output wrt`, run the extracted `lower_dag_ownership` on the
-returned post-AD DAG (as production does), require the extracted production verifier
-`DagOwnershipPlan::verify` to accept the returned plan against the returned payload DAG (the
-check `verify_ownership` runs for a DAG program), then decode the source, the post-AD artifact
-and the returned final plan independently and require `Validation.acceptPlan` (reference
-ownership check of the original plan, gradient correspondence, copy-normalized value
-correspondence of the final plan). -/
+returned post-AD DAG (as production does), seal the returned program with the extracted public
+verifier `verify_ownership` (as production does before emission), then decode the source, the
+post-AD artifact and the sealed program's final plan independently and require
+`Validation.acceptPlan` (reference ownership check of the original plan, gradient
+correspondence, copy-normalized value correspondence of the final plan). -/
 def acceptLowered (dt : DType) (forward : Model.Dag) (output : Model.NodeId)
     (wrt : Slice Model.NodeId) (supply : Model.CapacityScopeSupply)
     (adWitness normalizationWitness : List (Option Nat)) : Bool :=
   match extractedResult (Model.gradDagChecked forward output wrt) with
   | none => false
   | some r =>
-      match loweredPlan r.dag supply with
-      | none => false
-      | some pl =>
-          match Model.dagPlanVerify pl.plan pl.dag with
-          | .ok (.Ok ()) => Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r pl
-              adWitness normalizationWitness
+      match Model.lowerDagOwnership r.dag supply with
+      | .ok (.Ok prog, _) =>
+          match Model.verifyOwnership prog with
+          | .ok (.Ok verified) =>
+              match Model.dagProgramParts (Model.verifiedProgram verified) with
+              | some (d, plan) => Validation.acceptPlan dt forward (wrt.val.map (·.val)) output.val r
+                  (⟨d, plan⟩ : LoweredPlan) adWitness normalizationWitness
+              | none => false
           | _ => false
+      | _ => false
 
 /-- **Composed pipeline theorem for the actual returned artifacts.** If `acceptLowered`
 accepts, then the extracted AD returned `r`, the extracted ownership lowering of `r.dag`
-returned a program whose plan `pl` is over `r.dag` itself, the extracted production verifier
-accepted exactly that returned plan against that DAG, and for the independently
+returned a program whose plan `pl` is over `r.dag` itself, the extracted `verify_ownership`
+sealed exactly that returned program (so the extracted DAG verifier accepted its plan against
+that DAG), and for the independently
 decoded source loss `p`, post-AD circuit `actual` and final plan `final` (over the artifact's own roots `Ω`): no owned
 root is transferred twice; `final` executes under the reference ownership machine from
 borrowed entries, returning its value semantics and terminating each local owner exactly
@@ -156,6 +244,7 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
       Model.gradDagChecked forward output wrt = .ok (.Ok r) ∧
       Model.lowerDagOwnership r.dag supply = .ok (.Ok prog, supply') ∧
       pl.dag = r.dag ∧ Model.dagProgramParts prog = some (pl.dag, pl.plan) ∧
+      Model.verifyOwnership prog = .ok (.Ok (prog, .Dag)) ∧
       Model.dagPlanVerify pl.plan r.dag = .ok (.Ok ()) ∧
       decodeSource dt forward (wrt.val.map (·.val)) output.val = some ⟨Γ, p⟩ ∧
       decodeArtifact dt forward (wrt.val.map (·.val)) p r = some actual ∧
@@ -183,32 +272,40 @@ theorem acceptLowered_sound {dt : DType} {forward : Model.Dag} {output : Model.N
   · contradiction
   · rename_i r hr
     split at h
-    · contradiction
-    · rename_i pl hpl
+    · rename_i prog supply' hlow
       split at h
-      · rename_i hv
-        have hgrad : Model.gradDagChecked forward output wrt = .ok (.Ok r) := by
-          unfold extractedResult at hr
-          split at hr
-          · cases Option.some.inj hr; assumption
-          · contradiction
-        obtain ⟨hdag, prog, supply', hlow, hparts⟩ := loweredPlan_spec hpl
-        obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots, ⟨ids, hids, hf⟩, hall⟩ :=
-          Validation.checkGradient_bridge h
-        exact ⟨r, pl, prog, supply', Γ, p, actual, Ω, rc, final, hgrad, hlow, hdag, hparts,
-          hdag ▸ hv, hs, ha, hroots, ⟨ids, hids, hf⟩, (decodeOwned_sound hf).2.1, hall⟩
+      · rename_i verified hver
+        split at h
+        · rename_i d plan hvp
+          have hgrad : Model.gradDagChecked forward output wrt = .ok (.Ok r) := by
+            unfold extractedResult at hr
+            split at hr
+            · cases Option.some.inj hr; assumption
+            · contradiction
+          obtain ⟨d', plan', hparts, hv, rfl⟩ := (verifyOwnership_ok_iff prog verified).mp hver
+          have hvp' : Model.dagProgramParts prog = some (d, plan) := hvp
+          rw [hparts] at hvp'
+          simp only [Option.some.injEq, Prod.mk.injEq] at hvp'
+          obtain ⟨rfl, rfl⟩ := hvp'
+          obtain ⟨plan'', hlowp⟩ := Model.lowerDagOwnership_ok hlow
+          rw [hparts] at hlowp
+          simp only [Option.some.injEq, Prod.mk.injEq] at hlowp
+          obtain ⟨rfl, rfl⟩ := hlowp
+          obtain ⟨Γ, p, actual, Ω, rc, final, hs, ha, hroots, ⟨ids, hids, hf⟩, hall⟩ :=
+            Validation.checkGradient_bridge h
+          exact ⟨r, ⟨r.dag, _⟩, prog, supply', Γ, p, actual, Ω, rc, final, hgrad, hlow, rfl,
+            hparts, hver, hv, hs, ha, hroots, ⟨ids, hids, hf⟩, (decodeOwned_sound hf).2.1, hall⟩
+        · contradiction
       · contradiction
+    · contradiction
 
 /-! ## Relation to the Rust independent verifier
 
 Production seals a DAG plan with `verify_ownership`, which for a DAG payload runs the private
-`DagOwnershipPlan::verify` on the plan and the payload DAG. That verifier is extracted
-(`Model.dagPlanVerify`) and `acceptLowered` requires it to accept the actual returned plan,
-in addition to — never instead of — the independent reference check `OwnedCode.check` of the
-decoded plan. The public `verify_ownership` wrapper itself is not yet in the model: its host
-arm (the host verifier) needs a collection model for `Flatten` (`last_use.rs:353`), so the
-statement that the verified program wraps the decoded plan is about the DAG verifier the
-wrapper dispatches to.
+`DagOwnershipPlan::verify` on the plan and the payload DAG. Both are extracted
+(`Model.verifyOwnership`, `Model.dagPlanVerify`; theorem (b), `verifyOwnership_ok_iff`), and
+`acceptLowered` requires the wrapper to seal the actual returned program, in addition to —
+never instead of — the independent reference check `OwnedCode.check` of the decoded plan.
 
 The two checks are not equivalent. The Rust verifier re-derives, node by node and root by
 root, the one directive the lowering emits (exact `DagDirective` equality), the owner-origin

@@ -94,6 +94,21 @@ abbrev dagPlanVerify : DagOwnershipPlan → Dag →
     Aeneas.Std.Result (Aeneas.Std.core.result.Result Unit OwnershipError) :=
   chelis_ir.ownership.DagOwnershipPlan.verify
 
+/-- A verified DAG program: the consumed program and its verification proof. -/
+abbrev VerifiedDagProgram :=
+  chelis_ir.ownership.VerifiedOwnershipProgram chelis_ir.ownership.DagEmissionPayload
+
+/-- The extracted public verifier `chelis_ir::ownership::verify_ownership` at the DAG payload
+(`P = DagEmissionPayload` with its `EmissionPayload` impl, whose `payload_ref` is
+`PayloadRef::Dag`): the only constructor of a verified program. -/
+abbrev verifyOwnership : DagOwnershipProgram →
+    Aeneas.Std.Result (Aeneas.Std.core.result.Result VerifiedDagProgram OwnershipError) :=
+  chelis_ir.ownership.verify_ownership
+    chelis_ir.ownership.DagEmissionPayload.Insts.Chelis_irOwnershipEmissionPayload
+
+/-- The program a verified DAG program carries (the tuple struct's field `0`). -/
+def verifiedProgram (v : VerifiedDagProgram) : DagOwnershipProgram := v.1
+
 /-- The directive vector of a DAG ownership plan, in order. -/
 def planDirectives (p : DagOwnershipPlan) : List DagDirective := p.directives.val
 
@@ -173,5 +188,9 @@ def u64 (n : Nat) : U64 :=
 
 /-- A capacity-scope supply handing out `draw 0, draw 1, …` (`none`: native exhaustion). -/
 def supplyOf (draw : Nat → Option Aeneas.Std.U64) : CapacityScopeSupply := { draw, taken := 0 }
+
+/-- The DAG ownership program of a payload DAG and its DAG plan (`OwnershipProof::Dag`). -/
+def dagProgram (dag : Dag) (plan : DagOwnershipPlan) : DagOwnershipProgram :=
+  { payload := { dag }, proof := .Dag plan }
 
 end ChelisBridge.Model

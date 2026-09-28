@@ -158,6 +158,9 @@ def accepted : List Name := [
   ``ChelisBridge.ExtractedOwnership.loweredPlan_spec,
   ``ChelisBridge.ExtractedOwnership.loweredPlan_of_ok,
   ``ChelisBridge.ExtractedOwnership.lowerDagOwnership_sound,
+  ``ChelisBridge.ExtractedOwnership.verifyOwnership_ok_iff,
+  ``ChelisBridge.ExtractedOwnership.verifyOwnership_rejects,
+  ``ChelisBridge.ExtractedOwnership.verifyOwnership_lowered,
   ``ChelisBridge.ExtractedOwnership.acceptLowered_sound,
   -- Validation
   ``ChelisBridge.opReads_iff,
