@@ -799,11 +799,12 @@ Empty objects allocate a zero-count owner without entering the ordering loops.
 
 The bounded acceptance surface is `checked_c_json_scratch` for delegation and
 cleanup-tail spelling, plus `issue_1314_json_bigint`'s recursive canonical Unicode,
-reordered and empty object case through Eval/C. Its separate
-`json_scratch_execution_detects_skipped_cleanup` test links the exact Cargo archive
-built with the private ownership ledger and executes the emitted ordering helper
-with an explicitly released caller. Empty and two-entry objects leave zero live
-owners/bytes. Output-preserving last-iteration return and omitted-owner-release
+reordered and empty object case through Eval/C. The `issue_1314_json_bigint_ledger`
+target's `json_scratch_execution_detects_skipped_cleanup` test requires the CLI's
+`ownership-ledger` feature, so the runtime `chelis build` stages records the private
+ownership ledger. The test links that runtime and executes the emitted ordering
+helper with an explicitly released caller. Empty and two-entry objects leave zero
+live owners/bytes. Output-preserving last-iteration return and omitted-owner-release
 mutations must leave live ownership; omitted guard exit must fail with the active
 write-guard error. The source check alone does not prove control-flow cleanup.
 These execution registrations extend the code-derived Phase 0 manifest without
@@ -1764,10 +1765,10 @@ stages it beside its output ([spec/08 §2.1](../08-backends.md)). Both verify th
 written archive against the carried digest and link it by exact path, so no leg
 takes a runtime from the target directory or the environment, and none can be
 substituted. Without `CHELIS_OWNERSHIP_LEDGER_PATH` the ledger records nothing.
-The one leg that sets it, the JSON ownership-ledger mutation test, still builds
-its instrumented Cargo artifact and links that exact archive in place of the
-staged one. The CLI-staged consumer's control names a directory holding an empty
-archive as `CHELIS_RUNTIME_DIR` and must fail with the CLI's rejection before
+The one leg that sets it, the JSON ownership-ledger mutation test, builds `chelis`
+with its `ownership-ledger` feature, so the runtime `chelis build` stages is the
+instrumented one. The CLI-staged consumer's control names a directory holding an
+empty archive as `CHELIS_RUNTIME_DIR` and must fail with the CLI's rejection before
 linking: honoring the directory would fail at the linker, and ignoring it would
 pass. Five missing-compiler controls prevent native compile checks from
 returning early. Staging, freshness and persisted-artifact admission

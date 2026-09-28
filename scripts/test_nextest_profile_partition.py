@@ -514,7 +514,7 @@ class ProfilePartitionTests(unittest.TestCase):
         }
 
     def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
-        from scripts import ci_test_targets
+        from scripts import ci_test_targets, gate
         metadata = json.loads(subprocess.run(
             ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
             cwd=REPO_ROOT, check=True, capture_output=True, text=True,
@@ -529,8 +529,17 @@ class ProfilePartitionTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=900,
             )
             return json.loads(result.stdout)
-        fast = ci_test_targets.merge_listings([listing(args) for args in selections])
-        ci_test_targets.validate_listing(fast, metadata, selected)
+        listings = [listing(args) for args in selections]
+        ci_test_targets.validate_listing(
+            ci_test_targets.merge_listings(listings), metadata, selected
+        )
+        # The featureless workspace listing cannot compile a feature-gated
+        # target, so only the featureless groups are compared against it.
+        featureless = [
+            document for args, document in zip(selections, listings)
+            if "--features" not in args
+        ]
+        fast = ci_test_targets.merge_listings(featureless)
         full = listing(["--workspace"])
         def active(data):
             return {(binary, name) for binary, suite in data["rust-suites"].items()
@@ -540,6 +549,17 @@ class ProfilePartitionTests(unittest.TestCase):
         self.assertTrue(all(info["filter-match"]["status"] == "matches"
                             for suite in full["rust-suites"].values()
                             for info in suite["testcases"].values() if not info["ignored"]))
+        # Each gated standing target also runs in the gate's integration
+        # stage with exactly its features.
+        def gated(commands):
+            return {
+                (command[command.index("-p") + 1],
+                 command[command.index("--features") + 1], command[index + 1])
+                for command in commands
+                if "-p" in command and "--features" in command
+                for index, value in enumerate(command) if value == "--test"
+            }
+        self.assertLessEqual(gated(selections), gated(gate.STAGES["integration"]))
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}

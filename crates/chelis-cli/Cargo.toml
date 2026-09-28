@@ -57,6 +57,9 @@ smt = ["chelis-prove/smt", "chelis-tide/smt"]
 # §2.1): they carry no checkout path and skip the development source-freshness
 # check. Staging receipts record the mode.
 sealed-runtime = ["chelis-runtime-bundle/sealed"]
+# Test-only: instruments the runtime this `chelis` build carries and stages, so
+# its programs record the ownership ledger. The ledger test requires it.
+ownership-ledger = ["chelis-runtime/ownership-ledger"]
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -89,6 +92,11 @@ toml = "0.8"
 walkdir = "2"
 wiremock = "0.6"
 zstd = "0.13"
+
+[[test]]
+name = "issue_1314_json_bigint_ledger"
+path = "tests/issue_1314_json_bigint_ledger.rs"
+required-features = ["ownership-ledger"]
 
 [lints]
 workspace = true

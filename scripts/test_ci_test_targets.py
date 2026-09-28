@@ -104,14 +104,58 @@ class TargetSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "extra"):
             targets.validate_listing(merged, shared_metadata(), [("p", "smoke")])
 
-    def test_integration_required_features_must_be_default_enabled(self):
+    def test_gated_targets_build_in_one_group_per_package_and_feature_set(self):
+        data = shared_metadata()
+        for package in data["packages"]:
+            package["features"] = {"default": [], "probe": [], "trace": []}
+        p_targets = data["packages"][0]["targets"]
+        p_targets[2]["required-features"] = ["probe"]
+        p_targets[3]["required-features"] = ["probe"]
+        p_targets.extend([
+            {"name": "traced", "kind": ["test"], "required-features": ["trace", "probe"]},
+            {"name": "plain", "kind": ["test"]},
+        ])
+        data["packages"][1]["targets"][2]["required-features"] = ["probe"]
+        groups = targets.cargo_selections(data, [
+            ("p", "smoke"), ("q", "smoke"), ("p", "traced"), ("p", "plain"),
+            ("p", "exhaustive"), ("q", "exhaustive"),
+        ])
+        self.assertEqual(groups, [
+            ["--workspace", "--lib", "--bins", "--test", "plain"],
+            ["-p", "q", "--test", "exhaustive"],
+            ["-p", "p", "--features", "probe", "--test", "smoke", "--test", "exhaustive"],
+            ["-p", "p", "--features", "probe,trace", "--test", "traced"],
+            ["-p", "q", "--features", "probe", "--test", "smoke"],
+        ])
+        for group in groups[2:]:
+            self.assertNotIn("--lib", group)
+            self.assertNotIn("--bins", group)
+
+    def test_default_enabled_required_features_keep_default_grouping(self):
         data = metadata()
         data["packages"][0]["targets"][2]["required-features"] = ["probe"]
-        with self.assertRaisesRegex(ValueError, "default features"):
-            targets.cargo_selections(data, [("p", "smoke")])
         data["packages"][0]["features"] = {"default": ["probe"], "probe": []}
         self.assertEqual(targets.cargo_selections(data, [("p", "smoke")]),
                          targets.cargo_selections(metadata(), [("p", "smoke")]))
+
+    def test_undeclared_required_feature_is_rejected(self):
+        data = metadata()
+        data["packages"][0]["targets"][2]["required-features"] = ["probe"]
+        with self.assertRaisesRegex(ValueError, "undeclared features \\['probe'\\]: p::smoke"):
+            targets.cargo_selections(data, [("p", "smoke")])
+
+    def test_gated_target_listing_validates_without_its_package_units(self):
+        data = metadata()
+        data["packages"][0]["features"] = {"default": [], "probe": []}
+        data["packages"][0]["targets"][2]["required-features"] = ["probe"]
+        units = listing()
+        gated = {"rust-suites": {"p::smoke": units["rust-suites"].pop("p::smoke")}}
+        merged = targets.merge_listings([units, gated])
+        self.assertEqual(targets.validate_listing(merged, data, [("p", "smoke")]),
+                         ["p::smoke::positive"])
+        del merged["rust-suites"]["p::smoke"]
+        with self.assertRaisesRegex(ValueError, "missing=\\['p::smoke'\\]"):
+            targets.validate_listing(merged, data, [("p", "smoke")])
 
     def test_manifest_requires_nonempty_exact_package_target_rows(self):
         for content in ("", "version = 1", "version = 2\nstanding_target = []",
@@ -346,6 +390,42 @@ class TargetSelectionTests(unittest.TestCase):
                         coverage["selected_tests"],
                         coverage["executed_tests"],
                     )
+
+    def test_runner_lists_and_runs_a_gated_target_with_exactly_its_features(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".config").mkdir()
+            (root / ".config/ci-test-targets.toml").write_text(
+                'version = 3\n[[standing_target]]\npackage = "p"\nname = "smoke"\n')
+            data = metadata()
+            data["packages"][0]["features"] = {"default": [], "probe": []}
+            data["packages"][0]["targets"][2]["required-features"] = ["probe"]
+            calls = []
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[1] == "metadata":
+                    return mock.Mock(stdout=json.dumps(data), returncode=0)
+                binaries = ["p", "p::bin/app"] if "--workspace" in command else ["p::smoke"]
+                if command[1:3] == ["nextest", "run"]:
+                    write_junit(root, binaries)
+                suites = {binary: listing()["rust-suites"]["p::smoke"] for binary in binaries}
+                return mock.Mock(stdout=json.dumps({"rust-suites": suites}), returncode=0)
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "target")}), mock.patch.object(targets.subprocess, "run", side_effect=run):
+                targets.run(root, candidate_sha="b" * 40)
+            gated = [c for c in calls if c[1] == "nextest" and "--workspace" not in c]
+            self.assertEqual([c[2] for c in gated], ["list", "run"])
+            for command in gated:
+                self.assertEqual(command[3:9], ["-p", "p", "--features", "probe", "--test", "smoke"])
+                self.assertNotIn("--lib", command)
+            for command in calls:
+                if command[1] == "nextest" and "--workspace" in command:
+                    self.assertNotIn("--features", command)
+                    self.assertNotIn("smoke", command)
+            coverage = json.loads((root / "target/ci-fast/coverage.json").read_text())
+            self.assertTrue(coverage["success"])
+            self.assertEqual(coverage["selected_targets"], ["p::smoke"])
+            self.assertEqual(coverage["executed_targets"], ["p::smoke"])
+            self.assertEqual(coverage["executed_tests"], ["p::smoke::positive"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ Four things are locked here:
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 from collections import deque
@@ -860,10 +861,12 @@ class StageUnionTests(unittest.TestCase):
         ) for name in ("frontend", "domain")]
         self.assertEqual(slices[0], [gate.LOWERING_TRACE_TESTS,
                                     gate.EMISSION_OBSERVER_TESTS,
+                                    gate.OWNERSHIP_LEDGER_API_TESTS,
                                     gate.COMPILER_FRONT_END_PERFORMANCE_ORACLE])
         self.assertEqual(slices[1], [
             gate.UNREPRESENTABLE_DOMAIN_ORACLE,
             [gate.MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+            gate.OWNERSHIP_LEDGER_CLI_TESTS,
         ])
         self.assertEqual(slices[0] + slices[1], gate.STAGES["integration"][1:])
 
@@ -877,6 +880,54 @@ class StageUnionTests(unittest.TestCase):
             "integration", tests_only=False, support_only=True, partition=None,
         )
         self.assertEqual(commands.count(command), 1)
+
+    def test_ownership_ledger_runs_with_its_feature_locally_and_in_ci_support(self):
+        commands = gate.selected_stage_commands(
+            "integration", tests_only=False, support_only=True, partition=None,
+        )
+        for command, package in (
+            (gate.OWNERSHIP_LEDGER_API_TESTS, "chelis-compiler-api"),
+            (gate.OWNERSHIP_LEDGER_CLI_TESTS, "chelis-cli"),
+        ):
+            with self.subTest(package=package):
+                self.assertEqual(
+                    command[:7],
+                    ["cargo", "nextest", "run", "-p", package, "--features",
+                     "ownership-ledger"],
+                )
+                self.assertNotIn("--profile", command)
+                self.assertNotIn("--lib", command)
+                names = command[8::2]
+                self.assertEqual(command[7::2], ["--test"] * len(names))
+                self.assertEqual(names, sorted(set(names)))
+                self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
+                self.assertEqual(commands.count(command), 1)
+
+    def test_ownership_ledger_commands_select_exactly_the_gated_targets(self):
+        # A static --test list can silently miss a newly gated target, and a
+        # featureless workspace run skips it, so derive the owed set from Cargo.
+        metadata = json.loads(subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+            cwd=REPO_ROOT, check=True, stdout=subprocess.PIPE, text=True,
+        ).stdout)
+        members = set(metadata["workspace_members"])
+        gated = sorted(
+            (package["name"], target["name"])
+            for package in metadata["packages"] if package["id"] in members
+            for target in package["targets"]
+            if "test" in target["kind"]
+            and "ownership-ledger" in target.get("required-features", [])
+        )
+        selected = []
+        for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
+            package = command[command.index("-p") + 1]
+            self.assertEqual(command[command.index("--features") + 1], "ownership-ledger")
+            selected.extend(
+                (package, command[index + 1])
+                for index, value in enumerate(command) if value == "--test"
+            )
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertEqual(sorted(selected), gated)
 
     def test_support_slice_is_rejected_outside_support_only_integration(self):
         for argv in (
@@ -1102,6 +1153,39 @@ class ListOutputTests(unittest.TestCase):
                 f"command that builds `chelis` before it; one of {sorted(producers)} "
                 "must precede it",
             )
+
+    def test_the_ledger_cli_rebuild_follows_every_prebuilt_chelis_consumer(self):
+        # OWNERSHIP_LEDGER_CLI_TESTS rebuilds <target>/debug/chelis against
+        # the instrumented runtime, and the handoff names that path whenever a
+        # producer precedes the oracle, so in every list the gate composes the
+        # oracle must run before that rebuild.
+        ledger = gate.render(gate.OWNERSHIP_LEDGER_CLI_TESTS)
+        oracle = gate.render(gate.UNREPRESENTABLE_DOMAIN_ORACLE)
+        support = dict(tests_only=False, support_only=True, partition=None)
+        lists = {
+            "full_command_list()": gate.full_command_list(),
+            "local_command_list([])": gate.local_command_list([]),
+            "local_command_list(['chelis-cli'])": gate.local_command_list(
+                ["chelis-cli"]
+            ),
+            "STAGES['integration']": gate.STAGES["integration"],
+            "integration --support-only": gate.selected_stage_commands(
+                "integration", **support
+            ),
+            "domain slice": gate.selected_stage_commands(
+                "integration", **support, support_slice="domain"
+            ),
+        }
+        for label, commands in lists.items():
+            with self.subTest(label=label):
+                rendered = [gate.render(command) for command in commands]
+                self.assertEqual(rendered.count(ledger), 1, label)
+                self.assertLess(
+                    rendered.index(oracle), rendered.index(ledger),
+                    f"{label} runs the oracle after the ledger rebuild",
+                )
+        # Every later command would see the instrumented binary.
+        self.assertEqual(gate.STAGES["integration"][-1], gate.OWNERSHIP_LEDGER_CLI_TESTS)
 
     def test_the_handoff_variable_has_exactly_one_spelling(self):
         # chelis#1322. Two independent string literals were the most likely
@@ -2346,7 +2430,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("if: matrix.shard == 2", shard_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
         self.assertIn(
-            "needs: [macos-workspace-shard]", aggregate_block
+            "needs: [macos-workspace-shard, macos-ownership-ledger]", aggregate_block
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 

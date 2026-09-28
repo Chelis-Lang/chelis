@@ -487,13 +487,15 @@
       "args": [
         "-p",
         "chelis-cli",
+        "--features",
+        "ownership-ledger",
         "--test",
-        "issue_1314_json_bigint",
+        "issue_1314_json_bigint_ledger",
         "-E",
         "(test(=json_scratch_execution_detects_skipped_cleanup)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
       ],
       "required": [
-        "chelis-cli::issue_1314_json_bigint::json_scratch_execution_detects_skipped_cleanup"
+        "chelis-cli::issue_1314_json_bigint_ledger::json_scratch_execution_detects_skipped_cleanup"
       ]
     },
     {

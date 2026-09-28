@@ -109,12 +109,12 @@ derivative theorem, full source/API transport, arbitrary runtime-rate C
 support, or completion of E1/E2. HIP/Metal and next-draw/state controls remain
 outside this slice.
 
-The existing PR integration selection includes `fixed_control_c`:
+The existing PR integration selection includes `fixed_control_host_c`, which
+requires the `ownership-ledger` feature:
 
 ```text
-cargo nextest run -p chelis-compiler-api --test fixed_control_c --locked --offline --build-jobs 1 --test-threads 1
+cargo nextest run -p chelis-compiler-api --features ownership-ledger --test fixed_control_host_c --locked --offline --build-jobs 1 --test-threads 1
 ```
 
-Its native helper builds an ownership-ledger runtime under the worktree's
-`target/ownership-ledger-runtime`; set `CARGO_NET_OFFLINE=true` for an offline run
-including that nested build.
+Its native helper links the runtime this test build carries, which the feature
+instruments with the ownership ledger; no nested Cargo build runs.

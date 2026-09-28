@@ -33,8 +33,8 @@ executes generic forward/AD/next-draw source at all four dtypes and balances
 the native ownership ledger. The existing CLI example now includes a generic
 following draw, with unchanged results.
 
-Owning command: `cargo nextest run -p chelis-compiler-api --test
-dropout_fixed_stream_api --test fixed_control_host_c --test fixed_control_c
+Owning command: `cargo nextest run -p chelis-compiler-api --features
+ownership-ledger --test dropout_fixed_stream_api --test fixed_control_host_c
 --locked --offline --build-jobs 1 --test-threads 1`, after the package's
 `cargo check --tests`. This is bounded evaluator/native parity for the named
 source profile, not exhaustive generic AD, arbitrary-rate native execution,
