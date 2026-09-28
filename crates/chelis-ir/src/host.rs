@@ -9466,6 +9466,10 @@ pub(crate) fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
         name,
         Some(
             "copy"
+                | "key_from_seed"
+                | "split_key"
+                | "split_keys"
+                | "fold_in"
                 | "to_tensor"
                 | "scalar_to_tensor"
                 | "pad_sequences"
@@ -19381,6 +19385,62 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         _ => None,
     });
     match name {
+        // A specialized host body must recover the same scalar/tensor
+        // relation as the checked builtin scheme, including each tuple
+        // component. Polymorphic rank slots remain ordered until inlining.
+        "key_from_seed" | "split_key" | "split_keys" | "fold_in" => {
+            let expected = if name == "key_from_seed" {
+                Prim::Int64
+            } else {
+                Prim::Key
+            };
+            let key = match arg_tys.first()? {
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) if *prim == expected => {
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Key))
+                }
+                HostTypeTerm::Tensor(tensor) if tensor.precision == expected => {
+                    let mut tensor = tensor.clone();
+                    tensor.precision = Prim::Key;
+                    HostTypeTerm::Tensor(tensor)
+                }
+                HostTypeTerm::PolymorphicTensor(tensor)
+                    if tensor.precision == HostPrecisionTerm::Concrete(expected) =>
+                {
+                    let mut tensor = tensor.clone();
+                    tensor.precision = HostPrecisionTerm::Concrete(Prim::Key);
+                    HostTypeTerm::PolymorphicTensor(tensor)
+                }
+                other if other.is_unresolved() => return Some(fresh_host_inference()),
+                _ => return None,
+            };
+            Some(match name {
+                "split_key" => HostTypeTerm::Tuple(vec![key.clone(), key]),
+                "split_keys" => {
+                    let count = DimInfo::Named("*".into(), None);
+                    match key {
+                        HostTypeTerm::Tensor(mut tensor) => {
+                            tensor.dims.push(count);
+                            HostTypeTerm::Tensor(tensor)
+                        }
+                        HostTypeTerm::PolymorphicTensor(mut tensor) => {
+                            match &mut tensor.shape {
+                                HostShapeTerm::Concrete(dims) => dims.push(count),
+                                HostShapeTerm::Polymorphic(slots) => {
+                                    slots.push(HostShapeSlot::Dim(count))
+                                }
+                            }
+                            HostTypeTerm::PolymorphicTensor(tensor)
+                        }
+                        HostTypeTerm::Scalar(_) => HostTypeTerm::Tensor(TensorType {
+                            dims: vec![count],
+                            precision: Prim::Key,
+                        }),
+                        _ => unreachable!("key surface was resolved above"),
+                    }
+                }
+                _ => key,
+            })
+        }
         // [05-OP-8] and [05-OP-37]: a draw's result has the type of its
         // data operand, which follows the key. Position decides it: the key
         // is itself a rank-zero key tensor wherever it was projected from a

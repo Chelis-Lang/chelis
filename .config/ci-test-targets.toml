@@ -1243,6 +1243,12 @@ prefix = "examples/keyed_state_wrapper.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/tensor_key_operations.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # Illustrative source read by chelis-e2e::example_corpus_validate and
 # chelis-surf's fmt_idempotent_on_repo_ch_corpus.
 [[path_rule]]
