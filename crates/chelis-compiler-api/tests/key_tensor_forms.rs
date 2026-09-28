@@ -1,0 +1,187 @@
+//! [05-OP-69]..[05-OP-72]: tensor operations equal per-element scalar derivations.
+mod key_reference;
+mod ownership_support;
+
+use chelis_compiler_api::compiler::eval_selected;
+use chelis_compiler_api::schema::{EvalRequest, SourceKind};
+use std::collections::BTreeMap;
+
+fn tensor(shape: &[usize], keys: &[u64]) -> String {
+    if shape.is_empty() {
+        return format!("key({:016x})", keys[0]);
+    }
+    format!(
+        "tensor(shape={shape:?}, data=[{}])",
+        keys.iter()
+            .map(|k| format!("key({k:016x})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+#[test]
+fn tensor_key_forms_match_the_independent_scalar_reference_in_eval_and_c() {
+    for (seeds, shape, values) in [
+        ("-1i64", vec![], vec![-1i64]),
+        ("scalar_to_tensor(-1i64)", vec![], vec![-1i64]),
+        ("to_tensor([1i64, -1i64])", vec![2], vec![1, -1]),
+        (
+            "to_tensor([[9007199254740993i64, -1i64], [9223372036854775807i64, -9223372036854775808i64]])",
+            vec![2, 2],
+            vec![9007199254740993, -1, i64::MAX, i64::MIN],
+        ),
+        ("to_tensor(range(0i64, 0i64))", vec![0], vec![]),
+        (
+            "reshape(to_tensor(range(0i64, 0i64)), [2i64, 0i64])",
+            vec![2, 0],
+            vec![],
+        ),
+    ] {
+        let source = format!(
+            "def main() = {{\n seeds = {seeds}\n (left, right) = split_key(key_from_seed(seeds))\n (key_from_seed(seeds), left, right, fold_in(key_from_seed(seeds), seeds), split_keys(key_from_seed(seeds), 3i64))\n}}\n"
+        );
+        let mut sources = vec![source];
+        if seeds != "-1i64" {
+            sources.push(format!(
+                "def derived[r](seeds: tensor[..r, i64]) -> (tensor[..r, key], tensor[..r, key], tensor[..r, key], tensor[..r, key], tensor[..r, 3, key]) = {{\n (left, right) = split_key(key_from_seed(seeds))\n (key_from_seed(seeds), left, right, fold_in(key_from_seed(seeds), seeds), split_keys(key_from_seed(seeds), 3i64))\n}}\ndef main() = derived({seeds})\n"
+            ));
+        }
+        let keys = values.iter().map(|v| *v as u64).collect::<Vec<_>>();
+        let left = keys
+            .iter()
+            .map(|k| key_reference::split(*k).0)
+            .collect::<Vec<_>>();
+        let right = keys
+            .iter()
+            .map(|k| key_reference::split(*k).1)
+            .collect::<Vec<_>>();
+        let folded = keys
+            .iter()
+            .zip(&values)
+            .map(|(k, n)| key_reference::fold_in(*k, *n))
+            .collect::<Vec<_>>();
+        let children = keys
+            .iter()
+            .flat_map(|k| (0..3).map(move |n| key_reference::fold_in(*k, n)))
+            .collect::<Vec<_>>();
+        let mut child_shape = shape.clone();
+        child_shape.push(3);
+        let expected = [
+            tensor(&shape, &keys),
+            tensor(&shape, &left),
+            tensor(&shape, &right),
+            tensor(&shape, &folded),
+            tensor(&child_shape, &children),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("main.{i} = {s}"))
+        .collect::<Vec<_>>();
+        for source in sources {
+            let result = eval_selected(
+                EvalRequest {
+                    source_kind: SourceKind::Surf,
+                    source: source.clone(),
+                    bindings: BTreeMap::new(),
+                },
+                &["main".into()],
+            )
+            .unwrap_or_else(|e| panic!("{source}\n{e:?}"));
+            let actual = result
+                .roots
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} = {}",
+                        r.name.as_deref().unwrap(),
+                        r.display.as_deref().unwrap()
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "eval {source}");
+            let generated =
+                ownership_support::emit(&source, &format!("key_tensor_forms: {source}"));
+            let (ledger, stdout) = ownership_support::run_program(&generated);
+            ownership_support::balanced(&ledger);
+            assert_eq!(stdout.lines().collect::<Vec<_>>(), expected, "C {source}");
+        }
+    }
+}
+
+#[test]
+fn tensor_key_split_checks_runtime_count_before_allocating() {
+    for count in [-1, 0, i64::MAX] {
+        let source = format!(
+            "def children(k: tensor[2, key], n: i64) -> (tensor[2, *, key], unit) = (split_keys(k, n), ())\ndef main() = children(key_from_seed(to_tensor([1i64, 2i64])), {count}i64)\n"
+        );
+        let result = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.clone(),
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        );
+        let generated = ownership_support::emit(&source, "key_tensor_count");
+        if count < 0 {
+            let error = result.expect_err("negative runtime count must trap");
+            assert!(format!("{error:?}").contains("numeric trap: domain in split_keys at i64"));
+            let stderr = ownership_support::run_failure_stderr(&generated, "");
+            assert!(
+                stderr.contains("numeric trap: domain in split_keys at i64"),
+                "{stderr}"
+            );
+        } else if count > 0 {
+            let error = result.expect_err("overflowing result must reject before allocation");
+            assert!(
+                format!("{error:?}").contains("overflow in split_keys at i64"),
+                "{error:?}"
+            );
+            let stderr = ownership_support::run_failure_stderr(&generated, "");
+            assert!(
+                stderr.contains("Overflow") || stderr.contains("overflow in split_keys at i64"),
+                "{stderr}"
+            );
+        } else {
+            let result = result.expect("zero count is empty");
+            assert!(
+                result
+                    .roots
+                    .iter()
+                    .any(|r| r.display.as_deref() == Some("tensor(shape=[2, 0], data=[])")),
+                "{result:?}"
+            );
+            let (ledger, stdout) = ownership_support::run_program(&generated);
+            ownership_support::balanced(&ledger);
+            assert!(stdout.contains("tensor(shape=[2, 0], data=[])"), "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn tensor_fold_rejects_runtime_shape_mismatch_without_broadcasting() {
+    for source in [
+        "def folded(k: tensor[*, key], n: tensor[*, i64]) -> (tensor[*, key], unit) = (fold_in(k, n), ())\ndef main() = folded(key_from_seed(to_tensor([1i64, 2i64])), to_tensor([3i64, 4i64, 5i64]))\n",
+        "def folded(k: tensor[*, *, key], n: tensor[*, *, i64]) -> (tensor[*, *, key], unit) = (fold_in(k, n), ())\ndef main() = folded(key_from_seed(to_tensor([[1i64, 2i64]])), to_tensor([[3i64], [4i64]]))\n",
+    ] {
+        let error = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.into(),
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        )
+        .expect_err("different runtime extents must reject");
+        assert!(
+            format!("{error:?}").contains("numeric trap: domain in fold_in at i64"),
+            "{error:?}"
+        );
+        let generated = ownership_support::emit(source, "key_tensor_fold_shape");
+        let stderr = ownership_support::run_failure_stderr(&generated, "");
+        assert!(
+            stderr.contains("numeric trap: domain in fold_in at i64"),
+            "{stderr}"
+        );
+    }
+}

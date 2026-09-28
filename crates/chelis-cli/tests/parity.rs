@@ -538,6 +538,11 @@ fn parity_dropout_fixed_stream() {
 }
 
 #[test]
+fn parity_tensor_key_operations() {
+    drive_parity(&examples_root().join("tensor_key_operations.ch"), true);
+}
+
+#[test]
 fn parity_dropout_static_rate() {
     let path = examples_root().join("dropout_static_rate.ch");
     assert_eq!(

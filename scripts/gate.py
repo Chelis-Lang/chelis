@@ -560,6 +560,7 @@ OWNERSHIP_LEDGER_API_TESTS: list[str] = [
     "--test", "key_root_lanes",
     "--test", "key_split_count_lanes",
     "--test", "key_surface_lanes",
+    "--test", "key_tensor_forms",
     "--test", "local_ascription_activation",
     "--test", "rule_d_entered_lanes",
     "--test", "untaken_arm_gradients",

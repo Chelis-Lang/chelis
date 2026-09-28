@@ -257,7 +257,8 @@ class LocalCommandListTests(unittest.TestCase):
                 "--test issue_2577_filter_named_predicate --test key_admission_lanes "
                 "--test key_affinity_lanes --test key_extent_lanes --test key_operand_random_c "
                 "--test key_operations_c --test key_root_lanes --test key_split_count_lanes "
-                "--test key_surface_lanes --test local_ascription_activation "
+                "--test key_surface_lanes --test key_tensor_forms "
+                "--test local_ascription_activation "
                 "--test rule_d_entered_lanes --test untaken_arm_gradients",
                 "cargo nextest run -p chelis-cli --features ownership-ledger "
                 "--test issue_1314_json_bigint_ledger",

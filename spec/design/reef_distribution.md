@@ -67,7 +67,8 @@ rather than interpreted through bincode field coincidence. Each exported
 function carries a canonical `type_variable_restrictions` ledger keyed to the
 alpha-canonical type-variable identity in its printed type. CHB format 5 adds
 a `collection_obligations` ledger carrying the checked relation of a
-first-class `len`, `index`, `append`, or `concat` value as the rule name plus
+first-class `len`, `index`, `append`, `concat`, `key_from_seed`, `split_key`,
+`split_keys`, or `fold_in` value as the rule name plus
 its operand and result types in canonical Deep form under those same
 identities. A relation variable absent from the printed callable type is
 rejected rather than published as a hidden predicate. `reef schema` JSON uses

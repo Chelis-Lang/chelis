@@ -1255,7 +1255,22 @@ pub(super) fn check_split_keys_signature(
         }
         None => Dim::Wildcard,
     };
-    let canonical = Type::Tensor(vec![rows], TensorPrec::Concrete(Prim::Key));
+    let mut dims = match subst.apply(result_ty) {
+        Type::Tensor(dims, _) => dims,
+        _ => vec![Dim::Wildcard],
+    };
+    let Some(last) = dims.last_mut() else {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "split_keys must append a count axis".to_string(),
+                vec![],
+            ),
+        );
+    };
+    *last = rows;
+    let canonical = Type::Tensor(dims, TensorPrec::Concrete(Prim::Key));
     if let Err(error) = unify(result_ty, &canonical, subst) {
         return report(errors, error.into());
     }
