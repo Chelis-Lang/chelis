@@ -101,3 +101,14 @@ or corrupts sources. `chelis-cli::runtime_extent_slice_b` owns the #1767
 false-result-claim pair and #2083's exact agreeing/refuted movement pair.
 These tests are included explicitly in `runtime_extent_oracle_targets.json`;
 their presence does not change the scope of the other transformed leaves.
+
+### Captured tensor receipt boundary
+
+The #2378 matrix in `chelis-cli::issue_2378_grad_capture_extents` pins tensor
+captures after #2628's closure conversion: literal and symbolic captures and
+direct arguments agree on Eval and linked C; a disagreeing captured actual
+retains its named entry guard. The native test runner executes the original
+capture and both direct gradient slots, and a statically wrong capture shape
+remains a checker error. This target is included in
+`runtime_extent_oracle_targets.json`. These capture receipts do not cover
+#2370's map-built basis inside a composed Jacobian helper.

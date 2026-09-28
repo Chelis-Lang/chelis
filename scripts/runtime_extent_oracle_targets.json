@@ -1342,6 +1342,24 @@
       "expected": [
         "lower::tests::gradient_axis_mapping_rejects_missing_sources_before_publication"
       ]
+    },
+    {
+      "phase": "b",
+      "id": "grad_capture_extents",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_2378_grad_capture_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "captured_tensor_gradient_runs_in_the_native_test_runner",
+        "direct_tensor_arguments_remain_the_control",
+        "literal_tensor_capture_retains_its_axes",
+        "statically_wrong_capture_shape_is_rejected_by_check",
+        "symbolic_tensor_capture_retains_its_axes",
+        "tensor_capture_shape_disagreement_keeps_the_entry_guard"
+      ]
     }
   ]
 }
