@@ -393,6 +393,7 @@ def assert_ci_metadata_routing(test: unittest.TestCase, workflow: dict) -> None:
     test.assertIn("scripts.test_regenerate_conformance_assets", contract["run"])
     test.assertIn("scripts.test_gate.DocsOnlySkipTests", contract["run"])
     test.assertIn("scripts.test_gate.CiParityTests", contract["run"])
+    test.assertIn("scripts.test_gate_local.LocalCommandListTests", contract["run"])
     test.assertIn(
         "scripts.test_gate.RejectionAuthorityPrBoundaryTests",
         contract["run"],
@@ -1001,6 +1002,18 @@ def assert_author_machine_tokens(test: unittest.TestCase) -> None:
 
 
 class PullRequestWorkflowRoutingTests(unittest.TestCase):
+    def test_preflight_requires_the_independent_local_command_contract(self) -> None:
+        workflow = copy.deepcopy(yaml.safe_load(CI.read_text()))
+        contract = next(
+            step for step in workflow["jobs"]["changes"]["steps"]
+            if step.get("id") == "ci-contract"
+        )
+        contract["run"] = contract["run"].replace(
+            "scripts.test_gate_local.LocalCommandListTests", ""
+        )
+        with self.assertRaises(AssertionError):
+            assert_ci_metadata_routing(self, workflow)
+
     def test_current_workflows_preserve_the_selected_contract(self) -> None:
         assert_ci_metadata_routing(self, yaml.safe_load(CI.read_text()))
         assert_acknowledgement_workflow(

@@ -83,6 +83,193 @@ fn tensor_key_contracts_survive_checker_context_serialization() {
     );
 }
 
+/// #2709, [04-INF-9] and [05-OP-69]..[05-OP-72]: a builtin alias
+/// retains its closed scalar/tensor contract without a new type ascription.
+/// These acceptance stubs precede the representation repair.
+#[test]
+fn key_builtin_aliases_retain_scalar_and_tensor_contracts() {
+    for (seed_ty, key_ty, child_ty) in [
+        ("i64", "key", "tensor[3, key]"),
+        ("tensor[i64]", "tensor[key]", "tensor[3, key]"),
+        ("tensor[0, i64]", "tensor[0, key]", "tensor[0, 3, key]"),
+        ("tensor[2, i64]", "tensor[2, key]", "tensor[2, 3, key]"),
+        (
+            "tensor[2, 3, i64]",
+            "tensor[2, 3, key]",
+            "tensor[2, 3, 3, key]",
+        ),
+    ] {
+        for (name, source) in [
+            (
+                "seed alias",
+                format!(
+                    "def good(s: {seed_ty}) -> {key_ty} = {{\n  op = key_from_seed\n  op(s)\n}}\n"
+                ),
+            ),
+            (
+                "split alias",
+                format!(
+                    "def good(k: {key_ty}) -> ({key_ty}, {key_ty}) = {{\n  op = split_key\n  op(k)\n}}\n"
+                ),
+            ),
+            (
+                "children alias",
+                format!(
+                    "def good(k: {key_ty}) -> {child_ty} = {{\n  op = split_keys\n  op(k, 3i64)\n}}\n"
+                ),
+            ),
+            (
+                "fold alias",
+                format!(
+                    "def good(k: {key_ty}, n: {seed_ty}) -> {key_ty} = {{\n  op = fold_in\n  op(k, n)\n}}\n"
+                ),
+            ),
+        ] {
+            accepts(name, &source);
+        }
+    }
+}
+
+/// [04-INF-9]: the contract belongs to the value, not its lexical spelling
+/// or its first application. No newly authored generic wrapper consumes keys.
+#[test]
+fn key_builtin_alias_contracts_survive_value_transport() {
+    for source in [
+        "def main() = {\n  first = split_key\n  second = first\n  second(key_from_seed(1i64))\n}\n",
+        "def main() = {\n  ops = (split_key, fold_in)\n  derive = ops.0\n  derive(key_from_seed(1i64))\n}\n",
+        "def exported() = split_key\ndef main() = {\n  derive = exported()\n  derive(key_from_seed(1i64))\n}\n",
+        "def identity(f) = f\ndef main() = {\n  derive = identity(split_key)\n  derive(key_from_seed(1i64))\n}\n",
+        "def invoke(f: key -> (key, key), k: key) -> (key, key) = f(k)\ndef main() = {\n  derive = split_key\n  invoke(derive, key_from_seed(1i64))\n}\n",
+        "def main() = {\n  seed = key_from_seed\n  derive = split_key\n  (derive(seed(1i64)), derive(seed(to_tensor([2i64, 3i64]))))\n}\n",
+        "def main() = {\n  original = split_key\n  split_key = fold_in\n  (original(key_from_seed(1i64)), split_key(key_from_seed(2i64), 3i64))\n}\n",
+    ] {
+        accepts("transported key builtin", source);
+    }
+}
+
+/// [04-INF-9]: a refused alias must fail its operation's domain/shape
+/// contract, not a blanket generic-key fence that also refuses the positives.
+#[test]
+fn key_builtin_aliases_reject_wrong_domains_and_shapes() {
+    for source in [
+        "def bad() = {\n  seed = key_from_seed\n  seed(1i32)\n}\n",
+        "def bad() = {\n  seed = key_from_seed\n  seed(to_tensor([1i32]))\n}\n",
+        "def bad() = {\n  derive = split_key\n  derive(1i64)\n}\n",
+        "def bad(k: key) = {\n  derive = split_keys\n  derive(k, 2i32)\n}\n",
+        "def bad(k: tensor[2, key]) = {\n  derive = split_keys\n  derive(k, -1i64)\n}\n",
+        "def bad(k: tensor[2, key], n: tensor[3, i64]) = {\n  derive = fold_in\n  derive(k, n)\n}\n",
+        "def bad(k: tensor[key]) = {\n  derive = fold_in\n  derive(k, 1i64)\n}\n",
+        "def bad(k: key, n: tensor[i64]) = {\n  derive = fold_in\n  derive(k, n)\n}\n",
+        "def bad(s: tensor[2, i64]) -> tensor[3, key] = {\n  seed = key_from_seed\n  seed(s)\n}\n",
+        "def bad(k: tensor[2, key]) -> (tensor[3, key], tensor[3, key]) = {\n  derive = split_key\n  derive(k)\n}\n",
+    ] {
+        let errors = verdict(source).expect_err("the aliased operation must reject");
+        assert!(
+            errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::TypeMismatch
+                    | CheckErrorKind::PrecisionMismatch
+                    | CheckErrorKind::DimensionMismatch
+            )),
+            "expected an operation type/shape error: {source}\n{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|error| !matches!(error.kind, CheckErrorKind::KeyReuse)),
+            "a blanket alias rejection is not the operation contract: {source}\n{errors:?}"
+        );
+    }
+}
+
+/// [04-LIN-9]: admitting a callable alias never permits consuming a key twice.
+#[test]
+fn key_builtin_aliases_preserve_affine_consumption() {
+    for (good, bad) in [
+        (
+            "def good(k: key) -> ((key, key), (key, key)) = {\n  derive = split_key\n  (a, b) = derive(k)\n  (derive(a), derive(b))\n}\n",
+            "def bad(k: key) -> ((key, key), (key, key)) = {\n  derive = split_key\n  (derive(k), derive(k))\n}\n",
+        ),
+        (
+            "def good(k: tensor[2, key], n: tensor[2, i64]) -> (tensor[2, key], tensor[2, key]) = {\n  derive = fold_in\n  (a, b) = split_key(k)\n  (derive(a, n), derive(b, n))\n}\n",
+            "def bad(k: tensor[2, key], n: tensor[2, i64]) -> (tensor[2, key], tensor[2, key]) = {\n  derive = fold_in\n  (derive(k, n), derive(k, n))\n}\n",
+        ),
+    ] {
+        accepts("alias consumes independently derived keys", good);
+        let errors = rejects(
+            "alias repeats a consuming use",
+            bad,
+            CheckErrorKind::KeyReuse,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("[04-LIN-9]")),
+            "the rejection must concern repeated consumption, not alias generalization: {errors:?}"
+        );
+    }
+}
+
+/// [04-LIN-10]: preserving a checked builtin contract does not authorize a
+/// user-authored generic to carry key values, directly or inside an aggregate.
+#[test]
+fn key_builtin_aliases_do_not_exempt_user_generic_parameters() {
+    accepts(
+        "generic transports the callable rather than a key",
+        "def identity[a](x: a) -> a = x\ndef main() = {\n  seed = identity(key_from_seed)\n  seed(1i64)\n}\n",
+    );
+    for value in [
+        "seed(1i64)",
+        "seed(to_tensor([1i64, 2i64]))",
+        "(seed(1i64), 1i64)",
+    ] {
+        rejects_key_instantiation(
+            "the alias result reaches an ordinary generic",
+            &format!(
+                "def identity[a](x: a) -> a = x\ndef main() = {{\n  seed = key_from_seed\n  identity({value})\n}}\n"
+            ),
+            "identity",
+            Some("a"),
+        );
+    }
+}
+
+/// [04-INF-9]: importing an already-checked callable must preserve the same
+/// relation before and after serialization, including its rejection surface.
+#[test]
+fn key_builtin_alias_contracts_survive_exported_contexts() {
+    let live = build_type_env_from_library(&surf_program(
+        "def exported_seed() = key_from_seed\ndef exported_fold() = fold_in\n",
+    ))
+    .expect("returning an already-checked builtin does not author a generic wrapper");
+    let restored: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+    for context in [&live, &restored] {
+        context_verdict(
+            context,
+            "def good(s: tensor[2, i64]) -> tensor[2, key] = {\n  seed = exported_seed()\n  derive = exported_fold()\n  derive(seed(s), s)\n}\n",
+        )
+        .expect("an imported alias retains its positive contract");
+        let errors = context_verdict(
+            context,
+            "def bad(s: tensor[2, i64], n: tensor[3, i64]) = {\n  seed = exported_seed()\n  derive = exported_fold()\n  derive(seed(s), n)\n}\n",
+        )
+        .expect_err("an imported alias retains exact shape equality");
+        assert!(
+            errors.iter().any(|error| matches!(
+                error.kind,
+                CheckErrorKind::TypeMismatch | CheckErrorKind::DimensionMismatch
+            )),
+            "expected the transported shape rejection: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|error| !matches!(error.kind, CheckErrorKind::KeyReuse)),
+            "serialization cannot restore the blanket alias fence: {errors:?}"
+        );
+    }
+}
+
 fn verdict(source: &str) -> Result<(), Vec<CheckError>> {
     let decls = parse_str(source).expect("fixture parses");
     let deep = desugar_program(&decls).expect("fixture desugars");

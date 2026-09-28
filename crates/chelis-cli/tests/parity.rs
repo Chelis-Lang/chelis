@@ -554,6 +554,11 @@ fn parity_dropout_fixed_stream() {
 }
 
 #[test]
+fn parity_key_builtin_aliases() {
+    drive_parity(&examples_root().join("key_builtin_aliases.ch"), true);
+}
+
+#[test]
 fn parity_tensor_key_operations() {
     drive_parity(&examples_root().join("tensor_key_operations.ch"), true);
 }

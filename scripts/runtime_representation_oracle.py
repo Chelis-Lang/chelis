@@ -336,6 +336,17 @@ UNIFORM_RANDOM_BACKEND_FINAL_FORMS = (
         "HostEmitter < 'a >::assign_uniform_like",
     ),
 )
+KEY_CALLABLE_BACKEND_FINAL_FORMS = (
+    # chelis#2709: a closed checked key-builtin alias lowers to private C
+    # scalar/tensor entries. Their key-bit loads and stores implement the
+    # existing [05-OP-69]..[05-OP-72] operations, with each call specialized
+    # by its checked signature and no public numeric carrier.
+    (
+        "crates/chelis-backend-c/src/host_emit.rs",
+        "load-store-template",
+        "append_key_callable_helpers",
+    ),
+)
 DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS = (
     (
         "crates/chelis-backend-hip/src/kernels.rs",
@@ -479,6 +490,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         (path, kind, owner) in INTEGER_UNARY_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in UNIFORM_RANDOM_BACKEND_FINAL_FORMS
+    ) or (
+        (path, kind, owner) in KEY_CALLABLE_BACKEND_FINAL_FORMS
     ) or (
         (path, kind, owner) in DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS
     ) or (
@@ -866,6 +879,7 @@ def _owner_module_final_forms_manifest() -> dict[str, list[dict[str, str]]]:
         *EXACT_REDUCTION_BACKEND_FINAL_FORMS,
         *INTEGER_UNARY_BACKEND_FINAL_FORMS,
         *UNIFORM_RANDOM_BACKEND_FINAL_FORMS,
+        *KEY_CALLABLE_BACKEND_FINAL_FORMS,
         *DIRECT_ARITHMETIC_BACKEND_FINAL_FORMS,
         *UTF8_STRING_FINAL_FORMS,
         *RESULT_CLAIM_METADATA_FINAL_FORMS,
@@ -2265,6 +2279,13 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "test(c_nested_list_pattern_retains_selected_tail_producer) | "
                 "test(c_option_projection_distinguishes_local_and_formal_origins) | "
                 "test(c_aggregate_origin_arena_is_fresh_for_repeated_public_calls)",
+            ),
+        ),
+        OracleLeg(
+            "checked key callable scalar and tensor C execution",
+            (
+                "cargo", "nextest", "run", "-p", "chelis-compiler-api",
+                "--features", "ownership-ledger", "--test", "key_tensor_forms",
             ),
         ),
         OracleLeg(

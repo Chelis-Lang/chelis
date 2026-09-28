@@ -6,6 +6,7 @@ fn generated_metadata_uses_runtime_queries_without_rank_sized_stack_scratch() {
     assert!(!emit.contains("int64_t t{id}_shape[t{id}_rank"));
     assert!(!emit.contains("int64_t t{id}_strides[t{id}_rank"));
     assert!(!host.contains("int64_t shape[rank > 0 ? rank : 1]"));
+    assert!(!host.contains("int64_t shape[rank + 1]"));
     assert!(host.contains("chelis_tensor_alloc_like("));
     let shape = emit
         .split("    fn emit_shape(")

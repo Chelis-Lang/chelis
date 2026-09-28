@@ -180,9 +180,10 @@ impl FormalTypePattern {
                 Self::Tensor(vec![FormalDimension::Nominal; tensor.dims.len()])
             }
             ConcreteHostType::Option(inner) => Self::Option(Box::new(Self::nominal(inner))),
-            ConcreteHostType::Scalar(_) | ConcreteHostType::MappedFile | ConcreteHostType::Unit => {
-                Self::Exact
-            }
+            ConcreteHostType::Scalar(_)
+            | ConcreteHostType::KeyBuiltinCallable(_)
+            | ConcreteHostType::MappedFile
+            | ConcreteHostType::Unit => Self::Exact,
         }
     }
 }
@@ -544,6 +545,7 @@ struct UnitLowerer<'a, 'sites> {
     owners: BTreeMap<OwnerId, OwnerInfo>,
     owner_depth: BTreeMap<OwnerId, usize>,
     callback_modes: BTreeMap<OwnerId, Vec<ParamMode>>,
+    key_callbacks: BTreeMap<OwnerId, crate::host_type_state::KeyBuiltinCallable>,
     next_owner: u32,
     next_operation: u32,
     next_edge: u32,
@@ -578,6 +580,7 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
             owners: BTreeMap::new(),
             owner_depth: BTreeMap::new(),
             callback_modes: BTreeMap::new(),
+            key_callbacks: BTreeMap::new(),
             next_owner: 0,
             next_operation: 0,
             next_edge: 0,
@@ -900,9 +903,26 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                 // historical marker set would suppress its eventual terminal.
                 self.moved.remove(&owner);
                 self.register(owner)?;
-                self.name_owner(owner, name)
+                self.name_owner(owner, name)?;
+                // Only producers with recorded callback provenance enter
+                // callback scope. Ordinary returned function values retain
+                // their owner until the C ABI rejects them (chelis#879).
+                if self.callback_modes.contains_key(&owner) {
+                    self.scope_mut()?
+                        .names
+                        .insert(name.to_string(), Place::Callback(owner));
+                }
+                Ok(())
             }
-            Value::Named(owner) => self.name_owner(owner, name),
+            Value::Named(owner) => {
+                self.name_owner(owner, name)?;
+                if self.callback_modes.contains_key(&owner) {
+                    self.scope_mut()?
+                        .names
+                        .insert(name.to_string(), Place::Callback(owner));
+                }
+                Ok(())
+            }
             Value::Callback(owner) => {
                 self.scope_mut()?
                     .names
@@ -1231,12 +1251,26 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                         }
                     });
                 }
-                self.apply(
+                let value = self.apply(
                     ty,
                     format!("builtin:{name}"),
                     vec![use_; operands.len()],
                     operands,
-                )
+                )?;
+                // A closed key-builtin value has the checked operation's
+                // affine argument modes. Record them at its producer so an
+                // unrelated function value cannot acquire callback status
+                // merely by sharing its concrete function type.
+                if args.is_empty()
+                    && let Some(op) = crate::host_type_state::KeyBuiltinCallable::from_symbol(name)
+                    && let ConcreteHostType::Function(params, _) = ty
+                    && let Value::Fresh(owner) = &value
+                {
+                    self.callback_modes
+                        .insert(*owner, vec![ParamMode::Owned; params.len()]);
+                    self.key_callbacks.insert(*owner, op);
+                }
+                Ok(value)
             }
             ConcreteHostExprKind::AdtFieldAccess {
                 base,
@@ -1603,7 +1637,10 @@ impl<'a, 'sites> UnitLowerer<'a, 'sites> {
                     .collect();
                 (
                     format!("call_callback:%{}", owner.0),
-                    ApplyKind::IndirectCall,
+                    self.key_callbacks
+                        .get(&owner)
+                        .copied()
+                        .map_or(ApplyKind::IndirectCall, ApplyKind::KeyBuiltinCall),
                     specs,
                 )
             }

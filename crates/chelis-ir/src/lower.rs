@@ -6391,6 +6391,10 @@ impl ResolvedFunction {
 #[derive(Clone)]
 enum CallableExpr {
     Plain(ResolvedFunction),
+    /// Resolved key operation carried through a checked value binding. The
+    /// original operation identity is captured when the value is formed;
+    /// an alias's spelling never selects the lowered primitive.
+    KeyBuiltin(String),
     Vmap {
         fn_expr: ResolvedFunction,
         axis: usize,
@@ -8018,6 +8022,7 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
+            CallableExpr::KeyBuiltin(name) => CallableExpr::KeyBuiltin(name.clone()),
             CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
                 fn_expr: function(fn_expr),
                 axis: *axis,
@@ -9102,6 +9107,60 @@ impl<'program> LowerCtx<'program> {
         lowered
     }
 
+    /// A checked key operation inside a native aggregate carries a closed
+    /// operation identity through projection. The pure DAG path needs only
+    /// that static identity. The mixed host/DAG path also gets a staged
+    /// producer, so a host consumer can read the projected value.
+    fn stage_key_builtin_tuple_item(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::{HostTypeTerm, KeyBuiltinCallable};
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        if kids.first().and_then(symbol_name) != Some(name)
+            || self.bindings.contains_key(name)
+            || self.program_defs.contains_key(name)
+        {
+            return None;
+        }
+        let op = KeyBuiltinCallable::from_symbol(name)?;
+        let ty = HostTypeTerm::KeyBuiltinCallable(op);
+        let id = HostValueId(self.next_host_value);
+        self.next_host_value += 1;
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HasSources);
+            self.host_sources.push(HostSource {
+                before: self.dag.nodes().len(),
+                value: StageValue::Host(id),
+                ty: ty.clone(),
+                expression: expr.clone(),
+                captures: Vec::new(),
+            });
+        }
+        Some(LoweredValue::Host { id, ty })
+    }
+
+    /// A key builtin alias can enter a tuple after one or more lexical
+    /// bindings. Read an existing closed carrier through that binding;
+    /// only an unbound builtin producer creates a fresh carrier.
+    fn key_builtin_alias_value(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        let referenced = kids.first().and_then(symbol_name)?;
+        if let Some(value) = self.bindings.get(referenced)
+            && let LoweredValue::Host {
+                ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                ..
+            } = value
+            && op.symbol() == name
+        {
+            return Some(value.clone());
+        }
+        self.stage_key_builtin_tuple_item(expr, name)
+    }
+
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
     ///
@@ -9974,7 +10033,14 @@ impl<'program> LowerCtx<'program> {
                         // as well as its native inlining identity. Host scalar
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
-                        if let Some(value) = self.stage_host_value(&bind_kids[i + 1], false) {
+                        let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
+                            if let CallableExpr::KeyBuiltin(operation) = &callable {
+                                self.key_builtin_alias_value(&bind_kids[i + 1], operation)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(value) = value {
                             self.bindings.insert(name.clone(), value);
                         }
                         self.local_callables.insert(name.clone(), callable);
@@ -10612,9 +10678,13 @@ impl<'program> LowerCtx<'program> {
 
         let ty = self.type_from_meta(meta);
 
-        // Check if func is a known built-in: (var {} name).
+        // Unbound direct callees include builtin operations registered outside
+        // BUILTIN_NAMES (for example dropout) and positional ADT constructors.
+        // A lexical value binding takes precedence: a builtin-spelled alias or
+        // shadow must be resolved from its checked callable identity below.
         if let Some((DeepTag::Var, _, func_kids)) = stamped_parts(&kids[0])
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
+            && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
@@ -10761,6 +10831,18 @@ impl<'program> LowerCtx<'program> {
                 app_span,
                 inlining_name,
             )),
+            CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
+                if args.len() != 1 {
+                    raise_lowering_error(
+                        "checked split_key callable has wrong arity",
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                self.lower_split_key(&args[0])
+            } else {
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+            }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -10906,6 +10988,14 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
                 }
+                if !declaration
+                    && let Some(LoweredValue::Host {
+                        ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                        ..
+                    }) = self.bindings.get(&name)
+                {
+                    return Some(CallableExpr::KeyBuiltin(op.symbol().to_string()));
+                }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
                 // shadows a same-named top-level function, so it is no
@@ -10937,6 +11027,12 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     return Some(callable);
+                }
+                if matches!(
+                    name.as_str(),
+                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                ) {
+                    return Some(CallableExpr::KeyBuiltin(name));
                 }
                 None
             }
@@ -10995,6 +11091,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
+                        CallableExpr::KeyBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self
@@ -20014,7 +20111,19 @@ impl<'program> LowerCtx<'program> {
 
     /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple(&mut self, kids: &[Expr]) -> LoweredValue {
-        LoweredValue::Tuple(kids.iter().map(|expr| self.lower_expr(expr)).collect())
+        LoweredValue::Tuple(
+            kids.iter()
+                .map(|expr| {
+                    if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
+                        && let Some(staged) = self.key_builtin_alias_value(expr, &name)
+                    {
+                        staged
+                    } else {
+                        self.lower_expr(expr)
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Legacy sequential placeholder for `(par {} expr1 expr2 ...)`, retained
@@ -27200,6 +27309,30 @@ mod regression_tests {
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
             ),
             "dead arm's literal must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_payload_ctor_call_selects_taken_arm_and_binds_payload() {
+        // A positional constructor application must reach the ADT arm of
+        // lower_app, even though constructors are absent from BUILTIN_NAMES.
+        let dag = parse_and_lower_unchecked(
+            "(match {} (app {} (var {} ModeA) (lit {type: (t-prim {} f32)} 2.5)) \
+             (arm {} (pat-ctor {} ModeA (pat-var {} value)) () (var {} value)) \
+             (arm {} (pat-ctor {} ModeB (pat-var {} other)) () \
+               (lit {type: (t-prim {} f32)} 9.0)))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
+            "constructor payload must lower into the taken arm: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
+            "dead constructor arm must not be lowered: {dag:?}"
         );
     }
 
