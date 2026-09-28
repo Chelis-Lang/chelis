@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,23 @@ class RuntimeBundleOracleContracts(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_prerequisite_executable_invokes_symlink_as_cargo(self) -> None:
+        rustup = self.root / "rustup"
+        rustup.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "print(Path(sys.argv[0]).name, *sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        rustup.chmod(0o755)
+        (self.root / "cargo").symlink_to(rustup)
+
+        cargo = oracle.require_executable("cargo", search_path=str(self.root))
+        result = subprocess.run([cargo, "build", "--locked"], capture_output=True, check=True, text=True)
+        self.assertEqual(result.stdout, "cargo build --locked\n")
+        self.assertEqual(result.stderr, "")
 
     def test_staging_receipt_binds_archive_and_header_bytes(self) -> None:
         archive = self.root / oracle.ARCHIVE_FILE_NAME

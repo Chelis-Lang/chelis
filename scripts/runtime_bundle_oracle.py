@@ -430,7 +430,7 @@ def require_executable(name: str, *, search_path: str | None = None) -> str:
     found = shutil.which(name, path=search_path)
     if found is None:
         raise OracleFailure(f"required executable {name!r} is not available on PATH")
-    return str(Path(found).resolve())
+    return str(Path(found).absolute())
 
 
 def hardware_probe_manifest() -> list[dict[str, str]]:
