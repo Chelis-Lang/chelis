@@ -135,6 +135,18 @@ fn typed_key_builtin_alias_chain_retains_original_identity() {
 }
 
 #[test]
+fn unannotated_alias_selects_scalar_and_tensor_independently_in_eval() {
+    let source = "def main() = {\n  seed = key_from_seed\n  (seed(-1i64), seed(to_tensor([1i64, 2i64])))\n}\n";
+    assert_eq!(
+        eval_main(source).unwrap(),
+        [
+            format!("key({:016x})", u64::MAX),
+            "tensor(shape=[2], data=[key(0000000000000001), key(0000000000000002)])".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn typed_tensor_fold_alias_rejects_runtime_shape_mismatch() {
     let source = "def folded(k: tensor[*, key], n: tensor[*, i64]) -> (tensor[*, key], unit) = {\n  combine: tensor[*, key] -> tensor[*, i64] -> tensor[*, key] = fold_in\n  (combine(k, n), ())\n}\ndef main() = folded(key_from_seed(to_tensor([1i64, 2i64])), to_tensor([3i64, 4i64, 5i64]))\n";
     let error = eval_main(source).expect_err("unequal runtime shapes");

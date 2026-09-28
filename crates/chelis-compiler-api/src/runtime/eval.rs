@@ -1451,11 +1451,28 @@ impl<'a> EvalContext<'a> {
             name,
             "key_from_seed" | "split_key" | "split_keys" | "fold_in"
         ) && self.active_builtin_symbol(name)
-            && let Some(signature) = node.metadata.ty().map(|ty| ty.expression())
-            && let Some(types) = checked_function_children(signature)
-            && let Some((return_type, param_types)) = types.split_last()
         {
-            let params = (0..param_types.len())
+            // An unannotated checked alias can retain the closed operation
+            // relation without one selected `TFn` on this value node. Its
+            // identity and arity are fixed here; the checked application
+            // decides the scalar/tensor alternative from its arguments.
+            let signature = node.metadata.ty().map(|ty| ty.expression());
+            let types = signature.and_then(checked_function_children);
+            let (return_type, param_types) =
+                types
+                    .and_then(<[Expr]>::split_last)
+                    .map_or((None, Vec::new()), |(ret, params)| {
+                        (
+                            Some(ret.clone()),
+                            params.iter().cloned().map(Some).collect(),
+                        )
+                    });
+            let arity = if matches!(name, "key_from_seed" | "split_key") {
+                1
+            } else {
+                2
+            };
+            let params = (0..arity)
                 .map(|index| format!("__chelis_key_arg_{index}"))
                 .collect::<Vec<_>>();
             let span = node.expr.span();
@@ -1478,9 +1495,13 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::Closure {
                 checked_function: Box::new(node.expr.clone()),
                 params,
-                param_types: param_types.iter().cloned().map(Some).collect(),
-                return_type: Some(return_type.clone()),
-                checked_signature: Some(signature.clone()),
+                param_types: if param_types.is_empty() {
+                    vec![None; arity]
+                } else {
+                    param_types
+                },
+                return_type,
+                checked_signature: types.and_then(|_| signature.cloned()),
                 invocation_contracts: Box::default(),
                 body,
                 env: self.bindings.capture(),
