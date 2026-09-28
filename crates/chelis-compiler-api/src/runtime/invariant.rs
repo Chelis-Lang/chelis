@@ -878,7 +878,7 @@ mod tests {
     fn bounded(value: f64) -> RuntimeValue {
         RuntimeValue::Adt {
             ctor: "Bounded".into(),
-            fields: vec![RuntimeValue::float_lit(value)],
+            fields: vec![RuntimeValue::float_lit(value)].into(),
             field_names: None,
         }
     }

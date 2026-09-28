@@ -190,14 +190,14 @@ fn structural_decode(
                 .iter()
                 .map(|item| structural_decode(item, field_types))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RuntimeValue::List(items))
+            Ok(RuntimeValue::List(items.into()))
         }
         ExecutionValue::Tuple { value } => {
             let items = value
                 .iter()
                 .map(|item| structural_decode(item, field_types))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(RuntimeValue::Tuple(items))
+            Ok(RuntimeValue::Tuple(items.into()))
         }
         ExecutionValue::Dict { entries } => {
             let decoded = entries
@@ -209,7 +209,7 @@ fn structural_decode(
                     ))
                 })
                 .collect::<Result<Vec<_>, DecodeError>>()?;
-            Ok(RuntimeValue::Dict(decoded))
+            Ok(RuntimeValue::Dict(decoded.into()))
         }
     }
 }
@@ -243,7 +243,7 @@ fn decode_adt(
 
     Ok(RuntimeValue::Adt {
         ctor: ctor.to_string(),
-        fields,
+        fields: fields.into(),
         field_names: Some(field_names),
     })
 }

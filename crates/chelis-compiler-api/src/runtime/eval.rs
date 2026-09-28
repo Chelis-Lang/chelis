@@ -1100,7 +1100,7 @@ impl<'a> EvalContext<'a> {
                     producers.push(self.result_producer.take());
                 }
                 self.result_producer = ResultProducer::aggregate(producers);
-                Ok(RuntimeValue::Tuple(values))
+                Ok(RuntimeValue::Tuple(values.into()))
             }
             DeepTag::Copy => {
                 let value = self.eval_expr(
@@ -1297,7 +1297,7 @@ impl<'a> EvalContext<'a> {
         self.result_producer = ResultProducer::aggregate(ordered_producers);
         Ok(RuntimeValue::Adt {
             ctor: ctor.to_string(),
-            fields: ordered,
+            fields: ordered.into(),
             field_names: Some(declared),
         })
     }
@@ -1442,12 +1442,12 @@ impl<'a> EvalContext<'a> {
             return Ok(value);
         }
         if name == "Nil" {
-            return Ok(RuntimeValue::List(Vec::new()));
+            return Ok(RuntimeValue::List(Vec::new().into()));
         }
         if name.chars().next().is_some_and(|ch| ch.is_uppercase()) {
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
-                fields: Vec::new(),
+                fields: Vec::new().into(),
                 field_names: None,
             });
         }
@@ -1611,7 +1611,7 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::List(
                 entries
                     .into_iter()
-                    .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                    .map(|(key, value)| RuntimeValue::Tuple(vec![key, value].into()))
                     .collect(),
             ));
         }
@@ -1644,7 +1644,7 @@ impl<'a> EvalContext<'a> {
             self.result_producer = ResultProducer::aggregate(arg_producers);
             return Ok(RuntimeValue::Adt {
                 ctor: name.to_string(),
-                fields: args,
+                fields: args.into(),
                 field_names: None,
             });
         }
@@ -2984,10 +2984,9 @@ impl<'a> EvalContext<'a> {
             }
             "split_key" => {
                 let (left, right) = expect_key_arg(args, 0, "split_key")?.split();
-                Ok(RuntimeValue::Tuple(vec![
-                    RuntimeValue::Key(left),
-                    RuntimeValue::Key(right),
-                ]))
+                Ok(RuntimeValue::Tuple(
+                    vec![RuntimeValue::Key(left), RuntimeValue::Key(right)].into(),
+                ))
             }
             "fold_in" => {
                 let key = expect_key_arg(args, 0, "fold_in")?;
@@ -3190,12 +3189,12 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<i64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
-                        fields: vec![RuntimeValue::int64(parsed)],
+                        fields: vec![RuntimeValue::int64(parsed)].into(),
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
-                        fields: Vec::new(),
+                        fields: Vec::new().into(),
                         field_names: None,
                     },
                 })
@@ -3205,12 +3204,12 @@ impl<'a> EvalContext<'a> {
                 Ok(match value.trim().parse::<f64>() {
                     Ok(parsed) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
-                        fields: vec![RuntimeValue::float64(parsed)],
+                        fields: vec![RuntimeValue::float64(parsed)].into(),
                         field_names: None,
                     },
                     Err(_) => RuntimeValue::Adt {
                         ctor: "None".to_string(),
-                        fields: Vec::new(),
+                        fields: Vec::new().into(),
                         field_names: None,
                     },
                 })
@@ -3237,7 +3236,7 @@ impl<'a> EvalContext<'a> {
                         .cloned()
                         .ok_or_else(|| "append expects 2 arguments".to_string())?,
                 );
-                Ok(RuntimeValue::List(list))
+                Ok(RuntimeValue::List(list.into()))
             }
             "concat" => match (args.first(), args.get(1).and_then(RuntimeValue::as_i64)) {
                 (Some(RuntimeValue::List(parts)), Some(axis))
@@ -3250,7 +3249,7 @@ impl<'a> EvalContext<'a> {
                 _ => {
                     let mut lhs = expect_list_arg(args, 0)?;
                     lhs.extend(expect_list_arg(args, 1)?);
-                    Ok(RuntimeValue::List(lhs))
+                    Ok(RuntimeValue::List(lhs.into()))
                 }
             },
             "take" => {
@@ -3295,9 +3294,9 @@ impl<'a> EvalContext<'a> {
                 let mut out = Vec::new();
                 let size = size as usize;
                 for chunk in list.chunks(size) {
-                    out.push(RuntimeValue::List(chunk.to_vec()));
+                    out.push(RuntimeValue::List(chunk.to_vec().into()));
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             "range" => {
                 let start = expect_int_arg(args, 0)?;
@@ -3327,7 +3326,7 @@ impl<'a> EvalContext<'a> {
                         callback_result_type,
                     )?);
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             "filter" => {
                 let callback = args
@@ -3356,7 +3355,7 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             "fold" => {
                 let callback = args
@@ -3415,7 +3414,7 @@ impl<'a> EvalContext<'a> {
                     )?;
                     out.push(acc.clone());
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             // Issue #257: iterative scan that produces a rank-1 tensor
             // directly, bypassing the right-recursive Surf list build that
@@ -3557,10 +3556,13 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                Ok(RuntimeValue::Tuple(vec![
-                    RuntimeValue::List(kept),
-                    RuntimeValue::List(rejected),
-                ]))
+                Ok(RuntimeValue::Tuple(
+                    vec![
+                        RuntimeValue::List(kept.into()),
+                        RuntimeValue::List(rejected.into()),
+                    ]
+                    .into(),
+                ))
             }
             "flat_map" => {
                 let callback = args
@@ -3588,7 +3590,7 @@ impl<'a> EvalContext<'a> {
                     };
                     out.extend(inner);
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             "flatten" => {
                 let lists = expect_list_arg(args, 0)?;
@@ -3599,7 +3601,7 @@ impl<'a> EvalContext<'a> {
                     };
                     out.extend(inner);
                 }
-                Ok(RuntimeValue::List(out))
+                Ok(RuntimeValue::List(out.into()))
             }
             "zip" => {
                 let lhs = expect_list_arg(args, 0)?;
@@ -3607,7 +3609,7 @@ impl<'a> EvalContext<'a> {
                 Ok(RuntimeValue::List(
                     lhs.into_iter()
                         .zip(rhs)
-                        .map(|(lhs, rhs)| RuntimeValue::Tuple(vec![lhs, rhs]))
+                        .map(|(lhs, rhs)| RuntimeValue::Tuple(vec![lhs, rhs].into()))
                         .collect(),
                 ))
             }
@@ -3618,7 +3620,9 @@ impl<'a> EvalContext<'a> {
                         .into_iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            RuntimeValue::Tuple(vec![RuntimeValue::int64(index as i64), value])
+                            RuntimeValue::Tuple(
+                                vec![RuntimeValue::int64(index as i64), value].into(),
+                            )
                         })
                         .collect(),
                 ))
@@ -3636,7 +3640,7 @@ impl<'a> EvalContext<'a> {
                     ensure_dict_key_supported(&items[0])?;
                     upsert_dict_entry(&mut dict, items[0].clone(), items[1].clone());
                 }
-                Ok(RuntimeValue::Dict(dict))
+                Ok(RuntimeValue::Dict(dict.into()))
             }
             "dict_get" => {
                 let dict = expect_dict_arg(args, 0)?;
@@ -3647,12 +3651,12 @@ impl<'a> EvalContext<'a> {
                 Ok(match dict_lookup(&dict, key) {
                     Some(value) => RuntimeValue::Adt {
                         ctor: "Some".to_string(),
-                        fields: vec![value.clone()],
+                        fields: vec![value.clone()].into(),
                         field_names: None,
                     },
                     None => RuntimeValue::Adt {
                         ctor: "None".to_string(),
-                        fields: Vec::new(),
+                        fields: Vec::new().into(),
                         field_names: None,
                     },
                 })
@@ -3689,7 +3693,7 @@ impl<'a> EvalContext<'a> {
                     .cloned()
                     .ok_or_else(|| "dict_insert expects 3 arguments".to_string())?;
                 upsert_dict_entry(&mut dict, key, value);
-                Ok(RuntimeValue::Dict(dict))
+                Ok(RuntimeValue::Dict(dict.into()))
             }
             "dict_merge" => {
                 let mut lhs = expect_dict_arg(args, 0)?;
@@ -3698,7 +3702,7 @@ impl<'a> EvalContext<'a> {
                     ensure_dict_key_supported(&key)?;
                     upsert_dict_entry(&mut lhs, key, value);
                 }
-                Ok(RuntimeValue::Dict(lhs))
+                Ok(RuntimeValue::Dict(lhs.into()))
             }
             "dict_keys" => {
                 let dict = expect_dict_arg(args, 0)?;
@@ -3716,7 +3720,7 @@ impl<'a> EvalContext<'a> {
                 let dict = expect_dict_arg(args, 0)?;
                 Ok(RuntimeValue::List(
                     dict.into_iter()
-                        .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                        .map(|(key, value)| RuntimeValue::Tuple(vec![key, value].into()))
                         .collect(),
                 ))
             }
@@ -3806,7 +3810,7 @@ impl<'a> EvalContext<'a> {
             "to_list" => {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let values = tensor_to_list_values(&tensor)?;
-                Ok(RuntimeValue::List(values))
+                Ok(RuntimeValue::List(values.into()))
             }
             "pad_sequences" => {
                 let sequences = expect_list_arg(args, 0)?;
@@ -3985,11 +3989,14 @@ impl<'a> EvalContext<'a> {
                 let exit_code = output.status.code().map_or(-1_i64, i64::from);
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                Ok(RuntimeValue::Tuple(vec![
-                    RuntimeValue::int64(exit_code),
-                    RuntimeValue::String(stdout),
-                    RuntimeValue::String(stderr),
-                ]))
+                Ok(RuntimeValue::Tuple(
+                    vec![
+                        RuntimeValue::int64(exit_code),
+                        RuntimeValue::String(stdout),
+                        RuntimeValue::String(stderr),
+                    ]
+                    .into(),
+                ))
             }
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
@@ -4728,90 +4735,210 @@ impl<'a> EvalContext<'a> {
     }
 }
 
-fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
-    match (lhs, rhs) {
-        (RuntimeValue::Scalar(lhs), RuntimeValue::Scalar(rhs)) => Ok(lhs == rhs),
-        (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => Ok(lhs == rhs),
-        (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => Ok(lhs == rhs),
-        (RuntimeValue::Unit, RuntimeValue::Unit) => Ok(true),
-        (RuntimeValue::List(lhs), RuntimeValue::List(rhs))
-        | (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
-            if lhs.len() != rhs.len() {
-                return Ok(false);
+enum DictStage {
+    Find,
+    AfterKey,
+    AfterValue,
+}
+
+enum Step<'a> {
+    Pair(&'a RuntimeValue, &'a RuntimeValue),
+    Sequence {
+        lhs: &'a [RuntimeValue],
+        rhs: &'a [RuntimeValue],
+        next: usize,
+    },
+    Dict {
+        lhs: &'a [(RuntimeValue, RuntimeValue)],
+        rhs: &'a [(RuntimeValue, RuntimeValue)],
+        matched: Vec<bool>,
+        lhs_index: usize,
+        rhs_index: usize,
+        stage: DictStage,
+    },
+}
+
+/// Structural equality for `test_assert_eq`. Every nested container walk,
+/// including a dictionary candidate search, runs from an explicit stack so
+/// value depth cannot consume the native stack (chelis#2592).
+pub(super) fn runtime_values_equal(lhs: &RuntimeValue, rhs: &RuntimeValue) -> Result<bool, String> {
+    let mut steps = vec![Step::Pair(lhs, rhs)];
+    // The result of the last child comparison is consumed by its parent
+    // frame. A false dictionary candidate resumes the search; a false
+    // sequence child ends that sequence immediately.
+    let mut returned: Option<Result<bool, String>> = None;
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Pair(lhs, rhs) => {
+                returned = Some(match (lhs, rhs) {
+                    (RuntimeValue::Scalar(lhs), RuntimeValue::Scalar(rhs)) => Ok(lhs == rhs),
+                    (RuntimeValue::Bool(lhs), RuntimeValue::Bool(rhs)) => Ok(lhs == rhs),
+                    (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => Ok(lhs == rhs),
+                    (RuntimeValue::Unit, RuntimeValue::Unit) => Ok(true),
+                    (RuntimeValue::List(lhs), RuntimeValue::List(rhs))
+                    | (RuntimeValue::Tuple(lhs), RuntimeValue::Tuple(rhs)) => {
+                        steps.push(Step::Sequence { lhs, rhs, next: 0 });
+                        continue;
+                    }
+                    (RuntimeValue::Dict(lhs), RuntimeValue::Dict(rhs)) => {
+                        if lhs.len() != rhs.len() {
+                            Ok(false)
+                        } else {
+                            steps.push(Step::Dict {
+                                lhs,
+                                rhs,
+                                matched: vec![false; rhs.len()],
+                                lhs_index: 0,
+                                rhs_index: 0,
+                                stage: DictStage::Find,
+                            });
+                            continue;
+                        }
+                    }
+                    (
+                        RuntimeValue::Adt {
+                            ctor: lhs_ctor,
+                            fields: lhs_fields,
+                            ..
+                        },
+                        RuntimeValue::Adt {
+                            ctor: rhs_ctor,
+                            fields: rhs_fields,
+                            ..
+                        },
+                    ) => {
+                        if lhs_ctor != rhs_ctor {
+                            Ok(false)
+                        } else {
+                            steps.push(Step::Sequence {
+                                lhs: lhs_fields,
+                                rhs: rhs_fields,
+                                next: 0,
+                            });
+                            continue;
+                        }
+                    }
+                    (RuntimeValue::Tensor(lhs), RuntimeValue::Tensor(rhs)) => Ok(lhs.precision
+                        == rhs.precision
+                        && lhs.value.shape == rhs.value.shape
+                        && (0..lhs.value.storage().len()).all(|index| {
+                            lhs.value.storage().scalar_at(index)
+                                == rhs.value.storage().scalar_at(index)
+                        })),
+                    (RuntimeValue::MappedFile(_), _)
+                    | (_, RuntimeValue::MappedFile(_))
+                    | (RuntimeValue::Closure { .. }, _)
+                    | (_, RuntimeValue::Closure { .. })
+                    | (RuntimeValue::Transform { .. }, _)
+                    | (_, RuntimeValue::Transform { .. }) => {
+                        Err("assert_eq does not admit functions or resource handles".to_string())
+                    }
+                    _ => Ok(false),
+                });
             }
-            for (lhs, rhs) in lhs.iter().zip(rhs) {
-                if !runtime_values_equal(lhs, rhs)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (RuntimeValue::Dict(lhs), RuntimeValue::Dict(rhs)) => {
-            if lhs.len() != rhs.len() {
-                return Ok(false);
-            }
-            let mut matched = vec![false; rhs.len()];
-            for (lhs_key, lhs_value) in lhs {
-                let mut found = None;
-                for (index, (rhs_key, rhs_value)) in rhs.iter().enumerate() {
-                    if !matched[index]
-                        && runtime_values_equal(lhs_key, rhs_key)?
-                        && runtime_values_equal(lhs_value, rhs_value)?
-                    {
-                        found = Some(index);
-                        break;
+            Step::Sequence { lhs, rhs, next } => {
+                if let Some(result) = returned.take() {
+                    match result {
+                        Ok(true) => {}
+                        other => {
+                            returned = Some(other);
+                            continue;
+                        }
                     }
                 }
-                let Some(index) = found else {
-                    return Ok(false);
-                };
-                matched[index] = true;
-            }
-            Ok(true)
-        }
-        (
-            RuntimeValue::Adt {
-                ctor: lhs_ctor,
-                fields: lhs_fields,
-                ..
-            },
-            RuntimeValue::Adt {
-                ctor: rhs_ctor,
-                fields: rhs_fields,
-                ..
-            },
-        ) => {
-            if lhs_ctor != rhs_ctor || lhs_fields.len() != rhs_fields.len() {
-                return Ok(false);
-            }
-            for (lhs, rhs) in lhs_fields.iter().zip(rhs_fields) {
-                if !runtime_values_equal(lhs, rhs)? {
-                    return Ok(false);
+                if lhs.len() != rhs.len() {
+                    returned = Some(Ok(false));
+                } else if next == lhs.len() {
+                    returned = Some(Ok(true));
+                } else {
+                    steps.push(Step::Sequence {
+                        lhs,
+                        rhs,
+                        next: next + 1,
+                    });
+                    steps.push(Step::Pair(&lhs[next], &rhs[next]));
                 }
             }
-            Ok(true)
-        }
-        (RuntimeValue::Tensor(lhs), RuntimeValue::Tensor(rhs)) => {
-            if lhs.precision != rhs.precision || lhs.value.shape != rhs.value.shape {
-                return Ok(false);
-            }
-            for index in 0..lhs.value.storage().len() {
-                if lhs.value.storage().scalar_at(index) != rhs.value.storage().scalar_at(index) {
-                    return Ok(false);
+            Step::Dict {
+                lhs,
+                rhs,
+                mut matched,
+                lhs_index,
+                mut rhs_index,
+                stage,
+            } => match stage {
+                DictStage::Find => {
+                    if lhs_index == lhs.len() {
+                        returned = Some(Ok(true));
+                        continue;
+                    }
+                    while rhs_index < rhs.len() && matched[rhs_index] {
+                        rhs_index += 1;
+                    }
+                    if rhs_index == rhs.len() {
+                        returned = Some(Ok(false));
+                        continue;
+                    }
+                    steps.push(Step::Dict {
+                        lhs,
+                        rhs,
+                        matched,
+                        lhs_index,
+                        rhs_index,
+                        stage: DictStage::AfterKey,
+                    });
+                    steps.push(Step::Pair(&lhs[lhs_index].0, &rhs[rhs_index].0));
                 }
-            }
-            Ok(true)
+                DictStage::AfterKey => match returned.take().expect("key comparison returned") {
+                    Ok(true) => {
+                        steps.push(Step::Dict {
+                            lhs,
+                            rhs,
+                            matched,
+                            lhs_index,
+                            rhs_index,
+                            stage: DictStage::AfterValue,
+                        });
+                        steps.push(Step::Pair(&lhs[lhs_index].1, &rhs[rhs_index].1));
+                    }
+                    Ok(false) => steps.push(Step::Dict {
+                        lhs,
+                        rhs,
+                        matched,
+                        lhs_index,
+                        rhs_index: rhs_index + 1,
+                        stage: DictStage::Find,
+                    }),
+                    Err(error) => returned = Some(Err(error)),
+                },
+                DictStage::AfterValue => {
+                    match returned.take().expect("value comparison returned") {
+                        Ok(true) => {
+                            matched[rhs_index] = true;
+                            steps.push(Step::Dict {
+                                lhs,
+                                rhs,
+                                matched,
+                                lhs_index: lhs_index + 1,
+                                rhs_index: 0,
+                                stage: DictStage::Find,
+                            });
+                        }
+                        Ok(false) => steps.push(Step::Dict {
+                            lhs,
+                            rhs,
+                            matched,
+                            lhs_index,
+                            rhs_index: rhs_index + 1,
+                            stage: DictStage::Find,
+                        }),
+                        Err(error) => returned = Some(Err(error)),
+                    }
+                }
+            },
         }
-        (RuntimeValue::MappedFile(_), _)
-        | (_, RuntimeValue::MappedFile(_))
-        | (RuntimeValue::Closure { .. }, _)
-        | (_, RuntimeValue::Closure { .. })
-        | (RuntimeValue::Transform { .. }, _)
-        | (_, RuntimeValue::Transform { .. }) => {
-            Err("assert_eq does not admit functions or resource handles".to_string())
-        }
-        _ => Ok(false),
     }
+    returned.expect("the root comparison returns a result")
 }
 
 /// One evaluated argument as the kernel `Load` its declared parameter names.

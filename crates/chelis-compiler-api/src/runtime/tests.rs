@@ -12,7 +12,7 @@ use chelis_deep::DeepTag;
 fn eval_renderer_demangles_reef_linked_ctor() {
     let mangled = RuntimeValue::Adt {
         ctor: "Pkg__kb__chelis__agent__KellyBenchAgent__Strategy__StrategyState".to_string(),
-        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit],
+        fields: vec![RuntimeValue::Unit, RuntimeValue::Unit].into(),
         field_names: None,
     };
     // human renderer: bare ctor with fields
@@ -25,14 +25,14 @@ fn eval_renderer_demangles_reef_linked_ctor() {
     // nullary reef-linked ctor de-mangles too
     let nullary = RuntimeValue::Adt {
         ctor: "Pkg__pkg__Mod__NoBet".to_string(),
-        fields: vec![],
+        fields: vec![].into(),
         field_names: None,
     };
     assert_eq!(render_value(&nullary), "NoBet");
     // bare / builtin constructor is unchanged (demangle_ident no-op)
     let bare = RuntimeValue::Adt {
         ctor: "None".to_string(),
-        fields: vec![],
+        fields: vec![].into(),
         field_names: None,
     };
     assert_eq!(render_value(&bare), "None");
@@ -459,7 +459,7 @@ fn runtime_pattern_reader_matches_every_decoded_pattern() {
         (
             RuntimeValue::Adt {
                 ctor: "Some".to_string(),
-                fields: vec![RuntimeValue::Bool(true)],
+                fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: None,
             },
             Expr::node(
@@ -480,7 +480,7 @@ fn runtime_pattern_reader_matches_every_decoded_pattern() {
         (
             RuntimeValue::Adt {
                 ctor: "Point".to_string(),
-                fields: vec![RuntimeValue::Bool(true)],
+                fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: Some(vec!["x".to_string()]),
             },
             Expr::node(
@@ -499,10 +499,13 @@ fn runtime_pattern_reader_matches_every_decoded_pattern() {
             ),
         ),
         (
-            RuntimeValue::Tuple(vec![
-                RuntimeValue::Bool(true),
-                RuntimeValue::String("ok".to_string()),
-            ]),
+            RuntimeValue::Tuple(
+                vec![
+                    RuntimeValue::Bool(true),
+                    RuntimeValue::String("ok".to_string()),
+                ]
+                .into(),
+            ),
             Expr::node(
                 DeepTag::PatTuple,
                 Metadata::default(),
@@ -630,7 +633,7 @@ fn runtime_nested_owner_readers_reject_malformed_children() {
         pattern_matches(
             &RuntimeValue::Adt {
                 ctor: "Point".to_string(),
-                fields: vec![RuntimeValue::Bool(true)],
+                fields: vec![RuntimeValue::Bool(true)].into(),
                 field_names: Some(vec!["x".to_string()]),
             },
             &malformed_pattern,
@@ -1096,7 +1099,7 @@ fn manifest_root_lookup_follows_recursive_list_adt_path() {
     let entry = manifest_entry_with_path("items.1.0", "items", vec![Adt(1), Adt(0)]);
     let bindings = UnordMap::from([(
         "items".to_string(),
-        RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)]),
+        RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)].into()),
     )]);
 
     let value = lookup_runtime_value_for_manifest_root(&entry, &bindings, &UnordMap::new())
@@ -3648,15 +3651,14 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
     for (prim, expected_tag) in cases {
         let scalar = numeric_scalar(prim, 7, 1.5);
         let containers = [
-            RuntimeValue::List(vec![scalar.clone()]),
-            RuntimeValue::Tuple(vec![scalar.clone()]),
-            RuntimeValue::Dict(vec![(
-                RuntimeValue::String("value".to_string()),
-                scalar.clone(),
-            )]),
+            RuntimeValue::List(vec![scalar.clone()].into()),
+            RuntimeValue::Tuple(vec![scalar.clone()].into()),
+            RuntimeValue::Dict(
+                vec![(RuntimeValue::String("value".to_string()), scalar.clone())].into(),
+            ),
             RuntimeValue::Adt {
                 ctor: "Boxed".to_string(),
-                fields: vec![scalar],
+                fields: vec![scalar].into(),
                 field_names: Some(vec!["value".to_string()]),
             },
         ];
@@ -3720,7 +3722,7 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
             ListTensorData::Float(values) => assert_eq!(values, vec![expected_float]),
         }
 
-        let sequences = [RuntimeValue::List(vec![value.clone()])];
+        let sequences = [RuntimeValue::List(vec![value.clone()].into())];
         let (padded_prim, padded_data, _, _) =
             pad_sequences_value(&sequences, &value).expect("pad_sequences ingress");
         assert_eq!(
@@ -3759,14 +3761,14 @@ fn list_tensor_bridges_reject_same_family_dtype_substitution() {
         "to_tensor must reject heterogeneous integer widths"
     );
     assert!(
-        pad_sequences_value(&[RuntimeValue::List(vec![int8])], &int16).is_err(),
+        pad_sequences_value(&[RuntimeValue::List(vec![int8].into())], &int16).is_err(),
         "pad_sequences must reject a different integer pad dtype"
     );
 
     let f64_value = numeric_scalar(Prim::F64, 0, 1e100);
     let f32_pad = numeric_scalar(Prim::F32, 0, 0.0);
     assert!(
-        pad_sequences_to_value(&[RuntimeValue::List(vec![f64_value])], 2, &f32_pad).is_err(),
+        pad_sequences_to_value(&[RuntimeValue::List(vec![f64_value].into())], 2, &f32_pad).is_err(),
         "pad_sequences_to must reject a different float pad dtype"
     );
 }
@@ -4159,7 +4161,7 @@ fn int_scalar_of(dtype: Prim, value: i64) -> RuntimeValue {
 fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
     RuntimeValue::Adt {
         ctor: ctor.to_string(),
-        fields,
+        fields: fields.into(),
         field_names: None,
     }
 }
@@ -4291,18 +4293,21 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
 /// kind tag, so nested payloads cannot disagree.
 #[test]
 fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
-    let list = RuntimeValue::List(vec![
-        int_scalar_of(Prim::Int64, 9_007_199_254_740_993),
-        scalar_of(Prim::F32, 0.1f32 as f64),
-        RuntimeValue::Bool(true),
-    ]);
+    let list = RuntimeValue::List(
+        vec![
+            int_scalar_of(Prim::Int64, 9_007_199_254_740_993),
+            scalar_of(Prim::F32, 0.1f32 as f64),
+            RuntimeValue::Bool(true),
+        ]
+        .into(),
+    );
     assert_eq!(
         describe_value(&list),
         format!("list {}", render_value(&list))
     );
     assert_eq!(describe_value(&list), "list [9007199254740993, 0.1, true]");
 
-    let tuple = RuntimeValue::Tuple(vec![int_scalar_of(Prim::Int32, 1), RuntimeValue::Unit]);
+    let tuple = RuntimeValue::Tuple(vec![int_scalar_of(Prim::Int32, 1), RuntimeValue::Unit].into());
     assert_eq!(describe_value(&tuple), "tuple (1, ())");
 
     // Tensors, dicts, and ADTs already name their own shape, so they are
@@ -4320,13 +4325,16 @@ fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
 
     let nested = adt(
         "JList",
-        vec![RuntimeValue::List(vec![
-            adt(
-                "JInt",
-                vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
-            ),
-            adt("JNum", vec![scalar_of(Prim::F64, 1e-7)]),
-        ])],
+        vec![RuntimeValue::List(
+            vec![
+                adt(
+                    "JInt",
+                    vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
+                ),
+                adt("JNum", vec![scalar_of(Prim::F64, 1e-7)]),
+            ]
+            .into(),
+        )],
     );
     assert_eq!(describe_value(&nested), render_value(&nested));
     assert_eq!(
@@ -4368,14 +4376,15 @@ fn fo_diag_argument_slots_name_an_absent_argument() {
 /// that fits is byte-identical to the untruncated form.
 #[test]
 fn fo_diag_truncation_is_owned_by_the_boundary() {
-    let short = RuntimeValue::List(vec![int_scalar_of(Prim::Int32, 1)]);
+    let short = RuntimeValue::List(vec![int_scalar_of(Prim::Int32, 1)].into());
     assert_eq!(describe_value(&short), "list [1]");
     assert!(!describe_value(&short).contains("elided"));
 
     let long = RuntimeValue::List(
         (0..200)
             .map(|i| int_scalar_of(Prim::Int32, i))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
+            .into(),
     );
     let rendered = describe_value(&long);
     assert!(
@@ -4573,27 +4582,30 @@ mod issue_2439_transform_lowering_context {
     }
 }
 
-/// chelis#2567: the worklist `Clone` copies every container kind with its
-/// children in order, dict entries paired, and data-type names and field
-/// names intact, and the copy shares no container with the original.
+/// chelis#2592: a clone shares containers while preserving field order,
+/// dict pairs, and value semantics after a write.
 #[test]
 fn runtime_value_clone_copies_every_container_in_order() {
     let original = RuntimeValue::Adt {
         ctor: "Record".to_string(),
         fields: vec![
-            RuntimeValue::List(vec![RuntimeValue::int64(1), RuntimeValue::int64(2)]),
-            RuntimeValue::Tuple(vec![RuntimeValue::Bool(true), RuntimeValue::Unit]),
-            RuntimeValue::Dict(vec![
-                (
-                    RuntimeValue::String("a".to_string()),
-                    RuntimeValue::int64(3),
-                ),
-                (
-                    RuntimeValue::String("b".to_string()),
-                    RuntimeValue::List(Vec::new()),
-                ),
-            ]),
-        ],
+            RuntimeValue::List(vec![RuntimeValue::int64(1), RuntimeValue::int64(2)].into()),
+            RuntimeValue::Tuple(vec![RuntimeValue::Bool(true), RuntimeValue::Unit].into()),
+            RuntimeValue::Dict(
+                vec![
+                    (
+                        RuntimeValue::String("a".to_string()),
+                        RuntimeValue::int64(3),
+                    ),
+                    (
+                        RuntimeValue::String("b".to_string()),
+                        RuntimeValue::List(Vec::new().into()),
+                    ),
+                ]
+                .into(),
+            ),
+        ]
+        .into(),
         field_names: Some(vec!["xs".to_string(), "pair".to_string(), "d".to_string()]),
     };
     let mut copy = original.clone();
