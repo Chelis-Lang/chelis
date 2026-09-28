@@ -564,6 +564,11 @@ fn parity_dropout_fixed_stream() {
 }
 
 #[test]
+fn parity_key_builtin_aliases() {
+    drive_parity(&examples_root().join("key_builtin_aliases.ch"), true);
+}
+
+#[test]
 fn parity_tensor_key_operations() {
     drive_parity(&examples_root().join("tensor_key_operations.ch"), true);
 }
@@ -925,4 +930,9 @@ fn parity_grad_host_results() {
 #[test]
 fn parity_keyed_state_wrapper() {
     drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
+}
+
+#[test]
+fn parity_staged_adt_control() {
+    drive_parity(&examples_root().join("staged_adt_control.ch"), true);
 }

@@ -1098,6 +1098,17 @@ prefix = "bindings/python/chelis/"
 disposition = "packages"
 packages = ["chelis-python"]
 
+# These PEP 517 inputs choose the features used to build chelis-python wheels.
+[[path_rule]]
+prefix = "bindings/python/pyproject.toml"
+disposition = "packages"
+packages = ["chelis-python"]
+
+[[path_rule]]
+prefix = "bindings/python/build_backend/"
+disposition = "packages"
+packages = ["chelis-python"]
+
 [[path_rule]]
 prefix = "bindings/python/tests/"
 disposition = "packages"
@@ -1260,6 +1271,12 @@ prefix = "examples/signed_seed.ch"
 disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
+# Forward staged ADT selection is checked through public Eval/C and parity.
+[[path_rule]]
+prefix = "examples/staged_adt_control.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 # The keyed state wrapper is executed by chelis-cli::key_pair_host_staging and
 # chelis-cli::parity, and enters the executable and formatter corpora.
 [[path_rule]]
@@ -1268,6 +1285,11 @@ disposition = "packages"
 packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
 
 # CLI parity, executable-example checking, and formatter corpus coverage.
+[[path_rule]]
+prefix = "examples/key_builtin_aliases.ch"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-e2e", "chelis-surf"]
+
 [[path_rule]]
 prefix = "examples/tensor_key_operations.ch"
 disposition = "packages"

@@ -20,6 +20,7 @@ use chelis_ir::host::{
     HostExprKind, HostFunction, HostMatchArm, HostParam, HostPatternBinding, HostProgram,
     HostTensorHelper,
 };
+use chelis_ir::host_type_state::KeyBuiltinCallable;
 use chelis_ir::ownership::{
     HostSiteId, HostSiteKind, VerifiedHostAction, VerifiedHostEmission, VerifiedHostFunctionView,
     VerifiedHostSiteActionKind, VerifiedHostTensorHelperView,
@@ -49,14 +50,19 @@ pub(crate) enum HostAbiType {
     /// `bits` are the key's 64 bits. It is never an integer: it has no
     /// arithmetic, cast or comparison (spec/04 section 1.1).
     Key,
-    /// A typed C function-pointer parameter or direct callback argument.
+    /// A typed C function pointer for a declared callback or a resolved
+    /// compiler key-builtin value.
     ///
-    /// This is deliberately not a general value representation.  The only
-    /// constructor is [`Self::try_callback_signature`], and projection uses
-    /// it only for declared callback parameters and statically-known callback
-    /// arguments.  Function results, bindings, fields, and container elements
-    /// all cross [`Self::try_from_concrete`], which rejects function values.
+    /// This is deliberately not a general value representation. Projection
+    /// admits a local binding only when its initializer is a resolved key
+    /// builtin or an already admitted callable alias. Ordinary function
+    /// results and container elements have no callback-value ABI; the closed
+    /// key-builtin carrier below is a separate internal representation.
     Callback(Vec<HostAbiType>, Box<HostAbiType>),
+    /// A closed, unspecialized operation. Its identity is fixed in the type;
+    /// the private C value is an inert witness until a checked call selects
+    /// one concrete callback signature.
+    KeyBuiltinCallable(KeyBuiltinCallable),
     Adt(String, Vec<HostAbiType>),
     List(Box<HostAbiType>),
     Dict(Box<HostAbiType>, Box<HostAbiType>),
@@ -176,6 +182,7 @@ impl HostAbiType {
             ConcreteHostType::Function(_, _) => {
                 return Err(unsupported_function_value(ty, "C host ABI value selection"));
             }
+            ConcreteHostType::KeyBuiltinCallable(op) => Self::KeyBuiltinCallable(*op),
             ConcreteHostType::Adt(name, args) => Self::Adt(
                 name.clone(),
                 args.iter()
@@ -231,6 +238,7 @@ impl HostAbiType {
             Self::String => Some("chelis_string"),
             Self::Key => Some("chelis_key"),
             Self::Callback(_, _) => None,
+            Self::KeyBuiltinCallable(_) => Some("chelis_key_callable"),
             Self::Adt(_, _) => Some("chelis_adt*"),
             Self::List(_) => Some("chelis_list*"),
             Self::Dict(_, _) => Some("chelis_dict*"),
@@ -263,6 +271,7 @@ impl HostAbiType {
             | Self::Key
             | Self::Unit
             | Self::Callback(_, _) => None,
+            Self::KeyBuiltinCallable(_) => None,
             Self::String => Some("(chelis_string){ NULL }"),
             Self::Adt(_, _)
             | Self::List(_)
@@ -293,6 +302,7 @@ impl HostAbiType {
 pub(crate) fn project_program(
     emission: VerifiedHostEmission<'_>,
 ) -> Result<ProjectedHostProgram<'_>, Unsupported> {
+    let adt_layouts = emission.adt_layouts();
     let declared_callbacks = (0..emission.function_count())
         .filter_map(|index| emission.function(index))
         .map(|function| function.name().to_string())
@@ -315,7 +325,7 @@ pub(crate) fn project_program(
             .collect(),
         functions: (0..emission.function_count())
             .filter_map(|index| emission.function(index))
-            .map(|function| project_function(function, &declared_callbacks))
+            .map(|function| project_function(function, &declared_callbacks, adt_layouts))
             .collect::<Result<Vec<_>, _>>()?,
         summary_rejections: emission.summary_rejections().to_vec(),
         adt_layouts: emission
@@ -462,7 +472,11 @@ pub(crate) fn project_binding(
         name: binding.name,
         display_name: binding.display_name,
         display_roots: binding.display_roots,
-        ty: HostAbiType::try_from_concrete(&binding.ty)?,
+        ty: if matches!(binding.ty, ConcreteHostType::Function(_, _)) {
+            HostAbiType::try_callback_signature(&binding.ty)?
+        } else {
+            HostAbiType::try_from_concrete(&binding.ty)?
+        },
         value: project_expr(binding.value, allowed_callbacks)?,
     })
 }
@@ -470,7 +484,30 @@ pub(crate) fn project_binding(
 fn project_function(
     function: VerifiedHostFunctionView<'_>,
     declared_callbacks: &UnordSet<String>,
+    adt_layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
 ) -> Result<HostAbiFunction, Unsupported> {
+    // Authored functions are externally declared even if unused by the
+    // program's main. A closed builtin witness has no public callable ABI:
+    // exporting it inside a tuple, option, collection or ADT would publish
+    // an inert value and lose the operation selected by the checker.
+    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored
+        && public_type_contains_key_callable(function.ret_ty(), adt_layouts)
+    {
+        return Err(unsupported_function_value(
+            function.ret_ty(),
+            "C host public function result",
+        ));
+    }
+    if function.origin() == chelis_ir::host::HostFunctionOrigin::Authored {
+        for param in function.params() {
+            if public_type_contains_key_callable(&param.ty, adt_layouts) {
+                return Err(unsupported_function_value(
+                    &param.ty,
+                    "C host public function parameter",
+                ));
+            }
+        }
+    }
     let mut allowed_callbacks = declared_callbacks.clone();
     for param in function.params() {
         if matches!(param.ty, ConcreteHostType::Function(_, _)) {
@@ -501,6 +538,60 @@ fn project_function(
         specialization: function.specialization().cloned(),
         summary_rejections: function.summary_rejections().to_vec(),
     })
+}
+
+/// Trace both structural children and nominal fields reachable from a
+/// published type. Local values may use the private carrier; only an
+/// authored function declaration crosses this boundary.
+pub(crate) fn public_type_contains_key_callable(
+    ty: &ConcreteHostType,
+    layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+) -> bool {
+    fn contains(
+        ty: &ConcreteHostType,
+        layouts: &[chelis_ir::host::HostAdtLayout<ConcreteHostType>],
+        visited: &mut UnordSet<String>,
+    ) -> bool {
+        match ty {
+            ConcreteHostType::KeyBuiltinCallable(_) => true,
+            ConcreteHostType::Function(params, ret) => {
+                params.iter().any(|param| contains(param, layouts, visited))
+                    || contains(ret, layouts, visited)
+            }
+            ConcreteHostType::Adt(name, args) => {
+                if args.iter().any(|arg| contains(arg, layouts, visited)) {
+                    return true;
+                }
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                let found = layouts
+                    .iter()
+                    .filter(|layout| {
+                        matches!(&layout.ty, ConcreteHostType::Adt(layout_name, _) if layout_name == name)
+                    })
+                    .flat_map(|layout| &layout.constructors)
+                    .flat_map(|constructor| &constructor.fields)
+                    .any(|field| contains(&field.ty, layouts, visited));
+                visited.remove(name);
+                found
+            }
+            ConcreteHostType::List(inner) | ConcreteHostType::Option(inner) => {
+                contains(inner, layouts, visited)
+            }
+            ConcreteHostType::Dict(key, value) => {
+                contains(key, layouts, visited) || contains(value, layouts, visited)
+            }
+            ConcreteHostType::Tuple(items) => {
+                items.iter().any(|item| contains(item, layouts, visited))
+            }
+            ConcreteHostType::Scalar(_)
+            | ConcreteHostType::Tensor(_)
+            | ConcreteHostType::MappedFile
+            | ConcreteHostType::Unit => false,
+        }
+    }
+    contains(ty, layouts, &mut UnordSet::new())
 }
 
 fn project_value_param(param: ConcreteHostParam) -> Result<HostAbiParam, Unsupported> {
@@ -585,9 +676,14 @@ fn project_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             HostAbiType::try_from_concrete(&ty)?,
         ),
-        ConcreteHostExprKind::Var(name, ty) => {
-            HostAbiExprKind::Var(name, HostAbiType::try_from_concrete(&ty)?)
-        }
+        ConcreteHostExprKind::Var(name, ty) => HostAbiExprKind::Var(
+            name.clone(),
+            if matches!(ty, ConcreteHostType::Function(_, _)) && allowed_callbacks.contains(&name) {
+                HostAbiType::try_callback_signature(&ty)?
+            } else {
+                HostAbiType::try_from_concrete(&ty)?
+            },
+        ),
         ConcreteHostExprKind::Call {
             function,
             args,
@@ -641,13 +737,24 @@ fn project_expr(
             if chelis_ir::host::is_host_unresolved_marker(&name) {
                 return Err(unsupported_callable_use(&name));
             }
+            let abi_ty = if args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                )
+                && matches!(ty, ConcreteHostType::Function(_, _))
+            {
+                HostAbiType::try_callback_signature(&ty)?
+            } else {
+                HostAbiType::try_from_concrete(&ty)?
+            };
             HostAbiExprKind::Builtin {
                 name,
                 args: args
                     .into_iter()
                     .map(|expr| project_expr(expr, allowed_callbacks))
                     .collect::<Result<Vec<_>, _>>()?,
-                ty: HostAbiType::try_from_concrete(&ty)?,
+                ty: abi_ty,
             }
         }
         ConcreteHostExprKind::AdtConstruct { ctor, fields, ty } => HostAbiExprKind::AdtConstruct {
@@ -723,14 +830,34 @@ fn project_expr(
                 .transpose()?,
             ty: HostAbiType::try_from_concrete(&ty)?,
         },
-        ConcreteHostExprKind::Let { bindings, body, ty } => HostAbiExprKind::Let {
-            bindings: bindings
-                .into_iter()
-                .map(|binding| project_binding(binding, allowed_callbacks))
-                .collect::<Result<Vec<_>, _>>()?,
-            body: Box::new(project_expr(*body, allowed_callbacks)?),
-            ty: HostAbiType::try_from_concrete(&ty)?,
-        },
+        ConcreteHostExprKind::Let { bindings, body, ty } => {
+            let mut visible = allowed_callbacks.clone();
+            let mut projected = Vec::with_capacity(bindings.len());
+            for binding in bindings {
+                let admitted = matches!(binding.ty, ConcreteHostType::Function(_, _))
+                    && match &binding.value.kind {
+                        ConcreteHostExprKind::Builtin { name, args, .. } => {
+                            args.is_empty()
+                                && matches!(
+                                    name.as_str(),
+                                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                                )
+                        }
+                        ConcreteHostExprKind::Var(name, _) => visible.contains(name),
+                        _ => false,
+                    };
+                let projected_binding = project_binding(binding, &visible)?;
+                if admitted {
+                    visible.insert(projected_binding.name.clone());
+                }
+                projected.push(projected_binding);
+            }
+            HostAbiExprKind::Let {
+                bindings: projected,
+                body: Box::new(project_expr(*body, &visible)?),
+                ty: HostAbiType::try_from_concrete(&ty)?,
+            }
+        }
         ConcreteHostExprKind::RetainedInvocation { bindings, body, ty } => {
             HostAbiExprKind::RetainedInvocation {
                 bindings: bindings
@@ -811,6 +938,17 @@ fn project_callback_argument(
             "C host callback argument selection",
         ));
     };
+    if let ConcreteHostType::KeyBuiltinCallable(op) = actual {
+        return Ok(HostAbiExpr {
+            kind: HostAbiExprKind::Builtin {
+                name: op.symbol().to_string(),
+                args: Vec::new(),
+                ty: HostAbiType::try_callback_signature(expected)?,
+            },
+            span_id: expr.span_id,
+            merged_spans: expr.merged_spans,
+        });
+    }
     if &actual != expected {
         return Err(invalid_callback_shape(format!(
             "callback `{name}` has type {actual:?}, expected {expected:?}"

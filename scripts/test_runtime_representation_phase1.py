@@ -217,6 +217,27 @@ class ReceiptTests(unittest.TestCase):
                 with self.assertRaises(oracle.OracleFailure):
                     oracle.require_frozen_selection(identities[:-1], identities)
 
+    def test_key_callable_inherited_leg_preserves_execution_and_rejection_floors(self):
+        packet = oracle.frozen_manifest(oracle.MANIFEST.read_bytes(), oracle.MANIFEST_SHA256)
+        name = 'checked key callable scalar and tensor C execution'
+        row = next(row for row in packet['legs'] if row['name'] == name)
+        self.assertEqual(row['args'], list(dict(oracle.phase1_legs())[name]))
+        self.assertIn('ownership-ledger', row['args'])
+        for test in (
+            'unannotated_key_builtin_aliases_execute_in_eval_and_c',
+            'locally_aggregated_key_builtin_alias_rejects_wrong_operand',
+            'exported_aggregate_of_key_callables_rejects_before_public_c_abi',
+            'typed_ordinary_function_tuple_remains_a_loud_c_rejection',
+        ):
+            identity = 'chelis-compiler-api::key_tensor_forms::' + test
+            self.assertIn(identity, row['required'])
+            with self.subTest(missing=identity), self.assertRaisesRegex(oracle.OracleFailure, 'lost identities'):
+                oracle.require_frozen_selection([item for item in row['required'] if item != identity], row['required'])
+        changed = copy.deepcopy(packet)
+        changed['legs'] = [row for row in changed['legs'] if row['name'] != name]
+        with self.assertRaisesRegex(oracle.OracleFailure, 'leg inventory drifted'):
+            oracle.validate_manifest(changed)
+
     def test_integer_unary_inherited_legs_preserve_exact_positive_and_negative_floors(self):
         packet = oracle.frozen_manifest(oracle.MANIFEST.read_bytes(), oracle.MANIFEST_SHA256)
         rows = {row['name']: row for row in packet['legs']}

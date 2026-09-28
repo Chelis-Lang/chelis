@@ -1132,6 +1132,22 @@ inactive and empty rows, and a false forward range claim. Renaming an owner
 or introducing another spelling remains an unclassified scanner hit until it
 has its own semantic authority and execution contract.
 
+The private C key-callable entries emitted by `append_key_callable_helpers`
+have one exact `load-store-template` final-form owner. The tensor entries read
+and write key or seed storage under [05-OP-69] through [05-OP-72]; they add no
+public carrier or operation identity. Tensor helper shapes use checked i64
+tensor storage, never rank-sized C stack arrays or key-valued scalar exemplars.
+The helpers are emitted only for bodies that consume their closed carrier or
+callback symbol. Ownership carries a distinct closed-key call authority; an
+ordinary indirect call gains no authority from this admission.
+The checked call signature selects the
+scalar or tensor entry, and the compiled-C `key_tensor_forms` suite covers
+those entries, including invalid counts, shapes, shadowing, and local
+transport. Phase 1 inherits the same ownership-ledger command and freezes
+its positive and rejection test identities in its reviewed selection manifest.
+The Phase 0 owner registration admits only this path, kind, and
+owner; a new helper requires its own authority and execution control.
+
 HIP exact direct arithmetic adds four closed typed-lane final forms:
 `binary_elementwise_typed` and `fused_reduced_step_lines` each supply one
 `backend-element-spelling`, while `binary_extrema_reduced` and

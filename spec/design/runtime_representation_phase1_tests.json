@@ -363,6 +363,35 @@
       ]
     },
     {
+      "name": "checked key callable scalar and tensor C execution",
+      "args": [
+        "-p",
+        "chelis-compiler-api",
+        "--features",
+        "ownership-ledger",
+        "--test",
+        "key_tensor_forms",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "required": [
+        "chelis-compiler-api::key_tensor_forms::concretely_typed_key_builtin_aliases_execute_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::exported_aggregate_of_key_callables_rejects_before_public_c_abi",
+        "chelis-compiler-api::key_tensor_forms::key_builtin_aliases_preserve_runtime_domain_rejections",
+        "chelis-compiler-api::key_tensor_forms::locally_aggregated_key_builtin_alias_rejects_wrong_operand",
+        "chelis-compiler-api::key_tensor_forms::locally_aggregated_key_builtin_aliases_execute_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::one_unannotated_key_alias_selects_multiple_shapes_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::shadowed_key_builtin_name_does_not_select_builtin_carrier",
+        "chelis-compiler-api::key_tensor_forms::tensor_fold_rejects_runtime_shape_mismatch_without_broadcasting",
+        "chelis-compiler-api::key_tensor_forms::tensor_key_forms_match_the_independent_scalar_reference_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::tensor_key_split_checks_runtime_count_before_allocating",
+        "chelis-compiler-api::key_tensor_forms::transported_key_builtin_aliases_execute_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::typed_ordinary_function_tuple_remains_a_loud_c_rejection",
+        "chelis-compiler-api::key_tensor_forms::unannotated_key_builtin_aliases_execute_in_eval_and_c",
+        "chelis-compiler-api::key_tensor_forms::unused_exported_key_callable_values_reject_before_public_c_abi"
+      ]
+    },
+    {
       "name": "checked C reduction delegation and bypass mutations",
       "args": [
         "-p",

@@ -36,6 +36,7 @@ class CiContractPathTests(unittest.TestCase):
             "scripts/test_ci_candidate_receipt.py",
             "scripts/gate.py",
             "scripts/test_gate.py",
+            "scripts/test_gate_local.py",
             "scripts/changelog.py",
             "scripts/phase3_test_change_report.py",
             "scripts/phase4b_change_report.py",
