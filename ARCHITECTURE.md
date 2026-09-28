@@ -192,6 +192,25 @@ For C, production acceptance implies the weaker reference device predicate; equi
 requires restricting device names. The pure `checkGradient` theorem does not discharge
 these effect obligations.
 
+`ChelisBridge.Random.dropout_forward_tensor_f64` relates a successful
+extracted `ExecutionFrame::dropout` call at a forward Random site to its
+actual scope draw ordinal and the reference `runProtocol` step. Its returned
+f64 storage decodes to the LaCaDiLE `dropoutMask` of the decoded input.
+Its premise `input.shape.val.map (fun d => d.val) = shape` pins every actual
+input dimension to the reference shape; the returned output has those same
+dimensions. A flat buffer of six elements decodes at both `[2,3]` and
+`[3,2]`, but only the former matches a production input shaped `[2,3]`.
+Other premises include frame well-formedness, no `u64` draw overflow, an
+exactly decoded f64 tensor, an exact rate interpretation, and binary64
+representability of `1 - rate` and every input-element quotient. The proof
+composes the production call's `PreparedDropout::apply` result with the
+checked tensor-mask relation; it does not replace the returned result with a
+reference-only construction. The unrestricted exact-rational scaling claim
+fails at binary64 rate `0.1` (`Random.scale_counterexample`); non-f64 threshold
+rounding differs (`Random.nonf64_mask_counterexample`).
+Native IEEE execution and wrapper/state restoration remain outside this
+fragment.
+
 ## Runtime state and unwind boundary
 
 Full-core extraction must model a thread-indexed TLS store, shared cancellation flags,

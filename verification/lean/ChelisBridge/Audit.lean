@@ -635,6 +635,7 @@ def accepted : List Name := [
   ``ChelisBridge.Random.dropout_f16,
   ``ChelisBridge.Random.dropout_bf16,
   ``ChelisBridge.Random.dropout_forward_f64,
+  ``ChelisBridge.Random.dropout_forward_tensor_f64,
   ``ChelisBridge.Random.dropout_forward_key,
   ``ChelisBridge.Random.dropout_forward_f32,
   ``ChelisBridge.Random.dropout_forward_f16,

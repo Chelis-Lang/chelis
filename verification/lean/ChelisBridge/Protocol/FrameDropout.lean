@@ -524,6 +524,63 @@ theorem dropout_forward_f64 (target : Target) {F : Frame} {node : chelis_ir.dag.
   obtain ⟨rfl, -⟩ := he2
   exact ⟨c, ys, hc, hrun, hwf', hfin, h0, h1, hsh, hout, hys⟩
 
+/-- **Composed tensor f64 dropout at a forward site.** The successful extracted production call
+returns the actual `PreparedDropout::apply` output. The reference shape is *exactly* the
+production input's dimension vector, not merely a shape with the same element count. With
+an exactly decoded f64 input and representability of the denominator and every input-element
+quotient, the actual output decodes to the rational tensor masked by the forward site's
+reference draw key. The same call takes that protocol step and preserves frame well-formedness. -/
+theorem dropout_forward_tensor_f64 (target : Target) {F : Frame} {node : chelis_ir.dag.NodeId}
+    {input : TV} {rate : F64} {seed : U64} {out : TV} {F' : Frame} {back : Frame → Frame}
+    {draw : chelis_ir.evaluation.DrawId} {s : chelis_ir.evaluation.ScopeId}
+    {shape : Shape} {xs : alloc.vec.Vec F64} {x : Tensor ℚ shape}
+    {dropoutRate : DropoutRate} (hs : input.storage = ⟨.F64 xs⟩)
+    (hinputShape : input.shape.val.map (fun d => d.val) = shape)
+    (hx : decodeTensor shape xs.val = some x)
+    (hrate : realize rate = some dropoutRate.val)
+    (hden : Representable .binary64 (1 - dropoutRate.val))
+    (hq : ∀ (j : ℕ) (hj : j < xs.val.length) (a : ℚ), realize xs.val[j] = some a →
+      Representable .binary64 (a / (1 - dropoutRate.val)))
+    (hsite : siteOf F node = .ok (some (.Forward draw s))) (hwf : StackWF F)
+    (hno : ∀ c, counterAt F s = some c → c.val + 1 < 2 ^ 64)
+    (h : chelis_ir.evaluation.ExecutionFrame.dropout F node input rate seed =
+      .ok (.Ok out, F', back)) :
+    ∃ (c : U64) (ys : alloc.vec.Vec F64) (y : Tensor ℚ shape),
+      counterAt F s = some c ∧
+      runProtocol target [.draw (keyOfDraw seed c)] (absState F) = some (absState F') ∧
+      StackWF F' ∧ out.shape = input.shape ∧
+      out.shape.val.map (fun d => d.val) = shape ∧ out.storage = ⟨.F64 ys⟩ ∧
+      decodeTensor shape ys.val = some y ∧
+      ∀ i, y i = x i * dropoutMask dropoutRate (keyOfDraw seed c) i := by
+  obtain ⟨c, ys₀, hc, hrun, hwf', _, _, _, hshape, hstorage, _⟩ :=
+    dropout_forward_f64 target hs hsite hwf hno h
+  obtain ⟨p, rsv, k, back', hp, hcast, hnew, he, happly, hshape'⟩ := dropout_ok_inv h
+  rw [hs] at hp hnew happly
+  simp only [chelis_types.dtype_semantics.TensorStorage.prim, Result.ok.injEq] at hp
+  subst p
+  rw [cast_raw_float_f64] at hcast
+  simp only [Result.ok.injEq, core.result.Result.Ok.injEq] at hcast
+  subst rsv
+  obtain ⟨c', -, -, hc', -, hk', -⟩ :=
+    enter_forward_inv F node seed draw s k F' back' hsite he
+  have hcEq : c' = c := (Option.some.inj (hc.symm.trans hc')).symm
+  have hk : k = ⟨seed, c⟩ := by
+    rw [hcEq] at hk'
+    exact hk'
+  have hkey : keyOfDraw k.seed k.ordinal = keyOfDraw seed c := by
+    rw [hk]
+  obtain ⟨ys, y, hmask, hdecode, hy⟩ :=
+    mask_tensor_f64 xs rate dropoutRate hrate k.seed k.ordinal x hx hden hq
+  have houtStorage : out.storage = ⟨.F64 ys⟩ := by
+    rw [hmask] at happly
+    simp only [Result.ok.injEq, core.result.Result.Ok.injEq] at happly
+    exact happly.symm
+  refine ⟨c, ys, y, hc, hrun, hwf', hshape, ?_, houtStorage, hdecode, ?_⟩
+  · rw [hshape]
+    exact hinputShape
+  rw [hkey] at hy
+  exact hy
+
 /-- The counter of the active scope at a forward site: an accepted dropout there draws the key
 `(seed, c)` of that counter (no well-formedness needed for the key itself). -/
 theorem dropout_forward_key {F : Frame} {node : chelis_ir.dag.NodeId} {input : TV} {rate : F64}

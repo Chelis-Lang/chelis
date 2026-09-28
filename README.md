@@ -415,8 +415,9 @@ the entire check; replacing its returned primal-node identity with its distinct
 scalar gradient root fails `Numeric.acceptPrimal` even with a newly searched witness.
 
 This theorem was compiled with the combined r35 `chelis_ir-3ndlar8c` model and
-matching patched Aeneas library. `ChelisBridge.Audit` accepted 590 theorems;
-`ClosureAudit` found 34,137 reachable declarations, only the foundational axioms
+matching patched Aeneas library. With the f64 production dropout theorem below,
+`ChelisBridge.Audit` accepted 591 theorems and 5910 package constants;
+`ClosureAudit` found 34,138 reachable declarations, only the foundational axioms
 `propext`, `Classical.choice`, `Quot.sound`, and no unjustified opaque/extern
 dependencies under `verification/trusted_base.json` (46 opaque and 114
 extern/implemented-by declarations inventoried). The model covers 25 selected
@@ -424,3 +425,20 @@ roots, not a fresh eight-crate extraction or full acceptance. Native IEEE
 evaluation requires an independently justified exact, nontrapping execution
 relation; the theorem asserts real semantics of the decoded graph, not bitwise
 Rust execution. Runtime shell/unwind and whole-core correspondence remain open.
+
+`ChelisBridge.Random.dropout_forward_tensor_f64` relates an accepted
+*production* `ExecutionFrame::dropout` forward call to its scope's draw
+ordinal, the reference `runProtocol` step, and the decoded LaCaDiLE
+`dropoutMask` tensor. The reference shape must equal the actual input's
+dimension vector, and the returned output's dimensions equal that same vector:
+equal element counts alone do not preserve row-major tensor meaning. The
+tensor equality also needs a decodable input, an exactly interpreted rate, a
+representable binary64 denominator `1 - rate`, and representable
+per-input-element quotients. Frame well-formedness and no counter overflow
+are required for direct protocol simulation. Neither successful dropout
+alone nor a finite rate implies exact rational scaling
+(`Random.scale_counterexample` uses binary64 rate `0.1`);
+non-f64 masks can differ when the sampled unit is rounded before comparison
+(`Random.nonf64_mask_counterexample`). This is
+conditional correspondence for the extracted numerical/frame model, not a
+native IEEE/runtime-shell proof or fresh whole-core acceptance.
