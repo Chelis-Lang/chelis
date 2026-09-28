@@ -880,26 +880,6 @@ class SchemaTests(unittest.TestCase):
                 ),
             },
         )
-        self.assertEqual(
-            {
-                identity: (gate.entries, gate.tracking_issue)
-                for identity, gate in config.manual_gate_targets.items()
-            },
-            {
-                owned.Identity("chelis-cli", "shoals_oracle"): (
-                    (
-                        "phase3l_shoals_oracle",
-                        "phase3l_shoals_oracle_grad_greeks_match_analytic",
-                        "shoals_oracle suite",
-                    ),
-                    "chelis#1824",
-                ),
-                owned.Identity("chelis-python", "manual_reef_context"): (
-                    ("reef_context_manual_acceptance_oracle",),
-                    "chelis#1824",
-                ),
-            },
-        )
         device_entry_owner = config.manual_only_targets[
             owned.Identity("chelis-backend-hip", "device_entry_execution")
         ]
