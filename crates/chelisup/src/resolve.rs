@@ -357,6 +357,29 @@ mod tests {
     }
 
     #[test]
+    fn schema_one_manifest_routes_a_pre_schema_shim_by_exact_compiler_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("reef.toml"),
+            "schema = \"1\"\n\n[package]\nname = \"schema-one\"\ncompiler = \"=0.7.10\"\n",
+        )
+        .unwrap();
+        let store = store_with_default(tmp.path(), Some("0.9.0"));
+        let args: Vec<OsString> = vec![];
+        let input = ResolveInput {
+            args: &args,
+            env_toolchain: None,
+            cwd: tmp.path(),
+            store: &store,
+        };
+
+        let resolution = resolve(&input).expect("schema-unaware shim must use the exact pin");
+
+        assert_eq!(resolution.version, "0.7.10");
+        assert!(matches!(resolution.source, ToolchainSource::ReefPin(_)));
+    }
+
+    #[test]
     fn nearest_reef_without_pin_falls_to_default_not_farther_manifest() {
         // Outer manifest has a pin; inner manifest (nearer the cwd) has
         // none. The nearer manifest owns the answer: fall to default.

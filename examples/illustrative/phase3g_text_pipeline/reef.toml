@@ -1,8 +1,13 @@
+schema = "3"
 [package]
 name = "phase3g-text-pipeline"
 version = "0.1.0"
 compiler = "=0.18.11"
 module_prefix = "Demo"
+resolver = "2"
+description = "Illustrative text pipeline for phase 3G"
+license = "MIT"
+repository = "https://github.com/Chelis-Lang/chelis"
 
 [dependencies]
-chelis-std = { version = "0.3.0" }
+chelis-std = { version = "=0.3.0" }

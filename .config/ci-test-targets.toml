@@ -3027,6 +3027,24 @@ reason = "the Rust policy job's lint-and-unit gate stage runs the pipeline-core 
 tracking_issue = "chelis#1824"
 
 [[path_rule]]
+prefix = "scripts/regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "the Rust policy job's lint-and-unit gate stage runs the chelis-std bundle regeneration check twice against the committed outputs"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_regenerate_chelis_std_bundle.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "script-unit executes the bundle regeneration unit tests; the real fixed-point class stays on the nightly script lane"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
 prefix = "rust-toolchain.toml"
 disposition = "packages"
 packages = [
