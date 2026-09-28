@@ -1099,6 +1099,20 @@ not serve. The two rows are the seams the Phase 0 scanner observes in that
 owner; neither is gratuitous, and dropping either reproduces an unclassified
 inventory hit.
 
+Runtime List-map capture and ordered cotangent summation add two exact C
+numeric-operation final forms under [05-OP-55] and spec/06 section 2.4:
+`CEmitter::emit_list_map_capture` has a `load-store-template`, and
+`CEmitter::emit_ordered_adjoint_sum` has a `backend-element-spelling`. The
+capture copies the source scalar's declared element bits into the actual
+invocation rows; the sum loads those rows in invocation and consumer order,
+then combines them at the declared float width. Both operate on private
+typed tensor storage and introduce no public bare-number channel. The Phase 0
+execution legs bind these exact owners to native C length-mismatch rejection
+and compiled Eval/C parity for the ordered tree, each float-width rounding,
+inactive and empty rows, and a false forward range claim. Renaming an owner
+or introducing another spelling remains an unclassified scanner hit until it
+has its own semantic authority and execution contract.
+
 HIP exact direct arithmetic adds four closed typed-lane final forms:
 `binary_elementwise_typed` and `fused_reduced_step_lines` each supply one
 `backend-element-spelling`, while `binary_extrema_reduced` and
@@ -1721,6 +1735,18 @@ identity requires a reviewed manifest amendment. A test newly selected by an
 existing command is an addition: it executes and is reported without changing
 the required floor. Neither a previous receipt nor a regenerated selection is an
 acceptance input.
+
+The [05-OP-55] List-map C owners add two inherited Phase 0 execution legs to
+the Phase 1 frozen manifest. The initial selected floor is one native C
+column-length rejection and four compiled Eval/C cotangent controls: ordered
+consumer accumulation, stored-width pair rounding, inactive/empty rows, and
+rejection of a false forward range claim. The manifest retains every earlier
+leg, command, required identity, Python floor, native control, and planner
+mutation unchanged; only these two commands and five test identities extend
+the selection. Fresh nextest listings established their exact binary/test
+identities. The manifest digest changes to bind the additive selection, while
+Phase 0's foundation and frozen mutation contract do not change. A passing
+selection receipt still requires actual execution and artifact verification.
 
 The host/C consumer audit follows the representation owners and submissions:
 
