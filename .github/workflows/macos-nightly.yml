@@ -213,7 +213,21 @@ jobs:
 
       - name: Clippy macOS solver-free features
         if: matrix.shard == 1
-        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-compiler-api/compilation-trace,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-cli/ownership-ledger,chelis-compiler-api/compilation-trace,chelis-compiler-api/ownership-ledger,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+
+      # The ownership-ledger targets require their package's feature, so the
+      # featureless workspace run above skips them; these are the gate's
+      # commands, run on the macOS link path. No `--profile`: the ci-full
+      # JUnit this shard uploads and times stays the workspace run's. The CLI
+      # command rebuilds ./target/debug/chelis with an instrumented runtime,
+      # so it stays off shard 2, whose smoke steps run that binary.
+      - name: Ownership-ledger compiler-api tests
+        if: matrix.shard == 1
+        run: cargo nextest run -p chelis-compiler-api --features ownership-ledger --test builtin_named_kernel_inputs --test dropout_fixed_stream_api --test fixed_control_host_c --test generated_header_native_probe --test invocation_local_random --test issue_1684_entry_cleanup --test issue_1685_multi_root_cleanup --test issue_2445_match_arm_ownership --test issue_2485_region_entry_terminals --test issue_2508_list_step_ownership --test issue_2522_data_type_c_lane --test issue_2576_option_items_render --test issue_2577_filter_named_predicate --test key_admission_lanes --test key_affinity_lanes --test key_extent_lanes --test key_operand_random_c --test key_operations_c --test key_root_lanes --test key_split_count_lanes --test key_surface_lanes --test local_ascription_activation --test rule_d_entered_lanes --test untaken_arm_gradients
+
+      - name: Ownership-ledger CLI tests
+        if: matrix.shard == 1
+        run: cargo nextest run -p chelis-cli --features ownership-ledger --test issue_1314_json_bigint_ledger
 
       - name: Verify packaged binary architecture
         if: matrix.shard == 2

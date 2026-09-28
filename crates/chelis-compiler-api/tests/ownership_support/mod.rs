@@ -1,4 +1,9 @@
-//! Compile the real selected C artifact against an exactly identified ledger runtime.
+//! Compile the real selected C artifact against the ledger runtime this build carries.
+//!
+//! The targets that use this harness require the `ownership-ledger` feature,
+//! which instruments the `chelis-runtime` this test build links. Each program
+//! stages the runtime `chelis-runtime-bundle` carries into its own directory
+//! and links that archive by path (spec/08-backends.md §2.1).
 #![allow(dead_code)]
 
 use chelis_compiler_api::compiler::{compile, compile_for_execution};
@@ -6,15 +11,9 @@ use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 use serde_json::Value;
 use std::fmt;
 use std::fs;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 #[derive(Clone)]
 pub struct GeneratedProgram {
@@ -108,89 +107,6 @@ impl fmt::Display for GeneratedProgram {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.source)
     }
-}
-
-/// The ledger runtime archive this process links: built into the shared
-/// `target/ownership-ledger-runtime` directory, then staged at a path that no
-/// later build rewrites.
-///
-/// nextest runs each test in its own process, and every `cargo build`, fresh
-/// or not, replaces the uplifted `debug/libchelis_runtime.a` with a new file.
-/// Linking that path let one process's build remove the archive another
-/// process's `cc` was reading ("library ... not found", "file cannot be
-/// open()ed"). So each process builds and copies the archive while holding a
-/// lock every process of this harness takes, and links the copy, which is
-/// named by its content and never rewritten once it exists.
-fn runtime() -> &'static Path {
-    static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
-    ARCHIVE.get_or_init(|| {
-        let target = root().join("target/ownership-ledger-runtime");
-        let staged = target.join("staged");
-        fs::create_dir_all(&staged).unwrap();
-        let lock = fs::File::create(target.join("harness.lock")).unwrap();
-        lock.lock().expect("lock the ledger runtime build");
-        let bytes = fs::read(build_ledger_runtime(&target)).unwrap();
-        let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        let archive = staged.join(format!("libchelis_runtime-{:016x}.a", hasher.finish()));
-        if !archive.exists() {
-            let partial = staged.join(format!(".partial-{}", std::process::id()));
-            fs::write(&partial, &bytes).unwrap();
-            fs::rename(&partial, &archive).unwrap();
-        }
-        drop(lock);
-        archive
-    })
-}
-
-/// Build the ledger runtime into `target` and return the archive cargo
-/// reports for it.
-fn build_ledger_runtime(target: &Path) -> PathBuf {
-    let output = Command::new(env!("CARGO"))
-        .current_dir(root())
-        .env("CARGO_TARGET_DIR", target)
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            "chelis-runtime",
-            "--lib",
-            "--features",
-            "ownership-ledger",
-            "--message-format=json",
-        ])
-        .output()
-        .expect("build ledger runtime");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<Value> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| {
-            row["reason"] == "compiler-artifact" && row["target"]["name"] == "chelis_runtime"
-        })
-        .collect();
-    assert_eq!(rows.len(), 1, "exact runtime artifact required");
-    assert!(
-        rows[0]["features"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| f == "ownership-ledger")
-    );
-    let paths: Vec<_> = rows[0]["filenames"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|p| p.ends_with(".a"))
-        .collect();
-    assert_eq!(paths.len(), 1);
-    PathBuf::from(paths[0])
 }
 
 pub fn emit(source: &str, entry: &str) -> GeneratedProgram {
@@ -356,6 +272,8 @@ fn compile_program(
             .expect("generated header and source must agree before native compilation");
     }
     let dir = tempfile::tempdir().unwrap();
+    let staged = chelis_runtime_bundle::stage(dir.path())
+        .unwrap_or_else(|error| panic!("stage the carried runtime: {error}"));
     fs::write(dir.path().join("generated.h"), source.header()).unwrap();
     let c = dir.path().join("probe.c");
     fs::write(
@@ -371,8 +289,8 @@ fn compile_program(
     cc.args(["-std=c11", "-O0"])
         .arg(&c)
         .arg("-I")
-        .arg(root().join("crates/chelis-runtime/include"))
-        .arg(runtime())
+        .arg(dir.path())
+        .arg(&staged.archive)
         .args(["-lm", "-lpthread"]);
     for (index, source) in peers.iter().enumerate() {
         let peer = dir.path().join(format!("peer_{index}.c"));

@@ -177,7 +177,8 @@ target directory are never read.
   target directory into another, and an embedded path would then name the other
   directory's archive.
 - A test or oracle that needs an instrumented runtime builds its consumer with
-  that runtime feature, or links an exact instrumented Cargo artifact itself.
+  that runtime feature and links the runtime the consumer carries. The
+  ownership-ledger harnesses require their crate's `ownership-ledger` feature.
 - The Python extension stages its carried runtime into the artifact directory
   and rejects a set `CHELIS_RUNTIME_DIR` (chelis#1354).
 - A development build checks its runtime's sources before staging.

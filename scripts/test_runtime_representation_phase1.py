@@ -379,6 +379,12 @@ class ReceiptTests(unittest.TestCase):
                 'chelis-cli::capacity_census_tripwire::'
                 'prepared_dropout_kernel_boundaries_have_exact_semantic_authority',
             ),
+            (
+                'chelis-cli::issue_1314_json_bigint_ledger::'
+                'json_scratch_execution_detects_skipped_cleanup',
+                'chelis-cli::issue_1314_json_bigint::'
+                'json_scratch_execution_detects_skipped_cleanup',
+            ),
         )
         for current, stale in replacements:
             with self.subTest(stale=stale):

@@ -1241,7 +1241,7 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_json_scratch" in command for command in commands))
         self.assertTrue(any("issue_1314_json_bigint" in command and "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)" in command for command in commands))
 
-        self.assertTrue(any("issue_1314_json_bigint" in command and "test(=json_scratch_execution_detects_skipped_cleanup)" in command for command in commands))
+        self.assertTrue(any("issue_1314_json_bigint_ledger" in command and "ownership-ledger" in command and "test(=json_scratch_execution_detects_skipped_cleanup)" in command for command in commands))
 
     def test_checked_literals_require_delegation_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]

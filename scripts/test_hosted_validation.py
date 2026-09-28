@@ -50,6 +50,14 @@ def assert_hosted_coverage(test, workflow, nightly):
         test.assertEqual(len(steps), 1, command)
         test.assertEqual(steps[0].get("if"), "matrix.shard == 1")
         test.assertFalse(steps[0].get("continue-on-error", False))
+    # The featureless workspace run skips the ownership-ledger targets, so
+    # shard 1 runs the gate's commands verbatim. The CLI command rebuilds
+    # ./target/debug/chelis, which shard 2's smoke steps run.
+    for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
+        steps = [step for step in macos["steps"] if step.get("run") == " ".join(command)]
+        test.assertEqual(len(steps), 1, command)
+        test.assertEqual(steps[0].get("if"), "matrix.shard == 1")
+        test.assertFalse(steps[0].get("continue-on-error", False))
     aggregate = jobs["macos-smoke"]
     test.assertIn("macos-workspace-shard", aggregate["needs"])
     test.assertEqual(aggregate.get("if"), "always()")
@@ -156,6 +164,24 @@ class HostedCoverageTests(unittest.TestCase):
                         step["continue-on-error"] = True
                 with self.assertRaises(AssertionError):
                     assert_hosted_coverage(self, self.workflow, workflow)
+
+    def test_ownership_ledger_must_run_on_macos_shard_one_as_the_gate_spells_it(self):
+        for command in (gate.OWNERSHIP_LEDGER_API_TESTS, gate.OWNERSHIP_LEDGER_CLI_TESTS):
+            for change in ("missing", "shard-two", "ignore-failure", "profile"):
+                with self.subTest(command=command[4], change=change):
+                    workflow = copy.deepcopy(self.nightly)
+                    steps = workflow["jobs"]["macos-workspace-shard"]["steps"]
+                    step = next(step for step in steps if step.get("run") == " ".join(command))
+                    if change == "missing":
+                        steps.remove(step)
+                    elif change == "shard-two":
+                        step["if"] = "matrix.shard == 2"
+                    elif change == "ignore-failure":
+                        step["continue-on-error"] = True
+                    else:
+                        step["run"] += " --profile ci-full"
+                    with self.assertRaises(AssertionError):
+                        assert_hosted_coverage(self, self.workflow, workflow)
 
     def test_macos_producer_and_aggregate_cannot_be_skipped_or_made_nonblocking(self):
         for job_name in ("macos-workspace-shard", "macos-smoke"):
