@@ -1449,6 +1449,74 @@ impl<'a> EvalContext<'a> {
             self.result_producer = ResultProducer::interface_load(&value);
             return Ok(value);
         }
+        // The checked key operations are values as well as direct call
+        // heads. Capture the resolved operation now: a later lexical alias
+        // or shadow must not change which operation the callable invokes.
+        // The wrapper is compiler-owned and has no source-level body or
+        // captures. Its parameters and result come from the checked value
+        // type, never from a guessed scalar default.
+        if matches!(
+            name,
+            "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+        ) && self.active_builtin_symbol(name)
+        {
+            // An unannotated checked alias can retain the closed operation
+            // relation without one selected `TFn` on this value node. Its
+            // identity and arity are fixed here; the checked application
+            // decides the scalar/tensor alternative from its arguments.
+            let signature = node.metadata.ty().map(|ty| ty.expression());
+            let types = signature.and_then(checked_function_children);
+            let (return_type, param_types) =
+                types
+                    .and_then(<[Expr]>::split_last)
+                    .map_or((None, Vec::new()), |(ret, params)| {
+                        (
+                            Some(ret.clone()),
+                            params.iter().cloned().map(Some).collect(),
+                        )
+                    });
+            let arity = if matches!(name, "key_from_seed" | "split_key") {
+                1
+            } else {
+                2
+            };
+            let params = (0..arity)
+                .map(|index| format!("__chelis_key_arg_{index}"))
+                .collect::<Vec<_>>();
+            let span = node.expr.span();
+            let mut call = Vec::with_capacity(params.len() + 1);
+            call.push(Expr::node(
+                DeepTag::Var,
+                chelis_deep::Metadata::default(),
+                vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+                span,
+            ));
+            call.extend(params.iter().map(|param| {
+                Expr::node(
+                    DeepTag::Var,
+                    chelis_deep::Metadata::default(),
+                    vec![Expr::Atom(Atom::Name(param.clone()), span)],
+                    span,
+                )
+            }));
+            let body = Expr::node(DeepTag::App, chelis_deep::Metadata::default(), call, span);
+            return Ok(RuntimeValue::Closure {
+                checked_function: Box::new(node.expr.clone()),
+                params,
+                param_types: if param_types.is_empty() {
+                    vec![None; arity]
+                } else {
+                    param_types
+                },
+                return_type,
+                checked_signature: types.and_then(|_| signature.cloned()),
+                invocation_contracts: Box::default(),
+                body,
+                env: self.bindings.capture(),
+                precision_env: self.precision_bindings.clone(),
+                def_name: None,
+            });
+        }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new().into()));
         }
@@ -6067,7 +6135,7 @@ mod legacy_capture_order_tests {
     fn declaration_exact_and_unique_resolution_never_populates_an_ambiguous_alias() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("src")).unwrap();
-        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity_frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
+        std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"identity-frames\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\nmodule_prefix = \"Probe\"\n", crate::COMPILER_VERSION)).unwrap();
         for (module, value) in [("Left", 3), ("Right", 5)] {
             std::fs::write(directory.path().join("src").join(format!("{}.ch", module.to_lowercase())), format!("module Probe.{module}\nexport (value, unique_{value})\nvalue = {{ _ = print(\"{module}\")\n {value} }}\nunique_{value} = {value}\n")).unwrap();
         }

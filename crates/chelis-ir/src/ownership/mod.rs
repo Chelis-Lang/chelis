@@ -534,7 +534,12 @@ pub enum VerifiedOwnershipUse {
 pub enum VerifiedApplyKind {
     Intrinsic,
     IndirectCall,
-    DirectCall { callee: VerifiedUnitId, tail: bool },
+    /// The indirect callee owner was produced by this closed key operation.
+    KeyBuiltinCall(crate::host_type_state::KeyBuiltinCallable),
+    DirectCall {
+        callee: VerifiedUnitId,
+        tail: bool,
+    },
 }
 
 /// Closed edge-local terminal domain. No definition, application, or clone
@@ -933,6 +938,9 @@ fn verified_host_action<'a>(
                         kind: match kind {
                             ir::ApplyKind::Intrinsic => VerifiedApplyKind::Intrinsic,
                             ir::ApplyKind::IndirectCall => VerifiedApplyKind::IndirectCall,
+                            ir::ApplyKind::KeyBuiltinCall(op) => {
+                                VerifiedApplyKind::KeyBuiltinCall(*op)
+                            }
                             ir::ApplyKind::DirectCall { callee } => VerifiedApplyKind::DirectCall {
                                 callee: VerifiedUnitId { key: callee.0 },
                                 tail: verification.is_tail_call(program.units.get(unit)?.id, op.id),

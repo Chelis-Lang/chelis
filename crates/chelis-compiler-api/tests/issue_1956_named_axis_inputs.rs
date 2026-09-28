@@ -16,7 +16,7 @@ fn prepare(library: &str) -> chelis_compiler_api::compiler::PreparedEvalInContex
     use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("src")).unwrap();
-    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"declaration_ownership\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"declaration-ownership\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
     std::fs::write(
         directory.path().join("src/values.ch"),
         format!("module Probe.Values\nexport (total)\n{library}"),

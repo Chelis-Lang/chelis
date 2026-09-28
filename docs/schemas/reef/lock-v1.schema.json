@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LockWireV1",
+  "type": "object",
+  "required": [
+    "dependencies",
+    "package",
+    "schema"
+  ],
+  "properties": {
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LockedDependencyWireV1"
+      }
+    },
+    "package": {
+      "$ref": "#/definitions/PackageIdWireV1"
+    },
+    "schema": {
+      "$ref": "#/definitions/SchemaOne"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "LockSourceWireV1": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "path"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "path"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "local_registry"
+              ]
+            },
+            "remote_origin": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "compiler_version",
+            "kind"
+          ],
+          "properties": {
+            "compiler_version": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "bundled"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "asset",
+            "kind",
+            "platform",
+            "remote_origin",
+            "sha256"
+          ],
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "binary"
+              ]
+            },
+            "platform": {
+              "type": "string"
+            },
+            "remote_origin": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "LockedDependencyWireV1": {
+      "type": "object",
+      "required": [
+        "archive_sha256",
+        "compiler",
+        "name",
+        "shell_sha256",
+        "source",
+        "version"
+      ],
+      "properties": {
+        "archive_sha256": {
+          "type": "string"
+        },
+        "compiler": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "shell_sha256": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/LockSourceWireV1"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PackageIdWireV1": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchemaOne": {
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    }
+  }
+}

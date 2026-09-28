@@ -210,7 +210,10 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
 
             // Operations without embedded numeric values. Keep this match
             // exhaustive so a new payload cannot bypass the proof boundary.
-            WireRiscOp::Add
+            WireRiscOp::ListMapCapture { .. }
+            | WireRiscOp::OrderedAdjointSum { .. }
+            | WireRiscOp::Iota
+            | WireRiscOp::Add
             | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
@@ -591,7 +594,13 @@ const _: () = {
     // `Expand` size is, so they join the same group.
     // Version 19 (chelis#2413) deletes the counter-stream bridge operation;
     // it adds no operation.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 21);
+    // Version 20 adds the tagged signed-integer Bitwise family, which has no
+    // floating numeric payload. Version 21 adds the discrete Iota source,
+    // List capture carriers and contribution-group counts. None embeds a
+    // floating numeric payload or is a float-envelope transformer.
+    // Version 22 distinguishes resolved-origin Load labels from graph inputs;
+    // labels carry no numeric payload.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 22);
 };
 
 #[cfg(test)]

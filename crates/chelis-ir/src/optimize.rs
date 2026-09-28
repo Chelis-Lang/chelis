@@ -542,6 +542,9 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
                 RiscOp::ExtentWitness { .. }
                     | RiscOp::CheckedReshapeExtent { .. }
                     | RiscOp::CheckedUnitAxis { .. }
+                    // Equal capture values in two List calls still have
+                    // distinct invocation identities for a later AD pass.
+                    | RiscOp::ListMapCapture { .. }
             )
             // Two key operations with equal inputs produce equal bits, but
             // merging them would hand one key to both consumers, which the

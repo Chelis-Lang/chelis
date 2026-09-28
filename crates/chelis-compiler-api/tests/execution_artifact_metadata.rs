@@ -364,34 +364,34 @@ fn zero_input_entry_reports_one_output_no_inputs() {
     );
 }
 
-/// Fix 1 guard: a `grad`-using entry, even selected by its def name, stays on
-/// the host lane (empty compiled-execution metadata) — the pure entry-kernel
-/// lane does not own multi-root grad-tuple emission (#309). This is the line
-/// that keeps "it lowers" from being sufficient to claim the entry lane.
+/// A tensor result selected from a gradient has one callable output. The
+/// gradient's internal tuple does not make the selected entry a host-only
+/// function or leak the sibling loss definition into its ABI.
 #[test]
-fn grad_entry_stays_on_host_lane_even_when_selected() {
-    const GRAD_SRC: &str = "module Repro.GradEntry
-def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 =
-  tensor_to_scalar(sum(mul(x, w), cast(0, i32)))
-def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(x, w)).0
-";
-    let artifact = compile_c(GRAD_SRC, Some("dloss"));
-    assert!(
-        artifact.inputs.is_empty() && artifact.outputs.is_empty(),
-        "grad entry must stay host-lane (empty callable metadata), got inputs={:?} outputs={:?}",
-        artifact.inputs,
-        artifact.outputs
-    );
-    // #819 Fix 2: the decline is recorded, not silent — and it is the
-    // grad-specific reason, so downstream error text can say WHY instead of
-    // guessing from the empty manifest.
-    assert_eq!(
-        artifact.entry_lane_decline,
-        Some(EntryLaneDecline::GradLike {
-            entry: "dloss".to_string()
-        }),
-        "grad decline must be recorded with the GradLike reason"
-    );
+fn selected_tensor_gradient_has_exact_entry_manifest() {
+    let source = "def loss(x: tensor[2, f32], w: tensor[2, f32]) -> f32 = \
+        tensor_to_scalar(sum(mul(x, w), 0i32))\n\
+        def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = \
+        (grad(loss)(x, w)).0\n";
+    let artifact = compile_c(source, Some("dloss"));
+    assert_eq!(input_names(&artifact), ["x", "w"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert_eq!(artifact.entry_lane_decline, None);
+    let c = artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path == "chelis_main.c")
+        .expect("selected entry source");
+    assert!(c.contents.contains("chelis_main"));
+}
+
+#[test]
+fn selected_vmap_has_exact_entry_manifest() {
+    let artifact = compile_c(VMAP_ENTRY, Some("batch_process"));
+    assert_eq!(input_names(&artifact), ["xs"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert_eq!(artifact.entry_lane_decline, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -627,41 +627,12 @@ fn compile_emits_entry_scoped_kernel_not_sibling_def() {
     );
 }
 
-/// Reviewer B1: a `vmap` entry declines the lane as `GradLike` but, unlike
-/// `grad`, does NOT force the host backend, so it reaches the legacy
-/// whole-DAG fallthrough. An earlier revision `debug_assert!`ed that this
-/// combination was impossible: a vmap entry panicked every debug-built
-/// caller of the shared pipeline (tide serve included) and, in release,
-/// silently returned the merged whole-program manifest (#817 unfixed). On
-/// the STRICT surface it is now a loud unsupported-feature error.
+/// The legacy surface still emits the whole program; the callable surface
+/// above scopes this same transformed entry to one checked DAG.
 const VMAP_ENTRY: &str = "\
 def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
 def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process)
 ";
-
-#[test]
-fn vmap_entry_is_a_loud_unsupported_error_on_the_callable_surface() {
-    let err = compile_for_execution(CompileRequest {
-        source_kind: SourceKind::Surf,
-        source: VMAP_ENTRY.to_string(),
-        target: CompileTarget::C,
-        entry_name: Some("batch_process".to_string()),
-    })
-    .expect_err("a vmap entry must be a loud error on compile_for_execution, not a panic");
-    let diagnostic = &err.errors[0];
-    assert_eq!(
-        diagnostic.kind(),
-        chelis_vocab::DiagnosticKind::UnsupportedFeature,
-        "a transform entry is a not-yet-implemented capability, got kind {}: {}",
-        diagnostic.kind().as_str(),
-        diagnostic.message
-    );
-    assert!(
-        diagnostic.message.contains("batch_process") && diagnostic.message.contains("eval"),
-        "message must name the entry and point at `eval`, got: {}",
-        diagnostic.message
-    );
-}
 
 /// LEGACY surface pin for the same program: `compile()` must keep emitting
 /// the whole program (pre-entry-lane behavior) with no panic and no error.

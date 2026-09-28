@@ -1,4 +1,4 @@
-use crate::schema::numbers::{NonnegativeExtent, SourceInteger};
+use crate::schema::numbers::{NonnegativeCount, NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
 use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
@@ -1382,9 +1382,6 @@ pub enum EntryLaneDecline {
     /// The selected entry def's signature is not tensor-in/tensor-out
     /// (e.g. a scalar `f32 -> f32` def selected by name).
     NotTensorSignature { entry: String },
-    /// The selected entry uses a `grad`/`vmap` form; the host lane owns
-    /// multi-root grad-tuple emission (issue #309).
-    GradLike { entry: String },
     /// `lower_named_tensor_entry_dag` could not lower the entry body.
     LoweringFailed { entry: String },
     /// The entry lowered, but its DAG had no roots after dead-code
@@ -1416,30 +1413,6 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
              supports top-level bindings.",
             GeneralKind::CompileError,
         ),
-        EntryLaneDecline::GradLike { entry } => {
-            unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(format!(
-                    "a `grad`/`vmap` transform entry (`{entry}`)"
-                )),
-                "the compiled-execution lane (compile_and_load), which emits a single \
-                 entry-scoped tensor kernel and does not yet lower transform entries \
-                 standalone",
-                chelis_types::unsupported::Stage::Codegen("c"),
-                // chelis#1138 owns this capability: the entry-scoped
-                // compiled lane declines grad/vmap transform entries
-                // standalone (the chelis#817/#818 entry-scoping did not
-                // extend to transform entries). Filed and re-pointed from
-                // the provisional chelis#613 citation after the PR #1037
-                // delta red team adjudicated that #613 (the legacy
-                // whole-program build lane, different predicate) does not
-                // govern this decline.
-                chelis_types::unimplemented_rejection!(
-                    1138,
-                    "run the transform through `eval`, or select a non-transform def \
-                     with `entry_name=`"
-                ),
-            ))
-        }
         other => stage_error(
             "compile",
             format!(
@@ -1479,13 +1452,10 @@ enum EntryLaneOutcome<'a> {
 ///     the LEGACY surface declines to whole-program emission);
 ///   - that def is tensor-signature (`NotTensorSignature` otherwise) — a
 ///     scalar/record/ADT entry stays on the host lane;
-///   - the def does NOT use a `grad`/`vmap` form (`GradLike` otherwise) —
-///     the host lane owns multi-root grad-tuple emission (#309), which
-///     `lower_named_tensor_entry_dag` can technically lower but must not
-///     here. NOTE: unlike `grad`, a `vmap` entry does NOT force the host
-///     backend, so its `GradLike` decline reaches the legacy whole-DAG
-///     fallthrough (a loud error on the strict surface, whole-program
-///     emission on the legacy one);
+///   - the checked body lowers to a standalone tensor DAG regardless of
+///     whether it contains `grad` or `vmap`; a tensor-valued projection
+///     of a gradient tuple is one entry result, while a tuple-valued entry
+///     stays on the host lane by its declared signature;
 ///   - the def lowers to a DAG (`LoweringFailed`) that is non-empty after
 ///     DCE (`EmptyAfterDce`);
 ///   - the DAG's `Load` labels are a subset of the def's declared param
@@ -1534,11 +1504,6 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    if chelis_ir::host::named_entry_uses_grad_like(checked, entry) {
-        return Ok(Decline(EntryLaneDecline::GradLike {
-            entry: entry.to_string(),
-        }));
-    }
     let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
         return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
@@ -1547,6 +1512,11 @@ fn entry_lane_decision<'a>(
     let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
+            entry: entry.to_string(),
+        }));
+    }
+    if dag.roots().len() != 1 {
+        return Ok(Decline(EntryLaneDecline::LoweringFailed {
             entry: entry.to_string(),
         }));
     }
@@ -1578,8 +1548,7 @@ fn entry_lane_decision<'a>(
 /// (python's `compile_and_load`). STRICT entry integrity: an unknown
 /// `entry_name`, an ambiguous default on a multi-def program, or an
 /// entry-lane decline that would otherwise fall through to merged
-/// whole-program metadata (top-level value bindings, a `grad`/`vmap`
-/// transform entry) is a loud error here, never a silently merged
+/// whole-program metadata is a loud error here, never a silently merged
 /// manifest (#817) and never a debug assert. The C-source surface with
 /// the legacy whole-program contract is [`compile`].
 pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutionArtifact> {
@@ -2061,7 +2030,11 @@ fn execution_artifact_from_compiled_observed(
                 reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
-                reject_unsized_named_dims(&entry_dag, "c")?;
+                // The C emitter validates each axis's extent source and each
+                // rendered dimension's origin after backend preparation. A
+                // runtime extent is representable when those checks succeed;
+                // rejecting every unsized dimension here also rejects valid
+                // transformed entries with runtime pad/shrink intermediates.
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -2245,8 +2218,8 @@ fn execution_artifact_from_compiled_observed(
                 // scalar-global shape is the one strict #817 fallback that
                 // remains unsafe here: source-level detection sees the global,
                 // while host lowering has no global product to expose. Real
-                // host globals and GradLike entries retain their established
-                // host-lane artifact with an explicit decline reason.
+                // host globals retain their established host-lane artifact
+                // with an explicit decline reason.
                 if strictness == EntryStrictness::Strict
                     && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
                     && scalar_only_globals
@@ -2311,11 +2284,7 @@ fn execution_artifact_from_compiled_observed(
             // On this legacy whole-DAG path a `Some(decline)` co-occurs with
             // a real (whole-program, merged) manifest — see the
             // `entry_lane_decline` field doc. Every decline reason that
-            // leaves the whole-program DAG rooted can get here, including
-            // `GradLike`: a `vmap` entry declines the lane but, unlike
-            // `grad`, does NOT force the host backend, so it reaches this
-            // path (an earlier revision asserted it could not, and a vmap
-            // entry panicked every debug-built caller). On the STRICT
+            // leaves the whole-program DAG rooted can get here. On the STRICT
             // (callable) surface a merged manifest is the #817 defect, so
             // any decline here is a loud error; on the LEGACY (C-source)
             // surface the whole-program emission is the product contract
@@ -6872,6 +6841,15 @@ fn wire_op(op: &RiscOp) -> WireResult<WireRiscOp> {
                 chelis_ir::dag::KeyBranch::Right => crate::schema::WireKeyBranch::Right,
             },
         },
+        RiscOp::Iota => WireRiscOp::Iota,
+        RiscOp::ListMapCapture { first } => WireRiscOp::ListMapCapture { first: *first },
+        RiscOp::OrderedAdjointSum { groups } => WireRiscOp::OrderedAdjointSum {
+            groups: groups
+                .iter()
+                .copied()
+                .map(NonnegativeCount::try_from)
+                .collect::<WireResult<_>>()?,
+        },
         RiscOp::FoldIn => WireRiscOp::FoldIn {},
         RiscOp::KeySelect => WireRiscOp::KeySelect {},
         RiscOp::SplitN { count } => WireRiscOp::SplitN {
@@ -7155,7 +7133,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn wire_producer_preserves_resolved_global_load_origin_at_v21() {
+    fn wire_producer_preserves_resolved_global_load_origin_at_v22() {
         let mut dag = Dag::new();
         let declaration = dag.declare("entry");
         let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
@@ -7173,13 +7151,13 @@ mod tests {
         );
         dag.add_root(root);
         let wire = wire_dag(&dag).expect("IR producer has a wire form");
-        assert_eq!(wire.schema_version, 21);
+        assert_eq!(wire.schema_version, 22);
         assert!(
             matches!(&wire.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
         );
-        let bytes = serde_json::to_string(&wire).expect("v21 encoding");
-        let decoded = crate::schema::WireDag::from_validated_json(&bytes).expect("v21 decoding");
+        let bytes = serde_json::to_string(&wire).expect("v22 encoding");
+        let decoded = crate::schema::WireDag::from_validated_json(&bytes).expect("v22 decoding");
         assert!(
             matches!(&decoded.nodes[0].op, crate::schema::WireRiscOp::Load { name }
             if name == global.as_str())
@@ -7486,7 +7464,7 @@ mod tests {
         dag.add_root(right);
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 21);
+        assert_eq!(json["schema_version"], 22);
         let kinds: Vec<&serde_json::Value> = json["nodes"]
             .as_array()
             .unwrap()
@@ -7562,6 +7540,157 @@ mod tests {
         let json = serde_json::to_value(&wire).unwrap();
         let decoded = crate::schema::WireDag::from_validated_json(&json.to_string()).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn ordered_list_capture_wire_round_trip_and_malformed_groups() {
+        let mut dag = Dag::new();
+        let owner = dag.declare("ordered_list");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        };
+        let vector = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let source = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "source".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let carrier = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "carrier".into(),
+            },
+            vec![],
+            vector.clone(),
+            None,
+        );
+        let capture = dag.add_node(
+            owner,
+            RiscOp::ListMapCapture { first: true },
+            vec![source, carrier],
+            vector,
+            None,
+        );
+        let sum = dag.add_node(
+            owner,
+            RiscOp::OrderedAdjointSum { groups: vec![2] },
+            vec![capture, capture],
+            scalar,
+            None,
+        );
+        dag.add_root(sum);
+        let json = serde_json::to_value(wire_dag(&dag).unwrap()).unwrap();
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert!(matches!(
+            decoded.nodes[2].op,
+            WireRiscOp::ListMapCapture { .. }
+        ));
+        assert!(
+            matches!(&decoded.nodes[3].op, WireRiscOp::OrderedAdjointSum { groups } if groups.len() == 1 && groups[0].get() == 2)
+        );
+        for (node, field, replacement) in [
+            (
+                2,
+                "op",
+                serde_json::json!({"kind": "list_map_capture", "first": false}),
+            ),
+            (2, "inputs", serde_json::json!([0])),
+            (
+                2,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f32"}),
+            ),
+            (3, "inputs", serde_json::json!([2, 0])),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [0, 2]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [1]}),
+            ),
+            (
+                3,
+                "op",
+                serde_json::json!({"kind": "ordered_adjoint_sum", "groups": [usize::MAX, 2]}),
+            ),
+            (
+                3,
+                "output_type",
+                serde_json::json!({"dims": [], "precision": "f64"}),
+            ),
+        ] {
+            let mut malformed = json.clone();
+            malformed["nodes"][node][field] = replacement;
+            assert!(
+                WireDag::from_validated_json(&malformed.to_string()).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    fn runtime_iota_wire_fixture() -> Dag {
+        let mut dag = Dag::new();
+        let owner = dag.declare("runtime_iota");
+        let scalar = TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        };
+        let start = dag.add_node(
+            owner,
+            RiscOp::Load {
+                name: "start".into(),
+            },
+            vec![],
+            scalar.clone(),
+            None,
+        );
+        let end = dag.add_node(
+            owner,
+            RiscOp::Load { name: "end".into() },
+            vec![],
+            scalar,
+            None,
+        );
+        let output = dag.add_node(
+            owner,
+            RiscOp::Iota,
+            vec![start, end],
+            TensorType {
+                dims: vec![DimInfo::Named("count".into(), None)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.add_root(output);
+        dag
+    }
+
+    #[test]
+    fn runtime_iota_wire_round_trip_and_malformed_endpoints() {
+        let dag = runtime_iota_wire_fixture();
+        let wire = wire_dag(&dag).unwrap();
+        let json = serde_json::to_string(&wire).unwrap();
+        let decoded = WireDag::from_validated_json(&json).unwrap();
+        assert!(matches!(decoded.nodes[2].op, WireRiscOp::Iota));
+        for path in [0, 1, 2] {
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["nodes"][path]["output_type"]["precision"] = serde_json::json!("f32");
+            assert!(WireDag::from_validated_json(&value.to_string()).is_err());
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["nodes"][2]["inputs"] = serde_json::json!([0]);
+        assert!(WireDag::from_validated_json(&value.to_string()).is_err());
     }
 
     #[test]

@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 21 is explicitly
+WireDag JSON is an exact-version contract. Schema version 22 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 20, and every future version are decode errors before any IR
+versions 1 through 21, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
@@ -35,7 +35,7 @@ uses `@chelis_global_` followed by the lowercase hexadecimal UTF-8 bytes of
 its nonempty validated declaration name. This encoding is injective and cannot
 be authored as an ordinary identifier, including a linked qualified name.
 `WireRiscOp::Store.name` is always ordinary. An empty, malformed, noncanonical,
-or wrong-kind name is an encoding and decoding error. Version 20 has no
+or wrong-kind name is an encoding and decoding error. Version 21 has no
 resolved-origin label contract and is rejected before node decoding.
 
 `WireRiscOp::ExtentWitness { site, parameter, axis, requirements, claims }`
@@ -194,7 +194,12 @@ axis range, and the exact input cardinality before IR construction.
 
 Version 20 adds the closed `Bitwise { bitwise }` operation with the five signed
 integer identities in [05-OP-47]. Every tagged variant must be known to the
-version 20 decoder. `OneHot` remains only a transient
+version 22 decoder. Version 21 adds `Iota` for the two exact scalar i64
+endpoints of `range` [05-OP-54], plus `ListMapCapture` and
+`OrderedAdjointSum` for the executed callback and cotangent order in
+[05-OP-55] and spec/06. Ordered contribution group counts use a tagged,
+nonnegative i64 carrier; zero groups, zero widths, overflow, or a count total
+different from the input arity are decode errors. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact

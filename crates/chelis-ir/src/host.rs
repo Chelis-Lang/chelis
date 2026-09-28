@@ -25,7 +25,7 @@ use crate::LoadStoreName;
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeSlot, HostShapeTerm,
-    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, decode_host_type,
+    HostTensorTypeTerm, HostTypeDecodeError, HostTypeTerm, KeyBuiltinCallable, decode_host_type,
 };
 use crate::lower::top_level_lowering_map;
 
@@ -2671,30 +2671,6 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
                 .iter()
                 .all(|param| matches!(param.ty, ConcreteHostType::Tensor(_)))
     })
-}
-
-/// Does the named entry def's body use a `grad`/`vmap`/`vmap-grad` form?
-///
-/// Such an entry MUST stay on the host lane even though it is
-/// tensor-signature and [`lower_named_tensor_entry_dag`] *can* produce a
-/// DAG for it: the host lane owns the multi-root grad-tuple emission
-/// (assembling a real `chelis_tuple` from per-`wrt` gradient outputs, see
-/// #309), which the single-root entry-scoped kernel path does not.
-///
-/// This is deliberately narrower than "the body needs the host runtime":
-/// a DAG-lowerable host-runtime builtin such as `concat` lowers cleanly
-/// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
-/// NOT excluded here. Only genuinely host-lane-owned forms are.
-pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
-    // A whole-program entry owns its session, so nothing outside this crate
-    // has to know one exists (chelis#1835).
-    let session = HostLoweringSession::new(program);
-    let program = &session;
-    let defs = cached_program_defs(program);
-    match lookup_program_def(&defs, name) {
-        Some(body) => expr_contains_grad_like(body),
-        None => false,
-    }
 }
 
 /// Does the checked program bind any top-level VALUE binding — a
@@ -7774,6 +7750,25 @@ fn lower_host_expr_kind(
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `var` node has no symbol"))?
                 .to_string();
             let ty = expr_host_type(expr, program, scope);
+            // An unshadowed key operation in value position is a checked
+            // callable, not a lexical C variable. Keep its registered
+            // operation identity in host IR so a later alias or shadow
+            // cannot change what it calls. The backend materializes the
+            // corresponding capture-free function pointer from this node.
+            if let Some(op) = KeyBuiltinCallable::from_symbol(&name)
+                && !scope.contains_key(&name)
+                && program.def_named(&name).is_none()
+            {
+                return Ok(HostExpr::new(HostExprKind::Builtin {
+                    name,
+                    args: Vec::new(),
+                    ty: if ty.is_unresolved() {
+                        HostTypeTerm::KeyBuiltinCallable(op)
+                    } else {
+                        ty
+                    },
+                }));
+            }
             if name == "Nil" {
                 return Ok(HostExpr::new(HostExprKind::List(
                     Vec::new(),
@@ -11955,6 +11950,27 @@ fn lower_app_host_expr(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
+    if let Some(HostTypeTerm::KeyBuiltinCallable(op)) = scope.get(&name) {
+        // This identity came from the resolved value's producer, including
+        // aliases and tuple projections. The application metadata selects
+        // its concrete result; the alias's spelling selects nothing.
+        let args = kids[1..]
+            .iter()
+            .map(|arg| lower_host_expr(arg, program, scope, tensor_helpers))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ty = if explicit_ty.is_unresolved() {
+            infer_builtin_host_type(op.symbol(), &args).ok_or_else(|| {
+                host_expr_lowering_error(app_expr, "checked key call has no concrete result type")
+            })?
+        } else {
+            explicit_ty
+        };
+        return Ok(HostExpr::new(HostExprKind::Builtin {
+            name: op.symbol().to_string(),
+            args,
+            ty,
+        }));
+    }
     // Std.Io.Json owns canonical object observation. Keep generic
     // `dict_entries` insertion-ordered and lower only this exact private
     // package identity to the generated-C-local sorter. The name is exact so
@@ -13086,6 +13102,9 @@ fn host_type_syntax(ty: &HostTypeTerm, span: chelis_deep::Span) -> Option<Expr> 
                 span,
             ))
         }
+        // This closed operation has no single Deep function type until a
+        // checked application selects its scalar or tensor alternative.
+        HostTypeTerm::KeyBuiltinCallable(_) => None,
         HostTypeTerm::Adt(name, args) => Some(host_adt_syntax(
             name,
             args.iter()
@@ -13947,6 +13966,10 @@ fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
             }
             out.push_str(")->");
             write_canonical_host_type_key(ret, out);
+        }
+        HostTypeTerm::KeyBuiltinCallable(op) => {
+            out.push_str("key-builtin:");
+            out.push_str(op.symbol());
         }
         HostTypeTerm::Adt(name, args) => {
             out.push_str("adt:");
@@ -16813,26 +16836,6 @@ fn expr_reaches_forward_fail(
             .iter()
             .any(|kid| expr_reaches_forward_fail(kid, defs, visiting)),
         Expr::MetaExpr(meta, _) => expr_reaches_forward_fail(&meta.expr, defs, visiting),
-        Expr::Atom(_, _) | Expr::Map(_, _) => false,
-    }
-}
-
-/// Does this Deep expr contain a `grad`/`vmap`/`vmap-grad` node anywhere?
-/// Entry-point routing uses the whole-expression answer because transformed
-/// result packaging is host-owned; the forward-fail gate above intentionally
-/// uses the more precise subtree-aware traversal instead.
-fn expr_contains_grad_like(expr: &Expr) -> bool {
-    record_host_work(|profile| profile.grad_scan_nodes += 1);
-    match expr {
-        Expr::Node(list, _) => {
-            matches!(list.tag(), DeepTag::Grad | DeepTag::Vmap)
-                || list.children_slice().iter().any(expr_contains_grad_like)
-        }
-        Expr::UnknownForm(data) => {
-            data.head == "vmap-grad" || data.children.iter().any(expr_contains_grad_like)
-        }
-        Expr::BareList(items, _) => items.iter().any(expr_contains_grad_like),
-        Expr::MetaExpr(meta, _) => expr_contains_grad_like(&meta.expr),
         Expr::Atom(_, _) | Expr::Map(_, _) => false,
     }
 }

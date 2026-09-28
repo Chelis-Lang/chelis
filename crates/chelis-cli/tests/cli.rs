@@ -46,6 +46,10 @@ fn iter_foundation_example() -> PathBuf {
     example_path("../../examples/iter_foundation.ch")
 }
 
+fn key_builtin_aliases_example() -> PathBuf {
+    example_path("../../examples/key_builtin_aliases.ch")
+}
+
 fn tensor_structural_ops_example() -> PathBuf {
     example_path("../../examples/tensor_structural_ops.ch")
 }
@@ -70,11 +74,12 @@ fn opaque_invariants_simplex_example() -> PathBuf {
     example_path("../../examples/opaque_invariants_simplex.ch")
 }
 
-fn executable_examples() -> [PathBuf; 13] {
+fn executable_examples() -> [PathBuf; 14] {
     [
         dict_foundation_example(),
         hello_tensor_example(),
         iter_foundation_example(),
+        key_builtin_aliases_example(),
         list_foundation_example(),
         linreg_example(),
         mnist_example(),
@@ -1173,6 +1178,51 @@ fn assert_stdout_value_parity(c_out: &[u8], eval_out: &[u8], label: &str) {
         "[{label}] compiled and eval stdout must be byte-identical \
          (chelis#732 section C2.3)"
     );
+}
+
+#[test]
+fn build_c_runs_key_builtin_aliases_and_matches_eval_output() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("key-builtin-aliases-build-out");
+    let source = key_builtin_aliases_example();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", source.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval_text = String::from_utf8_lossy(&eval_stdout);
+    assert!(eval_text.contains("main.0 = key(0000000000000007)"));
+    assert!(eval_text.contains("main.3 = tensor(shape=[2, 2], data=[key("));
+
+    let status = gcc_link_generated(&out_dir, "key_builtin_aliases.c", "key_builtin_aliases");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("key_builtin_aliases"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_stdout_value_parity(&run_output.stdout, &eval_stdout, "key_builtin_aliases");
 }
 
 #[test]

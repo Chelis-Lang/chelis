@@ -135,7 +135,19 @@ The bridge exists to give the IR rewrite a bit-identical oracle. Phase 3 states 
 - phase 3 refuses `vmap` over a function that draws, because eval's bits would otherwise change to a different non-conforming value;
 - anything silently wrong in a new way must be fenced.
 
-## 6. LaCaDiLE
+## 6. Compiler acceptance
+
+The bounded keyed-randomness oracle is
+`.venv/bin/python scripts/keyed_randomness_oracle.py`, with its exact corpus,
+lane coverage, failure rules and receipt format in
+[`docs/keyed_randomness_oracle.md`](../../docs/keyed_randomness_oracle.md).
+It covers explicit derivations in place of counter-era nested seeds and
+ordinals, and records `par` as the typed chelis#2503 rejection documented in
+spec/07, not positive execution. The tensor-key surface target is required.
+PASS applies to this named compiler corpus; step 4's shell migrations and
+releases remain separate completion evidence.
+
+## 7. LaCaDiLE
 
 LaCaDiLE PR #80 models keys beside its counter protocol. The keyed modules prove three results with no `sorry` and only the standard axioms:
 - the pathwise derivative at every key environment;

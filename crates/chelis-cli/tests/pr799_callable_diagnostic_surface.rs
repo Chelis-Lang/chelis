@@ -92,6 +92,20 @@ fn used_returned_named_function_gets_the_frozen_callable_diagnostic() {
     assert_frozen_callable_rejection(&stderr, &emitted);
 }
 
+/// An unused nullary function still exposes its returned callable as a root;
+/// ownership must preserve that value until the target ABI rejects it.
+#[test]
+fn unused_returned_named_function_keeps_callable_diagnostic() {
+    let (ok, stderr, emitted) = c_build(
+        "def increment(x: i8) -> i8 = add(x, cast(1, i8))\n\
+         def choose() -> i8 -> i8 = increment\n\
+         out = print(cast(6, i8))\n",
+        "returned_named_unused",
+    );
+    assert!(!ok, "an ordinary returned function must not build for C");
+    assert_frozen_callable_rejection(&stderr, &emitted);
+}
+
 /// The compiler-API fixture from
 /// `dynamically_selected_named_callback_has_no_c_host_value_abi`, driven
 /// through the CLI surface.

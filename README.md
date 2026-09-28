@@ -162,8 +162,12 @@ Install Python dependencies into the venv as needed:
 
 ```sh
 uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
-uv pip install -e bindings/python # chelis Python bindings (optional)
+uv pip install -e bindings/python # editable development install; checks checkout runtime freshness
 ```
+
+Standard wheel builds seal the runtime into the extension; this distribution-only feature
+does not apply to editable installs. See `bindings/python/README.md` for the bounded
+source-free wheel consumer smoke.
 
 **Commit-message hook.** `.githooks/commit-msg` is the tracked commit-msg hook.
 It runs `scripts/check_commit_message.py` through the activated

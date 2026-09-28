@@ -5539,6 +5539,27 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
     }
 }
 
+// A runtime scalar list represented by its tensor storage. Keeping a VALUE,
+// rather than replaying its source expression, evaluates endpoints and map
+// callbacks once and transports the source through normal lexical captures.
+const TENSOR_LIST_CTOR: &str = "__chelis_tensor_list";
+fn tensor_list_value(source: NodeId) -> LoweredValue {
+    LoweredValue::Adt {
+        host: None,
+        ctor: TENSOR_LIST_CTOR.into(),
+        field_names: None,
+        fields: vec![LoweredValue::Node(source)],
+    }
+}
+fn tensor_list_source(value: &LoweredValue) -> Option<NodeId> {
+    match value {
+        LoweredValue::Adt { ctor, fields, .. } if ctor == TENSOR_LIST_CTOR && fields.len() == 1 => {
+            fields[0].as_single_node()
+        }
+        _ => None,
+    }
+}
+
 fn runtime_list_view_parts(value: &LoweredValue) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
     let LoweredValue::Adt { ctor, fields, .. } = value else {
         return None;
@@ -6399,6 +6420,10 @@ impl ResolvedFunction {
 #[derive(Clone)]
 enum CallableExpr {
     Plain(ResolvedFunction),
+    /// Resolved key operation carried through a checked value binding. The
+    /// original operation identity is captured when the value is formed;
+    /// an alias's spelling never selects the lowered primitive.
+    KeyBuiltin(String),
     Vmap {
         fn_expr: ResolvedFunction,
         axis: usize,
@@ -8042,6 +8067,7 @@ impl<'program> LowerCtx<'program> {
         };
         match callable {
             CallableExpr::Plain(fn_expr) => CallableExpr::Plain(function(fn_expr)),
+            CallableExpr::KeyBuiltin(name) => CallableExpr::KeyBuiltin(name.clone()),
             CallableExpr::Vmap { fn_expr, axis } => CallableExpr::Vmap {
                 fn_expr: function(fn_expr),
                 axis: *axis,
@@ -9136,6 +9162,60 @@ impl<'program> LowerCtx<'program> {
         lowered
     }
 
+    /// A checked key operation inside a native aggregate carries a closed
+    /// operation identity through projection. The pure DAG path needs only
+    /// that static identity. The mixed host/DAG path also gets a staged
+    /// producer, so a host consumer can read the projected value.
+    fn stage_key_builtin_tuple_item(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::{HostTypeTerm, KeyBuiltinCallable};
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        if kids.first().and_then(symbol_name) != Some(name)
+            || self.bindings.contains_key(name)
+            || self.program_defs.contains_key(name)
+        {
+            return None;
+        }
+        let op = KeyBuiltinCallable::from_symbol(name)?;
+        let ty = HostTypeTerm::KeyBuiltinCallable(op);
+        let id = HostValueId(self.next_host_value);
+        self.next_host_value += 1;
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HasSources);
+            self.host_sources.push(HostSource {
+                before: self.dag.nodes().len(),
+                value: StageValue::Host(id),
+                ty: ty.clone(),
+                expression: expr.clone(),
+                captures: Vec::new(),
+            });
+        }
+        Some(LoweredValue::Host { id, ty })
+    }
+
+    /// A key builtin alias can enter a tuple after one or more lexical
+    /// bindings. Read an existing closed carrier through that binding;
+    /// only an unbound builtin producer creates a fresh carrier.
+    fn key_builtin_alias_value(&mut self, expr: &Expr, name: &str) -> Option<LoweredValue> {
+        let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+            return None;
+        };
+        let referenced = kids.first().and_then(symbol_name)?;
+        if let Some(value) = self.bindings.get(referenced)
+            && let LoweredValue::Host {
+                ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                ..
+            } = value
+            && op.symbol() == name
+        {
+            return Some(value.clone());
+        }
+        self.stage_key_builtin_tuple_item(expr, name)
+    }
+
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
     ///
@@ -10008,7 +10088,14 @@ impl<'program> LowerCtx<'program> {
                         // as well as its native inlining identity. Host scalar
                         // expressions can then capture aliases through the
                         // same typed host carrier as other lexical values.
-                        if let Some(value) = self.stage_host_value(&bind_kids[i + 1], false) {
+                        let value = self.stage_host_value(&bind_kids[i + 1], false).or_else(|| {
+                            if let CallableExpr::KeyBuiltin(operation) = &callable {
+                                self.key_builtin_alias_value(&bind_kids[i + 1], operation)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(value) = value {
                             self.bindings.insert(name.clone(), value);
                         }
                         self.local_callables.insert(name.clone(), callable);
@@ -10646,13 +10733,51 @@ impl<'program> LowerCtx<'program> {
 
         let ty = self.type_from_meta(meta);
 
-        // Check if func is a known built-in: (var {} name).
+        // Unbound direct callees include builtin operations registered outside
+        // BUILTIN_NAMES (for example dropout) and positional ADT constructors.
+        // A lexical value binding takes precedence: a builtin-spelled alias or
+        // shadow must be resolved from its checked callable identity below.
         if let Some((DeepTag::Var, _, func_kids)) = stamped_parts(&kids[0])
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
+            && !self.bindings.contains_key(func_name)
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
+            if self.allow_host_list_ad_rewrites && func_name == "range" && kids.len() == 3 {
+                let start = self.lower_expr_node(&kids[1], "range start");
+                let end = self.lower_expr_node(&kids[2], "range end");
+                let dim = DimInfo::Named("*".into(), None);
+                let source = self.dag.add_node(
+                    self.owner(),
+                    RiscOp::Iota,
+                    vec![start, end],
+                    TensorType {
+                        dims: vec![dim],
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                );
+                return tensor_list_value(source);
+            }
+            if self.allow_host_list_ad_rewrites
+                && func_name == "map"
+                && kids.len() == 3
+                && self.is_tensor_list_expr(&kids[2])
+            {
+                let list = self.lower_expr(&kids[2]);
+                let source = tensor_list_source(&list).expect("represented tensor list");
+                let output = self
+                    .lower_host_list_map(&kids[1], source)
+                    .unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "runtime map callback cannot be represented as a scalar tensor graph",
+                            Some(app_span),
+                            self.current_span_id.clone(),
+                        )
+                    });
+                return tensor_list_value(output);
+            }
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && kids.len() == 3 {
                 return LoweredValue::Adt {
                     host: None,
@@ -10668,7 +10793,35 @@ impl<'program> LowerCtx<'program> {
             // static empty/non-empty guard look runtime-dependent and mix an
             // i64 mask into the floating adjoint branches.
             if self.allow_host_list_ad_rewrites && func_name == "len" && kids.len() == 2 {
+                let resolved = self.resolved_list_expr(&kids[1]);
+                if let Some(source) = to_list_source_expr(&resolved) {
+                    let source = self.lower_expr_node(source, "list length source");
+                    // [05-OP-57] preserves nested Lists. Their outer length
+                    // is axis zero, never the tensor's total element count.
+                    return LoweredValue::Node(self.dag.add_node(
+                        self.owner(),
+                        RiscOp::Shape { axis: 0 },
+                        vec![source],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    ));
+                }
                 let list = self.lower_expr(&kids[1]);
+                if let Some(source) = tensor_list_source(&list) {
+                    return LoweredValue::Node(self.dag.add_node(
+                        self.owner(),
+                        RiscOp::Shape { axis: 0 },
+                        vec![source],
+                        TensorType {
+                            dims: vec![],
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    ));
+                }
                 if let Some((_, len, _)) = runtime_list_view_parts(&list) {
                     return LoweredValue::Node(len);
                 }
@@ -10795,6 +10948,18 @@ impl<'program> LowerCtx<'program> {
                 app_span,
                 inlining_name,
             )),
+            CallableExpr::KeyBuiltin(name) => Some(if name == "split_key" {
+                if args.len() != 1 {
+                    raise_lowering_error(
+                        "checked split_key callable has wrong arity",
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                self.lower_split_key(&args[0])
+            } else {
+                LoweredValue::Node(self.lower_builtin_app(&name, args, ty, app_span))
+            }),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -10940,6 +11105,14 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = local_callables.get(&name) {
                     return Some(callable.clone());
                 }
+                if !declaration
+                    && let Some(LoweredValue::Host {
+                        ty: crate::host_type_state::HostTypeTerm::KeyBuiltinCallable(op),
+                        ..
+                    }) = self.bindings.get(&name)
+                {
+                    return Some(CallableExpr::KeyBuiltin(op.symbol().to_string()));
+                }
                 // The innermost binding of the name wins (chelis#1949): a
                 // function-typed parameter is a callable, and a local value
                 // shadows a same-named top-level function, so it is no
@@ -10971,6 +11144,12 @@ impl<'program> LowerCtx<'program> {
                         }
                     }
                     return Some(callable);
+                }
+                if matches!(
+                    name.as_str(),
+                    "key_from_seed" | "split_key" | "split_keys" | "fold_in"
+                ) {
+                    return Some(CallableExpr::KeyBuiltin(name));
                 }
                 None
             }
@@ -11029,6 +11208,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         // `vmap(parameter)` is G2 territory.
                         CallableExpr::Parameter { .. } => None,
+                        CallableExpr::KeyBuiltin(_) => None,
                     })
             }
             DeepTag::Grad => self
@@ -12508,7 +12688,7 @@ impl<'program> LowerCtx<'program> {
             .iter()
             .map(|arg| self.lower_expr_node(arg, "vmap arguments"))
             .collect();
-        self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span)
+        self.lower_vmap_callable_with_nodes(fn_expr, axis, &actual_args, app_span, false)
     }
 
     fn restore_vmapped_entry_witness_axes(
@@ -12615,6 +12795,7 @@ impl<'program> LowerCtx<'program> {
         axis: usize,
         actual_args: &[NodeId],
         app_span: Span,
+        ordered_scalar_map: bool,
     ) -> LoweredValue {
         #[cfg(feature = "lowering-trace")]
         if let Some(trace) = &self.trace {
@@ -12768,11 +12949,31 @@ impl<'program> LowerCtx<'program> {
             })
             .collect::<UnordSet<_>>();
 
-        let vmapped = match vmap::vectorize_axis0_with_captures(
-            &subctx.dag,
-            batch_dim.clone(),
-            &captured_loads,
-        ) {
+        // [05-OP-55] Vectorization may reorder callback operations between
+        // iterations only if no invocation can produce an observable check.
+        // Scalar outputs also exclude iteration-dependent allocation extents.
+        if ordered_scalar_map
+            && crate::optimize::dead_code_eliminate(&subctx.dag)
+                .nodes()
+                .iter()
+                .any(|node| {
+                    !node.output_type.dims.is_empty()
+                        || node.runtime_check() != crate::dag::RuntimeCheck::Nothing
+                        || node.output_type.precision == Prim::Key
+                })
+        {
+            raise_fatal_lowering_error(
+                "runtime map callback requires ordered execution: its scalar DAG is not proven free of observable checks",
+                Some(app_span),
+                self.current_span_id.clone(),
+            );
+        }
+        let vectorize = if ordered_scalar_map {
+            vmap::vectorize_list_map
+        } else {
+            vmap::vectorize_axis0_with_captures
+        };
+        let vmapped = match vectorize(&subctx.dag, batch_dim.clone(), &captured_loads) {
             Ok(dag) => dag,
             Err(message) => raise_lowering_error(
                 format!("`vmap` lowering failed: {message}"),
@@ -13018,6 +13219,7 @@ impl<'program> LowerCtx<'program> {
         subctx.current_span_id = self.current_span_id.clone();
         let mut wrt = Vec::new();
         let mut wrt_param_indices = Vec::new();
+        let mut mapped_batch_witness = None;
         for (index, (name, param_ty)) in param_names
             .iter()
             .zip(param_types.iter().cloned())
@@ -13033,6 +13235,14 @@ impl<'program> LowerCtx<'program> {
                 param_ty.clone(),
                 subctx.current_span_id.clone(),
             );
+            if mapped_batch_witness.is_none()
+                && self
+                    .dag
+                    .get(canonical_args[index])
+                    .is_some_and(|actual| actual.output_type.dims.len() > param_ty.dims.len())
+            {
+                mapped_batch_witness = Some(load);
+            }
             if self.is_selected_wrt(index, &param_ty, wrt_indices) {
                 wrt.push(load);
                 wrt_param_indices.push(index);
@@ -13060,6 +13270,14 @@ impl<'program> LowerCtx<'program> {
         let output = subctx
             .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
+        // Even a constant body has one result per mapped input row. Keep the
+        // formal's shape available through AD pruning so a symbolic batch
+        // broadcast reads its cardinality from the actual at the call site.
+        if let Some(witness) = mapped_batch_witness
+            && witness != output
+        {
+            subctx.dag.add_shape_dep(output, witness);
+        }
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -16199,11 +16417,38 @@ impl<'program> LowerCtx<'program> {
         }
         matches!(
             app_var_name_and_args(expr),
-            Some(("to_list", [_])) | Some(("map", [_, _])) | Some(("filter", [_, _]))
+            Some(("to_list", [_]))
+                | Some(("map", [_, _]))
+                | Some(("filter", [_, _]))
+                | Some(("range", [_, _]))
         )
     }
 
+    fn is_tensor_list_expr(&self, expr: &Expr) -> bool {
+        if let Some(name) = bare_var_name(expr) {
+            return self
+                .bindings
+                .get(&name)
+                .and_then(tensor_list_source)
+                .is_some();
+        }
+        let builtin = |name: &str| {
+            !self.program_defs.contains_key(name)
+                && !self.local_callables.contains_key(name)
+                && !self.fn_typed_params.contains(name)
+        };
+        match app_var_name_and_args(expr) {
+            Some(("range", [_, _])) if builtin("range") => true,
+            Some(("map", [_, source])) if builtin("map") => self.is_tensor_list_expr(source),
+            _ => false,
+        }
+    }
+
     fn lower_host_list_to_tensor(&mut self, expr: &Expr, ty: &TensorType) -> Option<NodeId> {
+        if self.is_tensor_list_expr(expr) {
+            let value = self.lower_expr(expr);
+            return tensor_list_source(&value);
+        }
         let resolved = self.resolved_list_expr(expr);
         if let Some(source) = to_list_source_expr(&resolved) {
             return Some(self.lower_expr_node(source, "to_list/tensor AD boundary"));
@@ -16218,8 +16463,7 @@ impl<'program> LowerCtx<'program> {
                     let rhs_node = self.lower_expr_node(rhs, "map zip right source");
                     self.lower_host_list_zip_map(callback, lhs_node, rhs_node)
                 } else {
-                    let source = to_list_source_expr(&list_resolved)?;
-                    let source_node = self.lower_expr_node(source, "map source");
+                    let source_node = self.lower_host_list_to_tensor(&list_resolved, ty)?;
                     self.lower_host_list_map(callback, source_node)
                 }
             }
@@ -16240,6 +16484,20 @@ impl<'program> LowerCtx<'program> {
         let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
             return None;
         };
+        if self.dag.get(source_node)?.output_type.dims.len() == 1
+            && concrete_dim_len(&self.dag.get(source_node)?.output_type.dims[0]).is_none()
+        {
+            return Some(
+                self.lower_vmap_callable_with_nodes(
+                    &fn_expr,
+                    0,
+                    &[source_node],
+                    callback.span(),
+                    true,
+                )
+                .expect_node("scalar map callback"),
+            );
+        }
         let (source_node, len, elem_ty, out_dim) = self.flattened_list_source_parts(source_node)?;
         let mut mapped = Vec::with_capacity(len);
         for index in 0..len {
@@ -20048,7 +20306,19 @@ impl<'program> LowerCtx<'program> {
 
     /// `(tuple {} elem1 elem2 ...)` -- not representable in the Phase 0 RISC DAG.
     fn lower_tuple(&mut self, kids: &[Expr]) -> LoweredValue {
-        LoweredValue::Tuple(kids.iter().map(|expr| self.lower_expr(expr)).collect())
+        LoweredValue::Tuple(
+            kids.iter()
+                .map(|expr| {
+                    if let Some(CallableExpr::KeyBuiltin(name)) = self.resolve_callable_expr(expr)
+                        && let Some(staged) = self.key_builtin_alias_value(expr, &name)
+                    {
+                        staged
+                    } else {
+                        self.lower_expr(expr)
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Legacy sequential placeholder for `(par {} expr1 expr2 ...)`, retained
@@ -20360,6 +20630,7 @@ impl<'program> LowerCtx<'program> {
             fields,
         } = scrutinee
         else {
+            self.retain_host_match_control(span);
             self.reject_static_adt(
                 span,
                 "`match` on a runtime scrutinee is not supported by IR evaluation yet; \
@@ -20396,6 +20667,7 @@ impl<'program> LowerCtx<'program> {
                 }
                 StaticPatternMatch::Match(binds) => {
                     if !guard_is_absent(guard) {
+                        self.retain_host_match_control(span);
                         self.reject_static_adt(
                             span,
                             "`match` arm guards are not supported by static arm \
@@ -20444,6 +20716,24 @@ impl<'program> LowerCtx<'program> {
                  form outside the supported static slice (chelis#520 D1)"
             ),
         )
+    }
+
+    /// [04-PAT-2]: when selection needs a host value or guard, the staged
+    /// tensor plan must retain the entire match in host control. In particular,
+    /// an initializer's ADT result is an opaque host carrier, not a static
+    /// constructor. Decline this plan explicitly before visiting any arm;
+    /// retrying DAG lowering after a generic failure would lose source claims.
+    /// Transform lowerers have no host program and keep their own rejection.
+    fn retain_host_match_control(&self, span: Span) {
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            raise_lowering_error(
+                "dynamic matches retain host control flow; scalar source stages cannot be hoisted out of an arm",
+                Some(span),
+                self.current_span_id.clone(),
+            );
+        }
     }
 
     /// Rejection helper for the static-ADT lowering slice (chelis#520).
@@ -22209,6 +22499,38 @@ mod tests {
             LinearityInfo::default(),
         )
         .declared_for_test()
+    }
+
+    #[test]
+    fn host_list_length_reads_the_outer_axis() {
+        let mut ctx = empty_lower_ctx();
+        ctx.allow_host_list_ad_rewrites = true;
+        let input = ctx.dag.add_node(
+            ctx.owner(),
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        ctx.bindings.insert("x".into(), LoweredValue::Node(input));
+        let expr = chelis_deep::parser::parse_str(
+            "(app {} (var {} len) (app {} (var {} to_list) (var {} x)))",
+        )
+        .unwrap()
+        .remove(0);
+        let count = ctx.lower_expr_node(&expr, "outer list length");
+        ctx.dag.add_root(count);
+        let values = crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[count], |name| {
+            (name == "x").then(|| crate::eval::TensorValue::from_vec(vec![2, 3], vec![1.0; 6]))
+        })
+        .unwrap();
+        assert_eq!(
+            values[&count].storage().scalar_at(0).as_i64_exact(),
+            Some(2)
+        );
     }
 
     fn pattern_scope_depends_on_bad(pattern: Expr) -> bool {
@@ -27225,6 +27547,30 @@ mod regression_tests {
                 |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
             ),
             "dead arm's literal must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_payload_ctor_call_selects_taken_arm_and_binds_payload() {
+        // A positional constructor application must reach the ADT arm of
+        // lower_app, even though constructors are absent from BUILTIN_NAMES.
+        let dag = parse_and_lower_unchecked(
+            "(match {} (app {} (var {} ModeA) (lit {type: (t-prim {} f32)} 2.5)) \
+             (arm {} (pat-ctor {} ModeA (pat-var {} value)) () (var {} value)) \
+             (arm {} (pat-ctor {} ModeB (pat-var {} other)) () \
+               (lit {type: (t-prim {} f32)} 9.0)))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 2.5)
+            ),
+            "constructor payload must lower into the taken arm: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 9.0)
+            ),
+            "dead constructor arm must not be lowered: {dag:?}"
         );
     }
 

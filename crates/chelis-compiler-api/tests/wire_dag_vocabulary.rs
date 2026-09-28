@@ -120,14 +120,18 @@ fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
         "split_n",
         // Version 19 (chelis#2413): the key join of a where-lowered branch.
         "key_select",
+        // Version 21: represented runtime integer range and List-map captures.
+        "iota",
+        "list_map_capture",
+        "ordered_adjoint_sum",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 21,
+        WIRE_DAG_SCHEMA_VERSION, 22,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 74);
+    assert_eq!(actual.len(), 77);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"
@@ -173,10 +177,10 @@ fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions(
 }
 
 #[test]
-fn resolved_global_load_has_a_v21_wire_identity() {
+fn resolved_global_load_has_a_v22_wire_identity() {
     let global = chelis_ir::LoadStoreName::top_level("Lib.weights");
     let dag = WireDag {
-        schema_version: 21,
+        schema_version: 22,
         declarations: vec!["entry".to_string()],
         nodes: vec![WireDagNode {
             declaration: 0,
@@ -196,13 +200,13 @@ fn resolved_global_load_has_a_v21_wire_identity() {
         }],
         roots: vec![0],
     };
-    let encoded = serde_json::to_string(&dag).expect("v21 producer carries resolved origin");
-    let decoded = WireDag::from_validated_json(&encoded).expect("v21 consumer retains origin");
+    let encoded = serde_json::to_string(&dag).expect("v22 producer carries resolved origin");
+    let decoded = WireDag::from_validated_json(&encoded).expect("v22 consumer retains origin");
     assert!(matches!(&decoded.nodes[0].op, WireRiscOp::Load { name } if name == global.as_str()));
-    let old = encoded.replace("\"schema_version\":21", "\"schema_version\":20");
+    let old = encoded.replace("\"schema_version\":22", "\"schema_version\":21");
     assert!(
         WireDag::from_validated_json(&old).is_err(),
-        "v20 is rejected before label decode"
+        "v21 is rejected before label decode"
     );
     for malformed in ["@chelis_global_0g", "@chelis_global_6D"] {
         let wrong = encoded.replace(global.as_str(), malformed);

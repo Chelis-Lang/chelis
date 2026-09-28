@@ -509,6 +509,16 @@ fn parity_grad_fused_zero() {
 }
 
 #[test]
+fn parity_grad_runtime_basis() {
+    let path = examples_root().join("grad_runtime_basis.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[3], data=[0.0, 3.0, 0.0])\ncapture = tensor(shape=[1], data=[0.0])\n"
+    );
+}
+
+#[test]
 fn parity_vmap_shape_value() {
     let path = examples_root().join("vmap_shape_value.ch");
     drive_parity(&path, true);
@@ -551,6 +561,11 @@ fn parity_dropout_fixed_stream() {
         b"main.0 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 2.0])\nmain.1 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\n",
     );
     drive_parity(&path, true);
+}
+
+#[test]
+fn parity_key_builtin_aliases() {
+    drive_parity(&examples_root().join("key_builtin_aliases.ch"), true);
 }
 
 #[test]
@@ -915,4 +930,9 @@ fn parity_grad_host_results() {
 #[test]
 fn parity_keyed_state_wrapper() {
     drive_parity(&examples_root().join("keyed_state_wrapper.ch"), true);
+}
+
+#[test]
+fn parity_staged_adt_control() {
+    drive_parity(&examples_root().join("staged_adt_control.ch"), true);
 }
